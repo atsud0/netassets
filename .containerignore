@@ -1,0 +1,15 @@
+.git
+.gitignore
+.env
+web/node_modules
+web/dist
+web/coverage
+web/*.tsbuildinfo
+e2e/node_modules
+e2e/test-results
+e2e/playwright-report
+backend/bin
+backend/coverage.out
+data
+*.log
+.DS_Store

@@ -1,0 +1,167 @@
+package bootstrap
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"log/slog"
+	"strings"
+
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
+	"golang.org/x/crypto/bcrypt"
+
+	"netassets/internal/config"
+)
+
+var permissions = map[string]string{
+	"organization.read":   "查看组织机构",
+	"organization.create": "新增组织机构",
+	"organization.update": "编辑组织机构",
+	"system.manage":       "管理业务系统",
+	"asset.manage":        "管理网络资产",
+	"inventory.manage":    "管理填报任务",
+	"user.manage":         "管理用户和权限",
+}
+
+func Ensure(ctx context.Context, pool *pgxpool.Pool, cfg config.Config, logger *slog.Logger) error {
+	if strings.TrimSpace(cfg.BootstrapAdminPassword) == "" {
+		var count int
+		if err := pool.QueryRow(ctx, `SELECT count(*) FROM users`).Scan(&count); err != nil {
+			return fmt.Errorf("check bootstrap users: %w", err)
+		}
+		if count == 0 {
+			return fmt.Errorf("BOOTSTRAP_ADMIN_PASSWORD must be configured when no users exist")
+		}
+		return nil
+	}
+	if len(cfg.BootstrapAdminPassword) < 10 {
+		return fmt.Errorf("BOOTSTRAP_ADMIN_PASSWORD must contain at least 10 characters")
+	}
+
+	tx, err := pool.BeginTx(ctx, pgx.TxOptions{})
+	if err != nil {
+		return fmt.Errorf("begin bootstrap transaction: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtext('netassets-bootstrap'))`); err != nil {
+		return fmt.Errorf("lock bootstrap: %w", err)
+	}
+
+	var organizationID string
+	if err := tx.QueryRow(ctx, `
+		INSERT INTO organizations (organization_code, organization_name, short_name, organization_type, status, notes)
+		VALUES ($1, $2, $3, 'group', 'enabled', '系统初始化创建的集团根组织')
+		ON CONFLICT (organization_code) DO UPDATE SET
+			organization_code = organizations.organization_code
+		RETURNING id::text
+	`, cfg.BootstrapGroupCode, cfg.BootstrapGroupName, cfg.BootstrapGroupShortName).Scan(&organizationID); err != nil {
+		return fmt.Errorf("bootstrap group organization: %w", err)
+	}
+
+	for key, name := range permissions {
+		if _, err := tx.Exec(ctx, `
+			INSERT INTO permissions (permission_key, permission_name)
+			VALUES ($1, $2)
+			ON CONFLICT (permission_key) DO UPDATE SET permission_name = EXCLUDED.permission_name
+		`, key, name); err != nil {
+			return fmt.Errorf("bootstrap permission %s: %w", key, err)
+		}
+	}
+
+	var roleID string
+	if err := tx.QueryRow(ctx, `
+		INSERT INTO roles (role_key, role_name, role_scope, description, is_system)
+		VALUES ('group_admin', '集团管理员', 'group', '拥有集团范围内全部管理权限', true)
+		ON CONFLICT (role_key) DO UPDATE SET role_name = EXCLUDED.role_name, description = EXCLUDED.description
+		RETURNING id::text
+	`).Scan(&roleID); err != nil {
+		return fmt.Errorf("bootstrap group administrator role: %w", err)
+	}
+	if _, err := tx.Exec(ctx, `
+		INSERT INTO role_permissions (role_id, permission_key)
+		SELECT $1::uuid, permission_key FROM permissions
+		ON CONFLICT DO NOTHING
+	`, roleID); err != nil {
+		return fmt.Errorf("bootstrap role permissions: %w", err)
+	}
+
+	organizationRoles := []struct {
+		Key         string
+		Name        string
+		Description string
+		Permissions []string
+	}{
+		{Key: "organization_admin", Name: "子公司管理员", Description: "管理所属组织的业务系统、网络资产和填报数据", Permissions: []string{"organization.read", "system.manage", "asset.manage", "inventory.manage", "user.manage"}},
+		{Key: "organization_editor", Name: "子公司填报员", Description: "维护所属组织的业务系统、网络资产和填报数据", Permissions: []string{"organization.read", "system.manage", "asset.manage", "inventory.manage"}},
+	}
+	for _, role := range organizationRoles {
+		var organizationRoleID string
+		if err := tx.QueryRow(ctx, `
+			INSERT INTO roles (role_key, role_name, role_scope, description, is_system)
+			VALUES ($1, $2, 'organization', $3, true)
+			ON CONFLICT (role_key) DO UPDATE SET role_name = EXCLUDED.role_name, description = EXCLUDED.description
+			RETURNING id::text
+		`, role.Key, role.Name, role.Description).Scan(&organizationRoleID); err != nil {
+			return fmt.Errorf("bootstrap organization role %s: %w", role.Key, err)
+		}
+		if _, err := tx.Exec(ctx, `
+			INSERT INTO role_permissions (role_id, permission_key)
+			SELECT $1::uuid, unnest($2::varchar[])
+			ON CONFLICT DO NOTHING
+		`, organizationRoleID, role.Permissions); err != nil {
+			return fmt.Errorf("bootstrap organization role permissions %s: %w", role.Key, err)
+		}
+	}
+
+	var userID string
+	created := false
+	err = tx.QueryRow(ctx, `SELECT id::text FROM users WHERE lower(username) = lower($1) AND deleted_at IS NULL`, cfg.BootstrapAdminUsername).Scan(&userID)
+	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+		return fmt.Errorf("find bootstrap administrator: %w", err)
+	}
+	if errors.Is(err, pgx.ErrNoRows) {
+		hash, err := bcrypt.GenerateFromPassword([]byte(cfg.BootstrapAdminPassword), 12)
+		if err != nil {
+			return fmt.Errorf("hash bootstrap administrator password: %w", err)
+		}
+		if err := tx.QueryRow(ctx, `
+			INSERT INTO users (username, password_hash, display_name, status, password_changed_at)
+			VALUES ($1, $2, $3, 'enabled', now())
+			RETURNING id::text
+		`, cfg.BootstrapAdminUsername, string(hash), cfg.BootstrapAdminDisplayName).Scan(&userID); err != nil {
+			return fmt.Errorf("create bootstrap administrator: %w", err)
+		}
+		created = true
+	}
+
+	if _, err := tx.Exec(ctx, `
+		INSERT INTO user_organizations (user_id, organization_id, is_primary)
+		VALUES ($1::uuid, $2::uuid, true)
+		ON CONFLICT (user_id, organization_id) DO UPDATE SET is_primary = true
+	`, userID, organizationID); err != nil {
+		return fmt.Errorf("attach bootstrap administrator organization: %w", err)
+	}
+	if _, err := tx.Exec(ctx, `
+		INSERT INTO user_roles (user_id, role_id, organization_id, data_scope)
+		SELECT $1::uuid, $2::uuid, NULL, 'all'
+		WHERE NOT EXISTS (
+			SELECT 1 FROM user_roles
+			WHERE user_id = $1::uuid AND role_id = $2::uuid AND organization_id IS NULL
+		)
+	`, userID, roleID); err != nil {
+		return fmt.Errorf("assign bootstrap administrator role: %w", err)
+	}
+	if _, err := tx.Exec(ctx, `
+		UPDATE user_roles SET data_scope = 'all'
+		WHERE user_id = $1::uuid AND role_id = $2::uuid AND organization_id IS NULL
+	`, userID, roleID); err != nil {
+		return fmt.Errorf("update bootstrap administrator role scope: %w", err)
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("commit bootstrap transaction: %w", err)
+	}
+	logger.Info("bootstrap data ensured", "group_code", cfg.BootstrapGroupCode, "admin_username", cfg.BootstrapAdminUsername, "admin_created", created)
+	return nil
+}

@@ -1,0 +1,78 @@
+name: netassets
+
+services:
+  postgres:
+    image: docker.io/library/postgres:17-alpine
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-netassets}
+      POSTGRES_USER: ${POSTGRES_USER:-netassets}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-netassets}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-netassets} -d ${POSTGRES_DB:-netassets}"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    restart: unless-stopped
+
+  app:
+    build:
+      context: .
+      dockerfile: deploy/Containerfile
+      args:
+        HTTP_PROXY: ${BUILD_HTTP_PROXY:-http://host.containers.internal:6152}
+        HTTPS_PROXY: ${BUILD_HTTPS_PROXY:-http://host.containers.internal:6152}
+        ALL_PROXY: ${BUILD_ALL_PROXY:-socks5h://host.containers.internal:6153}
+        NO_PROXY: ${BUILD_NO_PROXY:-localhost,127.0.0.1,postgres,app}
+        GOPROXY: ${GOPROXY:-https://proxy.golang.org,direct}
+    environment:
+      APP_ENV: ${APP_ENV:-development}
+      APP_ADDR: :8080
+      DATABASE_URL: ${DATABASE_URL:-postgres://netassets:netassets@postgres:5432/netassets?sslmode=disable}
+      STATIC_DIR: /app/web
+      SESSION_COOKIE_NAME: ${SESSION_COOKIE_NAME:-netassets_session}
+      SESSION_TTL: ${SESSION_TTL:-12h}
+      SESSION_COOKIE_SECURE: ${SESSION_COOKIE_SECURE:-false}
+      BOOTSTRAP_GROUP_CODE: ${BOOTSTRAP_GROUP_CODE:-GROUP}
+      BOOTSTRAP_GROUP_NAME: ${BOOTSTRAP_GROUP_NAME:-示例集团}
+      BOOTSTRAP_GROUP_SHORT_NAME: ${BOOTSTRAP_GROUP_SHORT_NAME:-集团总部}
+      BOOTSTRAP_ADMIN_USERNAME: ${BOOTSTRAP_ADMIN_USERNAME:-admin}
+      BOOTSTRAP_ADMIN_PASSWORD: ${BOOTSTRAP_ADMIN_PASSWORD}
+      BOOTSTRAP_ADMIN_DISPLAY_NAME: ${BOOTSTRAP_ADMIN_DISPLAY_NAME:-集团管理员}
+    ports:
+      - "8080:8080"
+    volumes:
+      - app-data:/data
+    depends_on:
+      postgres:
+        condition: service_healthy
+    command: ["/bin/sh", "-c", "/app/netassets-migrate up && exec /app/netassets-server"]
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "-", "http://127.0.0.1:8080/health/live"]
+      interval: 10s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+
+  playwright:
+    image: mcr.microsoft.com/playwright:v1.55.0-noble
+    profiles: ["e2e"]
+    working_dir: /workspace
+    volumes:
+      - ./e2e:/workspace:Z
+    environment:
+      BASE_URL: http://app:8080
+      HTTP_PROXY: ${E2E_HTTP_PROXY:-http://host.containers.internal:6152}
+      HTTPS_PROXY: ${E2E_HTTPS_PROXY:-http://host.containers.internal:6152}
+      NO_PROXY: ${E2E_NO_PROXY:-localhost,127.0.0.1,app,postgres}
+      E2E_USERNAME: ${BOOTSTRAP_ADMIN_USERNAME:-admin}
+      E2E_PASSWORD: ${BOOTSTRAP_ADMIN_PASSWORD}
+    depends_on:
+      app:
+        condition: service_healthy
+    command: ["/bin/sh", "-lc", "npm ci && npm test"]
+
+volumes:
+  postgres-data:
+  app-data:

@@ -1,0 +1,40 @@
+FROM docker.io/library/node:22-alpine AS web-builder
+ARG HTTP_PROXY
+ARG HTTPS_PROXY
+ARG ALL_PROXY
+ARG NO_PROXY
+WORKDIR /src/web
+COPY web/package*.json ./
+RUN npm ci
+COPY web/ ./
+RUN npm run build
+
+FROM docker.io/library/golang:1.26-alpine AS backend-builder
+ARG HTTP_PROXY
+ARG HTTPS_PROXY
+ARG ALL_PROXY
+ARG NO_PROXY
+ARG GOPROXY=https://proxy.golang.org,direct
+ENV GOPROXY=${GOPROXY}
+WORKDIR /src/backend
+RUN apk add --no-cache ca-certificates git
+COPY backend/go.mod backend/go.sum ./
+RUN set -eu; for attempt in 1 2 3 4; do go mod download && exit 0; echo "go mod download failed (attempt ${attempt}/4), retrying..." >&2; sleep $((attempt * 3)); done; exit 1
+COPY backend/ ./
+ARG VERSION=dev
+ARG COMMIT=unknown
+RUN CGO_ENABLED=0 go build -trimpath -ldflags "-s -w -X netassets/internal/buildinfo.Version=${VERSION} -X netassets/internal/buildinfo.Commit=${COMMIT}" -o /out/netassets-server ./cmd/server
+RUN CGO_ENABLED=0 go build -trimpath -ldflags "-s -w" -o /out/netassets-migrate ./cmd/migrate
+
+FROM docker.io/library/alpine:3.22
+RUN apk add --no-cache ca-certificates tzdata wget && addgroup -S netassets && adduser -S -G netassets netassets
+WORKDIR /app
+COPY --from=backend-builder /out/netassets-server /app/netassets-server
+COPY --from=backend-builder /out/netassets-migrate /app/netassets-migrate
+COPY --from=web-builder /src/web/dist /app/web
+COPY backend/migrations /app/migrations
+RUN mkdir -p /data && chown -R netassets:netassets /app /data
+USER netassets
+EXPOSE 8080
+ENV APP_ADDR=:8080 STATIC_DIR=/app/web MIGRATIONS_DIR=/app/migrations
+CMD ["/app/netassets-server"]

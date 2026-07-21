@@ -1,0 +1,26 @@
+# Go
+backend/bin/
+backend/coverage.out
+
+# Node
+web/node_modules/
+web/dist/
+web/coverage/
+web/*.tsbuildinfo
+e2e/node_modules/
+e2e/test-results/
+e2e/playwright-report/
+
+# Environment
+.env
+.env.local
+!.env.example
+
+# Runtime data
+data/
+*.log
+
+# Editors / OS
+.DS_Store
+.idea/
+.vscode/
