@@ -31,6 +31,7 @@ services:
       APP_ADDR: :8080
       DATABASE_URL: ${DATABASE_URL:-postgres://netassets:netassets@postgres:5432/netassets?sslmode=disable}
       STATIC_DIR: /app/web
+      DATA_DIR: /data
       SESSION_COOKIE_NAME: ${SESSION_COOKIE_NAME:-netassets_session}
       SESSION_TTL: ${SESSION_TTL:-12h}
       SESSION_COOKIE_SECURE: ${SESSION_COOKIE_SECURE:-false}
