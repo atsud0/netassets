@@ -26,6 +26,8 @@ interface OrganizationProgress {
   submitted_by_name?: string
   reviewed_by_name?: string
   return_reason?: string
+  snapshot_available: boolean
+  submission_version: number
 }
 interface InventoryTask {
   id: string
@@ -43,26 +45,160 @@ interface InventoryTask {
   approved_count: number
   created_by_name?: string
   created_at: string
-  organizations: OrganizationProgress[]
 }
-interface ListResponse<T> { items: T[]; total: number }
+interface QualityIssue {
+  code: string
+  severity: 'error' | 'warning'
+  message: string
+  count: number
+}
+interface QualityCheck {
+  passed: boolean
+  system_count: number
+  asset_count: number
+  error_count: number
+  warning_count: number
+  issues: QualityIssue[]
+}
+interface QualityCheckResponse { quality_check: QualityCheck }
+interface SubmissionMetadata {
+  id: string
+  task_id: string
+  task_name: string
+  organization_id: string
+  organization_name: string
+  version: number
+  submitted_at: string
+  submitted_by_name?: string
+  note?: string
+  system_count: number
+  asset_count: number
+}
+interface SubmissionFieldChange {
+  field: string
+  label: string
+  before: unknown
+  after: unknown
+}
+interface SubmissionResourceChange {
+  resource_id: string
+  resource_key: string
+  resource_name: string
+  changes?: SubmissionFieldChange[]
+}
+type DiffResourceType = 'business_system' | 'network_asset'
+type DiffChangeType = 'added' | 'modified' | 'removed'
+type DiffListKey = `${DiffResourceType}:${DiffChangeType}`
+interface SubmissionDiffSummary { added: number; modified: number; removed: number }
+interface SubmissionDiff {
+  submission: SubmissionMetadata
+  previous_submission?: SubmissionMetadata
+  business_systems: SubmissionDiffSummary
+  network_assets: SubmissionDiffSummary
+  summary: SubmissionDiffSummary
+}
+interface SubmissionDiffResponse { submission_diff: SubmissionDiff }
+interface DiffListState {
+  items: SubmissionResourceChange[]
+  total: number
+  page: number
+  pageSize: number
+  loading: boolean
+  loaded: boolean
+}
+interface ReviewResource {
+  resource_type: 'business_system' | 'network_asset'
+  resource_id: string
+  resource_key: string
+  resource_name: string
+  snapshot_data: Record<string, unknown>
+}
+interface ReviewComment {
+  id: string
+  submission_id: string
+  submission_version: number
+  resource_type: 'business_system' | 'network_asset'
+  resource_id: string
+  resource_key: string
+  resource_name: string
+  comment: string
+  created_by_name?: string
+  created_at: string
+}
+interface ReviewContext {
+  submission: SubmissionMetadata
+}
+interface ReviewContextResponse { review_context: ReviewContext }
+interface ListResponse<T> { items: T[]; total: number; page: number; page_size: number }
+interface TaskOrganizationState {
+  items: OrganizationProgress[]
+  total: number
+  page: number
+  pageSize: number
+  loading: boolean
+  loaded: boolean
+}
 
 const auth = useAuthStore()
 const router = useRouter()
 const loading = ref(false)
 const submitting = ref(false)
 const actionLoading = ref('')
+const exportLoading = ref('')
 const createDialogVisible = ref(false)
 const submissionDialogVisible = ref(false)
 const returnDialogVisible = ref(false)
+const qualityLoading = ref(false)
+const qualityCheck = ref<QualityCheck | null>(null)
+const diffDrawerVisible = ref(false)
+const diffLoading = ref(false)
+const submissionDiff = ref<SubmissionDiff | null>(null)
+const diffTaskID = ref('')
+const diffOrganizationID = ref('')
+const diffActiveTabs = reactive<Record<DiffResourceType, DiffChangeType>>({
+  business_system: 'added',
+  network_asset: 'added',
+})
+function newDiffListState(): DiffListState {
+  return { items: [], total: 0, page: 1, pageSize: 20, loading: false, loaded: false }
+}
+const diffListStates = reactive<Record<DiffListKey, DiffListState>>({
+  'business_system:added': newDiffListState(),
+  'business_system:modified': newDiffListState(),
+  'business_system:removed': newDiffListState(),
+  'network_asset:added': newDiffListState(),
+  'network_asset:modified': newDiffListState(),
+  'network_asset:removed': newDiffListState(),
+})
+const reviewContextVisible = ref(false)
+const reviewContextLoading = ref(false)
+const reviewContext = ref<ReviewContext | null>(null)
+const reviewComments = ref<ReviewComment[]>([])
+const reviewCommentLoading = ref(false)
+const reviewCommentPage = ref(1)
+const reviewCommentPageSize = ref(20)
+const reviewCommentTotal = ref(0)
+const returnContextLoading = ref(false)
+const returnReviewContext = ref<ReviewContext | null>(null)
+const returnResources = ref<ReviewResource[]>([])
+const returnResourceLoading = ref(false)
+const returnResourceSearch = ref('')
+const returnResourcePage = ref(1)
+const returnResourcePageSize = ref(20)
+const returnResourceTotal = ref(0)
+const returnCommentDrafts = reactive<Record<string, string>>({})
+const returnResourceIndex = reactive<Record<string, ReviewResource>>({})
 const formRef = ref<FormInstance>()
 const tasks = ref<InventoryTask[]>([])
+const taskOrganizationStates = reactive<Record<string, TaskOrganizationState>>({})
 const organizations = ref<Organization[]>([])
+const page = ref(1)
+const pageSize = ref(20)
+const total = ref(0)
 const selectedTask = ref<InventoryTask | null>(null)
 const selectedProgress = ref<OrganizationProgress | null>(null)
 const submissionForm = reactive({ note: '' })
 const returnForm = reactive({ reason: '' })
-
 function initialStart() {
   const value = new Date()
   value.setSeconds(0, 0)
@@ -101,27 +237,122 @@ const progressStatusLabels: Record<string, string> = {
 const requiredFieldLabels: Record<string, string> = {
   business_systems: '业务系统信息', data_security: '数据安全属性', network_assets: '网络资产信息', owner_contacts: '负责人及联系方式',
 }
+const snapshotValueLabels: Record<string, string> = {
+  yes: '是', no: '否', unknown: '未知', partial: '部分', pending: '待确认',
+  normal: '一般', important: '重要', core: '核心',
+  planning: '规划中', running: '运行中', suspended: '暂停', offline: '已下线', archived: '已归档',
+  active: '启用', disabled: '停用', production: '生产', staging: '预发布', testing: '测试', development: '开发', office: '办公', other: '其他',
+  public: '公网', private: '内网', domain: '域名', ip: 'IP 地址', url: 'URL', service: '服务',
+}
+const diffChangeTabs: Array<{ key: DiffChangeType; label: string; type: 'success' | 'warning' | 'danger'; emptyText: string }> = [
+  { key: 'added', label: '新增', type: 'success', emptyText: '无新增记录' },
+  { key: 'modified', label: '修改', type: 'warning', emptyText: '无修改记录' },
+  { key: 'removed', label: '删除/归档', type: 'danger', emptyText: '无删除或归档记录' },
+]
+const diffGroups = computed(() => {
+  if (!submissionDiff.value) return []
+  return [
+    { key: 'business_system' as const, label: '业务系统', summary: submissionDiff.value.business_systems },
+    { key: 'network_asset' as const, label: '网络资产', summary: submissionDiff.value.network_assets },
+  ]
+})
+
+async function loadOrganizations() {
+  if (!auth.isGroupAdmin) {
+    organizations.value = []
+    return
+  }
+  try {
+    const response = await apiClient.get<ListResponse<Organization>>('/organizations', {
+      params: { page: 1, page_size: 100 },
+    })
+    organizations.value = response.data.items
+  } catch (error) {
+    ElMessage.error(getAPIErrorMessage(error, '读取可填报组织失败'))
+  }
+}
+
+function taskOrganizationState(task: InventoryTask) {
+  if (!taskOrganizationStates[task.id]) {
+    taskOrganizationStates[task.id] = { items: [], total: 0, page: 1, pageSize: 20, loading: false, loaded: false }
+  }
+  return taskOrganizationStates[task.id]
+}
+
+async function loadTaskOrganizations(task: InventoryTask) {
+  const state = taskOrganizationState(task)
+  state.loading = true
+  try {
+    const response = await apiClient.get<ListResponse<OrganizationProgress>>(`/inventory-tasks/${task.id}/organizations`, {
+      params: { page: state.page, page_size: state.pageSize },
+    })
+    state.items = response.data.items
+    state.total = response.data.total
+    state.loaded = true
+    if (!state.items.length && state.page > 1 && state.total > 0) {
+      state.page -= 1
+      await loadTaskOrganizations(task)
+    }
+  } finally {
+    state.loading = false
+  }
+}
+
+async function handleTaskExpand(task: InventoryTask, expandedRows: InventoryTask[]) {
+  if (!expandedRows.some((item) => item.id === task.id)) return
+  try { await loadTaskOrganizations(task) }
+  catch (error) { ElMessage.error(getAPIErrorMessage(error, '读取填报组织进度失败')) }
+}
+
+async function handleTaskOrganizationPageChange(task: InventoryTask, value: number) {
+  taskOrganizationState(task).page = value
+  try { await loadTaskOrganizations(task) }
+  catch (error) { ElMessage.error(getAPIErrorMessage(error, '读取填报组织进度失败')) }
+}
+
+async function handleTaskOrganizationPageSizeChange(task: InventoryTask, value: number) {
+  const state = taskOrganizationState(task)
+  state.pageSize = value
+  state.page = 1
+  try { await loadTaskOrganizations(task) }
+  catch (error) { ElMessage.error(getAPIErrorMessage(error, '读取填报组织进度失败')) }
+}
 
 async function load() {
   loading.value = true
   try {
-    if (auth.isGroupAdmin) {
-      const [taskResponse, organizationResponse] = await Promise.all([
-        apiClient.get<ListResponse<InventoryTask>>('/inventory-tasks'),
-        apiClient.get<ListResponse<Organization>>('/organizations'),
-      ])
-      tasks.value = taskResponse.data.items
-      organizations.value = organizationResponse.data.items
-    } else {
-      const taskResponse = await apiClient.get<ListResponse<InventoryTask>>('/inventory-tasks')
-      tasks.value = taskResponse.data.items
-      organizations.value = []
-    }
+    const response = await apiClient.get<ListResponse<InventoryTask>>('/inventory-tasks', {
+      params: { page: page.value, page_size: pageSize.value },
+    })
+    tasks.value = response.data.items
+    total.value = response.data.total
   } catch (error) {
     ElMessage.error(getAPIErrorMessage(error, '读取填报任务失败'))
   } finally {
     loading.value = false
   }
+}
+
+async function refreshAfterMutation() {
+  await load()
+  if (tasks.value.length === 0 && total.value > 0 && page.value > 1) {
+    page.value -= 1
+    await load()
+  }
+  await Promise.allSettled(tasks.value
+    .filter((task) => taskOrganizationStates[task.id]?.loaded)
+    .map((task) => loadTaskOrganizations(task)))
+}
+
+function handlePageChange(value: number) {
+  page.value = value
+  void load()
+}
+
+function handlePageSizeChange(value: number) {
+  pageSize.value = value
+  page.value = 1
+  void load()
 }
 
 function openCreateDialog() {
@@ -144,6 +375,7 @@ async function createTask() {
     await apiClient.post('/inventory-tasks', { ...form, quality_rules: [] })
     createDialogVisible.value = false
     ElMessage.success(form.status === 'active' ? '填报任务已创建并下发' : '填报任务草稿已保存')
+    page.value = 1
     await load()
   } catch (error) {
     ElMessage.error(getAPIErrorMessage(error, '创建填报任务失败'))
@@ -182,7 +414,7 @@ async function startProgress(task: InventoryTask, progress: OrganizationProgress
   try {
     await apiClient.post(`/inventory-tasks/${task.id}/organizations/${progress.organization_id}/start`)
     ElMessage.success('已开始填报，请完善业务系统和网络资产后提交')
-    await load()
+    await refreshAfterMutation()
   } catch (error) {
     ElMessage.error(getAPIErrorMessage(error, '开始填报失败'))
   } finally {
@@ -190,15 +422,37 @@ async function startProgress(task: InventoryTask, progress: OrganizationProgress
   }
 }
 
+async function loadQualityCheck() {
+  if (!selectedTask.value || !selectedProgress.value) return
+  qualityLoading.value = true
+  qualityCheck.value = null
+  try {
+    const response = await apiClient.get<QualityCheckResponse>(
+      `/inventory-tasks/${selectedTask.value.id}/organizations/${selectedProgress.value.organization_id}/quality-check`,
+    )
+    qualityCheck.value = response.data.quality_check
+  } catch (error) {
+    ElMessage.error(getAPIErrorMessage(error, '执行填报质量检查失败'))
+  } finally {
+    qualityLoading.value = false
+  }
+}
+
 function openSubmissionDialog(task: InventoryTask, progress: OrganizationProgress) {
   selectedTask.value = task
   selectedProgress.value = progress
   submissionForm.note = progress.submission_note || ''
+  qualityCheck.value = null
   submissionDialogVisible.value = true
+  void loadQualityCheck()
 }
 
 async function submitProgress() {
   if (!selectedTask.value || !selectedProgress.value) return
+  if (!qualityCheck.value?.passed) {
+    ElMessage.warning('请先修正质量检查中的错误项并重新检查')
+    return
+  }
   const key = operationKey(selectedTask.value, selectedProgress.value)
   actionLoading.value = key
   try {
@@ -207,12 +461,108 @@ async function submitProgress() {
     })
     submissionDialogVisible.value = false
     ElMessage.success(selectedTask.value.require_review ? '填报结果已提交，等待集团审核' : '填报结果已提交并自动完成')
-    await load()
+    await refreshAfterMutation()
   } catch (error) {
     ElMessage.error(getAPIErrorMessage(error, '提交填报任务失败'))
   } finally {
     actionLoading.value = ''
   }
+}
+
+function diffListKey(resourceType: DiffResourceType, changeType: DiffChangeType): DiffListKey {
+  return `${resourceType}:${changeType}`
+}
+
+function diffListState(resourceType: DiffResourceType, changeType: DiffChangeType) {
+  return diffListStates[diffListKey(resourceType, changeType)]
+}
+
+function resetDiffListStates() {
+  for (const state of Object.values(diffListStates)) Object.assign(state, newDiffListState())
+}
+
+function initialDiffTab(summary: SubmissionDiffSummary): DiffChangeType {
+  if (summary.added > 0) return 'added'
+  if (summary.modified > 0) return 'modified'
+  if (summary.removed > 0) return 'removed'
+  return 'added'
+}
+
+async function loadSubmissionDiffItems(resourceType: DiffResourceType, changeType: DiffChangeType, force = false) {
+  const state = diffListState(resourceType, changeType)
+  if ((!force && state.loaded) || state.loading || !diffTaskID.value || !diffOrganizationID.value) return
+  const taskID = diffTaskID.value
+  const organizationID = diffOrganizationID.value
+  state.loading = true
+  try {
+    const response = await apiClient.get<ListResponse<SubmissionResourceChange>>(
+      `/inventory-tasks/${taskID}/organizations/${organizationID}/submission-diff/items`,
+      { params: { resource_type: resourceType, change_type: changeType, page: state.page, page_size: state.pageSize } },
+    )
+    if (taskID !== diffTaskID.value || organizationID !== diffOrganizationID.value) return
+    state.items = response.data.items
+    state.total = response.data.total
+    state.loaded = true
+  } catch (error) {
+    ElMessage.error(getAPIErrorMessage(error, '读取填报提交差异明细失败'))
+  } finally {
+    state.loading = false
+  }
+}
+
+function handleDiffTabChange(resourceType: DiffResourceType, name: string | number) {
+  const changeType = String(name) as DiffChangeType
+  diffActiveTabs[resourceType] = changeType
+  void loadSubmissionDiffItems(resourceType, changeType)
+}
+
+function handleDiffPageChange(resourceType: DiffResourceType, changeType: DiffChangeType, value: number) {
+  const state = diffListState(resourceType, changeType)
+  state.page = value
+  void loadSubmissionDiffItems(resourceType, changeType, true)
+}
+
+function handleDiffPageSizeChange(resourceType: DiffResourceType, changeType: DiffChangeType, value: number) {
+  const state = diffListState(resourceType, changeType)
+  state.pageSize = value
+  state.page = 1
+  void loadSubmissionDiffItems(resourceType, changeType, true)
+}
+
+async function openSubmissionDiff(task: InventoryTask, progress: OrganizationProgress) {
+  diffDrawerVisible.value = true
+  diffLoading.value = true
+  submissionDiff.value = null
+  diffTaskID.value = task.id
+  diffOrganizationID.value = progress.organization_id
+  resetDiffListStates()
+  try {
+    const response = await apiClient.get<SubmissionDiffResponse>(
+      `/inventory-tasks/${task.id}/organizations/${progress.organization_id}/submission-diff`,
+    )
+    if (task.id !== diffTaskID.value || progress.organization_id !== diffOrganizationID.value) return
+    submissionDiff.value = response.data.submission_diff
+    diffActiveTabs.business_system = initialDiffTab(response.data.submission_diff.business_systems)
+    diffActiveTabs.network_asset = initialDiffTab(response.data.submission_diff.network_assets)
+    await Promise.all([
+      loadSubmissionDiffItems('business_system', diffActiveTabs.business_system),
+      loadSubmissionDiffItems('network_asset', diffActiveTabs.network_asset),
+    ])
+  } catch (error) {
+    diffDrawerVisible.value = false
+    ElMessage.error(getAPIErrorMessage(error, '读取填报提交差异失败'))
+  } finally {
+    diffLoading.value = false
+  }
+}
+
+function formatSnapshotValue(value: unknown) {
+  if (value === null || value === undefined || value === '') return '—'
+  if (Array.isArray(value)) return value.length ? value.map((item) => snapshotValueLabels[String(item)] || String(item)).join('、') : '—'
+  if (typeof value === 'boolean') return value ? '是' : '否'
+  if (typeof value === 'number') return new Intl.NumberFormat('zh-CN').format(value)
+  if (typeof value === 'object') return JSON.stringify(value)
+  return snapshotValueLabels[String(value)] || String(value)
 }
 
 async function approveProgress(task: InventoryTask, progress: OrganizationProgress) {
@@ -226,7 +576,7 @@ async function approveProgress(task: InventoryTask, progress: OrganizationProgre
   try {
     await apiClient.post(`/inventory-tasks/${task.id}/organizations/${progress.organization_id}/review`, { decision: 'approved', return_reason: '' })
     ElMessage.success('填报结果已审核通过')
-    await load()
+    await refreshAfterMutation()
   } catch (error) {
     ElMessage.error(getAPIErrorMessage(error, '审核填报任务失败'))
   } finally {
@@ -234,12 +584,112 @@ async function approveProgress(task: InventoryTask, progress: OrganizationProgre
   }
 }
 
-function openReturnDialog(task: InventoryTask, progress: OrganizationProgress) {
+function reviewResourceKey(resource: ReviewResource) {
+  return `${resource.resource_type}:${resource.resource_id}`
+}
+
+function reviewResourceTypeLabel(value: string) {
+  return value === 'business_system' ? '业务系统' : '网络资产'
+}
+
+function clearReturnCommentDrafts() {
+  for (const key of Object.keys(returnCommentDrafts)) delete returnCommentDrafts[key]
+  for (const key of Object.keys(returnResourceIndex)) delete returnResourceIndex[key]
+}
+
+async function fetchReviewContext(task: InventoryTask, progress: OrganizationProgress) {
+  const response = await apiClient.get<ReviewContextResponse>(
+    `/inventory-tasks/${task.id}/organizations/${progress.organization_id}/review-context`,
+  )
+  return response.data.review_context
+}
+
+async function loadReviewComments() {
+  if (!selectedTask.value || !selectedProgress.value) return
+  reviewCommentLoading.value = true
+  try {
+    const response = await apiClient.get<ListResponse<ReviewComment>>(
+      `/inventory-tasks/${selectedTask.value.id}/organizations/${selectedProgress.value.organization_id}/review-comments`,
+      { params: { page: reviewCommentPage.value, page_size: reviewCommentPageSize.value } },
+    )
+    reviewComments.value = response.data.items
+    reviewCommentTotal.value = response.data.total
+  } catch (error) {
+    ElMessage.error(getAPIErrorMessage(error, '读取逐条审核意见失败'))
+  } finally {
+    reviewCommentLoading.value = false
+  }
+}
+
+async function loadReturnResources() {
+  if (!selectedTask.value || !selectedProgress.value) return
+  returnResourceLoading.value = true
+  try {
+    const params: Record<string, string | number> = { page: returnResourcePage.value, page_size: returnResourcePageSize.value }
+    if (returnResourceSearch.value.trim()) params.q = returnResourceSearch.value.trim()
+    const response = await apiClient.get<ListResponse<ReviewResource>>(
+      `/inventory-tasks/${selectedTask.value.id}/organizations/${selectedProgress.value.organization_id}/review-resources`,
+      { params },
+    )
+    returnResources.value = response.data.items
+    returnResourceTotal.value = response.data.total
+    for (const resource of response.data.items) returnResourceIndex[reviewResourceKey(resource)] = resource
+  } catch (error) {
+    ElMessage.error(getAPIErrorMessage(error, '读取本次提交明细失败'))
+  } finally {
+    returnResourceLoading.value = false
+  }
+}
+
+function handleReviewCommentPageChange(value: number) { reviewCommentPage.value = value; void loadReviewComments() }
+function handleReviewCommentPageSizeChange(value: number) { reviewCommentPageSize.value = value; reviewCommentPage.value = 1; void loadReviewComments() }
+function applyReturnResourceSearch() { returnResourcePage.value = 1; void loadReturnResources() }
+function handleReturnResourcePageChange(value: number) { returnResourcePage.value = value; void loadReturnResources() }
+function handleReturnResourcePageSizeChange(value: number) { returnResourcePageSize.value = value; returnResourcePage.value = 1; void loadReturnResources() }
+
+async function openReviewComments(task: InventoryTask, progress: OrganizationProgress) {
+  selectedTask.value = task
+  selectedProgress.value = progress
+  reviewContextVisible.value = true
+  reviewContextLoading.value = true
+  reviewContext.value = null
+  reviewComments.value = []
+  reviewCommentPage.value = 1
+  reviewCommentTotal.value = 0
+  try {
+    reviewContext.value = await fetchReviewContext(task, progress)
+    await loadReviewComments()
+  } catch (error) {
+    reviewContextVisible.value = false
+    ElMessage.error(getAPIErrorMessage(error, '读取逐条审核意见失败'))
+  } finally {
+    reviewContextLoading.value = false
+  }
+}
+
+async function openReturnDialog(task: InventoryTask, progress: OrganizationProgress) {
   selectedTask.value = task
   selectedProgress.value = progress
   returnForm.reason = ''
+  returnResourceSearch.value = ''
+  returnReviewContext.value = null
+  returnResources.value = []
+  returnResourcePage.value = 1
+  returnResourceTotal.value = 0
+  clearReturnCommentDrafts()
   returnDialogVisible.value = true
+  returnContextLoading.value = true
+  try {
+    returnReviewContext.value = await fetchReviewContext(task, progress)
+    await loadReturnResources()
+  } catch (error) {
+    returnDialogVisible.value = false
+    ElMessage.error(getAPIErrorMessage(error, '读取本次提交明细失败'))
+  } finally {
+    returnContextLoading.value = false
+  }
 }
+
 
 async function returnProgress() {
   if (!selectedTask.value || !selectedProgress.value) return
@@ -247,15 +697,24 @@ async function returnProgress() {
     ElMessage.warning('请填写退回原因')
     return
   }
+  const comments = Object.entries(returnCommentDrafts).flatMap(([key, value]) => {
+    const resource = returnResourceIndex[key]
+    const comment = value.trim()
+    return resource && comment ? [{ resource_type: resource.resource_type, resource_id: resource.resource_id, comment }] : []
+  })
+  if (comments.length > 100) {
+    ElMessage.warning('单次最多填写 100 条逐条审核意见')
+    return
+  }
   const key = operationKey(selectedTask.value, selectedProgress.value)
   actionLoading.value = key
   try {
     await apiClient.post(`/inventory-tasks/${selectedTask.value.id}/organizations/${selectedProgress.value.organization_id}/review`, {
-      decision: 'returned', return_reason: returnForm.reason,
+      decision: 'returned', return_reason: returnForm.reason, comments,
     })
     returnDialogVisible.value = false
     ElMessage.success('填报结果已退回修改')
-    await load()
+    await refreshAfterMutation()
   } catch (error) {
     ElMessage.error(getAPIErrorMessage(error, '退回填报任务失败'))
   } finally {
@@ -277,12 +736,39 @@ async function updateTaskStatus(task: InventoryTask, status: string) {
   try {
     await apiClient.patch(`/inventory-tasks/${task.id}/status`, { status })
     ElMessage.success(`任务已${labels[status]}`)
-    await load()
+    await refreshAfterMutation()
   } catch (error) {
     ElMessage.error(getAPIErrorMessage(error, `${labels[status]}任务失败`))
   } finally {
     actionLoading.value = ''
   }
+}
+
+async function exportTask(task: InventoryTask, format: 'csv' | 'xlsx') {
+  exportLoading.value = task.id
+  try {
+    const response = await apiClient.get(`/inventory-tasks/${task.id}/export?format=${format}`, {
+      responseType: 'blob',
+      timeout: 60_000,
+    })
+    const href = URL.createObjectURL(response.data)
+    const link = document.createElement('a')
+    const safeName = task.name.replace(/[\\/:*?"<>|]/g, '-').replace(/^[. ]+|[. ]+$/g, '') || '未命名任务'
+    link.href = href
+    link.download = `填报任务结果-${safeName}.${format}`
+    link.click()
+    URL.revokeObjectURL(href)
+    const count = response.headers['x-export-count'] ?? task.target_count
+    ElMessage.success(`已导出 ${count} 个组织的填报结果`)
+  } catch (error) {
+    ElMessage.error(getAPIErrorMessage(error, '导出填报任务结果失败'))
+  } finally {
+    exportLoading.value = ''
+  }
+}
+
+function handleExportCommand(task: InventoryTask, command: unknown) {
+  if (command === 'csv' || command === 'xlsx') void exportTask(task, command)
 }
 
 function formatDate(value?: string) {
@@ -296,7 +782,9 @@ function progressStatusTag(value: string) {
   return value === 'approved' ? 'success' : value === 'submitted' ? 'primary' : value === 'returned' || value === 'overdue' ? 'danger' : value === 'in_progress' ? 'warning' : 'info'
 }
 
-onMounted(load)
+onMounted(async () => {
+  await Promise.all([load(), loadOrganizations()])
+})
 </script>
 
 <template>
@@ -322,14 +810,14 @@ onMounted(load)
     </el-alert>
 
     <div class="organization-summary">
-      <div><span>任务总数</span><strong>{{ tasks.length }}</strong></div>
-      <div><span>进行中</span><strong>{{ activeCount }}</strong></div>
-      <div><span>草稿</span><strong>{{ draftCount }}</strong></div>
-      <div><span>已逾期</span><strong>{{ overdueCount }}</strong></div>
+      <div><span>任务总数</span><strong>{{ total }}</strong></div>
+      <div><span>本页进行中</span><strong>{{ activeCount }}</strong></div>
+      <div><span>本页草稿</span><strong>{{ draftCount }}</strong></div>
+      <div><span>本页已逾期</span><strong>{{ overdueCount }}</strong></div>
     </div>
 
     <div class="panel data-table-panel" v-loading="loading">
-      <el-table :data="tasks" row-key="id" empty-text="暂无填报任务">
+      <el-table :data="tasks" row-key="id" empty-text="暂无填报任务" @expand-change="handleTaskExpand">
         <el-table-column type="expand">
           <template #default="scope">
             <div class="task-detail">
@@ -337,7 +825,7 @@ onMounted(load)
               <div><strong>必填范围</strong><span>{{ scope.row.required_fields.map((item: string) => requiredFieldLabels[item] || item).join('、') || '未指定' }}</span></div>
               <div><strong>审核要求</strong><span>{{ scope.row.require_review ? '需要集团审核' : '提交后直接完成' }}</span></div>
               <div><strong>逾期提交</strong><span>{{ scope.row.allow_late_submission ? '允许' : '不允许' }}</span></div>
-              <el-table :data="scope.row.organizations" size="small" class="task-organization-table" empty-text="暂无组织">
+              <el-table v-loading="taskOrganizationState(scope.row).loading" :data="taskOrganizationState(scope.row).items" size="small" class="task-organization-table" empty-text="暂无组织" max-height="420">
                 <el-table-column label="填报组织" min-width="190">
                   <template #default="itemScope"><strong>{{ itemScope.row.organization_name }}</strong><span class="table-secondary">{{ itemScope.row.organization_code }}</span></template>
                 </el-table-column>
@@ -356,8 +844,10 @@ onMounted(load)
                     <span v-else>{{ itemScope.row.submission_note || '—' }}</span>
                   </template>
                 </el-table-column>
-                <el-table-column label="操作" width="190" fixed="right">
+                <el-table-column label="操作" width="320" fixed="right">
                   <template #default="itemScope">
+                    <el-button v-if="itemScope.row.snapshot_available" type="primary" link @click="openSubmissionDiff(scope.row, itemScope.row)">查看差异</el-button>
+                    <el-button v-if="itemScope.row.snapshot_available" type="primary" link @click="openReviewComments(scope.row, itemScope.row)">审核意见</el-button>
                     <template v-if="auth.isGroupAdmin">
                       <el-button v-if="scope.row.status === 'active' && itemScope.row.status === 'submitted'" type="success" link :loading="actionLoading === operationKey(scope.row, itemScope.row)" @click="approveProgress(scope.row, itemScope.row)">通过</el-button>
                       <el-button v-if="scope.row.status === 'active' && itemScope.row.status === 'submitted'" type="danger" link :disabled="actionLoading === operationKey(scope.row, itemScope.row)" @click="openReturnDialog(scope.row, itemScope.row)">退回</el-button>
@@ -372,6 +862,19 @@ onMounted(load)
                   </template>
                 </el-table-column>
               </el-table>
+              <div v-if="taskOrganizationState(scope.row).total > 0" class="table-pagination task-organization-pagination">
+                <el-pagination
+                  background
+                  small
+                  layout="total, sizes, prev, pager, next"
+                  :total="taskOrganizationState(scope.row).total"
+                  :current-page="taskOrganizationState(scope.row).page"
+                  :page-size="taskOrganizationState(scope.row).pageSize"
+                  :page-sizes="[20, 50, 100]"
+                  @current-change="handleTaskOrganizationPageChange(scope.row, $event)"
+                  @size-change="handleTaskOrganizationPageSizeChange(scope.row, $event)"
+                />
+              </div>
             </div>
           </template>
         </el-table-column>
@@ -380,15 +883,121 @@ onMounted(load)
         <el-table-column label="开始时间" min-width="165"><template #default="scope">{{ formatDate(scope.row.start_at) }}</template></el-table-column>
         <el-table-column label="截止时间" min-width="165"><template #default="scope">{{ formatDate(scope.row.deadline_at) }}</template></el-table-column>
         <el-table-column label="填报进度" width="155"><template #default="scope"><strong>{{ scope.row.submitted_count }}</strong> / {{ scope.row.target_count }} 已提交，{{ scope.row.approved_count }} 已通过</template></el-table-column>
-        <el-table-column v-if="auth.isGroupAdmin" label="任务操作" width="105" fixed="right">
+        <el-table-column label="任务操作" width="180" fixed="right">
           <template #default="scope">
-            <el-button v-if="scope.row.status === 'draft'" type="primary" link :loading="actionLoading === operationKey(scope.row)" @click="updateTaskStatus(scope.row, 'active')">下发</el-button>
-            <el-button v-else-if="scope.row.status === 'active'" type="warning" link :loading="actionLoading === operationKey(scope.row)" @click="updateTaskStatus(scope.row, 'closed')">关闭</el-button>
-            <el-button v-else-if="['closed', 'completed'].includes(scope.row.status)" type="info" link :loading="actionLoading === operationKey(scope.row)" @click="updateTaskStatus(scope.row, 'archived')">归档</el-button>
+            <template v-if="auth.isGroupAdmin">
+              <el-button v-if="scope.row.status === 'draft'" type="primary" link :loading="actionLoading === operationKey(scope.row)" @click="updateTaskStatus(scope.row, 'active')">下发</el-button>
+              <el-button v-else-if="scope.row.status === 'active'" type="warning" link :loading="actionLoading === operationKey(scope.row)" @click="updateTaskStatus(scope.row, 'closed')">关闭</el-button>
+              <el-button v-else-if="['closed', 'completed'].includes(scope.row.status)" type="info" link :loading="actionLoading === operationKey(scope.row)" @click="updateTaskStatus(scope.row, 'archived')">归档</el-button>
+            </template>
+            <el-dropdown trigger="click" @command="handleExportCommand(scope.row, $event)">
+              <el-button type="primary" link :loading="exportLoading === scope.row.id">导出</el-button>
+              <template #dropdown>
+                <el-dropdown-menu>
+                  <el-dropdown-item command="xlsx">导出 XLSX</el-dropdown-item>
+                  <el-dropdown-item command="csv">导出 CSV</el-dropdown-item>
+                </el-dropdown-menu>
+              </template>
+            </el-dropdown>
           </template>
         </el-table-column>
       </el-table>
+      <div class="table-pagination">
+        <el-pagination
+          background
+          layout="total, sizes, prev, pager, next"
+          :total="total"
+          :current-page="page"
+          :page-size="pageSize"
+          :page-sizes="[20, 50, 100]"
+          @current-change="handlePageChange"
+          @size-change="handlePageSizeChange"
+        />
+      </div>
     </div>
+
+    <el-drawer v-model="diffDrawerVisible" title="填报提交差异" size="78%" destroy-on-close>
+      <div v-loading="diffLoading" class="submission-diff-drawer">
+        <template v-if="submissionDiff">
+          <el-descriptions :column="3" border class="submission-diff-meta">
+            <el-descriptions-item label="填报组织">{{ submissionDiff.submission.organization_name }}</el-descriptions-item>
+            <el-descriptions-item label="当前提交">第 {{ submissionDiff.submission.version }} 版 · {{ formatDate(submissionDiff.submission.submitted_at) }}</el-descriptions-item>
+            <el-descriptions-item label="提交人">{{ submissionDiff.submission.submitted_by_name || '—' }}</el-descriptions-item>
+            <el-descriptions-item label="对比基线" :span="2">
+              <template v-if="submissionDiff.previous_submission">
+                {{ submissionDiff.previous_submission.task_name }} / 第 {{ submissionDiff.previous_submission.version }} 版 · {{ formatDate(submissionDiff.previous_submission.submitted_at) }}
+              </template>
+              <span v-else>首次提交，无历史基线</span>
+            </el-descriptions-item>
+            <el-descriptions-item label="快照规模">{{ submissionDiff.submission.system_count }} 个系统 / {{ submissionDiff.submission.asset_count }} 项资产</el-descriptions-item>
+          </el-descriptions>
+
+          <el-alert v-if="!submissionDiff.previous_submission" title="这是该组织的首次提交，当前全部系统和资产均计为新增。" type="info" :closable="false" show-icon />
+          <div class="submission-diff-summary">
+            <div class="added"><span>新增</span><strong>{{ submissionDiff.summary.added }}</strong></div>
+            <div class="modified"><span>修改</span><strong>{{ submissionDiff.summary.modified }}</strong></div>
+            <div class="removed"><span>删除/归档</span><strong>{{ submissionDiff.summary.removed }}</strong></div>
+          </div>
+
+          <section v-for="groupItem in diffGroups" :key="groupItem.key" class="submission-diff-group">
+            <div class="submission-diff-group-heading">
+              <h3>{{ groupItem.label }}</h3>
+              <div>
+                <el-tag type="success" effect="plain">新增 {{ groupItem.summary.added }}</el-tag>
+                <el-tag type="warning" effect="plain">修改 {{ groupItem.summary.modified }}</el-tag>
+                <el-tag type="danger" effect="plain">删除/归档 {{ groupItem.summary.removed }}</el-tag>
+              </div>
+            </div>
+            <el-tabs v-model="diffActiveTabs[groupItem.key]" @tab-change="(name: string | number) => handleDiffTabChange(groupItem.key, name)">
+              <el-tab-pane
+                v-for="tabItem in diffChangeTabs"
+                :key="tabItem.key"
+                :name="tabItem.key"
+                :label="`${tabItem.label}（${groupItem.summary[tabItem.key]}）`"
+              >
+                <el-table
+                  v-loading="diffListState(groupItem.key, tabItem.key).loading"
+                  :data="diffListState(groupItem.key, tabItem.key).items"
+                  size="small"
+                  :empty-text="tabItem.emptyText"
+                  max-height="420"
+                >
+                  <el-table-column v-if="tabItem.key === 'modified'" type="expand">
+                    <template #default="changeScope">
+                      <div class="submission-field-changes">
+                        <div v-for="change in changeScope.row.changes" :key="change.field" class="submission-field-change">
+                          <strong>{{ change.label }}</strong>
+                          <span class="before">{{ formatSnapshotValue(change.before) }}</span>
+                          <span class="change-arrow">→</span>
+                          <span class="after">{{ formatSnapshotValue(change.after) }}</span>
+                        </div>
+                      </div>
+                    </template>
+                  </el-table-column>
+                  <el-table-column prop="resource_name" label="名称" min-width="220" />
+                  <el-table-column prop="resource_key" label="唯一标识" min-width="260" show-overflow-tooltip />
+                  <el-table-column v-if="tabItem.key === 'modified'" label="变更字段" width="110">
+                    <template #default="changeScope">{{ changeScope.row.changes?.length || 0 }} 项</template>
+                  </el-table-column>
+                </el-table>
+                <el-pagination
+                  v-if="diffListState(groupItem.key, tabItem.key).total > 0"
+                  class="table-pagination"
+                  background
+                  layout="total, sizes, prev, pager, next"
+                  :page-sizes="[20, 50, 100]"
+                  :current-page="diffListState(groupItem.key, tabItem.key).page"
+                  :page-size="diffListState(groupItem.key, tabItem.key).pageSize"
+                  :total="diffListState(groupItem.key, tabItem.key).total"
+                  @current-change="(value: number) => handleDiffPageChange(groupItem.key, tabItem.key, value)"
+                  @size-change="(value: number) => handleDiffPageSizeChange(groupItem.key, tabItem.key, value)"
+                />
+              </el-tab-pane>
+            </el-tabs>
+          </section>
+        </template>
+      </div>
+    </el-drawer>
 
     <el-dialog v-model="createDialogVisible" title="创建填报任务" width="760px" destroy-on-close>
       <el-alert title="任务创建后将关联到所选组织；选择“立即下发”后，子公司登录即可看到该任务。" type="info" :closable="false" show-icon />
@@ -408,22 +1017,88 @@ onMounted(load)
       <template #footer><el-button @click="createDialogVisible = false">取消</el-button><el-button type="primary" :loading="submitting" @click="createTask">{{ form.status === 'active' ? '创建并下发' : '保存草稿' }}</el-button></template>
     </el-dialog>
 
-    <el-dialog v-model="submissionDialogVisible" title="提交填报结果" width="580px" destroy-on-close>
-      <el-alert title="系统将记录提交时本组织的业务系统和网络资产数量快照。提交后如需修改，请等待集团退回。" type="info" :closable="false" show-icon />
-      <el-form label-position="top" class="dialog-form-with-alert">
+    <el-dialog v-model="submissionDialogVisible" title="提交填报结果" width="640px" destroy-on-close>
+      <el-alert title="系统会先检查必填数据，再记录本组织的业务系统和网络资产数量快照。" type="info" :closable="false" show-icon />
+      <div class="quality-check" v-loading="qualityLoading">
+        <div class="quality-check-header">
+          <div><strong>提交前质量检查</strong><span v-if="qualityCheck">{{ qualityCheck.system_count }} 个系统 / {{ qualityCheck.asset_count }} 项资产</span></div>
+          <el-button size="small" :loading="qualityLoading" @click="loadQualityCheck">重新检查</el-button>
+        </div>
+        <el-alert v-if="qualityCheck?.passed" :title="qualityCheck.warning_count ? `检查通过，另有 ${qualityCheck.warning_count} 项提醒` : '检查通过，可以提交'" :type="qualityCheck.warning_count ? 'warning' : 'success'" :closable="false" show-icon />
+        <el-alert v-else-if="qualityCheck" :title="`发现 ${qualityCheck.error_count} 项错误，修正后才能提交`" type="error" :closable="false" show-icon />
+        <ul v-if="qualityCheck?.issues.length" class="quality-issue-list">
+          <li v-for="issue in qualityCheck.issues" :key="issue.code" :class="issue.severity">
+            <el-tag :type="issue.severity === 'error' ? 'danger' : 'warning'" effect="plain" size="small">{{ issue.severity === 'error' ? '错误' : '提醒' }}</el-tag>
+            <span>{{ issue.message }}</span><strong>{{ issue.count }}</strong>
+          </li>
+        </ul>
+        <div v-if="qualityCheck && !qualityCheck.passed" class="quality-actions">
+          <el-button size="small" @click="router.push('/systems'); submissionDialogVisible = false">维护业务系统</el-button>
+          <el-button size="small" @click="router.push('/assets'); submissionDialogVisible = false">维护网络资产</el-button>
+        </div>
+      </div>
+      <el-form label-position="top">
         <el-form-item label="任务"><el-input :model-value="selectedTask?.name" disabled /></el-form-item>
         <el-form-item label="填报组织"><el-input :model-value="selectedProgress?.organization_name" disabled /></el-form-item>
         <el-form-item label="填报说明"><el-input v-model="submissionForm.note" type="textarea" :rows="4" maxlength="5000" show-word-limit placeholder="可填写数据范围、统计口径或需要集团关注的事项" /></el-form-item>
       </el-form>
-      <template #footer><el-button @click="submissionDialogVisible = false">取消</el-button><el-button type="primary" :loading="actionLoading !== ''" @click="submitProgress">确认提交</el-button></template>
+      <template #footer><el-button @click="submissionDialogVisible = false">取消</el-button><el-button type="primary" :loading="actionLoading !== ''" :disabled="qualityLoading || !qualityCheck?.passed" @click="submitProgress">确认提交</el-button></template>
     </el-dialog>
 
-    <el-dialog v-model="returnDialogVisible" title="退回填报结果" width="540px" destroy-on-close>
+    <el-dialog v-model="returnDialogVisible" title="退回填报结果" width="920px" destroy-on-close>
       <el-form label-position="top">
         <el-form-item label="填报组织"><el-input :model-value="selectedProgress?.organization_name" disabled /></el-form-item>
-        <el-form-item label="退回原因" required><el-input v-model="returnForm.reason" type="textarea" :rows="4" maxlength="2000" show-word-limit placeholder="请明确说明需要补充或修正的内容" /></el-form-item>
+        <el-form-item label="整体退回原因" required><el-input v-model="returnForm.reason" type="textarea" :rows="3" maxlength="2000" show-word-limit placeholder="请明确说明本次退回的总体原因" /></el-form-item>
       </el-form>
-      <template #footer><el-button @click="returnDialogVisible = false">取消</el-button><el-button type="danger" :loading="actionLoading !== ''" @click="returnProgress">确认退回</el-button></template>
+      <el-divider content-position="left">逐条审核意见（可选）</el-divider>
+      <el-alert title="可以针对本次提交中的具体业务系统或网络资产填写意见；子公司将在任务中查看这些意见。单次最多 100 条。" type="info" :closable="false" show-icon />
+      <div v-loading="returnContextLoading" class="review-resource-panel">
+        <div class="review-resource-toolbar">
+          <el-input v-model="returnResourceSearch" clearable placeholder="按名称或资产标识搜索" class="review-resource-search" @keyup.enter="applyReturnResourceSearch" @clear="applyReturnResourceSearch" />
+          <el-button :loading="returnResourceLoading" @click="applyReturnResourceSearch">搜索</el-button>
+        </div>
+        <el-table v-loading="returnResourceLoading" :data="returnResources" max-height="390" empty-text="本次提交没有可填写意见的明细">
+          <el-table-column label="类型" width="95"><template #default="scope">{{ reviewResourceTypeLabel(scope.row.resource_type) }}</template></el-table-column>
+          <el-table-column label="对象" min-width="230"><template #default="scope"><div class="organization-name-cell"><strong>{{ scope.row.resource_name }}</strong><span>{{ scope.row.resource_key }}</span></div></template></el-table-column>
+          <el-table-column label="审核意见" min-width="390"><template #default="scope"><el-input v-model="returnCommentDrafts[reviewResourceKey(scope.row)]" maxlength="2000" placeholder="针对该条数据填写整改要求（可选）" /></template></el-table-column>
+        </el-table>
+        <div v-if="returnResourceTotal > 0" class="table-pagination dialog-pagination">
+          <el-pagination background small layout="total, sizes, prev, pager, next" :total="returnResourceTotal" :current-page="returnResourcePage" :page-size="returnResourcePageSize" :page-sizes="[20, 50, 100]" @current-change="handleReturnResourcePageChange" @size-change="handleReturnResourcePageSizeChange" />
+        </div>
+      </div>
+      <template #footer><el-button @click="returnDialogVisible = false">取消</el-button><el-button type="danger" :loading="actionLoading !== ''" :disabled="returnContextLoading || returnResourceLoading" @click="returnProgress">确认退回</el-button></template>
+    </el-dialog>
+
+    <el-dialog v-model="reviewContextVisible" title="逐条审核意见" width="860px" destroy-on-close>
+      <div v-loading="reviewContextLoading">
+        <el-descriptions v-if="reviewContext" :column="3" border class="review-context-summary">
+          <el-descriptions-item label="填报组织">{{ reviewContext.submission.organization_name }}</el-descriptions-item>
+          <el-descriptions-item label="提交版本">第 {{ reviewContext.submission.version }} 版</el-descriptions-item>
+          <el-descriptions-item label="提交时间">{{ formatDate(reviewContext.submission.submitted_at) }}</el-descriptions-item>
+        </el-descriptions>
+        <div v-loading="reviewCommentLoading">
+          <el-alert v-if="reviewContext && !reviewCommentLoading && reviewCommentTotal === 0" title="当前任务尚无逐条审核意见。" type="info" :closable="false" show-icon />
+          <el-table v-else-if="reviewContext && reviewComments.length" :data="reviewComments" max-height="460" empty-text="暂无逐条审核意见">
+            <el-table-column label="版本" width="80"><template #default="scope">第 {{ scope.row.submission_version }} 版</template></el-table-column>
+            <el-table-column label="类型" width="95"><template #default="scope">{{ reviewResourceTypeLabel(scope.row.resource_type) }}</template></el-table-column>
+            <el-table-column label="对象" min-width="210"><template #default="scope"><div class="organization-name-cell"><strong>{{ scope.row.resource_name }}</strong><span>{{ scope.row.resource_key }}</span></div></template></el-table-column>
+            <el-table-column prop="comment" label="审核意见" min-width="270" />
+            <el-table-column label="审核人 / 时间" width="175"><template #default="scope"><div class="organization-name-cell"><strong>{{ scope.row.created_by_name || '集团审核人' }}</strong><span>{{ formatDate(scope.row.created_at) }}</span></div></template></el-table-column>
+          </el-table>
+          <div v-if="reviewCommentTotal > 0" class="table-pagination dialog-pagination">
+            <el-pagination background small layout="total, sizes, prev, pager, next" :total="reviewCommentTotal" :current-page="reviewCommentPage" :page-size="reviewCommentPageSize" :page-sizes="[20, 50, 100]" @current-change="handleReviewCommentPageChange" @size-change="handleReviewCommentPageSizeChange" />
+          </div>
+        </div>
+      </div>
+      <template #footer><el-button type="primary" @click="reviewContextVisible = false">关闭</el-button></template>
     </el-dialog>
   </section>
 </template>
+
+<style scoped>
+.table-pagination { display:flex; justify-content:flex-end; margin-top:18px; }
+.dialog-pagination { overflow-x:auto; padding-bottom:2px; }
+.task-organization-pagination { grid-column: span 3; flex-direction: row !important; }
+.review-resource-toolbar { display:flex; gap:10px; margin:14px 0; }
+.review-resource-search { flex:1; }
+</style>

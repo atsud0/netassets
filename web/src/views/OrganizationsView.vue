@@ -22,8 +22,7 @@ interface Organization {
   created_at: string
 }
 
-interface OrganizationListResponse { items: Organization[]; total: number }
-interface OrganizationCreateResponse { item: Organization }
+interface OrganizationListResponse { items: Organization[]; total: number; page: number; page_size: number }
 
 const auth = useAuthStore()
 const loading = ref(false)
@@ -32,6 +31,10 @@ const groupSubmitting = ref(false)
 const dialogVisible = ref(false)
 const groupDialogVisible = ref(false)
 const organizations = ref<Organization[]>([])
+const rootOrganization = ref<Organization | null>(null)
+const page = ref(1)
+const pageSize = ref(20)
+const total = ref(0)
 const formRef = ref<FormInstance>()
 const groupFormRef = ref<FormInstance>()
 const form = reactive({
@@ -58,22 +61,64 @@ const rules: FormRules = {
   type: [{ required: true, message: '请选择组织类型', trigger: 'change' }],
 }
 
-const enabledParents = computed(() => organizations.value.filter((item) => item.status === 'enabled'))
-const rootOrganization = computed(() => organizations.value.find((item) => item.type === 'group'))
+const enabledParents = computed(() => {
+  const items = organizations.value.filter((item) => item.status === 'enabled')
+  if (rootOrganization.value?.status === 'enabled' && !items.some((item) => item.id === rootOrganization.value?.id)) {
+    return [rootOrganization.value, ...items]
+  }
+  return items
+})
 const typeLabels: Record<Organization['type'], string> = {
   group: '集团', subsidiary: '子公司', department: '部门', other: '其他',
+}
+
+async function loadRootOrganization() {
+  if (!auth.isGroupAdmin) {
+    rootOrganization.value = null
+    return
+  }
+  try {
+    const response = await apiClient.get<OrganizationListResponse>('/organizations', {
+      params: { page: 1, page_size: 1 },
+    })
+    rootOrganization.value = response.data.items.find((item) => item.type === 'group') ?? null
+  } catch (error) {
+    ElMessage.error(getAPIErrorMessage(error, '读取集团基本信息失败'))
+  }
 }
 
 async function loadOrganizations() {
   loading.value = true
   try {
-    const response = await apiClient.get<OrganizationListResponse>('/organizations')
+    const response = await apiClient.get<OrganizationListResponse>('/organizations', {
+      params: { page: page.value, page_size: pageSize.value },
+    })
     organizations.value = response.data.items
+    total.value = response.data.total
   } catch (error) {
     ElMessage.error(getAPIErrorMessage(error, '读取组织机构失败'))
   } finally {
     loading.value = false
   }
+}
+
+async function refreshAfterMutation() {
+  await loadOrganizations()
+  if (organizations.value.length === 0 && total.value > 0 && page.value > 1) {
+    page.value -= 1
+    await loadOrganizations()
+  }
+}
+
+function handlePageChange(value: number) {
+  page.value = value
+  void loadOrganizations()
+}
+
+function handlePageSizeChange(value: number) {
+  pageSize.value = value
+  page.value = 1
+  void loadOrganizations()
 }
 
 function openCreateDialog() {
@@ -102,7 +147,7 @@ async function submitGroupInfo() {
   try {
     await apiClient.patch(`/organizations/${rootOrganization.value.id}`, groupForm)
     groupDialogVisible.value = false
-    await Promise.all([loadOrganizations(), auth.fetchCurrentUser()])
+    await Promise.all([refreshAfterMutation(), loadRootOrganization(), auth.fetchCurrentUser()])
     ElMessage.success('集团基本信息已更新')
   } catch (error) {
     ElMessage.error(getAPIErrorMessage(error, '更新集团基本信息失败'))
@@ -115,11 +160,10 @@ async function submit() {
   if (!formRef.value || !(await formRef.value.validate())) return
   submitting.value = true
   try {
-    const response = await apiClient.post<OrganizationCreateResponse>('/organizations', form)
-    organizations.value.push(response.data.item)
+    await apiClient.post('/organizations', form)
     dialogVisible.value = false
     ElMessage.success('组织机构已新增')
-    await loadOrganizations()
+    await refreshAfterMutation()
   } catch (error) {
     ElMessage.error(getAPIErrorMessage(error, '新增组织机构失败'))
   } finally {
@@ -127,7 +171,9 @@ async function submit() {
   }
 }
 
-onMounted(loadOrganizations)
+onMounted(async () => {
+  await Promise.all([loadOrganizations(), loadRootOrganization()])
+})
 </script>
 
 <template>
@@ -145,10 +191,10 @@ onMounted(loadOrganizations)
     </div>
 
     <div class="organization-summary">
-      <div><span>组织总数</span><strong>{{ organizations.length }}</strong></div>
-      <div><span>子公司</span><strong>{{ organizations.filter((item) => item.type === 'subsidiary').length }}</strong></div>
-      <div><span>业务系统</span><strong>{{ organizations.reduce((sum, item) => sum + item.business_system_count, 0) }}</strong></div>
-      <div><span>网络资产</span><strong>{{ organizations.reduce((sum, item) => sum + item.asset_count, 0) }}</strong></div>
+      <div><span>组织总数</span><strong>{{ total }}</strong></div>
+      <div><span>本页子公司</span><strong>{{ organizations.filter((item) => item.type === 'subsidiary').length }}</strong></div>
+      <div><span>本页业务系统</span><strong>{{ organizations.reduce((sum, item) => sum + item.business_system_count, 0) }}</strong></div>
+      <div><span>本页网络资产</span><strong>{{ organizations.reduce((sum, item) => sum + item.asset_count, 0) }}</strong></div>
     </div>
 
     <div class="panel organization-table-panel">
@@ -182,6 +228,18 @@ onMounted(loadOrganizations)
           </template>
         </el-table-column>
       </el-table>
+      <div class="table-pagination">
+        <el-pagination
+          background
+          layout="total, sizes, prev, pager, next"
+          :total="total"
+          :current-page="page"
+          :page-size="pageSize"
+          :page-sizes="[20, 50, 100]"
+          @current-change="handlePageChange"
+          @size-change="handlePageSizeChange"
+        />
+      </div>
     </div>
 
     <el-dialog v-model="groupDialogVisible" title="编辑集团基本信息" width="620px" destroy-on-close>
@@ -243,3 +301,7 @@ onMounted(loadOrganizations)
     </el-dialog>
   </section>
 </template>
+
+<style scoped>
+.table-pagination { display:flex; justify-content:flex-end; margin-top:18px; }
+</style>

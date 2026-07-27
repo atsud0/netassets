@@ -7,6 +7,7 @@ export interface UserOrganization {
   code: string
   name: string
   type: string
+  is_primary?: boolean
 }
 
 export interface CurrentUser {
@@ -14,8 +15,13 @@ export interface CurrentUser {
   username: string
   display_name: string
   email?: string
+  mobile_phone?: string
+  office_phone?: string
+  must_change_password: boolean
   organization?: UserOrganization
+  organizations: UserOrganization[]
   roles: string[]
+  permissions: string[]
 }
 
 interface AuthResponse {
@@ -28,6 +34,11 @@ export const useAuthStore = defineStore('auth', () => {
   const initialized = ref(false)
   const authenticated = computed(() => user.value !== null)
   const isGroupAdmin = computed(() => user.value?.roles.includes('group_admin') ?? false)
+  const hasPermission = (permission: string) => user.value?.permissions.includes(permission) ?? false
+
+  function setCurrentUser(currentUser: CurrentUser) {
+    user.value = currentUser
+  }
 
   async function fetchCurrentUser() {
     try {
@@ -49,6 +60,12 @@ export const useAuthStore = defineStore('auth', () => {
     return user.value
   }
 
+  async function switchOrganization(organizationID: string) {
+    const response = await apiClient.put<AuthResponse>('/auth/current-organization', { organization_id: organizationID })
+    user.value = response.data.user
+    return user.value
+  }
+
   async function logout() {
     try {
       await apiClient.post('/auth/logout')
@@ -58,5 +75,5 @@ export const useAuthStore = defineStore('auth', () => {
     }
   }
 
-  return { user, initialized, authenticated, isGroupAdmin, fetchCurrentUser, login, logout }
+  return { user, initialized, authenticated, isGroupAdmin, hasPermission, setCurrentUser, fetchCurrentUser, login, switchOrganization, logout }
 })
