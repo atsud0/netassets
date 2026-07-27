@@ -12,6 +12,7 @@ type Config struct {
 	Address                   string
 	DatabaseURL               string
 	StaticDir                 string
+	DataDir                   string
 	SessionCookieName         string
 	SessionTTL                time.Duration
 	SessionCookieSecure       bool
@@ -39,6 +40,7 @@ func Load() (Config, error) {
 		Address:                   getenv("APP_ADDR", ":8080"),
 		DatabaseURL:               getenv("DATABASE_URL", "postgres://netassets:netassets@localhost:5432/netassets?sslmode=disable"),
 		StaticDir:                 getenv("STATIC_DIR", "../web/dist"),
+		DataDir:                   getenv("DATA_DIR", "../data"),
 		SessionCookieName:         getenv("SESSION_COOKIE_NAME", "netassets_session"),
 		SessionTTL:                sessionTTL,
 		SessionCookieSecure:       sessionCookieSecure,
@@ -55,6 +57,9 @@ func Load() (Config, error) {
 	}
 	if cfg.DatabaseURL == "" {
 		return Config{}, fmt.Errorf("DATABASE_URL must not be empty")
+	}
+	if cfg.DataDir == "" {
+		return Config{}, fmt.Errorf("DATA_DIR must not be empty")
 	}
 	if cfg.SessionCookieName == "" {
 		return Config{}, fmt.Errorf("SESSION_COOKIE_NAME must not be empty")

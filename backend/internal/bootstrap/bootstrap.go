@@ -15,13 +15,18 @@ import (
 )
 
 var permissions = map[string]string{
-	"organization.read":   "查看组织机构",
-	"organization.create": "新增组织机构",
-	"organization.update": "编辑组织机构",
-	"system.manage":       "管理业务系统",
-	"asset.manage":        "管理网络资产",
-	"inventory.manage":    "管理填报任务",
-	"user.manage":         "管理用户和权限",
+	"organization.read":         "查看组织机构",
+	"organization.create":       "新增组织机构",
+	"organization.update":       "编辑组织机构",
+	"system.manage":             "管理业务系统",
+	"asset.manage":              "管理网络资产和网络区域",
+	"inventory.manage":          "管理资产填报与审核",
+	"data_quality.manage":       "处理数据质量问题",
+	"security_test.manage":      "管理安全测试批次",
+	"security_workorder.manage": "管理安全工单",
+	"audit.read":                "查看审计日志和变更记录",
+	"recycle_bin.manage":        "管理回收站",
+	"user.manage":               "管理用户、角色和任职",
 }
 
 func Ensure(ctx context.Context, pool *pgxpool.Pool, cfg config.Config, logger *slog.Logger) error {
@@ -92,7 +97,7 @@ func Ensure(ctx context.Context, pool *pgxpool.Pool, cfg config.Config, logger *
 		Description string
 		Permissions []string
 	}{
-		{Key: "organization_admin", Name: "子公司管理员", Description: "管理所属组织的业务系统、网络资产和填报数据", Permissions: []string{"organization.read", "system.manage", "asset.manage", "inventory.manage", "user.manage"}},
+		{Key: "organization_admin", Name: "子公司管理员", Description: "管理所属组织的业务系统、网络资产和填报数据", Permissions: []string{"organization.read", "system.manage", "asset.manage", "inventory.manage", "data_quality.manage", "user.manage"}},
 		{Key: "organization_editor", Name: "子公司填报员", Description: "维护所属组织的业务系统、网络资产和填报数据", Permissions: []string{"organization.read", "system.manage", "asset.manage", "inventory.manage"}},
 	}
 	for _, role := range organizationRoles {

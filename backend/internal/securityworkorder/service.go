@@ -1,0 +1,1404 @@
+package securityworkorder
+
+import (
+	"context"
+	"crypto/rand"
+	"encoding/hex"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"regexp"
+	"strings"
+	"time"
+
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
+
+	"netassets/internal/access"
+	"netassets/internal/auth"
+	"netassets/internal/pagination"
+)
+
+var (
+	ErrForbidden = errors.New("forbidden")
+	ErrNotFound  = errors.New("not found")
+	ErrConflict  = errors.New("conflict")
+	ErrInvalid   = errors.New("invalid input")
+	ErrState     = errors.New("invalid state")
+	uuidPattern  = regexp.MustCompile(`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$`)
+)
+
+type Finding struct {
+	ID                       string     `json:"id"`
+	Code                     string     `json:"code"`
+	Title                    string     `json:"title"`
+	Severity                 string     `json:"severity"`
+	Status                   string     `json:"status"`
+	AssigneeOrganizationID   string     `json:"assignee_organization_id"`
+	AssigneeOrganizationCode string     `json:"assignee_organization_code"`
+	AssigneeOrganizationName string     `json:"assignee_organization_name"`
+	AssetID                  string     `json:"asset_id,omitempty"`
+	AssetValue               string     `json:"asset_value,omitempty"`
+	AssetName                string     `json:"asset_name,omitempty"`
+	BusinessSystemID         string     `json:"business_system_id,omitempty"`
+	BusinessSystemCode       string     `json:"business_system_code,omitempty"`
+	BusinessSystemName       string     `json:"business_system_name,omitempty"`
+	TestBatchID              string     `json:"test_batch_id,omitempty"`
+	TestBatchCode            string     `json:"test_batch_code,omitempty"`
+	TestBatchName            string     `json:"test_batch_name,omitempty"`
+	VulnerabilityType        string     `json:"vulnerability_type,omitempty"`
+	Description              string     `json:"description"`
+	Evidence                 string     `json:"evidence,omitempty"`
+	RemediationAdvice        string     `json:"remediation_advice,omitempty"`
+	Source                   string     `json:"source"`
+	DiscoveredAt             time.Time  `json:"discovered_at"`
+	CreatedByName            string     `json:"created_by_name,omitempty"`
+	CreatedAt                time.Time  `json:"created_at"`
+	UpdatedAt                time.Time  `json:"updated_at"`
+	RiskAcceptedAt           *time.Time `json:"risk_accepted_at,omitempty"`
+	RiskAcceptedUntil        *time.Time `json:"risk_accepted_until,omitempty"`
+	RiskAcceptanceReason     string     `json:"risk_acceptance_reason,omitempty"`
+	RiskAcceptedByName       string     `json:"risk_accepted_by_name,omitempty"`
+	RiskAcceptedFromStatus   string     `json:"risk_accepted_from_status,omitempty"`
+	RiskReviewedAt           *time.Time `json:"risk_reviewed_at,omitempty"`
+	RiskReviewedByName       string     `json:"risk_reviewed_by_name,omitempty"`
+	RiskReviewComment        string     `json:"risk_review_comment,omitempty"`
+	RiskAcceptanceExpired    bool       `json:"risk_acceptance_expired"`
+}
+
+type FindingInput struct {
+	Title                  string    `json:"title"`
+	Severity               string    `json:"severity"`
+	Status                 string    `json:"status"`
+	AssigneeOrganizationID string    `json:"assignee_organization_id"`
+	AssetID                string    `json:"asset_id"`
+	BusinessSystemID       string    `json:"business_system_id"`
+	TestBatchID            string    `json:"test_batch_id"`
+	VulnerabilityType      string    `json:"vulnerability_type"`
+	Description            string    `json:"description"`
+	Evidence               string    `json:"evidence"`
+	RemediationAdvice      string    `json:"remediation_advice"`
+	Source                 string    `json:"source"`
+	DiscoveredAt           time.Time `json:"discovered_at"`
+}
+
+type FindingSummary struct {
+	ID                 string `json:"id"`
+	Code               string `json:"code"`
+	Title              string `json:"title"`
+	Severity           string `json:"severity"`
+	Status             string `json:"status"`
+	AssetID            string `json:"asset_id,omitempty"`
+	AssetValue         string `json:"asset_value,omitempty"`
+	AssetName          string `json:"asset_name,omitempty"`
+	BusinessSystemID   string `json:"business_system_id,omitempty"`
+	BusinessSystemName string `json:"business_system_name,omitempty"`
+}
+
+type Event struct {
+	ID                    int64           `json:"id"`
+	Action                string          `json:"action"`
+	FromStatus            string          `json:"from_status,omitempty"`
+	ToStatus              string          `json:"to_status,omitempty"`
+	Comment               string          `json:"comment,omitempty"`
+	Details               json.RawMessage `json:"details"`
+	ActorUserID           string          `json:"actor_user_id,omitempty"`
+	ActorName             string          `json:"actor_name,omitempty"`
+	ActorOrganizationID   string          `json:"actor_organization_id,omitempty"`
+	ActorOrganizationName string          `json:"actor_organization_name,omitempty"`
+	CreatedAt             time.Time       `json:"created_at"`
+}
+
+type WorkOrder struct {
+	ID                       string           `json:"id"`
+	Number                   string           `json:"number"`
+	Title                    string           `json:"title"`
+	AssigneeOrganizationID   string           `json:"assignee_organization_id"`
+	AssigneeOrganizationCode string           `json:"assignee_organization_code"`
+	AssigneeOrganizationName string           `json:"assignee_organization_name"`
+	Severity                 string           `json:"severity"`
+	Status                   string           `json:"status"`
+	Description              string           `json:"description,omitempty"`
+	RemediationRequirement   string           `json:"remediation_requirement"`
+	DueAt                    time.Time        `json:"due_at"`
+	Overdue                  bool             `json:"overdue"`
+	IssuedAt                 *time.Time       `json:"issued_at,omitempty"`
+	AcceptedAt               *time.Time       `json:"accepted_at,omitempty"`
+	SubmittedAt              *time.Time       `json:"submitted_at,omitempty"`
+	VerifiedAt               *time.Time       `json:"verified_at,omitempty"`
+	ClosedAt                 *time.Time       `json:"closed_at,omitempty"`
+	CancelledAt              *time.Time       `json:"cancelled_at,omitempty"`
+	RemediationProgress      string           `json:"remediation_progress,omitempty"`
+	RemediationResult        string           `json:"remediation_result,omitempty"`
+	VerificationResult       string           `json:"verification_result,omitempty"`
+	ReturnReason             string           `json:"return_reason,omitempty"`
+	CreatedByName            string           `json:"created_by_name,omitempty"`
+	FindingCount             int64            `json:"finding_count"`
+	Findings                 []FindingSummary `json:"findings,omitempty"`
+	Events                   []Event          `json:"events,omitempty"`
+	Attachments              []Attachment     `json:"attachments,omitempty"`
+	CreatedAt                time.Time        `json:"created_at"`
+	UpdatedAt                time.Time        `json:"updated_at"`
+}
+
+type WorkOrderSearchFilter struct {
+	OrganizationID string
+	Status         string
+	OverdueOnly    bool
+	Page           pagination.Query
+}
+
+type WorkOrderInput struct {
+	Title                  string    `json:"title"`
+	AssigneeOrganizationID string    `json:"assignee_organization_id"`
+	Description            string    `json:"description"`
+	RemediationRequirement string    `json:"remediation_requirement"`
+	DueAt                  time.Time `json:"due_at"`
+	FindingIDs             []string  `json:"finding_ids"`
+}
+
+type ProgressInput struct {
+	Progress string `json:"progress"`
+	Comment  string `json:"comment"`
+}
+
+type SubmitInput struct {
+	RemediationResult string `json:"remediation_result"`
+	Comment           string `json:"comment"`
+}
+
+type ReviewInput struct {
+	Decision           string `json:"decision"`
+	VerificationResult string `json:"verification_result"`
+	ReturnReason       string `json:"return_reason"`
+}
+
+type CommentInput struct {
+	Comment string `json:"comment"`
+}
+
+type RiskAcceptanceInput struct {
+	Reason        string    `json:"reason"`
+	AcceptedUntil time.Time `json:"accepted_until"`
+}
+
+type RiskReviewInput struct {
+	Comment       string     `json:"comment"`
+	AcceptedUntil *time.Time `json:"accepted_until"`
+}
+
+type Service struct {
+	pool       *pgxpool.Pool
+	storageDir string
+}
+
+func NewService(pool *pgxpool.Pool, storageDirs ...string) *Service {
+	storageDir := "../data"
+	if len(storageDirs) > 0 && strings.TrimSpace(storageDirs[0]) != "" {
+		storageDir = strings.TrimSpace(storageDirs[0])
+	}
+	return &Service{pool: pool, storageDir: storageDir}
+}
+
+func (s *Service) ListFindings(ctx context.Context, principal auth.Principal, organizationID, status string) ([]Finding, error) {
+	// Kept for internal compatibility. HTTP collection endpoints must use SearchFindings.
+	result, err := s.SearchFindings(ctx, principal, organizationID, status, pagination.Query{Page: 1, PageSize: pagination.MaxPageSize})
+	return result.Items, err
+}
+
+// SearchFindings applies database pagination before findings are hydrated and serialized.
+func (s *Service) SearchFindings(ctx context.Context, principal auth.Principal, organizationID, status string, page pagination.Query) (pagination.Result[Finding], error) {
+	organizationID = strings.TrimSpace(organizationID)
+	status = strings.TrimSpace(status)
+	if organizationID != "" {
+		if !validUUID(organizationID) {
+			return pagination.Result[Finding]{}, ErrInvalid
+		}
+		allowed, err := access.CanAccessOrganization(ctx, s.pool, principal, organizationID)
+		if err != nil {
+			return pagination.Result[Finding]{}, err
+		}
+		if !allowed {
+			return pagination.Result[Finding]{}, ErrForbidden
+		}
+	}
+	if status != "" && !validFindingStatus(status) {
+		return pagination.Result[Finding]{}, ErrInvalid
+	}
+	rows, err := s.pool.Query(ctx, accessibleCTE+`
+		SELECT f.id::text, f.finding_code, f.title, f.severity, f.status,
+		       o.id::text, o.organization_code, o.organization_name,
+		       COALESCE(a.id::text, ''), COALESCE(a.asset_value, ''), COALESCE(a.asset_name, ''),
+		       COALESCE(bs.id::text, ''), COALESCE(bs.system_code, ''), COALESCE(bs.system_name, ''),
+		       COALESCE(tb.id::text, ''), COALESCE(tb.batch_code, ''), COALESCE(tb.batch_name, ''),
+		       COALESCE(f.vulnerability_type, ''), f.description, COALESCE(f.evidence, ''),
+		       COALESCE(f.remediation_advice, ''), f.source, f.discovered_at,
+		       COALESCE(u.display_name, ''), f.created_at, f.updated_at,
+		       f.risk_accepted_at, f.risk_accepted_until, COALESCE(f.risk_acceptance_reason, ''),
+		       COALESCE(risk_acceptor.display_name, ''), COALESCE(f.risk_accepted_from_status, ''),
+		       f.risk_reviewed_at, COALESCE(risk_reviewer.display_name, ''), COALESCE(f.risk_review_comment, ''),
+		       (f.status = 'accepted_risk' AND f.risk_accepted_until IS NOT NULL AND f.risk_accepted_until < now()),
+		       count(*) OVER ()
+		FROM security_findings f
+		JOIN organizations o ON o.id = f.assignee_organization_id
+		LEFT JOIN assets a ON a.id = f.asset_id
+		LEFT JOIN business_systems bs ON bs.id = f.business_system_id
+		LEFT JOIN security_test_batches tb ON tb.id = f.test_batch_id
+		LEFT JOIN users u ON u.id = f.created_by
+		LEFT JOIN users risk_acceptor ON risk_acceptor.id = f.risk_accepted_by
+		LEFT JOIN users risk_reviewer ON risk_reviewer.id = f.risk_reviewed_by
+		WHERE (
+		        $2::boolean
+		        OR (
+		            f.assignee_organization_id IN (SELECT id FROM accessible)
+		            AND EXISTS (
+		                SELECT 1 FROM security_work_order_findings visible_link
+		                JOIN security_work_orders visible_order ON visible_order.id = visible_link.work_order_id
+		                WHERE visible_link.finding_id = f.id AND visible_order.issued_at IS NOT NULL
+		            )
+		        )
+		      )
+		  AND ($3::text = '' OR f.assignee_organization_id::text = $3)
+		  AND ($4::text = '' OR f.status = $4)
+		ORDER BY f.discovered_at DESC, f.created_at DESC
+		LIMIT $5 OFFSET $6`, principal.UserID, principal.HasRole("group_admin"), organizationID, status, page.PageSize, page.Offset())
+	if err != nil {
+		return pagination.Result[Finding]{}, fmt.Errorf("search security findings: %w", err)
+	}
+	defer rows.Close()
+	items := make([]Finding, 0, page.PageSize)
+	total := 0
+	for rows.Next() {
+		var item Finding
+		if err := scanFindingWithTotal(rows, &item, &total); err != nil {
+			return pagination.Result[Finding]{}, fmt.Errorf("scan security finding: %w", err)
+		}
+		items = append(items, item)
+	}
+	if err := rows.Err(); err != nil {
+		return pagination.Result[Finding]{}, fmt.Errorf("iterate security findings: %w", err)
+	}
+	if pagination.NeedsTotalFallback(len(items), page) {
+		if err := s.pool.QueryRow(ctx, accessibleCTE+`
+            SELECT count(*) FROM security_findings f
+            WHERE (
+                    $2::boolean
+                    OR (
+                        f.assignee_organization_id IN (SELECT id FROM accessible)
+                        AND EXISTS (
+                            SELECT 1 FROM security_work_order_findings visible_link
+                            JOIN security_work_orders visible_order ON visible_order.id = visible_link.work_order_id
+                            WHERE visible_link.finding_id = f.id AND visible_order.issued_at IS NOT NULL
+                        )
+                    )
+                  )
+              AND ($3::text = '' OR f.assignee_organization_id::text = $3)
+              AND ($4::text = '' OR f.status = $4)
+        `, principal.UserID, principal.HasRole("group_admin"), organizationID, status).Scan(&total); err != nil {
+			return pagination.Result[Finding]{}, fmt.Errorf("count security findings: %w", err)
+		}
+	}
+	return pagination.NewResult(items, total, page), nil
+}
+
+func (s *Service) CreateFinding(ctx context.Context, principal auth.Principal, input FindingInput, requestID, ipAddress string) (Finding, error) {
+	if !principal.HasRole("group_admin") {
+		return Finding{}, ErrForbidden
+	}
+	normalizeFindingInput(&input)
+	if !validFindingInput(input) {
+		return Finding{}, ErrInvalid
+	}
+	if input.Status == "accepted_risk" {
+		return Finding{}, ErrConflict
+	}
+	if err := s.validateReferences(ctx, input.AssigneeOrganizationID, input.AssetID, input.BusinessSystemID); err != nil {
+		return Finding{}, err
+	}
+	if input.TestBatchID != "" {
+		if err := s.validateFindingBatchScope(ctx, input.TestBatchID, input.AssigneeOrganizationID, input.AssetID); err != nil {
+			return Finding{}, err
+		}
+	}
+	code, err := newCode("F")
+	if err != nil {
+		return Finding{}, fmt.Errorf("generate finding code: %w", err)
+	}
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return Finding{}, fmt.Errorf("begin create finding: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	var id string
+	if err := tx.QueryRow(ctx, `
+		INSERT INTO security_findings (
+			finding_code, title, severity, status, assignee_organization_id, asset_id, business_system_id, test_batch_id,
+			vulnerability_type, description, evidence, remediation_advice, source, discovered_at, created_by, updated_by
+		) VALUES ($1, $2, $3, $4, $5::uuid, NULLIF($6, '')::uuid, NULLIF($7, '')::uuid, NULLIF($8, '')::uuid,
+		          NULLIF($9, ''), $10, NULLIF($11, ''), NULLIF($12, ''), $13, $14, $15::uuid, $15::uuid)
+		RETURNING id::text`, code, input.Title, input.Severity, input.Status, input.AssigneeOrganizationID,
+		input.AssetID, input.BusinessSystemID, input.TestBatchID, input.VulnerabilityType, input.Description, input.Evidence,
+		input.RemediationAdvice, input.Source, input.DiscoveredAt, principal.UserID).Scan(&id); err != nil {
+		return Finding{}, fmt.Errorf("insert security finding: %w", err)
+	}
+	if err := writeAudit(ctx, tx, principal, input.AssigneeOrganizationID, "security_finding.create", "security_finding", id,
+		"登记安全发现 "+code, map[string]any{"severity": input.Severity, "asset_id": input.AssetID, "business_system_id": input.BusinessSystemID, "test_batch_id": input.TestBatchID}, requestID, ipAddress); err != nil {
+		return Finding{}, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return Finding{}, fmt.Errorf("commit create finding: %w", err)
+	}
+	return s.getFinding(ctx, id)
+}
+
+func (s *Service) UpdateFinding(ctx context.Context, principal auth.Principal, id string, input FindingInput, requestID, ipAddress string) (Finding, error) {
+	if !principal.HasRole("group_admin") {
+		return Finding{}, ErrForbidden
+	}
+	if !validUUID(id) {
+		return Finding{}, ErrInvalid
+	}
+	normalizeFindingInput(&input)
+	if !validFindingInput(input) {
+		return Finding{}, ErrInvalid
+	}
+	var currentOrganizationID, currentStatus string
+	var linked, activelyLinked bool
+	if err := s.pool.QueryRow(ctx, `
+		SELECT f.assignee_organization_id::text, f.status,
+		       EXISTS (SELECT 1 FROM security_work_order_findings link WHERE link.finding_id = f.id),
+		       EXISTS (
+		           SELECT 1 FROM security_work_order_findings link
+		           JOIN security_work_orders wo ON wo.id = link.work_order_id
+		           WHERE link.finding_id = f.id AND wo.status NOT IN ('closed', 'cancelled')
+		       )
+		FROM security_findings f WHERE f.id::text = $1`, id).Scan(&currentOrganizationID, &currentStatus, &linked, &activelyLinked); errors.Is(err, pgx.ErrNoRows) {
+		return Finding{}, ErrNotFound
+	} else if err != nil {
+		return Finding{}, fmt.Errorf("load finding update constraints: %w", err)
+	}
+	if linked && input.AssigneeOrganizationID != currentOrganizationID {
+		return Finding{}, ErrConflict
+	}
+	if activelyLinked && input.Status != currentStatus {
+		return Finding{}, ErrConflict
+	}
+	// Risk acceptance is a controlled workflow and must not be bypassed by the
+	// generic edit endpoint. Metadata can still be edited while accepted_risk
+	// remains the current status.
+	if (currentStatus == "accepted_risk" && input.Status != "accepted_risk") ||
+		(currentStatus != "accepted_risk" && input.Status == "accepted_risk") {
+		return Finding{}, ErrConflict
+	}
+	if err := s.validateReferences(ctx, input.AssigneeOrganizationID, input.AssetID, input.BusinessSystemID); err != nil {
+		return Finding{}, err
+	}
+	if input.TestBatchID != "" {
+		if err := s.validateFindingBatchScope(ctx, input.TestBatchID, input.AssigneeOrganizationID, input.AssetID); err != nil {
+			return Finding{}, err
+		}
+	}
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return Finding{}, fmt.Errorf("begin update finding: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	command, err := tx.Exec(ctx, `
+		UPDATE security_findings SET title = $2, severity = $3, status = $4,
+		       assignee_organization_id = $5::uuid, asset_id = NULLIF($6, '')::uuid,
+		       business_system_id = NULLIF($7, '')::uuid, test_batch_id = NULLIF($8, '')::uuid, vulnerability_type = NULLIF($9, ''),
+		       description = $10, evidence = NULLIF($11, ''), remediation_advice = NULLIF($12, ''),
+		       source = $13, discovered_at = $14, updated_by = $15::uuid, updated_at = now()
+		WHERE id::text = $1`, id, input.Title, input.Severity, input.Status, input.AssigneeOrganizationID,
+		input.AssetID, input.BusinessSystemID, input.TestBatchID, input.VulnerabilityType, input.Description, input.Evidence,
+		input.RemediationAdvice, input.Source, input.DiscoveredAt, principal.UserID)
+	if err != nil {
+		return Finding{}, fmt.Errorf("update security finding: %w", err)
+	}
+	if command.RowsAffected() == 0 {
+		return Finding{}, ErrNotFound
+	}
+	if err := writeAudit(ctx, tx, principal, input.AssigneeOrganizationID, "security_finding.update", "security_finding", id,
+		"更新安全发现", map[string]any{"severity": input.Severity, "status": input.Status}, requestID, ipAddress); err != nil {
+		return Finding{}, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return Finding{}, fmt.Errorf("commit update finding: %w", err)
+	}
+	return s.getFinding(ctx, id)
+}
+
+// GetFinding returns one finding when it is visible to the current principal.
+// Group administrators can inspect all findings; subsidiary users can only inspect
+// findings from their organization after the related work order has been issued.
+func (s *Service) GetFinding(ctx context.Context, principal auth.Principal, id string) (Finding, error) {
+	if !validUUID(id) {
+		return Finding{}, ErrInvalid
+	}
+	item, err := s.getFinding(ctx, id)
+	if err != nil {
+		return Finding{}, err
+	}
+	if principal.HasRole("group_admin") {
+		return item, nil
+	}
+	allowed, err := access.CanAccessOrganization(ctx, s.pool, principal, item.AssigneeOrganizationID)
+	if err != nil {
+		return Finding{}, err
+	}
+	if !allowed {
+		return Finding{}, ErrForbidden
+	}
+	var visible bool
+	if err := s.pool.QueryRow(ctx, `
+		SELECT EXISTS (
+			SELECT 1 FROM security_work_order_findings link
+			JOIN security_work_orders wo ON wo.id = link.work_order_id
+			WHERE link.finding_id = $1::uuid AND wo.issued_at IS NOT NULL
+		)`, id).Scan(&visible); err != nil {
+		return Finding{}, fmt.Errorf("check security finding visibility: %w", err)
+	}
+	if !visible {
+		return Finding{}, ErrNotFound
+	}
+	return item, nil
+}
+
+func (s *Service) AcceptRisk(ctx context.Context, principal auth.Principal, id string, input RiskAcceptanceInput, requestID, ipAddress string) (Finding, error) {
+	if !principal.HasRole("group_admin") {
+		return Finding{}, ErrForbidden
+	}
+	input.Reason = strings.TrimSpace(input.Reason)
+	if !validUUID(id) || !validRiskAcceptanceInput(input) {
+		return Finding{}, ErrInvalid
+	}
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return Finding{}, fmt.Errorf("begin accept finding risk: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	var organizationID, previousStatus, previousFromStatus string
+	var activelyLinked bool
+	if err := tx.QueryRow(ctx, `
+		SELECT f.assignee_organization_id::text, f.status, COALESCE(f.risk_accepted_from_status, ''),
+		       EXISTS (
+			SELECT 1 FROM security_work_order_findings link
+			JOIN security_work_orders wo ON wo.id = link.work_order_id
+			WHERE link.finding_id = f.id AND wo.status NOT IN ('closed', 'cancelled')
+		       )
+		FROM security_findings f WHERE f.id::text = $1 FOR UPDATE`, id).Scan(&organizationID, &previousStatus, &previousFromStatus, &activelyLinked); errors.Is(err, pgx.ErrNoRows) {
+		return Finding{}, ErrNotFound
+	} else if err != nil {
+		return Finding{}, fmt.Errorf("load finding risk acceptance: %w", err)
+	}
+	if previousStatus != "open" && previousStatus != "assigned" && previousStatus != "resolved" && previousStatus != "accepted_risk" {
+		return Finding{}, ErrState
+	}
+	if activelyLinked && previousStatus != "accepted_risk" {
+		return Finding{}, ErrConflict
+	}
+	fromStatus := previousStatus
+	if previousStatus == "accepted_risk" && previousFromStatus != "" {
+		fromStatus = previousFromStatus
+	}
+	if _, err := tx.Exec(ctx, `
+		UPDATE security_findings
+		SET status = 'accepted_risk', risk_accepted_at = now(), risk_accepted_until = $2,
+		    risk_acceptance_reason = $3, risk_accepted_by = $4::uuid, risk_accepted_from_status = $5,
+		    risk_reviewed_at = NULL, risk_reviewed_by = NULL, risk_review_comment = NULL,
+		    updated_by = $4::uuid, updated_at = now()
+		WHERE id::text = $1`, id, input.AcceptedUntil, input.Reason, principal.UserID, fromStatus); err != nil {
+		return Finding{}, fmt.Errorf("accept finding risk: %w", err)
+	}
+	if err := writeAudit(ctx, tx, principal, organizationID, "security_finding.accept_risk", "security_finding", id,
+		"接受安全发现风险", map[string]any{
+			"finding_id": id, "previous_status": previousStatus, "new_status": "accepted_risk",
+			"reason": input.Reason, "risk_accepted_until": input.AcceptedUntil,
+		}, requestID, ipAddress); err != nil {
+		return Finding{}, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return Finding{}, fmt.Errorf("commit accept finding risk: %w", err)
+	}
+	return s.getFinding(ctx, id)
+}
+
+func (s *Service) RevokeRisk(ctx context.Context, principal auth.Principal, id, requestID, ipAddress string) (Finding, error) {
+	if !principal.HasRole("group_admin") {
+		return Finding{}, ErrForbidden
+	}
+	if !validUUID(id) {
+		return Finding{}, ErrInvalid
+	}
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return Finding{}, fmt.Errorf("begin revoke finding risk: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	var organizationID, previousStatus, fromStatus string
+	var acceptedUntil *time.Time
+	if err := tx.QueryRow(ctx, `
+		SELECT assignee_organization_id::text, status, COALESCE(risk_accepted_from_status, ''), risk_accepted_until
+		FROM security_findings WHERE id::text = $1 FOR UPDATE`, id).Scan(&organizationID, &previousStatus, &fromStatus, &acceptedUntil); errors.Is(err, pgx.ErrNoRows) {
+		return Finding{}, ErrNotFound
+	} else if err != nil {
+		return Finding{}, fmt.Errorf("load finding risk revocation: %w", err)
+	}
+	if previousStatus != "accepted_risk" {
+		return Finding{}, ErrState
+	}
+	if fromStatus != "open" && fromStatus != "assigned" && fromStatus != "resolved" {
+		fromStatus = "open"
+	}
+	if _, err := tx.Exec(ctx, `UPDATE security_findings SET status = $2, updated_by = $3::uuid, updated_at = now() WHERE id::text = $1`, id, fromStatus, principal.UserID); err != nil {
+		return Finding{}, fmt.Errorf("revoke finding risk: %w", err)
+	}
+	details := map[string]any{"finding_id": id, "previous_status": previousStatus, "new_status": fromStatus}
+	if acceptedUntil != nil {
+		details["risk_accepted_until"] = acceptedUntil
+	}
+	if err := writeAudit(ctx, tx, principal, organizationID, "security_finding.revoke_risk", "security_finding", id,
+		"撤销安全发现风险接受", details, requestID, ipAddress); err != nil {
+		return Finding{}, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return Finding{}, fmt.Errorf("commit revoke finding risk: %w", err)
+	}
+	return s.getFinding(ctx, id)
+}
+
+func (s *Service) ReviewRisk(ctx context.Context, principal auth.Principal, id string, input RiskReviewInput, requestID, ipAddress string) (Finding, error) {
+	if !principal.HasRole("group_admin") {
+		return Finding{}, ErrForbidden
+	}
+	input.Comment = strings.TrimSpace(input.Comment)
+	if !validUUID(id) || input.Comment == "" || len(input.Comment) > 5000 {
+		return Finding{}, ErrInvalid
+	}
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return Finding{}, fmt.Errorf("begin review finding risk: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	var organizationID, previousStatus string
+	var currentUntil *time.Time
+	if err := tx.QueryRow(ctx, `
+		SELECT assignee_organization_id::text, status, risk_accepted_until
+		FROM security_findings WHERE id::text = $1 FOR UPDATE`, id).Scan(&organizationID, &previousStatus, &currentUntil); errors.Is(err, pgx.ErrNoRows) {
+		return Finding{}, ErrNotFound
+	} else if err != nil {
+		return Finding{}, fmt.Errorf("load finding risk review: %w", err)
+	}
+	if previousStatus != "accepted_risk" {
+		return Finding{}, ErrState
+	}
+	effectiveUntil := currentUntil
+	if input.AcceptedUntil != nil {
+		if !input.AcceptedUntil.After(time.Now()) {
+			return Finding{}, ErrInvalid
+		}
+		effectiveUntil = input.AcceptedUntil
+	}
+	if effectiveUntil == nil || !effectiveUntil.After(time.Now()) {
+		return Finding{}, ErrInvalid
+	}
+	if _, err := tx.Exec(ctx, `
+		UPDATE security_findings SET risk_accepted_until = $2, risk_reviewed_at = now(),
+		    risk_reviewed_by = $3::uuid, risk_review_comment = $4,
+		    updated_by = $3::uuid, updated_at = now()
+		WHERE id::text = $1`, id, effectiveUntil, principal.UserID, input.Comment); err != nil {
+		return Finding{}, fmt.Errorf("review finding risk: %w", err)
+	}
+	if err := writeAudit(ctx, tx, principal, organizationID, "security_finding.review_risk", "security_finding", id,
+		"复核安全发现风险接受", map[string]any{
+			"finding_id": id, "previous_status": previousStatus, "new_status": previousStatus,
+			"review_comment": input.Comment, "risk_accepted_until": effectiveUntil,
+		}, requestID, ipAddress); err != nil {
+		return Finding{}, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return Finding{}, fmt.Errorf("commit review finding risk: %w", err)
+	}
+	return s.getFinding(ctx, id)
+}
+
+func (s *Service) ListWorkOrders(ctx context.Context, principal auth.Principal, organizationID, status string) ([]WorkOrder, error) {
+	// Kept for internal compatibility. HTTP collection endpoints must use SearchWorkOrders.
+	result, err := s.SearchWorkOrders(ctx, principal, organizationID, status, pagination.Query{Page: 1, PageSize: pagination.MaxPageSize})
+	return result.Items, err
+}
+
+// SearchWorkOrders bounds both the main query and related finding hydration to a page.
+func (s *Service) SearchWorkOrders(ctx context.Context, principal auth.Principal, organizationID, status string, page pagination.Query) (pagination.Result[WorkOrder], error) {
+	return s.SearchWorkOrdersWithFilter(ctx, principal, WorkOrderSearchFilter{
+		OrganizationID: organizationID,
+		Status:         status,
+		Page:           page,
+	})
+}
+
+// SearchWorkOrdersWithFilter applies all filters and pagination in the database before related findings are hydrated.
+func (s *Service) SearchWorkOrdersWithFilter(ctx context.Context, principal auth.Principal, filter WorkOrderSearchFilter) (pagination.Result[WorkOrder], error) {
+	filter.OrganizationID = strings.TrimSpace(filter.OrganizationID)
+	filter.Status = strings.TrimSpace(filter.Status)
+	if filter.OrganizationID != "" {
+		if !validUUID(filter.OrganizationID) {
+			return pagination.Result[WorkOrder]{}, ErrInvalid
+		}
+		allowed, err := access.CanAccessOrganization(ctx, s.pool, principal, filter.OrganizationID)
+		if err != nil {
+			return pagination.Result[WorkOrder]{}, err
+		}
+		if !allowed {
+			return pagination.Result[WorkOrder]{}, ErrForbidden
+		}
+	}
+	if filter.Status != "" && !validWorkOrderStatus(filter.Status) {
+		return pagination.Result[WorkOrder]{}, ErrInvalid
+	}
+	selectWithTotal := strings.Replace(workOrderSelect, "SELECT ", "SELECT count(*) OVER (), ", 1)
+	rows, err := s.pool.Query(ctx, accessibleCTE+selectWithTotal+`
+		WHERE (
+		        $2::boolean
+		        OR (wo.assignee_organization_id IN (SELECT id FROM accessible) AND wo.status <> 'draft')
+		      )
+		  AND ($3::text = '' OR wo.assignee_organization_id::text = $3)
+		  AND ($4::text = '' OR wo.status = $4)
+		  AND (NOT $5::boolean OR (wo.due_at < now() AND wo.status NOT IN ('closed', 'cancelled')))
+		ORDER BY CASE WHEN wo.status IN ('closed', 'cancelled') THEN 1 ELSE 0 END,
+		         wo.due_at, wo.created_at DESC
+		LIMIT $6 OFFSET $7`, principal.UserID, principal.HasRole("group_admin"), filter.OrganizationID, filter.Status, filter.OverdueOnly, filter.Page.PageSize, filter.Page.Offset())
+	if err != nil {
+		return pagination.Result[WorkOrder]{}, fmt.Errorf("search security work orders: %w", err)
+	}
+	defer rows.Close()
+	items := make([]WorkOrder, 0, filter.Page.PageSize)
+	total := 0
+	for rows.Next() {
+		var item WorkOrder
+		if err := scanWorkOrderWithTotal(rows, &item, &total); err != nil {
+			return pagination.Result[WorkOrder]{}, fmt.Errorf("scan security work order: %w", err)
+		}
+		items = append(items, item)
+	}
+	if err := rows.Err(); err != nil {
+		return pagination.Result[WorkOrder]{}, fmt.Errorf("iterate security work orders: %w", err)
+	}
+	if pagination.NeedsTotalFallback(len(items), filter.Page) {
+		if err := s.pool.QueryRow(ctx, accessibleCTE+`
+            SELECT count(*) FROM security_work_orders wo
+            WHERE (
+                    $2::boolean
+                    OR (wo.assignee_organization_id IN (SELECT id FROM accessible) AND wo.status <> 'draft')
+                  )
+              AND ($3::text = '' OR wo.assignee_organization_id::text = $3)
+              AND ($4::text = '' OR wo.status = $4)
+              AND (NOT $5::boolean OR (wo.due_at < now() AND wo.status NOT IN ('closed', 'cancelled')))
+        `, principal.UserID, principal.HasRole("group_admin"), filter.OrganizationID, filter.Status, filter.OverdueOnly).Scan(&total); err != nil {
+			return pagination.Result[WorkOrder]{}, fmt.Errorf("count security work orders: %w", err)
+		}
+	}
+	return pagination.NewResult(items, total, filter.Page), nil
+}
+
+func (s *Service) GetWorkOrder(ctx context.Context, principal auth.Principal, id string) (WorkOrder, error) {
+	if !validUUID(id) {
+		return WorkOrder{}, ErrInvalid
+	}
+	item, err := loadWorkOrder(ctx, s.pool, id)
+	if err != nil {
+		return WorkOrder{}, err
+	}
+	allowed, err := access.CanAccessOrganization(ctx, s.pool, principal, item.AssigneeOrganizationID)
+	if err != nil {
+		return WorkOrder{}, err
+	}
+	if !allowed || (!principal.HasRole("group_admin") && item.Status == "draft") {
+		return WorkOrder{}, ErrForbidden
+	}
+	return item, nil
+}
+
+// SearchWorkOrderFindings loads linked findings only when a detail view asks
+// for them, avoiding one unbounded child query per row in the main work-order list.
+func (s *Service) SearchWorkOrderFindings(ctx context.Context, principal auth.Principal, workOrderID string, page pagination.Query) (pagination.Result[FindingSummary], error) {
+	if _, err := s.GetWorkOrder(ctx, principal, workOrderID); err != nil {
+		return pagination.Result[FindingSummary]{}, err
+	}
+	var total int
+	if err := s.pool.QueryRow(ctx, `SELECT count(*) FROM security_work_order_findings WHERE work_order_id::text = $1`, workOrderID).Scan(&total); err != nil {
+		return pagination.Result[FindingSummary]{}, fmt.Errorf("count work order findings: %w", err)
+	}
+	rows, err := s.pool.Query(ctx, `
+		SELECT f.id::text, f.finding_code, f.title, f.severity, f.status,
+		       COALESCE(a.id::text, ''), COALESCE(a.asset_value, ''), COALESCE(a.asset_name, ''),
+		       COALESCE(bs.id::text, ''), COALESCE(bs.system_name, '')
+		FROM security_work_order_findings link
+		JOIN security_findings f ON f.id = link.finding_id
+		LEFT JOIN assets a ON a.id = f.asset_id
+		LEFT JOIN business_systems bs ON bs.id = f.business_system_id
+		WHERE link.work_order_id::text = $1
+		ORDER BY CASE f.severity WHEN 'critical' THEN 1 WHEN 'high' THEN 2 WHEN 'medium' THEN 3 WHEN 'low' THEN 4 ELSE 5 END,
+		         f.finding_code
+		LIMIT $2 OFFSET $3`, workOrderID, page.PageSize, page.Offset())
+	if err != nil {
+		return pagination.Result[FindingSummary]{}, fmt.Errorf("list work order findings: %w", err)
+	}
+	defer rows.Close()
+	items := make([]FindingSummary, 0, page.PageSize)
+	for rows.Next() {
+		var item FindingSummary
+		if err := rows.Scan(&item.ID, &item.Code, &item.Title, &item.Severity, &item.Status,
+			&item.AssetID, &item.AssetValue, &item.AssetName, &item.BusinessSystemID, &item.BusinessSystemName); err != nil {
+			return pagination.Result[FindingSummary]{}, fmt.Errorf("scan work order finding: %w", err)
+		}
+		items = append(items, item)
+	}
+	if err := rows.Err(); err != nil {
+		return pagination.Result[FindingSummary]{}, fmt.Errorf("iterate work order findings: %w", err)
+	}
+	return pagination.NewResult(items, total, page), nil
+}
+
+// SearchWorkOrderEvents returns the newest workflow events first.
+func (s *Service) SearchWorkOrderEvents(ctx context.Context, principal auth.Principal, workOrderID string, page pagination.Query) (pagination.Result[Event], error) {
+	if _, err := s.GetWorkOrder(ctx, principal, workOrderID); err != nil {
+		return pagination.Result[Event]{}, err
+	}
+	var total int
+	if err := s.pool.QueryRow(ctx, `SELECT count(*) FROM security_work_order_events WHERE work_order_id::text = $1`, workOrderID).Scan(&total); err != nil {
+		return pagination.Result[Event]{}, fmt.Errorf("count work order events: %w", err)
+	}
+	rows, err := s.pool.Query(ctx, `
+		SELECT e.id, e.action, COALESCE(e.from_status, ''), COALESCE(e.to_status, ''), COALESCE(e.comment, ''), e.details,
+		       COALESCE(e.actor_user_id::text, ''), COALESCE(u.display_name, ''),
+		       COALESCE(e.actor_organization_id::text, ''), COALESCE(o.organization_name, ''), e.created_at
+		FROM security_work_order_events e
+		LEFT JOIN users u ON u.id = e.actor_user_id
+		LEFT JOIN organizations o ON o.id = e.actor_organization_id
+		WHERE e.work_order_id::text = $1
+		ORDER BY e.created_at DESC, e.id DESC
+		LIMIT $2 OFFSET $3`, workOrderID, page.PageSize, page.Offset())
+	if err != nil {
+		return pagination.Result[Event]{}, fmt.Errorf("list work order events: %w", err)
+	}
+	defer rows.Close()
+	items := make([]Event, 0, page.PageSize)
+	for rows.Next() {
+		var item Event
+		if err := rows.Scan(&item.ID, &item.Action, &item.FromStatus, &item.ToStatus, &item.Comment,
+			&item.Details, &item.ActorUserID, &item.ActorName, &item.ActorOrganizationID,
+			&item.ActorOrganizationName, &item.CreatedAt); err != nil {
+			return pagination.Result[Event]{}, fmt.Errorf("scan work order event: %w", err)
+		}
+		items = append(items, item)
+	}
+	if err := rows.Err(); err != nil {
+		return pagination.Result[Event]{}, fmt.Errorf("iterate work order events: %w", err)
+	}
+	return pagination.NewResult(items, total, page), nil
+}
+
+func (s *Service) CreateWorkOrder(ctx context.Context, principal auth.Principal, input WorkOrderInput, requestID, ipAddress string) (WorkOrder, error) {
+	if !principal.HasRole("group_admin") {
+		return WorkOrder{}, ErrForbidden
+	}
+	normalizeWorkOrderInput(&input)
+	if !validWorkOrderInput(input) {
+		return WorkOrder{}, ErrInvalid
+	}
+	var organizationStatus, organizationType string
+	if err := s.pool.QueryRow(ctx, `SELECT status, organization_type FROM organizations WHERE id::text = $1`, input.AssigneeOrganizationID).Scan(&organizationStatus, &organizationType); errors.Is(err, pgx.ErrNoRows) {
+		return WorkOrder{}, ErrNotFound
+	} else if err != nil {
+		return WorkOrder{}, fmt.Errorf("load work order organization: %w", err)
+	}
+	if organizationStatus != "enabled" || organizationType == "group" {
+		return WorkOrder{}, ErrInvalid
+	}
+
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return WorkOrder{}, fmt.Errorf("begin create work order: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	severity, err := validateFindingsForWorkOrder(ctx, tx, input.AssigneeOrganizationID, input.FindingIDs)
+	if err != nil {
+		return WorkOrder{}, err
+	}
+	number, err := newCode("WO")
+	if err != nil {
+		return WorkOrder{}, fmt.Errorf("generate work order number: %w", err)
+	}
+	var id string
+	if err := tx.QueryRow(ctx, `
+		INSERT INTO security_work_orders (work_order_no, title, assignee_organization_id, severity, description,
+		                                  remediation_requirement, due_at, created_by, updated_by)
+		VALUES ($1, $2, $3::uuid, $4, NULLIF($5, ''), $6, $7, $8::uuid, $8::uuid)
+		RETURNING id::text`, number, input.Title, input.AssigneeOrganizationID, severity, input.Description,
+		input.RemediationRequirement, input.DueAt, principal.UserID).Scan(&id); err != nil {
+		return WorkOrder{}, fmt.Errorf("insert security work order: %w", err)
+	}
+	for _, findingID := range input.FindingIDs {
+		if _, err := tx.Exec(ctx, `INSERT INTO security_work_order_findings (work_order_id, finding_id) VALUES ($1::uuid, $2::uuid)`, id, findingID); err != nil {
+			return WorkOrder{}, fmt.Errorf("link work order finding: %w", err)
+		}
+	}
+	if err := writeEvent(ctx, tx, principal, id, "create", "", "draft", "创建安全整改工单", map[string]any{"finding_count": len(input.FindingIDs)}); err != nil {
+		return WorkOrder{}, err
+	}
+	if err := writeAudit(ctx, tx, principal, input.AssigneeOrganizationID, "security_work_order.create", "security_work_order", id,
+		"创建安全整改工单 "+number, map[string]any{"status": "draft", "finding_count": len(input.FindingIDs), "due_at": input.DueAt}, requestID, ipAddress); err != nil {
+		return WorkOrder{}, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return WorkOrder{}, fmt.Errorf("commit create work order: %w", err)
+	}
+	return s.GetWorkOrder(ctx, principal, id)
+}
+
+func (s *Service) Issue(ctx context.Context, principal auth.Principal, id string, input CommentInput, requestID, ipAddress string) (WorkOrder, error) {
+	if !principal.HasRole("group_admin") {
+		return WorkOrder{}, ErrForbidden
+	}
+	input.Comment = strings.TrimSpace(input.Comment)
+	if !validUUID(id) || len(input.Comment) > 2000 {
+		return WorkOrder{}, ErrInvalid
+	}
+	return s.transition(ctx, principal, id, []string{"draft"}, "issued", "issue", input.Comment, requestID, ipAddress, func(ctx context.Context, tx pgx.Tx) error {
+		if _, err := tx.Exec(ctx, `UPDATE security_work_orders SET issued_at = now() WHERE id::text = $1`, id); err != nil {
+			return fmt.Errorf("set work order issued time: %w", err)
+		}
+		if _, err := tx.Exec(ctx, `
+			UPDATE security_findings SET status = 'assigned', updated_at = now(), updated_by = $2::uuid
+			WHERE id IN (SELECT finding_id FROM security_work_order_findings WHERE work_order_id::text = $1)
+			  AND status = 'open'`, id, principal.UserID); err != nil {
+			return fmt.Errorf("assign security findings: %w", err)
+		}
+		return nil
+	})
+}
+
+func (s *Service) Accept(ctx context.Context, principal auth.Principal, id string, input CommentInput, requestID, ipAddress string) (WorkOrder, error) {
+	input.Comment = strings.TrimSpace(input.Comment)
+	if !validUUID(id) || len(input.Comment) > 2000 {
+		return WorkOrder{}, ErrInvalid
+	}
+	return s.transition(ctx, principal, id, []string{"issued"}, "in_progress", "accept", input.Comment, requestID, ipAddress, func(ctx context.Context, tx pgx.Tx) error {
+		_, err := tx.Exec(ctx, `UPDATE security_work_orders SET accepted_at = COALESCE(accepted_at, now()) WHERE id::text = $1`, id)
+		return err
+	})
+}
+
+func (s *Service) Progress(ctx context.Context, principal auth.Principal, id string, input ProgressInput, requestID, ipAddress string) (WorkOrder, error) {
+	input.Progress = strings.TrimSpace(input.Progress)
+	input.Comment = strings.TrimSpace(input.Comment)
+	if !validUUID(id) || input.Progress == "" || len(input.Progress) > 5000 || len(input.Comment) > 2000 {
+		return WorkOrder{}, ErrInvalid
+	}
+	return s.transition(ctx, principal, id, []string{"in_progress", "returned"}, "in_progress", "progress", input.Comment, requestID, ipAddress, func(ctx context.Context, tx pgx.Tx) error {
+		_, err := tx.Exec(ctx, `UPDATE security_work_orders SET remediation_progress = $2, return_reason = CASE WHEN status = 'returned' THEN NULL ELSE return_reason END WHERE id::text = $1`, id, input.Progress)
+		return err
+	})
+}
+
+func (s *Service) Submit(ctx context.Context, principal auth.Principal, id string, input SubmitInput, requestID, ipAddress string) (WorkOrder, error) {
+	input.RemediationResult = strings.TrimSpace(input.RemediationResult)
+	input.Comment = strings.TrimSpace(input.Comment)
+	if !validUUID(id) || input.RemediationResult == "" || len(input.RemediationResult) > 10000 || len(input.Comment) > 2000 {
+		return WorkOrder{}, ErrInvalid
+	}
+	return s.transition(ctx, principal, id, []string{"in_progress", "returned"}, "pending_verification", "submit", input.Comment, requestID, ipAddress, func(ctx context.Context, tx pgx.Tx) error {
+		_, err := tx.Exec(ctx, `UPDATE security_work_orders SET remediation_result = $2, submitted_at = now(), return_reason = NULL WHERE id::text = $1`, id, input.RemediationResult)
+		return err
+	})
+}
+
+func (s *Service) Review(ctx context.Context, principal auth.Principal, id string, input ReviewInput, requestID, ipAddress string) (WorkOrder, error) {
+	if !principal.HasRole("group_admin") {
+		return WorkOrder{}, ErrForbidden
+	}
+	input.Decision = strings.TrimSpace(input.Decision)
+	input.VerificationResult = strings.TrimSpace(input.VerificationResult)
+	input.ReturnReason = strings.TrimSpace(input.ReturnReason)
+	if !validUUID(id) || (input.Decision != "returned" && input.Decision != "closed") || len(input.VerificationResult) > 10000 || len(input.ReturnReason) > 2000 ||
+		(input.Decision == "returned" && input.ReturnReason == "") || (input.Decision == "closed" && input.VerificationResult == "") {
+		return WorkOrder{}, ErrInvalid
+	}
+	action := "return"
+	comment := input.ReturnReason
+	if input.Decision == "closed" {
+		action = "close"
+		comment = input.VerificationResult
+	}
+	return s.transition(ctx, principal, id, []string{"pending_verification"}, input.Decision, action, comment, requestID, ipAddress, func(ctx context.Context, tx pgx.Tx) error {
+		if input.Decision == "returned" {
+			_, err := tx.Exec(ctx, `UPDATE security_work_orders SET verification_result = NULLIF($2, ''), return_reason = $3, verified_at = now() WHERE id::text = $1`, id, input.VerificationResult, input.ReturnReason)
+			return err
+		}
+		if _, err := tx.Exec(ctx, `UPDATE security_work_orders SET verification_result = $2, return_reason = NULL, verified_at = now(), closed_at = now() WHERE id::text = $1`, id, input.VerificationResult); err != nil {
+			return err
+		}
+		_, err := tx.Exec(ctx, `
+			UPDATE security_findings SET status = 'resolved', updated_at = now(), updated_by = $2::uuid
+			WHERE id IN (SELECT finding_id FROM security_work_order_findings WHERE work_order_id::text = $1)
+			  AND status = 'assigned'`, id, principal.UserID)
+		return err
+	})
+}
+
+func (s *Service) Cancel(ctx context.Context, principal auth.Principal, id string, input CommentInput, requestID, ipAddress string) (WorkOrder, error) {
+	if !principal.HasRole("group_admin") {
+		return WorkOrder{}, ErrForbidden
+	}
+	input.Comment = strings.TrimSpace(input.Comment)
+	if !validUUID(id) || input.Comment == "" || len(input.Comment) > 2000 {
+		return WorkOrder{}, ErrInvalid
+	}
+	return s.transition(ctx, principal, id, []string{"draft", "issued", "in_progress", "pending_verification", "returned"}, "cancelled", "cancel", input.Comment, requestID, ipAddress, func(ctx context.Context, tx pgx.Tx) error {
+		if _, err := tx.Exec(ctx, `UPDATE security_work_orders SET cancelled_at = now() WHERE id::text = $1`, id); err != nil {
+			return err
+		}
+		_, err := tx.Exec(ctx, `
+			UPDATE security_findings f SET status = 'open', updated_at = now(), updated_by = $2::uuid
+			WHERE f.id IN (SELECT finding_id FROM security_work_order_findings WHERE work_order_id::text = $1)
+			  AND f.status = 'assigned'
+			  AND NOT EXISTS (
+				SELECT 1 FROM security_work_order_findings other_link
+				JOIN security_work_orders other ON other.id = other_link.work_order_id
+				WHERE other_link.finding_id = f.id AND other.id::text <> $1
+				  AND other.status NOT IN ('closed', 'cancelled')
+			  )`, id, principal.UserID)
+		return err
+	})
+}
+
+type transitionExtra func(context.Context, pgx.Tx) error
+
+func (s *Service) transition(ctx context.Context, principal auth.Principal, id string, fromStatuses []string, toStatus, action, comment, requestID, ipAddress string, extra transitionExtra) (WorkOrder, error) {
+	if !validUUID(id) {
+		return WorkOrder{}, ErrInvalid
+	}
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return WorkOrder{}, fmt.Errorf("begin work order transition: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	var fromStatus, organizationID, number string
+	if err := tx.QueryRow(ctx, `SELECT status, assignee_organization_id::text, work_order_no FROM security_work_orders WHERE id::text = $1 FOR UPDATE`, id).Scan(&fromStatus, &organizationID, &number); errors.Is(err, pgx.ErrNoRows) {
+		return WorkOrder{}, ErrNotFound
+	} else if err != nil {
+		return WorkOrder{}, fmt.Errorf("lock security work order: %w", err)
+	}
+	allowed, err := access.CanAccessOrganization(ctx, s.pool, principal, organizationID)
+	if err != nil {
+		return WorkOrder{}, err
+	}
+	if !allowed {
+		return WorkOrder{}, ErrForbidden
+	}
+	if !contains(fromStatuses, fromStatus) {
+		return WorkOrder{}, ErrState
+	}
+	if !principal.HasRole("group_admin") && (action == "issue" || action == "return" || action == "close" || action == "cancel") {
+		return WorkOrder{}, ErrForbidden
+	}
+	if extra != nil {
+		if err := extra(ctx, tx); err != nil {
+			return WorkOrder{}, fmt.Errorf("apply work order transition details: %w", err)
+		}
+	}
+	if _, err := tx.Exec(ctx, `UPDATE security_work_orders SET status = $2, updated_by = $3::uuid, updated_at = now() WHERE id::text = $1`, id, toStatus, principal.UserID); err != nil {
+		return WorkOrder{}, fmt.Errorf("update work order status: %w", err)
+	}
+	if err := writeEvent(ctx, tx, principal, id, action, fromStatus, toStatus, comment, nil); err != nil {
+		return WorkOrder{}, err
+	}
+	if err := writeAudit(ctx, tx, principal, organizationID, "security_work_order."+action, "security_work_order", id,
+		workOrderActionSummary(action)+" "+number, map[string]any{"from_status": fromStatus, "to_status": toStatus, "comment": comment}, requestID, ipAddress); err != nil {
+		return WorkOrder{}, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return WorkOrder{}, fmt.Errorf("commit work order transition: %w", err)
+	}
+	return s.GetWorkOrder(ctx, principal, id)
+}
+
+func (s *Service) getFinding(ctx context.Context, id string) (Finding, error) {
+	var item Finding
+	err := scanFinding(s.pool.QueryRow(ctx, `
+		SELECT f.id::text, f.finding_code, f.title, f.severity, f.status,
+		       o.id::text, o.organization_code, o.organization_name,
+		       COALESCE(a.id::text, ''), COALESCE(a.asset_value, ''), COALESCE(a.asset_name, ''),
+		       COALESCE(bs.id::text, ''), COALESCE(bs.system_code, ''), COALESCE(bs.system_name, ''),
+		       COALESCE(tb.id::text, ''), COALESCE(tb.batch_code, ''), COALESCE(tb.batch_name, ''),
+		       COALESCE(f.vulnerability_type, ''), f.description, COALESCE(f.evidence, ''),
+		       COALESCE(f.remediation_advice, ''), f.source, f.discovered_at,
+		       COALESCE(u.display_name, ''), f.created_at, f.updated_at,
+		       f.risk_accepted_at, f.risk_accepted_until, COALESCE(f.risk_acceptance_reason, ''),
+		       COALESCE(risk_acceptor.display_name, ''), COALESCE(f.risk_accepted_from_status, ''),
+		       f.risk_reviewed_at, COALESCE(risk_reviewer.display_name, ''), COALESCE(f.risk_review_comment, ''),
+		       (f.status = 'accepted_risk' AND f.risk_accepted_until IS NOT NULL AND f.risk_accepted_until < now())
+		FROM security_findings f
+		JOIN organizations o ON o.id = f.assignee_organization_id
+		LEFT JOIN assets a ON a.id = f.asset_id
+		LEFT JOIN business_systems bs ON bs.id = f.business_system_id
+		LEFT JOIN security_test_batches tb ON tb.id = f.test_batch_id
+		LEFT JOIN users u ON u.id = f.created_by
+		LEFT JOIN users risk_acceptor ON risk_acceptor.id = f.risk_accepted_by
+		LEFT JOIN users risk_reviewer ON risk_reviewer.id = f.risk_reviewed_by
+		WHERE f.id::text = $1`, id), &item)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return Finding{}, ErrNotFound
+	}
+	if err != nil {
+		return Finding{}, fmt.Errorf("load security finding: %w", err)
+	}
+	return item, nil
+}
+
+func (s *Service) validateReferences(ctx context.Context, organizationID, assetID, systemID string) error {
+	var valid bool
+	if err := s.pool.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM organizations WHERE id::text = $1 AND status = 'enabled' AND organization_type <> 'group')`, organizationID).Scan(&valid); err != nil {
+		return fmt.Errorf("validate finding organization: %w", err)
+	}
+	if !valid {
+		return ErrNotFound
+	}
+	if assetID != "" {
+		if err := s.pool.QueryRow(ctx, `
+			SELECT EXISTS (
+				SELECT 1 FROM assets a JOIN asset_organizations ao ON ao.asset_id = a.id
+				WHERE a.id::text = $1 AND ao.organization_id::text = $2 AND a.deleted_at IS NULL
+			)`, assetID, organizationID).Scan(&valid); err != nil {
+			return fmt.Errorf("validate finding asset: %w", err)
+		}
+		if !valid {
+			return ErrNotFound
+		}
+	}
+	if systemID != "" {
+		if err := s.pool.QueryRow(ctx, `
+			SELECT EXISTS (SELECT 1 FROM business_systems WHERE id::text = $1 AND owner_organization_id::text = $2 AND deleted_at IS NULL)`, systemID, organizationID).Scan(&valid); err != nil {
+			return fmt.Errorf("validate finding business system: %w", err)
+		}
+		if !valid {
+			return ErrNotFound
+		}
+	}
+	return nil
+}
+
+func (s *Service) validateFindingBatchScope(ctx context.Context, batchID, organizationID, assetID string) error {
+	if assetID == "" {
+		return ErrInvalid
+	}
+	var valid bool
+	if err := s.pool.QueryRow(ctx, `
+		SELECT EXISTS (
+			SELECT 1 FROM security_test_batches b
+			JOIN security_test_scope_assets scope ON scope.batch_id = b.id
+			WHERE b.id::text = $1 AND b.status IN ('authorized', 'in_progress', 'completed')
+			  AND scope.organization_id::text = $2 AND scope.asset_id::text = $3
+		)`, batchID, organizationID, assetID).Scan(&valid); err != nil {
+		return fmt.Errorf("validate finding test batch scope: %w", err)
+	}
+	if !valid {
+		return ErrNotFound
+	}
+	return nil
+}
+
+func validateFindingsForWorkOrder(ctx context.Context, tx pgx.Tx, organizationID string, findingIDs []string) (string, error) {
+	var activeLinked bool
+	if err := tx.QueryRow(ctx, `
+		SELECT EXISTS (
+			SELECT 1 FROM security_work_order_findings link
+			JOIN security_work_orders wo ON wo.id = link.work_order_id
+			WHERE link.finding_id = ANY($1::uuid[]) AND wo.status NOT IN ('closed', 'cancelled')
+		)`, findingIDs).Scan(&activeLinked); err != nil {
+		return "", fmt.Errorf("check active work order findings: %w", err)
+	}
+	if activeLinked {
+		return "", ErrConflict
+	}
+	rows, err := tx.Query(ctx, `
+		SELECT id::text, severity
+		FROM security_findings
+		WHERE id = ANY($1::uuid[]) AND assignee_organization_id::text = $2
+		  AND status IN ('open', 'assigned')
+		FOR UPDATE`, findingIDs, organizationID)
+	if err != nil {
+		return "", fmt.Errorf("load work order findings: %w", err)
+	}
+	defer rows.Close()
+	found := make(map[string]string, len(findingIDs))
+	for rows.Next() {
+		var id, severity string
+		if err := rows.Scan(&id, &severity); err != nil {
+			return "", fmt.Errorf("scan work order finding: %w", err)
+		}
+		found[id] = severity
+	}
+	if err := rows.Err(); err != nil {
+		return "", fmt.Errorf("iterate work order findings: %w", err)
+	}
+	if len(found) != len(findingIDs) {
+		return "", ErrNotFound
+	}
+	severity := "info"
+	for _, id := range findingIDs {
+		if severityRank(found[id]) > severityRank(severity) {
+			severity = found[id]
+		}
+	}
+	return severity, nil
+}
+
+const accessibleCTE = `
+	WITH RECURSIVE descendant_roots(id) AS (
+		SELECT ur.organization_id FROM user_roles ur
+		WHERE ur.user_id = $1::uuid AND ur.organization_id IS NOT NULL AND ur.data_scope = 'organization_and_descendants'
+	), descendants(id) AS (
+		SELECT id FROM descendant_roots
+		UNION SELECT child.id FROM organizations child JOIN descendants parent ON child.parent_id = parent.id
+	), accessible(id) AS (
+		SELECT ur.organization_id FROM user_roles ur
+		WHERE ur.user_id = $1::uuid AND ur.organization_id IS NOT NULL
+		  AND ur.data_scope IN ('organization', 'organization_and_descendants')
+		UNION SELECT id FROM descendants
+	)
+`
+
+const workOrderSelect = `
+	SELECT wo.id::text, wo.work_order_no, wo.title,
+	       o.id::text, o.organization_code, o.organization_name,
+	       wo.severity, wo.status, COALESCE(wo.description, ''), wo.remediation_requirement,
+	       wo.due_at, (wo.due_at < now() AND wo.status NOT IN ('closed', 'cancelled')) AS overdue,
+	       wo.issued_at, wo.accepted_at, wo.submitted_at, wo.verified_at, wo.closed_at, wo.cancelled_at,
+	       COALESCE(wo.remediation_progress, ''), COALESCE(wo.remediation_result, ''),
+	       COALESCE(wo.verification_result, ''), COALESCE(wo.return_reason, ''),
+	       COALESCE(u.display_name, ''),
+	       (SELECT count(*) FROM security_work_order_findings link WHERE link.work_order_id = wo.id),
+	       wo.created_at, wo.updated_at
+	FROM security_work_orders wo
+	JOIN organizations o ON o.id = wo.assignee_organization_id
+	LEFT JOIN users u ON u.id = wo.created_by
+`
+
+type rowScanner interface{ Scan(...any) error }
+
+type queryer interface {
+	Query(context.Context, string, ...any) (pgx.Rows, error)
+	QueryRow(context.Context, string, ...any) pgx.Row
+}
+
+func scanFindingWithTotal(row rowScanner, item *Finding, total *int) error {
+	return row.Scan(&item.ID, &item.Code, &item.Title, &item.Severity, &item.Status,
+		&item.AssigneeOrganizationID, &item.AssigneeOrganizationCode, &item.AssigneeOrganizationName,
+		&item.AssetID, &item.AssetValue, &item.AssetName, &item.BusinessSystemID, &item.BusinessSystemCode,
+		&item.BusinessSystemName, &item.TestBatchID, &item.TestBatchCode, &item.TestBatchName, &item.VulnerabilityType, &item.Description, &item.Evidence,
+		&item.RemediationAdvice, &item.Source, &item.DiscoveredAt, &item.CreatedByName, &item.CreatedAt, &item.UpdatedAt,
+		&item.RiskAcceptedAt, &item.RiskAcceptedUntil, &item.RiskAcceptanceReason, &item.RiskAcceptedByName,
+		&item.RiskAcceptedFromStatus, &item.RiskReviewedAt, &item.RiskReviewedByName, &item.RiskReviewComment, &item.RiskAcceptanceExpired, total)
+}
+
+func scanWorkOrderWithTotal(row rowScanner, item *WorkOrder, total *int) error {
+	return row.Scan(total, &item.ID, &item.Number, &item.Title, &item.AssigneeOrganizationID,
+		&item.AssigneeOrganizationCode, &item.AssigneeOrganizationName, &item.Severity, &item.Status,
+		&item.Description, &item.RemediationRequirement, &item.DueAt, &item.Overdue,
+		&item.IssuedAt, &item.AcceptedAt, &item.SubmittedAt, &item.VerifiedAt, &item.ClosedAt,
+		&item.CancelledAt, &item.RemediationProgress, &item.RemediationResult, &item.VerificationResult,
+		&item.ReturnReason, &item.CreatedByName, &item.FindingCount, &item.CreatedAt, &item.UpdatedAt)
+}
+
+func scanFinding(row rowScanner, item *Finding) error {
+	err := row.Scan(&item.ID, &item.Code, &item.Title, &item.Severity, &item.Status,
+		&item.AssigneeOrganizationID, &item.AssigneeOrganizationCode, &item.AssigneeOrganizationName,
+		&item.AssetID, &item.AssetValue, &item.AssetName, &item.BusinessSystemID, &item.BusinessSystemCode,
+		&item.BusinessSystemName, &item.TestBatchID, &item.TestBatchCode, &item.TestBatchName, &item.VulnerabilityType, &item.Description, &item.Evidence,
+		&item.RemediationAdvice, &item.Source, &item.DiscoveredAt, &item.CreatedByName, &item.CreatedAt, &item.UpdatedAt,
+		&item.RiskAcceptedAt, &item.RiskAcceptedUntil, &item.RiskAcceptanceReason, &item.RiskAcceptedByName,
+		&item.RiskAcceptedFromStatus, &item.RiskReviewedAt, &item.RiskReviewedByName, &item.RiskReviewComment, &item.RiskAcceptanceExpired)
+	return err
+}
+
+func scanWorkOrder(row rowScanner, item *WorkOrder) error {
+	return row.Scan(&item.ID, &item.Number, &item.Title, &item.AssigneeOrganizationID,
+		&item.AssigneeOrganizationCode, &item.AssigneeOrganizationName, &item.Severity, &item.Status,
+		&item.Description, &item.RemediationRequirement, &item.DueAt, &item.Overdue,
+		&item.IssuedAt, &item.AcceptedAt, &item.SubmittedAt, &item.VerifiedAt, &item.ClosedAt,
+		&item.CancelledAt, &item.RemediationProgress, &item.RemediationResult, &item.VerificationResult,
+		&item.ReturnReason, &item.CreatedByName, &item.FindingCount, &item.CreatedAt, &item.UpdatedAt)
+}
+
+func loadWorkOrder(ctx context.Context, q queryer, id string) (WorkOrder, error) {
+	var item WorkOrder
+	if err := scanWorkOrder(q.QueryRow(ctx, workOrderSelect+` WHERE wo.id::text = $1`, id), &item); errors.Is(err, pgx.ErrNoRows) {
+		return WorkOrder{}, ErrNotFound
+	} else if err != nil {
+		return WorkOrder{}, fmt.Errorf("load security work order: %w", err)
+	}
+	return item, nil
+}
+
+func writeEvent(ctx context.Context, tx pgx.Tx, principal auth.Principal, workOrderID, action, fromStatus, toStatus, comment string, details map[string]any) error {
+	if details == nil {
+		details = map[string]any{}
+	}
+	payload, err := json.Marshal(details)
+	if err != nil {
+		return fmt.Errorf("encode work order event: %w", err)
+	}
+	if _, err := tx.Exec(ctx, `
+		INSERT INTO security_work_order_events (work_order_id, actor_user_id, actor_organization_id, action, from_status, to_status, comment, details)
+		VALUES ($1::uuid, $2::uuid, NULLIF($3, '')::uuid, $4, NULLIF($5, ''), NULLIF($6, ''), NULLIF($7, ''), $8::jsonb)`,
+		workOrderID, principal.UserID, principalOrganizationID(principal), action, fromStatus, toStatus, comment, payload); err != nil {
+		return fmt.Errorf("write work order event: %w", err)
+	}
+	return nil
+}
+
+func writeAudit(ctx context.Context, tx pgx.Tx, principal auth.Principal, organizationID, action, resourceType, resourceID, summary string, details map[string]any, requestID, ipAddress string) error {
+	payload, err := json.Marshal(details)
+	if err != nil {
+		return fmt.Errorf("encode work order audit details: %w", err)
+	}
+	if _, err := tx.Exec(ctx, `
+		INSERT INTO audit_logs (user_id, organization_id, action, resource_type, resource_id, summary, details, request_ip, request_id)
+		VALUES ($1::uuid, $2::uuid, $3, $4, $5, $6, $7::jsonb, NULLIF($8, '')::inet, NULLIF($9, ''))`,
+		principal.UserID, organizationID, action, resourceType, resourceID, summary, payload, ipAddress, requestID); err != nil {
+		return fmt.Errorf("write security work order audit: %w", err)
+	}
+	return nil
+}
+
+func normalizeFindingInput(input *FindingInput) {
+	input.Title = strings.TrimSpace(input.Title)
+	input.Severity = strings.TrimSpace(input.Severity)
+	input.Status = strings.TrimSpace(input.Status)
+	input.AssigneeOrganizationID = strings.TrimSpace(input.AssigneeOrganizationID)
+	input.AssetID = strings.TrimSpace(input.AssetID)
+	input.BusinessSystemID = strings.TrimSpace(input.BusinessSystemID)
+	input.TestBatchID = strings.TrimSpace(input.TestBatchID)
+	input.VulnerabilityType = strings.TrimSpace(input.VulnerabilityType)
+	input.Description = strings.TrimSpace(input.Description)
+	input.Evidence = strings.TrimSpace(input.Evidence)
+	input.RemediationAdvice = strings.TrimSpace(input.RemediationAdvice)
+	input.Source = strings.TrimSpace(input.Source)
+	if input.Status == "" {
+		input.Status = "open"
+	}
+	if input.Source == "" {
+		input.Source = "manual"
+	}
+	if input.DiscoveredAt.IsZero() {
+		input.DiscoveredAt = time.Now()
+	}
+}
+
+func validRiskAcceptanceInput(input RiskAcceptanceInput) bool {
+	return input.Reason != "" && len(input.Reason) <= 5000 && input.AcceptedUntil.After(time.Now())
+}
+
+func validFindingInput(input FindingInput) bool {
+	return input.Title != "" && len(input.Title) <= 255 && validSeverity(input.Severity) && validFindingStatus(input.Status) &&
+		validUUID(input.AssigneeOrganizationID) && (input.AssetID != "" || input.BusinessSystemID != "") &&
+		(input.AssetID == "" || validUUID(input.AssetID)) && (input.BusinessSystemID == "" || validUUID(input.BusinessSystemID)) &&
+		(input.TestBatchID == "" || validUUID(input.TestBatchID)) &&
+		len(input.VulnerabilityType) <= 128 && input.Description != "" && len(input.Description) <= 20000 &&
+		len(input.Evidence) <= 30000 && len(input.RemediationAdvice) <= 20000 &&
+		(input.Source == "manual" || input.Source == "import" || input.Source == "api" || input.Source == "plugin")
+}
+
+func normalizeWorkOrderInput(input *WorkOrderInput) {
+	input.Title = strings.TrimSpace(input.Title)
+	input.AssigneeOrganizationID = strings.TrimSpace(input.AssigneeOrganizationID)
+	input.Description = strings.TrimSpace(input.Description)
+	input.RemediationRequirement = strings.TrimSpace(input.RemediationRequirement)
+	input.FindingIDs = uniqueNonEmpty(input.FindingIDs)
+}
+
+func validWorkOrderInput(input WorkOrderInput) bool {
+	if input.Title == "" || len(input.Title) > 255 || !validUUID(input.AssigneeOrganizationID) ||
+		len(input.Description) > 10000 || input.RemediationRequirement == "" || len(input.RemediationRequirement) > 20000 ||
+		input.DueAt.IsZero() || !input.DueAt.After(time.Now().Add(-time.Minute)) || len(input.FindingIDs) == 0 || len(input.FindingIDs) > 100 {
+		return false
+	}
+	for _, id := range input.FindingIDs {
+		if !validUUID(id) {
+			return false
+		}
+	}
+	return true
+}
+
+func validSeverity(value string) bool {
+	return value == "critical" || value == "high" || value == "medium" || value == "low" || value == "info"
+}
+
+func validFindingStatus(value string) bool {
+	return value == "open" || value == "assigned" || value == "resolved" || value == "accepted_risk" || value == "false_positive"
+}
+
+func validWorkOrderStatus(value string) bool {
+	return value == "draft" || value == "issued" || value == "in_progress" || value == "pending_verification" || value == "returned" || value == "closed" || value == "cancelled"
+}
+
+func validUUID(value string) bool { return uuidPattern.MatchString(value) }
+
+func uniqueNonEmpty(values []string) []string {
+	seen := make(map[string]struct{}, len(values))
+	result := make([]string, 0, len(values))
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			continue
+		}
+		if _, ok := seen[value]; ok {
+			continue
+		}
+		seen[value] = struct{}{}
+		result = append(result, value)
+	}
+	return result
+}
+
+func newCode(prefix string) (string, error) {
+	buffer := make([]byte, 5)
+	if _, err := rand.Read(buffer); err != nil {
+		return "", err
+	}
+	return fmt.Sprintf("%s-%s-%s", prefix, time.Now().Format("20060102"), strings.ToUpper(hex.EncodeToString(buffer))), nil
+}
+
+func severityRank(value string) int {
+	return map[string]int{"info": 1, "low": 2, "medium": 3, "high": 4, "critical": 5}[value]
+}
+
+func contains(values []string, value string) bool {
+	for _, current := range values {
+		if current == value {
+			return true
+		}
+	}
+	return false
+}
+
+func principalOrganizationID(principal auth.Principal) string {
+	if principal.Organization == nil {
+		return ""
+	}
+	return principal.Organization.ID
+}
+
+func workOrderActionSummary(action string) string {
+	labels := map[string]string{
+		"issue": "下发安全工单", "accept": "接收安全工单", "progress": "更新整改进度",
+		"submit": "提交复测", "return": "退回安全工单", "close": "关闭安全工单", "cancel": "取消安全工单",
+	}
+	if label, ok := labels[action]; ok {
+		return label
+	}
+	return "更新安全工单"
+}

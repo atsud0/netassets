@@ -13,6 +13,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"netassets/internal/auth"
+	"netassets/internal/pagination"
 )
 
 var (
@@ -115,6 +116,59 @@ func (s *Service) List(ctx context.Context, principal auth.Principal) ([]Organiz
 		return nil, fmt.Errorf("iterate organizations: %w", err)
 	}
 	return items, nil
+}
+
+func (s *Service) Search(ctx context.Context, principal auth.Principal, query pagination.Query) (pagination.Result[Organization], error) {
+	rows, err := s.pool.Query(ctx, `
+		WITH RECURSIVE descendant_roots(id) AS (
+			SELECT ur.organization_id FROM user_roles ur WHERE ur.user_id = $1::uuid AND ur.organization_id IS NOT NULL AND ur.data_scope = 'organization_and_descendants'
+		), descendants(id) AS (
+			SELECT id FROM descendant_roots UNION SELECT child.id FROM organizations child JOIN descendants parent ON child.parent_id = parent.id
+		), accessible(id) AS (
+			SELECT ur.organization_id FROM user_roles ur WHERE ur.user_id = $1::uuid AND ur.organization_id IS NOT NULL AND ur.data_scope IN ('organization', 'organization_and_descendants') UNION SELECT id FROM descendants
+		)
+		SELECT o.id::text, o.parent_id::text, COALESCE(parent.organization_name, ''), o.organization_code, o.organization_name, COALESCE(o.short_name, ''), o.organization_type,
+		       COALESCE(o.manager, ''), COALESCE(o.contact, ''), o.status, COALESCE(o.notes, ''),
+		       (SELECT count(*) FROM organizations child WHERE child.parent_id = o.id),
+		       (SELECT count(*) FROM business_systems bs WHERE bs.owner_organization_id = o.id AND bs.deleted_at IS NULL),
+		       (SELECT count(*) FROM asset_organizations ao WHERE ao.organization_id = o.id), o.created_at, o.updated_at, count(*) OVER ()
+		FROM organizations o LEFT JOIN organizations parent ON parent.id = o.parent_id
+		WHERE $2::boolean OR o.id IN (SELECT id FROM accessible)
+		ORDER BY CASE WHEN o.organization_type = 'group' THEN 0 ELSE 1 END, o.organization_code
+		LIMIT $3 OFFSET $4
+	`, principal.UserID, principal.HasRole("group_admin"), query.PageSize, query.Offset())
+	if err != nil {
+		return pagination.Result[Organization]{}, fmt.Errorf("search organizations: %w", err)
+	}
+	defer rows.Close()
+	items := make([]Organization, 0, query.PageSize)
+	total := 0
+	for rows.Next() {
+		var item Organization
+		if err := rows.Scan(&item.ID, &item.ParentID, &item.ParentName, &item.Code, &item.Name, &item.ShortName, &item.Type, &item.Manager, &item.Contact, &item.Status, &item.Notes, &item.ChildCount, &item.BusinessSysCount, &item.AssetCount, &item.CreatedAt, &item.UpdatedAt, &total); err != nil {
+			return pagination.Result[Organization]{}, fmt.Errorf("scan organization page: %w", err)
+		}
+		items = append(items, item)
+	}
+	if err := rows.Err(); err != nil {
+		return pagination.Result[Organization]{}, err
+	}
+	if pagination.NeedsTotalFallback(len(items), query) {
+		if err := s.pool.QueryRow(ctx, `
+            WITH RECURSIVE descendant_roots(id) AS (
+                SELECT ur.organization_id FROM user_roles ur WHERE ur.user_id = $1::uuid AND ur.organization_id IS NOT NULL AND ur.data_scope = 'organization_and_descendants'
+            ), descendants(id) AS (
+                SELECT id FROM descendant_roots UNION SELECT child.id FROM organizations child JOIN descendants parent ON child.parent_id = parent.id
+            ), accessible(id) AS (
+                SELECT ur.organization_id FROM user_roles ur WHERE ur.user_id = $1::uuid AND ur.organization_id IS NOT NULL AND ur.data_scope IN ('organization', 'organization_and_descendants') UNION SELECT id FROM descendants
+            )
+            SELECT count(*) FROM organizations o
+            WHERE $2::boolean OR o.id IN (SELECT id FROM accessible)
+        `, principal.UserID, principal.HasRole("group_admin")).Scan(&total); err != nil {
+			return pagination.Result[Organization]{}, fmt.Errorf("count organizations: %w", err)
+		}
+	}
+	return pagination.NewResult(items, total, query), nil
 }
 
 func (s *Service) Create(ctx context.Context, principal auth.Principal, input CreateInput, requestID, ipAddress string) (Organization, error) {

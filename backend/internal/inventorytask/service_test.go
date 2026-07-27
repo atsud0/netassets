@@ -1,9 +1,14 @@
 package inventorytask
 
 import (
+	"bytes"
+	"encoding/csv"
 	"errors"
+	"strings"
 	"testing"
 	"time"
+
+	"github.com/xuri/excelize/v2"
 )
 
 func TestNormalizeCreateInput(t *testing.T) {
@@ -56,5 +61,270 @@ func TestNormalizeReviewInputClearsApprovalReason(t *testing.T) {
 	}
 	if input.ReturnReason != "" {
 		t.Fatalf("return reason = %q, want empty", input.ReturnReason)
+	}
+}
+
+func TestBuildQualityCheckBlocksRequiredDataErrors(t *testing.T) {
+	result := buildQualityCheck([]string{"business_systems", "network_assets", "owner_contacts", "data_security"}, qualityCounts{
+		AssetCount:          2,
+		MissingAssetOwner:   1,
+		UnknownDataSecurity: 1,
+	})
+	if result.Passed {
+		t.Fatal("quality check passed, want blocked")
+	}
+	if result.ErrorCount != 3 {
+		t.Fatalf("error count = %d, want 3", result.ErrorCount)
+	}
+	if result.WarningCount != 0 {
+		t.Fatalf("warning count = %d, want 0", result.WarningCount)
+	}
+}
+
+func TestBuildQualityCheckAllowsWarnings(t *testing.T) {
+	result := buildQualityCheck([]string{"business_systems", "network_assets"}, qualityCounts{
+		SystemCount:          1,
+		AssetCount:           2,
+		UnlinkedPublicAssets: 1,
+	})
+	if !result.Passed {
+		t.Fatal("quality check blocked on warning")
+	}
+	if result.WarningCount != 1 || result.ErrorCount != 0 {
+		t.Fatalf("unexpected counts: errors=%d warnings=%d", result.ErrorCount, result.WarningCount)
+	}
+}
+
+func TestBuildInventoryTaskExportCSV(t *testing.T) {
+	startAt := time.Date(2026, time.July, 22, 9, 0, 0, 0, time.FixedZone("CST", 8*60*60))
+	submittedAt := startAt.Add(2 * time.Hour)
+	reviewedAt := submittedAt.Add(time.Hour)
+	task := Task{
+		Name: "第三季度/网络资产填报", Description: "集团统一口径", StartAt: startAt, DeadlineAt: startAt.Add(7 * 24 * time.Hour),
+		Status: "completed", RequireReview: true, AllowLateSubmission: false, TargetCount: 1, SubmittedCount: 1, ApprovedCount: 1,
+		CreatedByName: "集团管理员", CreatedAt: startAt.Add(-time.Hour),
+		Organizations: []OrganizationProgress{{
+			OrganizationCode: "SUB_A", OrganizationName: "甲公司", Status: "approved", StartedAt: &startAt,
+			SubmittedAt: &submittedAt, ReviewedAt: &reviewedAt, SubmissionNote: "已完成填报", SubmittedSystemCount: 3,
+			SubmittedAssetCount: 12, SubmittedByName: "子公司管理员", ReviewedByName: "集团审核员",
+		}},
+	}
+	data, contentType, fileName, err := buildExport(task, "csv")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if contentType != "text/csv; charset=utf-8" || fileName != "填报任务结果-第三季度-网络资产填报.csv" {
+		t.Fatalf("unexpected metadata: %q %q", contentType, fileName)
+	}
+	rows, err := csv.NewReader(bytes.NewReader(bytes.TrimPrefix(data, []byte("\xEF\xBB\xBF")))).ReadAll()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 2 || rows[1][1] != "已完成" || rows[1][5] != "是" || rows[1][6] != "否" || rows[1][12] != "已通过" {
+		t.Fatalf("unexpected status fields: %#v", rows)
+	}
+	if rows[1][16] != "3" || rows[1][17] != "12" || rows[1][18] != "已完成填报" || rows[1][20] != "集团审核员" {
+		t.Fatalf("unexpected result fields: %#v", rows[1])
+	}
+	if rows[1][14] != "2026-07-22 11:00:00+08:00" || rows[1][19] != "2026-07-22 12:00:00+08:00" {
+		t.Fatalf("unexpected timestamps: %#v", rows[1])
+	}
+}
+
+func TestBuildInventoryTaskExportXLSXAndRejectInvalidFormat(t *testing.T) {
+	task := Task{Name: "测试任务", Status: "active", Organizations: []OrganizationProgress{{OrganizationCode: "SUB_A", OrganizationName: "甲公司", Status: "not_started"}}}
+	data, contentType, fileName, err := buildExport(task, "xlsx")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(contentType, "spreadsheetml") || fileName != "填报任务结果-测试任务.xlsx" {
+		t.Fatalf("unexpected metadata: %q %q", contentType, fileName)
+	}
+	file, err := excelize.OpenReader(bytes.NewReader(data))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer file.Close()
+	rows, err := file.GetRows("台账")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 2 || rows[0][0] != "任务名称" || rows[1][10] != "SUB_A" || rows[1][12] != "未开始" {
+		t.Fatalf("unexpected XLSX rows: %#v", rows)
+	}
+	if _, _, _, err := buildExport(task, "xls"); err != ErrInvalid {
+		t.Fatalf("buildExport(xls) error = %v", err)
+	}
+}
+
+func TestBuildSubmissionDiffTracksAddedModifiedAndRemovedResources(t *testing.T) {
+	previous := []snapshotItem{
+		{
+			ResourceType: "business_system", ResourceID: "system-1", ResourceKey: "SYS-001", ResourceName: "旧系统名称",
+			Data: map[string]any{"system_code": "SYS-001", "system_name": "旧系统名称", "system_level": "normal"},
+		},
+		{
+			ResourceType: "network_asset", ResourceID: "asset-removed", ResourceKey: "domain:old.example.com", ResourceName: "old.example.com",
+			Data: map[string]any{"asset_type": "domain", "asset_value": "old.example.com"},
+		},
+	}
+	current := []snapshotItem{
+		{
+			ResourceType: "business_system", ResourceID: "system-1", ResourceKey: "SYS-001", ResourceName: "新系统名称",
+			Data: map[string]any{"system_code": "SYS-001", "system_name": "新系统名称", "system_level": "important"},
+		},
+		{
+			ResourceType: "network_asset", ResourceID: "asset-added", ResourceKey: "url:https://new.example.com", ResourceName: "新入口",
+			Data: map[string]any{"asset_type": "url", "asset_value": "https://new.example.com"},
+		},
+	}
+
+	result := buildSubmissionDiff(current, previous)
+	if result.Summary.Added != 1 || result.Summary.Modified != 1 || result.Summary.Removed != 1 {
+		t.Fatalf("unexpected summary: %+v", result.Summary)
+	}
+	if len(result.BusinessSystems.Modified) != 1 || len(result.BusinessSystems.Modified[0].Changes) != 2 {
+		t.Fatalf("unexpected system diff: %+v", result.BusinessSystems)
+	}
+	if result.BusinessSystems.Modified[0].Changes[0].Field != "system_name" || result.BusinessSystems.Modified[0].Changes[1].Field != "system_level" {
+		t.Fatalf("unexpected field order: %+v", result.BusinessSystems.Modified[0].Changes)
+	}
+	if len(result.NetworkAssets.Added) != 1 || len(result.NetworkAssets.Removed) != 1 {
+		t.Fatalf("unexpected asset diff: %+v", result.NetworkAssets)
+	}
+}
+
+func TestBuildSubmissionDiffTreatsFirstSubmissionAsAddedBaseline(t *testing.T) {
+	current := []snapshotItem{
+		{ResourceType: "business_system", ResourceID: "system-1", ResourceKey: "SYS-001", ResourceName: "系统一", Data: map[string]any{"system_code": "SYS-001"}},
+		{ResourceType: "network_asset", ResourceID: "asset-1", ResourceKey: "ip:192.0.2.1", ResourceName: "192.0.2.1", Data: map[string]any{"asset_type": "ip"}},
+	}
+	result := buildSubmissionDiff(current, nil)
+	if result.Summary.Added != 2 || result.Summary.Modified != 0 || result.Summary.Removed != 0 {
+		t.Fatalf("unexpected first submission summary: %+v", result.Summary)
+	}
+	if result.BusinessSystems.Added == nil || result.NetworkAssets.Modified == nil {
+		t.Fatal("diff arrays must be serialized as empty arrays instead of null")
+	}
+}
+
+func TestNormalizeReviewInputWithResourceComments(t *testing.T) {
+	input := ReviewInput{
+		Decision:     " returned ",
+		ReturnReason: " 请逐条整改 ",
+		Comments: []ReviewCommentInput{
+			{ResourceType: " business_system ", ResourceID: " system-1 ", Comment: " 补充负责人联系方式 "},
+			{ResourceType: "network_asset", ResourceID: "asset-1", Comment: "确认该公网域名是否仍在使用"},
+		},
+	}
+	if err := normalizeReviewInput(&input); err != nil {
+		t.Fatal(err)
+	}
+	if len(input.Comments) != 2 || input.Comments[0].ResourceType != "business_system" ||
+		input.Comments[0].ResourceID != "system-1" || input.Comments[0].Comment != "补充负责人联系方式" {
+		t.Fatalf("unexpected normalized comments: %+v", input.Comments)
+	}
+}
+
+func TestNormalizeReviewInputRejectsDuplicateResourceComments(t *testing.T) {
+	input := ReviewInput{
+		Decision:     "returned",
+		ReturnReason: "请整改",
+		Comments: []ReviewCommentInput{
+			{ResourceType: "network_asset", ResourceID: "asset-1", Comment: "意见一"},
+			{ResourceType: "network_asset", ResourceID: "asset-1", Comment: "意见二"},
+		},
+	}
+	if err := normalizeReviewInput(&input); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("normalizeReviewInput() error = %v, want ErrInvalid", err)
+	}
+}
+
+func TestNormalizeReviewInputClearsCommentsOnApproval(t *testing.T) {
+	input := ReviewInput{
+		Decision: "approved",
+		Comments: []ReviewCommentInput{{ResourceType: "network_asset", ResourceID: "asset-1", Comment: "unused"}},
+	}
+	if err := normalizeReviewInput(&input); err != nil {
+		t.Fatal(err)
+	}
+	if len(input.Comments) != 0 {
+		t.Fatalf("approval comments = %+v, want empty", input.Comments)
+	}
+}
+
+func TestNormalizeReviewCommentsRejectsTooMany(t *testing.T) {
+	comments := make([]ReviewCommentInput, 101)
+	for index := range comments {
+		comments[index] = ReviewCommentInput{ResourceType: "network_asset", ResourceID: "asset-many", Comment: "整改"}
+	}
+	if _, err := normalizeReviewComments(comments); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("normalizeReviewComments() error = %v, want ErrInvalid", err)
+	}
+}
+
+func TestBuildSubmissionDiffTracksCustomFieldValueWithHistoricalLabel(t *testing.T) {
+	previous := []snapshotItem{{
+		ResourceType: "business_system", ResourceID: "system-1", ResourceKey: "SYS-001", ResourceName: "系统一",
+		Data: map[string]any{
+			"system_code":                  "SYS-001",
+			"custom:data_retention_period": "180 天",
+			"_custom_field_labels": map[string]any{
+				"custom:data_retention_period": "数据保留期限",
+			},
+		},
+	}}
+	current := []snapshotItem{{
+		ResourceType: "business_system", ResourceID: "system-1", ResourceKey: "SYS-001", ResourceName: "系统一",
+		Data: map[string]any{
+			"system_code":                  "SYS-001",
+			"custom:data_retention_period": "365 天",
+			"_custom_field_labels": map[string]any{
+				"custom:data_retention_period": "保留期限（新名称）",
+			},
+		},
+	}}
+
+	result := buildSubmissionDiff(current, previous)
+	changes := result.BusinessSystems.Modified[0].Changes
+	if len(changes) != 1 {
+		t.Fatalf("unexpected changes: %+v", changes)
+	}
+	if changes[0].Field != "custom:data_retention_period" || changes[0].Label != "自定义字段：保留期限（新名称）" || changes[0].Before != "180 天" || changes[0].After != "365 天" {
+		t.Fatalf("unexpected custom field change: %+v", changes[0])
+	}
+}
+
+func TestBuildSubmissionDiffIgnoresCustomMultiSelectOrder(t *testing.T) {
+	previous := []snapshotItem{{
+		ResourceType: "network_asset", ResourceID: "asset-1", ResourceKey: "domain:example.com", ResourceName: "example.com",
+		Data: map[string]any{
+			"custom:security_tags": []any{"互联网", "重要"},
+			"_custom_field_labels": map[string]any{"custom:security_tags": "安全标签"},
+		},
+	}}
+	current := []snapshotItem{{
+		ResourceType: "network_asset", ResourceID: "asset-1", ResourceKey: "domain:example.com", ResourceName: "example.com",
+		Data: map[string]any{
+			"custom:security_tags": []any{"重要", "互联网"},
+			"_custom_field_labels": map[string]any{"custom:security_tags": "安全标签"},
+		},
+	}}
+
+	result := buildSubmissionDiff(current, previous)
+	if len(result.NetworkAssets.Modified) != 0 || result.Summary.Modified != 0 {
+		t.Fatalf("same multiselect values in different order must not produce a diff: %+v", result)
+	}
+}
+
+func TestBuildSubmissionDiffUsesHistoricalCustomFieldLabelWhenCurrentSnapshotDoesNotHaveOne(t *testing.T) {
+	changes := compareSnapshotData("network_asset",
+		map[string]any{
+			"custom:business_owner": "甲", "_custom_field_labels": map[string]any{"custom:business_owner": "业务归口人"},
+		},
+		map[string]any{"custom:business_owner": "乙"},
+	)
+	if len(changes) != 1 || changes[0].Label != "自定义字段：业务归口人" {
+		t.Fatalf("expected historical custom label, got %+v", changes)
 	}
 }

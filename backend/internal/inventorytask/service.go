@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 
@@ -12,6 +13,8 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"netassets/internal/auth"
+	"netassets/internal/exportfile"
+	"netassets/internal/pagination"
 )
 
 var (
@@ -19,6 +22,7 @@ var (
 	ErrNotFound  = errors.New("not found")
 	ErrInvalid   = errors.New("invalid input")
 	ErrState     = errors.New("invalid state")
+	ErrQuality   = errors.New("quality check failed")
 )
 
 type OrganizationProgress struct {
@@ -35,6 +39,8 @@ type OrganizationProgress struct {
 	SubmittedByName      string     `json:"submitted_by_name,omitempty"`
 	ReviewedByName       string     `json:"reviewed_by_name,omitempty"`
 	ReturnReason         string     `json:"return_reason,omitempty"`
+	SnapshotAvailable    bool       `json:"snapshot_available"`
+	SubmissionVersion    int        `json:"submission_version"`
 }
 
 type Task struct {
@@ -54,7 +60,7 @@ type Task struct {
 	CreatedByName       string                 `json:"created_by_name,omitempty"`
 	CreatedAt           time.Time              `json:"created_at"`
 	UpdatedAt           time.Time              `json:"updated_at"`
-	Organizations       []OrganizationProgress `json:"organizations"`
+	Organizations       []OrganizationProgress `json:"organizations,omitempty"`
 }
 
 type CreateInput struct {
@@ -70,13 +76,37 @@ type CreateInput struct {
 	OrganizationIDs     []string  `json:"organization_ids"`
 }
 
+type QualityIssue struct {
+	Code     string `json:"code"`
+	Severity string `json:"severity"`
+	Message  string `json:"message"`
+	Count    int64  `json:"count"`
+}
+
+type QualityCheck struct {
+	Passed       bool           `json:"passed"`
+	SystemCount  int64          `json:"system_count"`
+	AssetCount   int64          `json:"asset_count"`
+	ErrorCount   int            `json:"error_count"`
+	WarningCount int            `json:"warning_count"`
+	Issues       []QualityIssue `json:"issues"`
+}
+
+type QualityCheckError struct {
+	Result QualityCheck
+}
+
+func (e *QualityCheckError) Error() string { return ErrQuality.Error() }
+func (e *QualityCheckError) Unwrap() error { return ErrQuality }
+
 type SubmissionInput struct {
 	Note string `json:"note"`
 }
 
 type ReviewInput struct {
-	Decision     string `json:"decision"`
-	ReturnReason string `json:"return_reason"`
+	Decision     string               `json:"decision"`
+	ReturnReason string               `json:"return_reason"`
+	Comments     []ReviewCommentInput `json:"comments"`
 }
 
 type StatusInput struct {
@@ -149,6 +179,206 @@ func (s *Service) List(ctx context.Context, principal auth.Principal) ([]Task, e
 		return nil, fmt.Errorf("iterate inventory tasks: %w", err)
 	}
 	return items, nil
+}
+
+func (s *Service) Search(ctx context.Context, principal auth.Principal, query pagination.Query) (pagination.Result[Task], error) {
+	rows, err := s.pool.Query(ctx, `
+		WITH RECURSIVE descendant_roots(id) AS (
+			SELECT ur.organization_id FROM user_roles ur WHERE ur.user_id = $1::uuid AND ur.organization_id IS NOT NULL AND ur.data_scope = 'organization_and_descendants'
+		), descendants(id) AS (
+			SELECT id FROM descendant_roots UNION SELECT child.id FROM organizations child JOIN descendants parent ON child.parent_id = parent.id
+		), accessible(id) AS (
+			SELECT ur.organization_id FROM user_roles ur WHERE ur.user_id = $1::uuid AND ur.organization_id IS NOT NULL AND ur.data_scope IN ('organization', 'organization_and_descendants') UNION SELECT id FROM descendants
+		)
+		SELECT t.id::text, t.task_name, COALESCE(t.description, ''), t.start_at, t.deadline_at, t.status,
+		       t.required_fields, t.quality_rules, t.require_review, t.allow_late_submission,
+		       (SELECT count(*) FROM inventory_task_organizations ito WHERE ito.task_id = t.id),
+		       (SELECT count(*) FROM inventory_task_organizations ito WHERE ito.task_id = t.id AND ito.status IN ('submitted', 'approved')),
+		       (SELECT count(*) FROM inventory_task_organizations ito WHERE ito.task_id = t.id AND ito.status = 'approved'),
+		       COALESCE(u.display_name, ''), t.created_at, t.updated_at, count(*) OVER ()
+		FROM inventory_tasks t LEFT JOIN users u ON u.id = t.created_by
+		WHERE $2::boolean OR (t.status <> 'draft' AND EXISTS (SELECT 1 FROM inventory_task_organizations ito WHERE ito.task_id = t.id AND ito.organization_id IN (SELECT id FROM accessible)))
+		ORDER BY t.created_at DESC LIMIT $3 OFFSET $4
+	`, principal.UserID, principal.HasRole("group_admin"), query.PageSize, query.Offset())
+	if err != nil {
+		return pagination.Result[Task]{}, fmt.Errorf("search inventory tasks: %w", err)
+	}
+	defer rows.Close()
+	items := make([]Task, 0, query.PageSize)
+	total := 0
+	for rows.Next() {
+		var item Task
+		var requiredFieldsJSON, qualityRulesJSON []byte
+		if err := rows.Scan(&item.ID, &item.Name, &item.Description, &item.StartAt, &item.DeadlineAt, &item.Status, &requiredFieldsJSON, &qualityRulesJSON, &item.RequireReview, &item.AllowLateSubmission, &item.TargetCount, &item.SubmittedCount, &item.ApprovedCount, &item.CreatedByName, &item.CreatedAt, &item.UpdatedAt, &total); err != nil {
+			return pagination.Result[Task]{}, fmt.Errorf("scan inventory task page: %w", err)
+		}
+		if err := json.Unmarshal(requiredFieldsJSON, &item.RequiredFields); err != nil {
+			return pagination.Result[Task]{}, fmt.Errorf("decode required fields: %w", err)
+		}
+		if err := json.Unmarshal(qualityRulesJSON, &item.QualityRules); err != nil {
+			return pagination.Result[Task]{}, fmt.Errorf("decode quality rules: %w", err)
+		}
+		items = append(items, item)
+	}
+	if err := rows.Err(); err != nil {
+		return pagination.Result[Task]{}, err
+	}
+	if pagination.NeedsTotalFallback(len(items), query) {
+		if err := s.pool.QueryRow(ctx, `
+            WITH RECURSIVE descendant_roots(id) AS (
+                SELECT ur.organization_id FROM user_roles ur WHERE ur.user_id = $1::uuid AND ur.organization_id IS NOT NULL AND ur.data_scope = 'organization_and_descendants'
+            ), descendants(id) AS (
+                SELECT id FROM descendant_roots UNION SELECT child.id FROM organizations child JOIN descendants parent ON child.parent_id = parent.id
+            ), accessible(id) AS (
+                SELECT ur.organization_id FROM user_roles ur WHERE ur.user_id = $1::uuid AND ur.organization_id IS NOT NULL AND ur.data_scope IN ('organization', 'organization_and_descendants') UNION SELECT id FROM descendants
+            )
+            SELECT count(*) FROM inventory_tasks t
+            WHERE $2::boolean OR (t.status <> 'draft' AND EXISTS (SELECT 1 FROM inventory_task_organizations ito WHERE ito.task_id = t.id AND ito.organization_id IN (SELECT id FROM accessible)))
+        `, principal.UserID, principal.HasRole("group_admin")).Scan(&total); err != nil {
+			return pagination.Result[Task]{}, fmt.Errorf("count inventory tasks: %w", err)
+		}
+	}
+	return pagination.NewResult(items, total, query), nil
+}
+
+func (s *Service) loadTaskForExport(ctx context.Context, principal auth.Principal, taskID string) (*Task, error) {
+	taskID = strings.TrimSpace(taskID)
+	if taskID == "" {
+		return nil, ErrInvalid
+	}
+	var item Task
+	var requiredFieldsJSON, qualityRulesJSON []byte
+	err := s.pool.QueryRow(ctx, `
+        WITH RECURSIVE descendant_roots(id) AS (
+            SELECT ur.organization_id FROM user_roles ur
+            WHERE ur.user_id = $1::uuid AND ur.organization_id IS NOT NULL AND ur.data_scope = 'organization_and_descendants'
+        ), descendants(id) AS (
+            SELECT id FROM descendant_roots
+            UNION SELECT child.id FROM organizations child JOIN descendants parent ON child.parent_id = parent.id
+        ), accessible(id) AS (
+            SELECT ur.organization_id FROM user_roles ur
+            WHERE ur.user_id = $1::uuid AND ur.organization_id IS NOT NULL
+              AND ur.data_scope IN ('organization', 'organization_and_descendants')
+            UNION SELECT id FROM descendants
+        )
+        SELECT t.id::text, t.task_name, COALESCE(t.description, ''), t.start_at, t.deadline_at, t.status,
+               t.required_fields, t.quality_rules, t.require_review, t.allow_late_submission,
+               (SELECT count(*) FROM inventory_task_organizations ito WHERE ito.task_id = t.id),
+               (SELECT count(*) FROM inventory_task_organizations ito WHERE ito.task_id = t.id AND ito.status IN ('submitted', 'approved')),
+               (SELECT count(*) FROM inventory_task_organizations ito WHERE ito.task_id = t.id AND ito.status = 'approved'),
+               COALESCE(u.display_name, ''), t.created_at, t.updated_at
+        FROM inventory_tasks t LEFT JOIN users u ON u.id = t.created_by
+        WHERE t.id::text = $3
+          AND ($2::boolean OR (t.status <> 'draft' AND EXISTS (
+              SELECT 1 FROM inventory_task_organizations ito
+              WHERE ito.task_id = t.id AND ito.organization_id IN (SELECT id FROM accessible)
+          )))
+    `, principal.UserID, principal.HasRole("group_admin"), taskID).Scan(
+		&item.ID, &item.Name, &item.Description, &item.StartAt, &item.DeadlineAt, &item.Status,
+		&requiredFieldsJSON, &qualityRulesJSON, &item.RequireReview, &item.AllowLateSubmission,
+		&item.TargetCount, &item.SubmittedCount, &item.ApprovedCount, &item.CreatedByName,
+		&item.CreatedAt, &item.UpdatedAt,
+	)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, ErrNotFound
+	}
+	if err != nil {
+		return nil, fmt.Errorf("load inventory task export: %w", err)
+	}
+	if err := json.Unmarshal(requiredFieldsJSON, &item.RequiredFields); err != nil {
+		return nil, fmt.Errorf("decode required fields: %w", err)
+	}
+	if err := json.Unmarshal(qualityRulesJSON, &item.QualityRules); err != nil {
+		return nil, fmt.Errorf("decode quality rules: %w", err)
+	}
+	item.Organizations, err = s.listOrganizations(ctx, principal, item.ID)
+	if err != nil {
+		return nil, err
+	}
+	return &item, nil
+}
+
+func (s *Service) Export(ctx context.Context, principal auth.Principal, taskID, format, requestID, ipAddress string) ([]byte, string, string, int, error) {
+	selected, err := s.loadTaskForExport(ctx, principal, taskID)
+	if err != nil {
+		return nil, "", "", 0, err
+	}
+	data, contentType, fileName, err := buildExport(*selected, format)
+	if err != nil {
+		return nil, "", "", 0, err
+	}
+	organizationID := principalOrganizationID(principal)
+	if _, err := s.pool.Exec(ctx, `
+		INSERT INTO audit_logs (user_id, organization_id, action, resource_type, resource_id, summary, details, request_ip, request_id)
+		VALUES ($1::uuid, NULLIF($2, '')::uuid, 'inventory_task.export', 'inventory_task', $3, '导出填报任务结果',
+		        jsonb_build_object('format', $4::text, 'count', $5::int, 'task_name', $6::text),
+		        NULLIF($7, '')::inet, NULLIF($8, ''))
+	`, principal.UserID, organizationID, selected.ID, strings.ToLower(strings.TrimPrefix(format, ".")), len(selected.Organizations), selected.Name, ipAddress, requestID); err != nil {
+		return nil, "", "", 0, fmt.Errorf("write inventory task export audit: %w", err)
+	}
+	return data, contentType, fileName, len(selected.Organizations), nil
+}
+
+func buildExport(task Task, format string) ([]byte, string, string, error) {
+	headers := []string{
+		"任务名称", "任务状态", "任务说明", "开始时间", "截止时间", "需要集团审核", "允许逾期提交",
+		"目标组织数", "已提交组织数", "已通过组织数", "组织编码", "组织名称", "填报状态", "开始填报时间",
+		"提交时间", "提交人", "业务系统数量", "网络资产数量", "提交说明", "审核时间", "审核人", "退回原因",
+		"任务创建人", "任务创建时间",
+	}
+	rows := make([][]string, 0, len(task.Organizations))
+	for _, progress := range task.Organizations {
+		rows = append(rows, []string{
+			task.Name, inventoryTaskExportLabel("task_status", task.Status), task.Description, formatExportTime(task.StartAt), formatExportTime(task.DeadlineAt),
+			inventoryTaskExportLabel("bool", strconv.FormatBool(task.RequireReview)), inventoryTaskExportLabel("bool", strconv.FormatBool(task.AllowLateSubmission)),
+			strconv.FormatInt(task.TargetCount, 10), strconv.FormatInt(task.SubmittedCount, 10), strconv.FormatInt(task.ApprovedCount, 10),
+			progress.OrganizationCode, progress.OrganizationName, inventoryTaskExportLabel("progress_status", progress.Status), formatExportTimePointer(progress.StartedAt),
+			formatExportTimePointer(progress.SubmittedAt), progress.SubmittedByName, strconv.FormatInt(progress.SubmittedSystemCount, 10), strconv.FormatInt(progress.SubmittedAssetCount, 10),
+			progress.SubmissionNote, formatExportTimePointer(progress.ReviewedAt), progress.ReviewedByName, progress.ReturnReason,
+			task.CreatedByName, formatExportTime(task.CreatedAt),
+		})
+	}
+	data, contentType, fileName, err := exportfile.Build(format, "填报任务结果-"+sanitizeExportName(task.Name), headers, rows)
+	if errors.Is(err, exportfile.ErrInvalidFormat) {
+		return nil, "", "", ErrInvalid
+	}
+	return data, contentType, fileName, err
+}
+
+func inventoryTaskExportLabel(kind, value string) string {
+	labels := map[string]map[string]string{
+		"task_status":     {"draft": "草稿", "active": "进行中", "closed": "已关闭", "completed": "已完成", "archived": "已归档"},
+		"progress_status": {"not_started": "未开始", "in_progress": "填报中", "submitted": "待审核", "returned": "已退回", "approved": "已通过", "overdue": "已逾期"},
+		"bool":            {"true": "是", "false": "否"},
+	}
+	if label, ok := labels[kind][value]; ok {
+		return label
+	}
+	return value
+}
+
+func formatExportTime(value time.Time) string {
+	if value.IsZero() {
+		return ""
+	}
+	return value.Format("2006-01-02 15:04:05Z07:00")
+}
+
+func formatExportTimePointer(value *time.Time) string {
+	if value == nil {
+		return ""
+	}
+	return formatExportTime(*value)
+}
+
+func sanitizeExportName(value string) string {
+	value = strings.TrimSpace(value)
+	replacer := strings.NewReplacer("/", "-", "\\", "-", ":", "-", "*", "-", "?", "-", "\"", "-", "<", "-", ">", "-", "|", "-")
+	value = strings.Trim(replacer.Replace(value), ". ")
+	if value == "" {
+		return "未命名任务"
+	}
+	return value
 }
 
 func (s *Service) Create(ctx context.Context, principal auth.Principal, input CreateInput, requestID, ipAddress string) (Task, error) {
@@ -275,6 +505,216 @@ func (s *Service) Start(ctx context.Context, principal auth.Principal, taskID, o
 	return item, nil
 }
 
+func (s *Service) QualityCheck(ctx context.Context, principal auth.Principal, taskID, organizationID string) (QualityCheck, error) {
+	return loadQualityCheck(ctx, s.pool, principal, taskID, organizationID)
+}
+
+type qualityCheckQuerier interface {
+	QueryRow(context.Context, string, ...any) pgx.Row
+	Query(context.Context, string, ...any) (pgx.Rows, error)
+}
+
+func loadQualityCheck(ctx context.Context, q qualityCheckQuerier, principal auth.Principal, taskID, organizationID string) (QualityCheck, error) {
+	var requiredFieldsJSON []byte
+	var counts qualityCounts
+	err := q.QueryRow(ctx, `
+		WITH RECURSIVE descendant_roots(id) AS (
+			SELECT ur.organization_id FROM user_roles ur
+			WHERE ur.user_id = $1::uuid AND ur.organization_id IS NOT NULL AND ur.data_scope = 'organization_and_descendants'
+		), descendants(id) AS (
+			SELECT id FROM descendant_roots
+			UNION SELECT child.id FROM organizations child JOIN descendants parent ON child.parent_id = parent.id
+		), accessible(id) AS (
+			SELECT ur.organization_id FROM user_roles ur
+			WHERE ur.user_id = $1::uuid AND ur.organization_id IS NOT NULL
+			  AND ur.data_scope IN ('organization', 'organization_and_descendants')
+			UNION SELECT id FROM descendants
+		), assignment AS (
+			SELECT t.required_fields
+			FROM inventory_tasks t
+			JOIN inventory_task_organizations ito ON ito.task_id = t.id
+			WHERE t.id::text = $2 AND ito.organization_id::text = $3
+			  AND ($4::boolean OR ito.organization_id IN (SELECT id FROM accessible))
+		), org_systems AS (
+			SELECT bs.id, bs.owner_name, bs.owner_contact, bs.system_level,
+			       p.contains_personal_information, p.contains_sensitive_personal_information,
+			       p.data_volume_over_100k, p.contains_important_data, p.contains_core_data
+			FROM business_systems bs
+			LEFT JOIN business_system_data_security_profiles p ON p.business_system_id = bs.id
+			WHERE bs.owner_organization_id::text = $3 AND bs.deleted_at IS NULL
+		), org_assets AS (
+			SELECT a.id, a.network_scope, a.importance, ao.owner_name
+			FROM assets a
+			JOIN asset_organizations ao ON ao.asset_id = a.id AND ao.is_primary
+			WHERE ao.organization_id::text = $3 AND a.deleted_at IS NULL
+		)
+		SELECT a.required_fields,
+		       (SELECT count(*) FROM org_systems),
+		       (SELECT count(*) FROM org_assets),
+		       (SELECT count(*) FROM org_systems WHERE btrim(COALESCE(owner_name, '')) = '' OR btrim(COALESCE(owner_contact, '')) = ''),
+		       (SELECT count(*) FROM org_assets WHERE btrim(COALESCE(owner_name, '')) = ''),
+		       (SELECT count(*) FROM org_systems WHERE contains_personal_information IS NULL
+		          OR contains_personal_information = 'unknown'
+		          OR contains_sensitive_personal_information = 'unknown'
+		          OR data_volume_over_100k = 'unknown'
+		          OR contains_important_data = 'unknown'
+		          OR contains_core_data = 'unknown'),
+		       (SELECT count(*) FROM org_assets oa WHERE oa.network_scope = 'public'
+		          AND NOT EXISTS (SELECT 1 FROM system_assets sa WHERE sa.asset_id = oa.id)),
+		       (SELECT count(*) FROM org_systems WHERE system_level IN ('important', 'core')
+		          AND (btrim(COALESCE(owner_name, '')) = '' OR btrim(COALESCE(owner_contact, '')) = '')),
+		       (SELECT count(*) FROM org_assets WHERE importance IN ('important', 'core') AND btrim(COALESCE(owner_name, '')) = '')
+		FROM assignment a
+	`, principal.UserID, taskID, organizationID, principal.HasRole("group_admin")).Scan(
+		&requiredFieldsJSON, &counts.SystemCount, &counts.AssetCount, &counts.MissingSystemOwner,
+		&counts.MissingAssetOwner, &counts.UnknownDataSecurity, &counts.UnlinkedPublicAssets,
+		&counts.MissingPrioritySystemOwner, &counts.MissingPriorityAssetOwner,
+	)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return QualityCheck{}, ErrNotFound
+	}
+	if err != nil {
+		return QualityCheck{}, fmt.Errorf("load inventory quality check: %w", err)
+	}
+	var requiredFields []string
+	if err := json.Unmarshal(requiredFieldsJSON, &requiredFields); err != nil {
+		return QualityCheck{}, fmt.Errorf("decode inventory quality fields: %w", err)
+	}
+	result := buildQualityCheck(requiredFields, counts)
+	if err := appendConfiguredQualityRules(ctx, q, organizationID, &result); err != nil {
+		return QualityCheck{}, err
+	}
+	result.Passed = result.ErrorCount == 0
+	return result, nil
+}
+
+type qualityCounts struct {
+	SystemCount                int64
+	AssetCount                 int64
+	MissingSystemOwner         int64
+	MissingAssetOwner          int64
+	UnknownDataSecurity        int64
+	UnlinkedPublicAssets       int64
+	MissingPrioritySystemOwner int64
+	MissingPriorityAssetOwner  int64
+}
+
+func buildQualityCheck(requiredFields []string, counts qualityCounts) QualityCheck {
+	result := QualityCheck{SystemCount: counts.SystemCount, AssetCount: counts.AssetCount, Issues: make([]QualityIssue, 0)}
+	required := make(map[string]bool, len(requiredFields))
+	for _, field := range requiredFields {
+		required[field] = true
+	}
+	add := func(code, severity, message string, count int64) {
+		if count <= 0 {
+			return
+		}
+		result.Issues = append(result.Issues, QualityIssue{Code: code, Severity: severity, Message: message, Count: count})
+		if severity == "error" {
+			result.ErrorCount++
+		} else {
+			result.WarningCount++
+		}
+	}
+	needsSystems := required["business_systems"] || required["data_security"] || required["owner_contacts"]
+	needsAssets := required["network_assets"] || required["owner_contacts"]
+	if needsSystems && counts.SystemCount == 0 {
+		add("missing_business_system", "error", "尚未录入业务系统", 1)
+	}
+	if needsAssets && counts.AssetCount == 0 {
+		add("missing_network_asset", "error", "尚未录入网络资产", 1)
+	}
+	if required["owner_contacts"] {
+		add("missing_system_owner", "error", "业务系统负责人或联系方式未填写完整", counts.MissingSystemOwner)
+		add("missing_asset_owner", "error", "网络资产负责人未填写", counts.MissingAssetOwner)
+	} else {
+		add("missing_priority_system_owner", "warning", "核心或重要业务系统负责人信息未填写完整", counts.MissingPrioritySystemOwner)
+		add("missing_priority_asset_owner", "warning", "核心或重要网络资产负责人未填写", counts.MissingPriorityAssetOwner)
+	}
+	if required["data_security"] {
+		add("unknown_data_security", "error", "业务系统的数据安全属性仍有未确认项", counts.UnknownDataSecurity)
+	}
+	if required["network_assets"] {
+		add("unlinked_public_asset", "warning", "公网资产尚未关联业务系统", counts.UnlinkedPublicAssets)
+	}
+	result.Passed = result.ErrorCount == 0
+	return result
+}
+
+type configuredQualityRule struct {
+	ID           string
+	RuleName     string
+	ResourceType string
+	TargetField  string
+	Severity     string
+}
+
+func appendConfiguredQualityRules(ctx context.Context, q qualityCheckQuerier, organizationID string, result *QualityCheck) error {
+	rows, err := q.Query(ctx, `SELECT id::text,rule_name,resource_type,target_field,severity FROM data_quality_rules WHERE is_enabled AND rule_type='required' ORDER BY sort_order,created_at`)
+	if err != nil {
+		return fmt.Errorf("load configured quality rules: %w", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var rule configuredQualityRule
+		if err := rows.Scan(&rule.ID, &rule.RuleName, &rule.ResourceType, &rule.TargetField, &rule.Severity); err != nil {
+			return err
+		}
+		missing, err := configuredMissingCount(ctx, q, rule, organizationID)
+		if err != nil {
+			return err
+		}
+		if missing == 0 {
+			continue
+		}
+		code := "configured_required_" + rule.ResourceType + "_" + strings.ReplaceAll(strings.TrimPrefix(rule.TargetField, "custom:"), ":", "_")
+		result.Issues = append(result.Issues, QualityIssue{Code: code, Severity: rule.Severity, Message: "集团规则“" + rule.RuleName + "”要求填写，当前存在缺失项", Count: missing})
+		if rule.Severity == "error" {
+			result.ErrorCount++
+		} else {
+			result.WarningCount++
+		}
+	}
+	return rows.Err()
+}
+
+func configuredMissingCount(ctx context.Context, q qualityCheckQuerier, rule configuredQualityRule, organizationID string) (int64, error) {
+	var query string
+	args := []any{organizationID}
+	if strings.HasPrefix(rule.TargetField, "custom:") {
+		key := strings.TrimPrefix(rule.TargetField, "custom:")
+		args = append(args, key)
+		if rule.ResourceType == "asset" {
+			query = `SELECT count(*) FROM assets a JOIN asset_organizations ao ON ao.asset_id=a.id AND ao.is_primary WHERE ao.organization_id=$1::uuid AND a.deleted_at IS NULL AND NOT EXISTS (SELECT 1 FROM custom_field_values v JOIN custom_field_definitions d ON d.id=v.field_definition_id WHERE v.resource_type='asset' AND v.resource_id=a.id AND d.field_key=$2 AND jsonb_typeof(v.value) <> 'null' AND btrim(trim(both '"' from v.value::text)) <> '' AND v.value <> '[]'::jsonb)`
+		} else {
+			query = `SELECT count(*) FROM business_systems bs WHERE bs.owner_organization_id=$1::uuid AND bs.deleted_at IS NULL AND NOT EXISTS (SELECT 1 FROM custom_field_values v JOIN custom_field_definitions d ON d.id=v.field_definition_id WHERE v.resource_type='business_system' AND v.resource_id=bs.id AND d.field_key=$2 AND jsonb_typeof(v.value) <> 'null' AND btrim(trim(both '"' from v.value::text)) <> '' AND v.value <> '[]'::jsonb)`
+		}
+	} else if rule.ResourceType == "asset" {
+		conditions := map[string]string{
+			"value": "btrim(COALESCE(a.asset_value,'')) = ''", "name": "btrim(COALESCE(a.asset_name,'')) = ''", "network_scope": "a.network_scope = 'unknown'", "network_area_id": "a.network_area_id IS NULL", "owner_name": "btrim(COALESCE(ao.owner_name,'')) = ''", "business_system_id": "NOT EXISTS (SELECT 1 FROM system_assets sa WHERE sa.asset_id=a.id)", "importance": "a.importance IS NULL",
+		}
+		condition, ok := conditions[rule.TargetField]
+		if !ok {
+			return 0, fmt.Errorf("unsupported asset quality target: %s", rule.TargetField)
+		}
+		query = `SELECT count(*) FROM assets a JOIN asset_organizations ao ON ao.asset_id=a.id AND ao.is_primary WHERE ao.organization_id=$1::uuid AND a.deleted_at IS NULL AND ` + condition
+	} else {
+		conditions := map[string]string{
+			"code": "btrim(COALESCE(bs.system_code,'')) = ''", "name": "btrim(COALESCE(bs.system_name,'')) = ''", "owner_name": "btrim(COALESCE(bs.owner_name,'')) = ''", "owner_contact": "btrim(COALESCE(bs.owner_contact,'')) = ''", "system_level": "bs.system_level IS NULL", "internet_exposure": "bs.internet_exposure = 'unknown'", "contains_personal_information": "COALESCE(p.contains_personal_information,'unknown') = 'unknown'", "contains_sensitive_personal_information": "COALESCE(p.contains_sensitive_personal_information,'unknown') = 'unknown'", "data_volume_over_100k": "COALESCE(p.data_volume_over_100k,'unknown') = 'unknown'", "contains_important_data": "COALESCE(p.contains_important_data,'unknown') = 'unknown'", "contains_core_data": "COALESCE(p.contains_core_data,'unknown') = 'unknown'",
+		}
+		condition, ok := conditions[rule.TargetField]
+		if !ok {
+			return 0, fmt.Errorf("unsupported business system quality target: %s", rule.TargetField)
+		}
+		query = `SELECT count(*) FROM business_systems bs LEFT JOIN business_system_data_security_profiles p ON p.business_system_id=bs.id WHERE bs.owner_organization_id=$1::uuid AND bs.deleted_at IS NULL AND ` + condition
+	}
+	var count int64
+	if err := q.QueryRow(ctx, query, args...).Scan(&count); err != nil {
+		return 0, fmt.Errorf("count configured quality rule %s: %w", rule.ID, err)
+	}
+	return count, nil
+}
+
 func (s *Service) Submit(ctx context.Context, principal auth.Principal, taskID, organizationID string, input SubmissionInput, requestID, ipAddress string) (OrganizationProgress, error) {
 	if principal.HasRole("group_admin") {
 		return OrganizationProgress{}, ErrForbidden
@@ -288,6 +728,14 @@ func (s *Service) Submit(ctx context.Context, principal auth.Principal, taskID, 
 		return OrganizationProgress{}, fmt.Errorf("begin inventory task submission: %w", err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
+
+	quality, err := loadQualityCheck(ctx, tx, principal, taskID, organizationID)
+	if err != nil {
+		return OrganizationProgress{}, err
+	}
+	if !quality.Passed {
+		return OrganizationProgress{}, &QualityCheckError{Result: quality}
+	}
 
 	result, err := tx.Exec(ctx, contributorUpdatePrefix+`
 		UPDATE inventory_task_organizations ito
@@ -320,15 +768,28 @@ func (s *Service) Submit(ctx context.Context, principal auth.Principal, taskID, 
 	if result.RowsAffected() == 0 {
 		return OrganizationProgress{}, ErrState
 	}
-	if err := writeAudit(ctx, tx, principal, organizationID, "inventory_task.submit", taskID,
-		"提交填报任务", input.Note, "submitted", "", 0, requestID, ipAddress); err != nil {
+	snapshot, err := createSubmissionSnapshot(ctx, tx, principal, taskID, organizationID, input.Note)
+	if err != nil {
 		return OrganizationProgress{}, err
 	}
-	if err := completeIfApproved(ctx, tx, taskID); err != nil {
-		return OrganizationProgress{}, err
+	if _, err := tx.Exec(ctx, `
+		UPDATE inventory_task_organizations
+		SET latest_submission_id = $3::uuid,
+		    submitted_system_count = $4,
+		    submitted_asset_count = $5,
+		    updated_at = now()
+		WHERE task_id::text = $1 AND organization_id::text = $2
+	`, taskID, organizationID, snapshot.ID, snapshot.SystemCount, snapshot.AssetCount); err != nil {
+		return OrganizationProgress{}, fmt.Errorf("attach inventory submission snapshot: %w", err)
 	}
 	item, err := loadOrganizationProgress(ctx, tx, taskID, organizationID)
 	if err != nil {
+		return OrganizationProgress{}, err
+	}
+	if err := writeSubmissionAudit(ctx, tx, principal, organizationID, taskID, input.Note, item.Status, snapshot, requestID, ipAddress); err != nil {
+		return OrganizationProgress{}, err
+	}
+	if err := completeIfApproved(ctx, tx, taskID); err != nil {
 		return OrganizationProgress{}, err
 	}
 	if err := tx.Commit(ctx); err != nil {
@@ -350,12 +811,16 @@ func (s *Service) Review(ctx context.Context, principal auth.Principal, taskID, 
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 
+	if err := insertReviewComments(ctx, tx, principal, taskID, organizationID, input.Comments); err != nil {
+		return OrganizationProgress{}, err
+	}
+
 	result, err := tx.Exec(ctx, `
 		UPDATE inventory_task_organizations ito
-		SET status = $3,
+		SET status = $3::varchar,
 		    reviewed_by = $4::uuid,
 		    reviewed_at = now(),
-		    return_reason = CASE WHEN $3 = 'returned' THEN $5 ELSE NULL END,
+		    return_reason = CASE WHEN $3::varchar = 'returned'::varchar THEN $5 ELSE NULL END,
 		    updated_at = now()
 		FROM inventory_tasks t
 		WHERE t.id = ito.task_id AND t.id::text = $1 AND ito.organization_id::text = $2
@@ -370,6 +835,9 @@ func (s *Service) Review(ctx context.Context, principal auth.Principal, taskID, 
 	summary := "审核通过填报任务"
 	if input.Decision == "returned" {
 		summary = "退回填报任务"
+		if len(input.Comments) > 0 {
+			summary = fmt.Sprintf("退回填报任务（逐条意见 %d 条）", len(input.Comments))
+		}
 	}
 	if err := writeAudit(ctx, tx, principal, organizationID, "inventory_task.review", taskID,
 		summary, "", input.Decision, input.ReturnReason, 0, requestID, ipAddress); err != nil {
@@ -405,11 +873,11 @@ func (s *Service) UpdateStatus(ctx context.Context, principal auth.Principal, ta
 	defer func() { _ = tx.Rollback(ctx) }()
 	result, err := tx.Exec(ctx, `
 		UPDATE inventory_tasks
-		SET status = $2, updated_at = now()
+		SET status = $2::varchar, updated_at = now()
 		WHERE id::text = $1 AND (
-			(status = 'draft' AND $2 = 'active') OR
-			(status = 'active' AND $2 = 'closed') OR
-			(status IN ('draft', 'closed', 'completed') AND $2 = 'archived')
+			(status = 'draft' AND $2::varchar = 'active'::varchar) OR
+			(status = 'active' AND $2::varchar = 'closed'::varchar) OR
+			(status IN ('draft', 'closed', 'completed') AND $2::varchar = 'archived'::varchar)
 		)
 	`, taskID, input.Status)
 	if err != nil {
@@ -426,6 +894,95 @@ func (s *Service) UpdateStatus(ctx context.Context, principal auth.Principal, ta
 		return fmt.Errorf("commit inventory task status update: %w", err)
 	}
 	return nil
+}
+
+// SearchOrganizations returns one bounded page of organization progress for a
+// task. Non-group users only receive progress rows within their organization
+// data scope; draft tasks remain visible only to group administrators.
+func (s *Service) SearchOrganizations(ctx context.Context, principal auth.Principal, taskID string, page pagination.Query) (pagination.Result[OrganizationProgress], error) {
+	taskID = strings.TrimSpace(taskID)
+	if taskID == "" {
+		return pagination.Result[OrganizationProgress]{}, ErrInvalid
+	}
+	visibilityCTE := `
+		WITH RECURSIVE descendant_roots(id) AS (
+			SELECT ur.organization_id FROM user_roles ur
+			WHERE ur.user_id = $1::uuid AND ur.organization_id IS NOT NULL AND ur.data_scope = 'organization_and_descendants'
+		), descendants(id) AS (
+			SELECT id FROM descendant_roots
+			UNION SELECT child.id FROM organizations child JOIN descendants parent ON child.parent_id = parent.id
+		), accessible(id) AS (
+			SELECT ur.organization_id FROM user_roles ur
+			WHERE ur.user_id = $1::uuid AND ur.organization_id IS NOT NULL
+			  AND ur.data_scope IN ('organization', 'organization_and_descendants')
+			UNION SELECT id FROM descendants
+		)
+	`
+	where := `
+		WHERE ito.task_id::text = $2
+		  AND ($3::boolean OR (t.status <> 'draft' AND o.id IN (SELECT id FROM accessible)))
+	`
+	var visible bool
+	var total int
+	if err := s.pool.QueryRow(ctx, visibilityCTE+`
+		SELECT
+			EXISTS (
+				SELECT 1 FROM inventory_tasks visible_task
+				WHERE visible_task.id::text = $2
+				  AND ($3::boolean OR (
+					visible_task.status <> 'draft' AND EXISTS (
+						SELECT 1 FROM inventory_task_organizations visible_ito
+						WHERE visible_ito.task_id = visible_task.id
+						  AND visible_ito.organization_id IN (SELECT id FROM accessible)
+					)
+				  ))
+			),
+			(
+				SELECT count(*)
+				FROM inventory_task_organizations ito
+				JOIN inventory_tasks t ON t.id = ito.task_id
+				JOIN organizations o ON o.id = ito.organization_id
+		`+where+`
+			)
+	`, principal.UserID, taskID, principal.HasRole("group_admin")).Scan(&visible, &total); err != nil {
+		return pagination.Result[OrganizationProgress]{}, fmt.Errorf("count inventory task organizations: %w", err)
+	}
+	if !visible {
+		return pagination.Result[OrganizationProgress]{}, ErrNotFound
+	}
+
+	rows, err := s.pool.Query(ctx, visibilityCTE+`
+		SELECT o.id::text, o.organization_code, o.organization_name, ito.status,
+		       ito.started_at, ito.submitted_at, ito.reviewed_at, COALESCE(ito.submission_note, ''),
+		       ito.submitted_system_count, ito.submitted_asset_count,
+		       COALESCE(submitter.display_name, ''), COALESCE(reviewer.display_name, ''), COALESCE(ito.return_reason, ''),
+		       (ito.latest_submission_id IS NOT NULL), COALESCE(submission.submission_version, 0)
+		FROM inventory_task_organizations ito
+		JOIN inventory_tasks t ON t.id = ito.task_id
+		JOIN organizations o ON o.id = ito.organization_id
+		LEFT JOIN users submitter ON submitter.id = ito.submitted_by
+		LEFT JOIN users reviewer ON reviewer.id = ito.reviewed_by
+		LEFT JOIN inventory_submissions submission ON submission.id = ito.latest_submission_id
+	`+where+`
+		ORDER BY o.organization_code, o.id
+		LIMIT $4 OFFSET $5
+	`, principal.UserID, taskID, principal.HasRole("group_admin"), page.PageSize, page.Offset())
+	if err != nil {
+		return pagination.Result[OrganizationProgress]{}, fmt.Errorf("search inventory task organizations: %w", err)
+	}
+	defer rows.Close()
+	items := make([]OrganizationProgress, 0, page.PageSize)
+	for rows.Next() {
+		var item OrganizationProgress
+		if err := scanOrganizationProgress(rows, &item); err != nil {
+			return pagination.Result[OrganizationProgress]{}, fmt.Errorf("scan inventory task organization progress page: %w", err)
+		}
+		items = append(items, item)
+	}
+	if err := rows.Err(); err != nil {
+		return pagination.Result[OrganizationProgress]{}, fmt.Errorf("iterate inventory task organization progress page: %w", err)
+	}
+	return pagination.NewResult(items, total, page), nil
 }
 
 func (s *Service) listOrganizations(ctx context.Context, principal auth.Principal, taskID string) ([]OrganizationProgress, error) {
@@ -445,11 +1002,13 @@ func (s *Service) listOrganizations(ctx context.Context, principal auth.Principa
 		SELECT o.id::text, o.organization_code, o.organization_name, ito.status,
 		       ito.started_at, ito.submitted_at, ito.reviewed_at, COALESCE(ito.submission_note, ''),
 		       ito.submitted_system_count, ito.submitted_asset_count,
-		       COALESCE(submitter.display_name, ''), COALESCE(reviewer.display_name, ''), COALESCE(ito.return_reason, '')
+		       COALESCE(submitter.display_name, ''), COALESCE(reviewer.display_name, ''), COALESCE(ito.return_reason, ''),
+		       (ito.latest_submission_id IS NOT NULL), COALESCE(submission.submission_version, 0)
 		FROM inventory_task_organizations ito
 		JOIN organizations o ON o.id = ito.organization_id
 		LEFT JOIN users submitter ON submitter.id = ito.submitted_by
 		LEFT JOIN users reviewer ON reviewer.id = ito.reviewed_by
+		LEFT JOIN inventory_submissions submission ON submission.id = ito.latest_submission_id
 		WHERE ito.task_id::text = $2 AND ($3::boolean OR o.id IN (SELECT id FROM accessible))
 		ORDER BY o.organization_code
 	`, principal.UserID, taskID, principal.HasRole("group_admin"))
@@ -492,18 +1051,20 @@ type queryRower interface {
 
 func loadOrganizationProgress(ctx context.Context, q queryRower, taskID, organizationID string) (OrganizationProgress, error) {
 	var item OrganizationProgress
-	err := q.QueryRow(ctx, `
+	row := q.QueryRow(ctx, `
 		SELECT o.id::text, o.organization_code, o.organization_name, ito.status,
 		       ito.started_at, ito.submitted_at, ito.reviewed_at, COALESCE(ito.submission_note, ''),
 		       ito.submitted_system_count, ito.submitted_asset_count,
-		       COALESCE(submitter.display_name, ''), COALESCE(reviewer.display_name, ''), COALESCE(ito.return_reason, '')
+		       COALESCE(submitter.display_name, ''), COALESCE(reviewer.display_name, ''), COALESCE(ito.return_reason, ''),
+		       (ito.latest_submission_id IS NOT NULL), COALESCE(submission.submission_version, 0)
 		FROM inventory_task_organizations ito
 		JOIN organizations o ON o.id = ito.organization_id
 		LEFT JOIN users submitter ON submitter.id = ito.submitted_by
 		LEFT JOIN users reviewer ON reviewer.id = ito.reviewed_by
+		LEFT JOIN inventory_submissions submission ON submission.id = ito.latest_submission_id
 		WHERE ito.task_id::text = $1 AND ito.organization_id::text = $2
 	`, taskID, organizationID)
-	if err := scanOrganizationProgress(err, &item); err != nil {
+	if err := scanOrganizationProgress(row, &item); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return OrganizationProgress{}, ErrNotFound
 		}
@@ -520,7 +1081,7 @@ func scanOrganizationProgress(row rowScanner, item *OrganizationProgress) error 
 	return row.Scan(&item.OrganizationID, &item.OrganizationCode, &item.OrganizationName, &item.Status,
 		&item.StartedAt, &item.SubmittedAt, &item.ReviewedAt, &item.SubmissionNote,
 		&item.SubmittedSystemCount, &item.SubmittedAssetCount, &item.SubmittedByName,
-		&item.ReviewedByName, &item.ReturnReason)
+		&item.ReviewedByName, &item.ReturnReason, &item.SnapshotAvailable, &item.SubmissionVersion)
 }
 
 func completeIfApproved(ctx context.Context, tx pgx.Tx, taskID string) error {
@@ -582,7 +1143,14 @@ func normalizeReviewInput(input *ReviewInput) error {
 	}
 	if input.Decision == "approved" {
 		input.ReturnReason = ""
+		input.Comments = nil
+		return nil
 	}
+	comments, err := normalizeReviewComments(input.Comments)
+	if err != nil {
+		return err
+	}
+	input.Comments = comments
 	return nil
 }
 

@@ -13,13 +13,18 @@ import (
 func registerOrganizationRoutes(api *gin.RouterGroup, requireAuth gin.HandlerFunc, service *organization.Service, logger *slog.Logger) {
 	group := api.Group("/organizations", requireAuth)
 	group.GET("", func(c *gin.Context) {
-		items, err := service.List(c.Request.Context(), mustPrincipal(c))
+		page, err := parsePageQuery(c)
+		if err != nil {
+			writeAPIError(c, http.StatusBadRequest, "invalid_query", "分页参数不正确，page_size 最大为 100")
+			return
+		}
+		result, err := service.Search(c.Request.Context(), mustPrincipal(c), page)
 		if err != nil {
 			logger.Error("list organizations", "error", err, "request_id", c.GetString("request_id"))
 			writeAPIError(c, http.StatusInternalServerError, "internal_error", "读取组织机构失败")
 			return
 		}
-		c.JSON(http.StatusOK, gin.H{"items": items, "total": len(items)})
+		c.JSON(http.StatusOK, result)
 	})
 	group.POST("", func(c *gin.Context) {
 		var input organization.CreateInput

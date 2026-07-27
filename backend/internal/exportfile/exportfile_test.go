@@ -1,0 +1,64 @@
+package exportfile
+
+import (
+	"bytes"
+	"encoding/csv"
+	"errors"
+	"strings"
+	"testing"
+
+	"github.com/xuri/excelize/v2"
+)
+
+func TestBuildCSVIncludesBOMAndRows(t *testing.T) {
+	data, contentType, fileName, err := Build("csv", "测试台账", []string{"名称", "备注"}, [][]string{{"南博集团", "包含,逗号"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if contentType != "text/csv; charset=utf-8" || fileName != "测试台账.csv" {
+		t.Fatalf("unexpected metadata: %q %q", contentType, fileName)
+	}
+	if !bytes.HasPrefix(data, []byte("\xEF\xBB\xBF")) {
+		t.Fatal("CSV does not include UTF-8 BOM")
+	}
+	rows, err := csv.NewReader(bytes.NewReader(bytes.TrimPrefix(data, []byte("\xEF\xBB\xBF")))).ReadAll()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 2 || rows[0][0] != "名称" || rows[1][0] != "南博集团" || rows[1][1] != "包含,逗号" {
+		t.Fatalf("unexpected CSV rows: %#v", rows)
+	}
+}
+
+func TestBuildXLSXIncludesStyledLedger(t *testing.T) {
+	data, contentType, fileName, err := Build("xlsx", "测试台账", []string{"组织", "资产"}, [][]string{{"南博集团", "portal.example.com"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(contentType, "spreadsheetml") || fileName != "测试台账.xlsx" {
+		t.Fatalf("unexpected metadata: %q %q", contentType, fileName)
+	}
+	file, err := excelize.OpenReader(bytes.NewReader(data))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer file.Close()
+	rows, err := file.GetRows("台账")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 2 || rows[0][0] != "组织" || rows[1][1] != "portal.example.com" {
+		t.Fatalf("unexpected XLSX rows: %#v", rows)
+	}
+	styleID, err := file.GetCellStyle("台账", "A1")
+	if err != nil || styleID == 0 {
+		t.Fatalf("header style was not applied: style=%d err=%v", styleID, err)
+	}
+}
+
+func TestBuildRejectsUnknownFormat(t *testing.T) {
+	_, _, _, err := Build("xls", "测试台账", nil, nil)
+	if !errors.Is(err, ErrInvalidFormat) {
+		t.Fatalf("Build(xls) error = %v", err)
+	}
+}

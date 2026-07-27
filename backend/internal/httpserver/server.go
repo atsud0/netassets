@@ -13,12 +13,25 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"netassets/internal/asset"
+	"netassets/internal/assetcandidate"
+	"netassets/internal/auditlog"
 	"netassets/internal/auth"
+	"netassets/internal/backup"
 	"netassets/internal/buildinfo"
 	"netassets/internal/businesssystem"
+	"netassets/internal/changehistory"
 	"netassets/internal/config"
+	"netassets/internal/customfield"
+	"netassets/internal/dashboard"
+	"netassets/internal/dataquality"
 	"netassets/internal/inventorytask"
+	"netassets/internal/networkarea"
+	"netassets/internal/notification"
 	"netassets/internal/organization"
+	"netassets/internal/recyclebin"
+	roleDomain "netassets/internal/role"
+	"netassets/internal/securitytestbatch"
+	"netassets/internal/securityworkorder"
 	userdomain "netassets/internal/user"
 )
 
@@ -45,13 +58,31 @@ func New(cfg config.Config, pool *pgxpool.Pool, logger *slog.Logger) http.Handle
 		})
 	})
 	if pool != nil {
+		backupService := backup.NewService(pool, cfg.DatabaseURL, cfg.DataDir)
+		router.Use(writeMaintenanceMiddleware(backupService.WriteGate()))
 		authService := auth.NewService(pool, cfg.SessionTTL)
 		requireAuth := registerAuthRoutes(api, cfg, authService, logger)
 		registerOrganizationRoutes(api, requireAuth, organization.NewService(pool), logger)
 		registerUserRoutes(api, requireAuth, userdomain.NewService(pool), logger)
-		registerBusinessSystemRoutes(api, requireAuth, businesssystem.NewService(pool), logger)
-		registerAssetRoutes(api, requireAuth, asset.NewService(pool), logger)
+		registerRoleRoutes(api, requireAuth, roleDomain.NewService(pool), logger)
+		customFieldService := customfield.NewService(pool)
+		businessSystemService := businesssystem.NewService(pool)
+		registerBusinessSystemRoutes(api, requireAuth, businessSystemService, customFieldService, logger)
+		assetService := asset.NewService(pool)
+		registerAssetRoutes(api, requireAuth, assetService, customFieldService, logger)
+		registerAssetCandidateRoutes(api, requireAuth, assetcandidate.NewService(pool, assetService), logger)
+		registerNetworkAreaRoutes(api, requireAuth, networkarea.NewService(pool), logger)
+		registerCustomFieldRoutes(api, requireAuth, customFieldService, logger)
+		registerDataQualityRuleRoutes(api, requireAuth, dataquality.NewService(pool), logger)
 		registerInventoryTaskRoutes(api, requireAuth, inventorytask.NewService(pool), logger)
+		registerDashboardRoutes(api, requireAuth, dashboard.NewService(pool), logger)
+		registerAuditLogRoutes(api, requireAuth, auditlog.NewService(pool), logger)
+		registerChangeHistoryRoutes(api, requireAuth, changehistory.NewService(pool), logger)
+		registerRecycleBinRoutes(api, requireAuth, recyclebin.NewService(pool), logger)
+		registerNotificationRoutes(api, requireAuth, notification.NewService(pool), logger)
+		registerSecurityWorkOrderRoutes(api, requireAuth, securityworkorder.NewService(pool, cfg.DataDir), logger)
+		registerSecurityTestBatchRoutes(api, requireAuth, securitytestbatch.NewService(pool, cfg.DataDir), logger)
+		registerBackupRoutes(api, requireAuth, backupService, logger)
 	}
 
 	registerStaticFrontend(router, cfg.StaticDir)
@@ -115,9 +146,9 @@ func registerStaticFrontend(router *gin.Engine, staticDir string) {
 	if err != nil || !info.IsDir() {
 		return
 	}
-	assetsDir := filepath.Join(staticDir, "assets")
+	assetsDir := filepath.Join(staticDir, "_assets")
 	if _, err := os.Stat(assetsDir); err == nil {
-		router.Static("/assets", assetsDir)
+		router.Static("/_assets", assetsDir)
 	}
 	router.NoRoute(func(c *gin.Context) {
 		if strings.HasPrefix(c.Request.URL.Path, "/api/") || strings.HasPrefix(c.Request.URL.Path, "/health/") {

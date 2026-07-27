@@ -22,6 +22,9 @@ import (
 
 	"netassets/internal/access"
 	"netassets/internal/auth"
+	"netassets/internal/customfield"
+	"netassets/internal/exportfile"
+	"netassets/internal/pagination"
 )
 
 var (
@@ -47,6 +50,8 @@ type Asset struct {
 	BusinessSystemName string    `json:"business_system_name,omitempty"`
 	Environment        string    `json:"environment"`
 	NetworkScope       string    `json:"network_scope"`
+	NetworkAreaID      string    `json:"network_area_id,omitempty"`
+	NetworkAreaName    string    `json:"network_area_name,omitempty"`
 	Status             string    `json:"status"`
 	Importance         string    `json:"importance"`
 	Source             string    `json:"source"`
@@ -64,6 +69,7 @@ type CreateInput struct {
 	BusinessSystemID string `json:"business_system_id"`
 	Environment      string `json:"environment"`
 	NetworkScope     string `json:"network_scope"`
+	NetworkAreaID    string `json:"network_area_id"`
 	Status           string `json:"status"`
 	Importance       string `json:"importance"`
 	OwnerName        string `json:"owner_name"`
@@ -97,20 +103,52 @@ type ImportHistory struct {
 	CreatedAt        time.Time `json:"created_at"`
 }
 
+type ExportFilter struct {
+	OrganizationID string
+	Type           string
+	Status         string
+	Keyword        string
+}
+
+// SearchFilter describes the server-side filters available on the asset ledger.
+// It deliberately shares the visible filter names with the HTTP API, while page
+// controls the bounded result window.
+type SearchFilter struct {
+	OrganizationID string
+	Type           string
+	Status         string
+	Keyword        string
+	Page           pagination.Query
+}
+
 type Service struct{ pool *pgxpool.Pool }
+
+type fieldChange struct {
+	Field  string `json:"field"`
+	Label  string `json:"label"`
+	Before string `json:"before"`
+	After  string `json:"after"`
+}
 
 func NewService(pool *pgxpool.Pool) *Service { return &Service{pool: pool} }
 
 func (s *Service) List(ctx context.Context, principal auth.Principal) ([]Asset, error) {
+	if !principal.HasPermission("asset.manage") {
+		return nil, ErrForbidden
+	}
 	rows, err := s.pool.Query(ctx, `
 		WITH RECURSIVE descendant_roots(id) AS (
 			SELECT ur.organization_id FROM user_roles ur
+			JOIN roles r ON r.id = ur.role_id AND r.status = 'enabled'
+			JOIN role_permissions rp ON rp.role_id = r.id AND rp.permission_key = 'asset.manage'
 			WHERE ur.user_id = $1::uuid AND ur.organization_id IS NOT NULL AND ur.data_scope = 'organization_and_descendants'
 		), descendants(id) AS (
 			SELECT id FROM descendant_roots
 			UNION SELECT child.id FROM organizations child JOIN descendants parent ON child.parent_id = parent.id
 		), accessible(id) AS (
 			SELECT ur.organization_id FROM user_roles ur
+			JOIN roles r ON r.id = ur.role_id AND r.status = 'enabled'
+			JOIN role_permissions rp ON rp.role_id = r.id AND rp.permission_key = 'asset.manage'
 			WHERE ur.user_id = $1::uuid AND ur.organization_id IS NOT NULL
 			  AND ur.data_scope IN ('organization', 'organization_and_descendants')
 			UNION SELECT id FROM descendants
@@ -118,9 +156,11 @@ func (s *Service) List(ctx context.Context, principal auth.Principal) ([]Asset, 
 		SELECT a.id::text, a.asset_type, a.asset_value, a.normalized_value, COALESCE(a.asset_name, ''),
 		       o.id::text, o.organization_code, o.organization_name,
 		       COALESCE(bs.id::text, ''), COALESCE(bs.system_code, ''), COALESCE(bs.system_name, ''),
-		       a.environment, a.network_scope, a.status, a.importance, a.source,
+		       a.environment, a.network_scope, COALESCE(na.id::text, ''), COALESCE(na.area_name, ''),
+		       a.status, a.importance, a.source,
 		       COALESCE(ao.owner_name, ''), COALESCE(a.notes, ''), a.created_at, a.updated_at
 		FROM assets a
+		LEFT JOIN asset_network_areas na ON na.id = a.network_area_id
 		JOIN asset_organizations ao ON ao.asset_id = a.id AND ao.is_primary
 		JOIN organizations o ON o.id = ao.organization_id
 		LEFT JOIN LATERAL (
@@ -142,8 +182,8 @@ func (s *Service) List(ctx context.Context, principal auth.Principal) ([]Asset, 
 		if err := rows.Scan(&item.ID, &item.Type, &item.Value, &item.NormalizedValue, &item.Name,
 			&item.OrganizationID, &item.OrganizationCode, &item.OrganizationName,
 			&item.BusinessSystemID, &item.BusinessSystemCode, &item.BusinessSystemName,
-			&item.Environment, &item.NetworkScope, &item.Status, &item.Importance, &item.Source,
-			&item.OwnerName, &item.Notes, &item.CreatedAt, &item.UpdatedAt); err != nil {
+			&item.Environment, &item.NetworkScope, &item.NetworkAreaID, &item.NetworkAreaName,
+			&item.Status, &item.Importance, &item.Source, &item.OwnerName, &item.Notes, &item.CreatedAt, &item.UpdatedAt); err != nil {
 			return nil, fmt.Errorf("scan asset: %w", err)
 		}
 		items = append(items, item)
@@ -154,13 +194,258 @@ func (s *Service) List(ctx context.Context, principal auth.Principal) ([]Asset, 
 	return items, nil
 }
 
+// Search returns a bounded database page of assets. The window total is computed
+// before LIMIT/OFFSET, so callers receive the real scoped result count without
+// materializing the complete asset inventory in the application process.
+func (s *Service) Search(ctx context.Context, principal auth.Principal, query pagination.Query) (pagination.Result[Asset], error) {
+	return s.SearchWithFilter(ctx, principal, SearchFilter{Page: query})
+}
+
+// SearchWithFilter returns a bounded database page of assets. Filtering is
+// applied in SQL before count(*) OVER(), so total always represents the real
+// number of records visible to the caller under the active filters.
+func (s *Service) SearchWithFilter(ctx context.Context, principal auth.Principal, filter SearchFilter) (pagination.Result[Asset], error) {
+	if !principal.HasPermission("asset.manage") {
+		return pagination.Result[Asset]{}, ErrForbidden
+	}
+	query := filter.Page
+	rows, err := s.pool.Query(ctx, `
+		WITH RECURSIVE descendant_roots(id) AS (
+			SELECT ur.organization_id FROM user_roles ur
+			JOIN roles r ON r.id = ur.role_id AND r.status = 'enabled'
+			JOIN role_permissions rp ON rp.role_id = r.id AND rp.permission_key = 'asset.manage'
+			WHERE ur.user_id = $1::uuid AND ur.organization_id IS NOT NULL AND ur.data_scope = 'organization_and_descendants'
+		), descendants(id) AS (
+			SELECT id FROM descendant_roots
+			UNION SELECT child.id FROM organizations child JOIN descendants parent ON child.parent_id = parent.id
+		), accessible(id) AS (
+			SELECT ur.organization_id FROM user_roles ur
+			JOIN roles r ON r.id = ur.role_id AND r.status = 'enabled'
+			JOIN role_permissions rp ON rp.role_id = r.id AND rp.permission_key = 'asset.manage'
+			WHERE ur.user_id = $1::uuid AND ur.organization_id IS NOT NULL
+			  AND ur.data_scope IN ('organization', 'organization_and_descendants')
+			UNION SELECT id FROM descendants
+		)
+		SELECT a.id::text, a.asset_type, a.asset_value, a.normalized_value, COALESCE(a.asset_name, ''),
+		       o.id::text, o.organization_code, o.organization_name,
+		       COALESCE(bs.id::text, ''), COALESCE(bs.system_code, ''), COALESCE(bs.system_name, ''),
+		       a.environment, a.network_scope, COALESCE(na.id::text, ''), COALESCE(na.area_name, ''),
+		       a.status, a.importance, a.source,
+		       COALESCE(ao.owner_name, ''), COALESCE(a.notes, ''), a.created_at, a.updated_at,
+		       count(*) OVER ()
+		FROM assets a
+		LEFT JOIN asset_network_areas na ON na.id = a.network_area_id
+		JOIN asset_organizations ao ON ao.asset_id = a.id AND ao.is_primary
+		JOIN organizations o ON o.id = ao.organization_id
+		LEFT JOIN LATERAL (
+			SELECT system.id, system.system_code, system.system_name
+			FROM system_assets sa JOIN business_systems system ON system.id = sa.business_system_id
+			WHERE sa.asset_id = a.id AND system.deleted_at IS NULL
+			ORDER BY sa.is_primary DESC, sa.created_at LIMIT 1
+		) bs ON true
+		WHERE a.deleted_at IS NULL AND ($2::boolean OR o.id IN (SELECT id FROM accessible))
+		  AND ($3 = '' OR a.asset_type = $3)
+		  AND ($4 = '' OR a.status = $4)
+		  AND ($5 = '' OR o.id::text = $5)
+		  AND ($6 = '' OR concat_ws(' ', a.asset_value, a.asset_name, o.organization_name, bs.system_name, bs.system_code, na.area_name, ao.owner_name) ILIKE '%' || $6 || '%')
+		ORDER BY o.organization_code, a.asset_type, a.normalized_value
+		LIMIT $7 OFFSET $8
+	`, principal.UserID, principal.HasRole("group_admin"), strings.TrimSpace(filter.Type), strings.TrimSpace(filter.Status), strings.TrimSpace(filter.OrganizationID), strings.TrimSpace(filter.Keyword), query.PageSize, query.Offset())
+	if err != nil {
+		return pagination.Result[Asset]{}, fmt.Errorf("search assets: %w", err)
+	}
+	defer rows.Close()
+	items := make([]Asset, 0, query.PageSize)
+	total := 0
+	for rows.Next() {
+		var item Asset
+		if err := rows.Scan(&item.ID, &item.Type, &item.Value, &item.NormalizedValue, &item.Name,
+			&item.OrganizationID, &item.OrganizationCode, &item.OrganizationName,
+			&item.BusinessSystemID, &item.BusinessSystemCode, &item.BusinessSystemName,
+			&item.Environment, &item.NetworkScope, &item.NetworkAreaID, &item.NetworkAreaName,
+			&item.Status, &item.Importance, &item.Source, &item.OwnerName, &item.Notes, &item.CreatedAt, &item.UpdatedAt, &total); err != nil {
+			return pagination.Result[Asset]{}, fmt.Errorf("scan asset page: %w", err)
+		}
+		items = append(items, item)
+	}
+	if err := rows.Err(); err != nil {
+		return pagination.Result[Asset]{}, fmt.Errorf("iterate asset page: %w", err)
+	}
+	if pagination.NeedsTotalFallback(len(items), query) {
+		if err := s.pool.QueryRow(ctx, `
+            WITH RECURSIVE descendant_roots(id) AS (
+                SELECT ur.organization_id FROM user_roles ur
+                JOIN roles r ON r.id = ur.role_id AND r.status = 'enabled'
+                JOIN role_permissions rp ON rp.role_id = r.id AND rp.permission_key = 'asset.manage'
+                WHERE ur.user_id = $1::uuid AND ur.organization_id IS NOT NULL AND ur.data_scope = 'organization_and_descendants'
+            ), descendants(id) AS (
+                SELECT id FROM descendant_roots
+                UNION SELECT child.id FROM organizations child JOIN descendants parent ON child.parent_id = parent.id
+            ), accessible(id) AS (
+                SELECT ur.organization_id FROM user_roles ur
+                JOIN roles r ON r.id = ur.role_id AND r.status = 'enabled'
+                JOIN role_permissions rp ON rp.role_id = r.id AND rp.permission_key = 'asset.manage'
+                WHERE ur.user_id = $1::uuid AND ur.organization_id IS NOT NULL
+                  AND ur.data_scope IN ('organization', 'organization_and_descendants')
+                UNION SELECT id FROM descendants
+            )
+            SELECT count(*)
+            FROM assets a
+            LEFT JOIN asset_network_areas na ON na.id = a.network_area_id
+            JOIN asset_organizations ao ON ao.asset_id = a.id AND ao.is_primary
+            JOIN organizations o ON o.id = ao.organization_id
+            LEFT JOIN LATERAL (
+                SELECT system.id, system.system_code, system.system_name
+                FROM system_assets sa JOIN business_systems system ON system.id = sa.business_system_id
+                WHERE sa.asset_id = a.id AND system.deleted_at IS NULL
+                ORDER BY sa.is_primary DESC, sa.created_at LIMIT 1
+            ) bs ON true
+            WHERE a.deleted_at IS NULL AND ($2::boolean OR o.id IN (SELECT id FROM accessible))
+              AND ($3 = '' OR a.asset_type = $3)
+              AND ($4 = '' OR a.status = $4)
+              AND ($5 = '' OR o.id::text = $5)
+              AND ($6 = '' OR concat_ws(' ', a.asset_value, a.asset_name, o.organization_name, bs.system_name, bs.system_code, na.area_name, ao.owner_name) ILIKE '%' || $6 || '%')
+        `, principal.UserID, principal.HasRole("group_admin"), strings.TrimSpace(filter.Type), strings.TrimSpace(filter.Status), strings.TrimSpace(filter.OrganizationID), strings.TrimSpace(filter.Keyword)).Scan(&total); err != nil {
+			return pagination.Result[Asset]{}, fmt.Errorf("count assets: %w", err)
+		}
+	}
+	return pagination.NewResult(items, total, query), nil
+}
+
+func (s *Service) Export(ctx context.Context, principal auth.Principal, filter ExportFilter, format, requestID, ipAddress string) ([]byte, string, string, int, error) {
+	items, err := s.List(ctx, principal)
+	if err != nil {
+		return nil, "", "", 0, err
+	}
+	items = filterExportAssets(items, filter)
+	customService := customfield.NewService(s.pool)
+	definitions, err := customService.EnabledDefinitions(ctx, "asset")
+	if err != nil {
+		return nil, "", "", 0, fmt.Errorf("load asset custom field definitions: %w", err)
+	}
+	ids := make([]string, 0, len(items))
+	for _, item := range items {
+		ids = append(ids, item.ID)
+	}
+	customValues, err := customService.ValuesForResources(ctx, "asset", ids)
+	if err != nil {
+		return nil, "", "", 0, fmt.Errorf("load asset custom field values: %w", err)
+	}
+	data, contentType, fileName, err := buildExportWithCustomFields(items, definitions, customValues, format)
+	if err != nil {
+		return nil, "", "", 0, err
+	}
+	organizationID := ""
+	if principal.Organization != nil {
+		organizationID = principal.Organization.ID
+	}
+	if _, err := s.pool.Exec(ctx, `
+		INSERT INTO audit_logs (user_id, organization_id, action, resource_type, summary, details, request_ip, request_id)
+		VALUES ($1::uuid, NULLIF($2, '')::uuid, 'asset.export', 'asset', '导出网络资产台账',
+		        jsonb_build_object('format', $3::text, 'count', $4::int, 'organization_id', $5::text, 'type', $6::text, 'status', $7::text, 'keyword', $8::text),
+		        NULLIF($9, '')::inet, NULLIF($10, ''))
+	`, principal.UserID, organizationID, strings.ToLower(strings.TrimPrefix(format, ".")), len(items), filter.OrganizationID, filter.Type, filter.Status, filter.Keyword, ipAddress, requestID); err != nil {
+		return nil, "", "", 0, fmt.Errorf("write asset export audit: %w", err)
+	}
+	return data, contentType, fileName, len(items), nil
+}
+
+func filterExportAssets(items []Asset, filter ExportFilter) []Asset {
+	keyword := strings.ToLower(strings.TrimSpace(filter.Keyword))
+	result := make([]Asset, 0, len(items))
+	for _, item := range items {
+		if filter.OrganizationID != "" && item.OrganizationID != filter.OrganizationID {
+			continue
+		}
+		if filter.Type != "" && item.Type != filter.Type {
+			continue
+		}
+		if filter.Status != "" && item.Status != filter.Status {
+			continue
+		}
+		if keyword != "" {
+			values := []string{item.Value, item.Name, item.OrganizationCode, item.OrganizationName, item.BusinessSystemCode, item.BusinessSystemName, item.OwnerName}
+			matched := false
+			for _, value := range values {
+				if strings.Contains(strings.ToLower(value), keyword) {
+					matched = true
+					break
+				}
+			}
+			if !matched {
+				continue
+			}
+		}
+		result = append(result, item)
+	}
+	return result
+}
+
+func buildExport(items []Asset, format string) ([]byte, string, string, error) {
+	return buildExportWithCustomFields(items, nil, nil, format)
+}
+
+func buildExportWithCustomFields(items []Asset, definitions []customfield.Definition, values map[string]map[string]any, format string) ([]byte, string, string, error) {
+	headers := []string{"所属组织编码", "所属组织名称", "资产类型", "资产值", "资产名称", "业务系统编码", "业务系统名称", "环境", "网络暴露范围", "网络区域", "状态", "重要程度", "来源", "负责人", "备注", "创建时间", "更新时间"}
+	for _, definition := range definitions {
+		headers = append(headers, "自定义："+definition.FieldName)
+	}
+	rows := make([][]string, 0, len(items))
+	for _, item := range items {
+		row := []string{
+			item.OrganizationCode, item.OrganizationName, assetExportLabel("type", item.Type), item.Value, item.Name,
+			item.BusinessSystemCode, item.BusinessSystemName, assetExportLabel("environment", item.Environment), assetExportLabel("scope", item.NetworkScope), item.NetworkAreaName,
+			assetExportLabel("status", item.Status), assetExportLabel("importance", item.Importance), assetExportLabel("source", item.Source),
+			item.OwnerName, item.Notes, formatExportTime(item.CreatedAt), formatExportTime(item.UpdatedAt),
+		}
+		for _, definition := range definitions {
+			row = append(row, customfield.ExportValue(definition, values[item.ID][definition.FieldKey]))
+		}
+		rows = append(rows, row)
+	}
+	data, contentType, fileName, err := exportfile.Build(format, "网络资产台账", headers, rows)
+	if errors.Is(err, exportfile.ErrInvalidFormat) {
+		return nil, "", "", ErrInvalid
+	}
+	return data, contentType, fileName, err
+}
+
+func assetExportLabel(kind, value string) string {
+	labels := map[string]map[string]string{
+		"type":        {"domain": "域名", "ip": "IP 地址", "url": "URL", "service": "网络服务", "other": "其他"},
+		"environment": {"production": "生产", "staging": "预发布", "testing": "测试", "development": "开发", "office": "办公", "other": "其他"},
+		"scope":       {"public": "公网", "private": "内网", "unknown": "未知"},
+		"status":      {"active": "启用", "pending": "待确认", "disabled": "停用", "archived": "已归档"},
+		"importance":  {"normal": "一般", "important": "重要", "core": "核心"},
+		"source":      {"manual": "手工", "import": "导入", "api": "API", "plugin": "插件"},
+	}
+	if label, ok := labels[kind][value]; ok {
+		return label
+	}
+	return value
+}
+
+func formatExportTime(value time.Time) string {
+	if value.IsZero() {
+		return ""
+	}
+	return value.Format("2006-01-02 15:04:05Z07:00")
+}
+
 func (s *Service) Create(ctx context.Context, principal auth.Principal, input CreateInput, source, requestID, ipAddress string) (Asset, error) {
+	return s.create(ctx, principal, input, source, requestID, ipAddress, nil)
+}
+
+func (s *Service) create(ctx context.Context, principal auth.Principal, input CreateInput, source, requestID, ipAddress string, afterCreate func(pgx.Tx, Asset) error) (Asset, error) {
+	if !principal.HasPermission("asset.manage") {
+		return Asset{}, ErrForbidden
+	}
 	normalizeInput(&input)
 	normalizedValue, err := normalizeValue(input.Type, input.Value)
 	if err != nil || !validInput(input) {
 		return Asset{}, ErrInvalid
 	}
-	allowed, err := access.CanAccessOrganization(ctx, s.pool, principal, input.OrganizationID)
+	allowed, err := access.CanOperateOrganization(ctx, s.pool, principal, input.OrganizationID, "asset.manage")
 	if err != nil {
 		return Asset{}, err
 	}
@@ -176,6 +461,11 @@ func (s *Service) Create(ctx context.Context, principal auth.Principal, input Cr
 	item, err := createInTx(ctx, tx, principal, input, normalizedValue, source)
 	if err != nil {
 		return Asset{}, err
+	}
+	if afterCreate != nil {
+		if err := afterCreate(tx, item); err != nil {
+			return Asset{}, err
+		}
 	}
 	if _, err := tx.Exec(ctx, `
 		INSERT INTO audit_logs (user_id, organization_id, action, resource_type, resource_id, summary, details, request_ip, request_id)
@@ -202,6 +492,10 @@ func createInTx(ctx context.Context, tx pgx.Tx, principal auth.Principal, input 
 	if organizationStatus != "enabled" {
 		return Asset{}, ErrInvalid
 	}
+	networkAreaName, err := validateNetworkArea(ctx, tx, input.NetworkAreaID, input.OrganizationID, false)
+	if err != nil {
+		return Asset{}, err
+	}
 
 	var systemCode, systemName string
 	if input.BusinessSystemID != "" {
@@ -218,12 +512,12 @@ func createInTx(ctx context.Context, tx pgx.Tx, principal auth.Principal, input 
 	}
 
 	var item Asset
-	err := tx.QueryRow(ctx, `
-		INSERT INTO assets (asset_type, asset_value, normalized_value, asset_name, environment, network_scope,
+	err = tx.QueryRow(ctx, `
+		INSERT INTO assets (asset_type, asset_value, normalized_value, asset_name, environment, network_scope, network_area_id,
 		                    status, importance, source, notes, created_by, updated_by, first_seen_at, last_seen_at)
-		VALUES ($1, $2, $3, NULLIF($4, ''), $5, $6, $7, $8, $9, NULLIF($10, ''), $11::uuid, $11::uuid, now(), now())
+		VALUES ($1, $2, $3, NULLIF($4, ''), $5, $6, NULLIF($7, '')::uuid, $8, $9, $10, NULLIF($11, ''), $12::uuid, $12::uuid, now(), now())
 		RETURNING id::text, created_at, updated_at
-	`, input.Type, input.Value, normalizedValue, input.Name, input.Environment, input.NetworkScope,
+	`, input.Type, input.Value, normalizedValue, input.Name, input.Environment, input.NetworkScope, input.NetworkAreaID,
 		input.Status, input.Importance, source, input.Notes, principal.UserID).Scan(&item.ID, &item.CreatedAt, &item.UpdatedAt)
 	if err != nil {
 		var pgErr *pgconn.PgError
@@ -249,12 +543,16 @@ func createInTx(ctx context.Context, tx pgx.Tx, principal auth.Principal, input 
 	item.Type, item.Value, item.NormalizedValue, item.Name = input.Type, input.Value, normalizedValue, input.Name
 	item.OrganizationID, item.OrganizationCode, item.OrganizationName = input.OrganizationID, organizationCode, organizationName
 	item.BusinessSystemID, item.BusinessSystemCode, item.BusinessSystemName = input.BusinessSystemID, systemCode, systemName
-	item.Environment, item.NetworkScope, item.Status, item.Importance = input.Environment, input.NetworkScope, input.Status, input.Importance
+	item.Environment, item.NetworkScope, item.NetworkAreaID, item.NetworkAreaName = input.Environment, input.NetworkScope, input.NetworkAreaID, networkAreaName
+	item.Status, item.Importance = input.Status, input.Importance
 	item.Source, item.OwnerName, item.Notes = source, input.OwnerName, input.Notes
 	return item, nil
 }
 
 func (s *Service) Get(ctx context.Context, principal auth.Principal, assetID string) (Asset, error) {
+	if !principal.HasPermission("asset.manage") {
+		return Asset{}, ErrForbidden
+	}
 	if _, err := s.authorizeAsset(ctx, principal, assetID); err != nil {
 		return Asset{}, err
 	}
@@ -262,6 +560,9 @@ func (s *Service) Get(ctx context.Context, principal auth.Principal, assetID str
 }
 
 func (s *Service) Update(ctx context.Context, principal auth.Principal, assetID string, input CreateInput, requestID, ipAddress string) (Asset, error) {
+	if !principal.HasPermission("asset.manage") {
+		return Asset{}, ErrForbidden
+	}
 	current, err := s.Get(ctx, principal, assetID)
 	if err != nil {
 		return Asset{}, err
@@ -274,7 +575,7 @@ func (s *Service) Update(ctx context.Context, principal auth.Principal, assetID 
 	if input.OrganizationID != current.OrganizationID && !principal.HasRole("group_admin") {
 		return Asset{}, ErrForbidden
 	}
-	allowed, err := access.CanAccessOrganization(ctx, s.pool, principal, input.OrganizationID)
+	allowed, err := access.CanOperateOrganization(ctx, s.pool, principal, input.OrganizationID, "asset.manage")
 	if err != nil {
 		return Asset{}, err
 	}
@@ -298,6 +599,10 @@ func (s *Service) Update(ctx context.Context, principal auth.Principal, assetID 
 	if organizationStatus != "enabled" {
 		return Asset{}, ErrInvalid
 	}
+	networkAreaName, err := validateNetworkArea(ctx, tx, input.NetworkAreaID, input.OrganizationID, current.NetworkAreaID == input.NetworkAreaID)
+	if err != nil {
+		return Asset{}, err
+	}
 
 	var systemCode, systemName string
 	if input.BusinessSystemID != "" {
@@ -317,10 +622,10 @@ func (s *Service) Update(ctx context.Context, principal auth.Principal, assetID 
 
 	command, err := tx.Exec(ctx, `
 		UPDATE assets SET asset_type = $2, asset_value = $3, normalized_value = $4, asset_name = NULLIF($5, ''),
-		                  environment = $6, network_scope = $7, status = $8, importance = $9,
-		                  notes = NULLIF($10, ''), updated_by = $11::uuid, updated_at = now()
+		                  environment = $6, network_scope = $7, network_area_id = NULLIF($8, '')::uuid, status = $9, importance = $10,
+		                  notes = NULLIF($11, ''), updated_by = $12::uuid, updated_at = now()
 		WHERE id::text = $1 AND deleted_at IS NULL
-	`, assetID, input.Type, input.Value, normalizedValue, input.Name, input.Environment, input.NetworkScope,
+	`, assetID, input.Type, input.Value, normalizedValue, input.Name, input.Environment, input.NetworkScope, input.NetworkAreaID,
 		input.Status, input.Importance, input.Notes, principal.UserID)
 	if err != nil {
 		var pgErr *pgconn.PgError
@@ -352,14 +657,15 @@ func (s *Service) Update(ctx context.Context, principal auth.Principal, assetID 
 			return Asset{}, fmt.Errorf("update asset system: %w", err)
 		}
 	}
+	changesJSON, err := json.Marshal(assetFieldChanges(current, input, organizationName, systemName, networkAreaName))
+	if err != nil {
+		return Asset{}, fmt.Errorf("encode asset changes: %w", err)
+	}
 	if _, err := tx.Exec(ctx, `
 		INSERT INTO audit_logs (user_id, organization_id, action, resource_type, resource_id, summary, details, request_ip, request_id)
 		VALUES ($1::uuid, $2::uuid, 'asset.update', 'asset', $3, '编辑网络资产',
-		        jsonb_build_object('old_type', $4::text, 'old_value', $5::text, 'old_organization_id', $6::text,
-		                           'type', $7::text, 'value', $8::text, 'status', $9::text),
-		        NULLIF($10, '')::inet, NULLIF($11, ''))
-	`, principal.UserID, input.OrganizationID, assetID, current.Type, current.Value, current.OrganizationID,
-		input.Type, input.Value, input.Status, ipAddress, requestID); err != nil {
+		        jsonb_build_object('changes', $4::jsonb), NULLIF($5, '')::inet, NULLIF($6, ''))
+	`, principal.UserID, input.OrganizationID, assetID, changesJSON, ipAddress, requestID); err != nil {
 		return Asset{}, fmt.Errorf("write asset update audit: %w", err)
 	}
 	if err := tx.Commit(ctx); err != nil {
@@ -369,6 +675,9 @@ func (s *Service) Update(ctx context.Context, principal auth.Principal, assetID 
 }
 
 func (s *Service) Delete(ctx context.Context, principal auth.Principal, assetID, requestID, ipAddress string) error {
+	if !principal.HasPermission("asset.manage") {
+		return ErrForbidden
+	}
 	current, err := s.Get(ctx, principal, assetID)
 	if err != nil {
 		return err
@@ -402,52 +711,69 @@ func (s *Service) Delete(ctx context.Context, principal auth.Principal, assetID,
 }
 
 func (s *Service) ListImports(ctx context.Context, principal auth.Principal) ([]ImportHistory, error) {
+	result, err := s.SearchImports(ctx, principal, pagination.Query{Page: 1, PageSize: pagination.MaxPageSize})
+	return result.Items, err
+}
+
+func (s *Service) SearchImports(ctx context.Context, principal auth.Principal, page pagination.Query) (pagination.Result[ImportHistory], error) {
+	if !principal.HasPermission("asset.manage") {
+		return pagination.Result[ImportHistory]{}, ErrForbidden
+	}
 	rows, err := s.pool.Query(ctx, `
 		WITH RECURSIVE descendant_roots(id) AS (
-			SELECT ur.organization_id FROM user_roles ur
-			WHERE ur.user_id = $1::uuid AND ur.organization_id IS NOT NULL AND ur.data_scope = 'organization_and_descendants'
+			SELECT ur.organization_id FROM user_roles ur JOIN roles r ON r.id=ur.role_id AND r.status='enabled' JOIN role_permissions rp ON rp.role_id=r.id AND rp.permission_key='asset.manage'
+			WHERE ur.user_id=$1::uuid AND ur.organization_id IS NOT NULL AND ur.data_scope='organization_and_descendants'
 		), descendants(id) AS (
-			SELECT id FROM descendant_roots
-			UNION SELECT child.id FROM organizations child JOIN descendants parent ON child.parent_id = parent.id
+			SELECT id FROM descendant_roots UNION SELECT child.id FROM organizations child JOIN descendants parent ON child.parent_id=parent.id
 		), accessible(id) AS (
-			SELECT ur.organization_id FROM user_roles ur
-			WHERE ur.user_id = $1::uuid AND ur.organization_id IS NOT NULL
-			  AND ur.data_scope IN ('organization', 'organization_and_descendants')
+			SELECT ur.organization_id FROM user_roles ur JOIN roles r ON r.id=ur.role_id AND r.status='enabled' JOIN role_permissions rp ON rp.role_id=r.id AND rp.permission_key='asset.manage'
+			WHERE ur.user_id=$1::uuid AND ur.organization_id IS NOT NULL AND ur.data_scope IN ('organization','organization_and_descendants')
 			UNION SELECT id FROM descendants
 		)
-		SELECT ai.id::text, ai.file_name, ai.file_type, ai.status, ai.total_count, ai.success_count,
-		       ai.failure_count, ai.duplicate_count, ai.errors::text, o.id::text, o.organization_code,
-		       o.organization_name, COALESCE(u.display_name, ''), ai.created_at
-		FROM asset_imports ai
-		JOIN organizations o ON o.id = ai.organization_id
-		LEFT JOIN users u ON u.id = ai.created_by
-		WHERE $2::boolean OR o.id IN (SELECT id FROM accessible)
-		ORDER BY ai.created_at DESC
-		LIMIT 100
-	`, principal.UserID, principal.HasRole("group_admin"))
+		SELECT i.id::text,i.file_name,i.file_type,i.status,i.total_count,i.success_count,i.failure_count,i.duplicate_count,i.errors::text,
+		       o.id::text,o.organization_code,o.organization_name,COALESCE(u.display_name,''),i.created_at,count(*) OVER ()
+		FROM asset_imports i JOIN organizations o ON o.id=i.organization_id LEFT JOIN users u ON u.id=i.created_by
+		WHERE $2::boolean OR o.id IN (SELECT id FROM accessible) ORDER BY i.created_at DESC LIMIT $3 OFFSET $4`, principal.UserID, principal.HasRole("group_admin"), page.PageSize, page.Offset())
 	if err != nil {
-		return nil, fmt.Errorf("list asset imports: %w", err)
+		return pagination.Result[ImportHistory]{}, fmt.Errorf("search imports: %w", err)
 	}
 	defer rows.Close()
-	items := make([]ImportHistory, 0)
+	items := make([]ImportHistory, 0, page.PageSize)
+	total := 0
 	for rows.Next() {
 		var item ImportHistory
 		var errorsText string
-		if err := rows.Scan(&item.ID, &item.FileName, &item.FileType, &item.Status, &item.TotalCount,
-			&item.SuccessCount, &item.FailureCount, &item.DuplicateCount, &errorsText,
-			&item.OrganizationID, &item.OrganizationCode, &item.OrganizationName, &item.CreatedByName, &item.CreatedAt); err != nil {
-			return nil, fmt.Errorf("scan asset import: %w", err)
+		if err := rows.Scan(&item.ID, &item.FileName, &item.FileType, &item.Status, &item.TotalCount, &item.SuccessCount, &item.FailureCount, &item.DuplicateCount, &errorsText, &item.OrganizationID, &item.OrganizationCode, &item.OrganizationName, &item.CreatedByName, &item.CreatedAt, &total); err != nil {
+			return pagination.Result[ImportHistory]{}, fmt.Errorf("scan import: %w", err)
 		}
 		item.Errors = make([]ImportError, 0)
 		if err := json.Unmarshal([]byte(errorsText), &item.Errors); err != nil {
-			return nil, fmt.Errorf("decode asset import errors: %w", err)
+			return pagination.Result[ImportHistory]{}, fmt.Errorf("decode import errors: %w", err)
 		}
 		items = append(items, item)
 	}
 	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("iterate asset imports: %w", err)
+		return pagination.Result[ImportHistory]{}, fmt.Errorf("iterate imports: %w", err)
 	}
-	return items, nil
+	if pagination.NeedsTotalFallback(len(items), page) {
+		if err := s.pool.QueryRow(ctx, `
+            WITH RECURSIVE descendant_roots(id) AS (
+                SELECT ur.organization_id FROM user_roles ur JOIN roles r ON r.id=ur.role_id AND r.status='enabled' JOIN role_permissions rp ON rp.role_id=r.id AND rp.permission_key='asset.manage'
+                WHERE ur.user_id=$1::uuid AND ur.organization_id IS NOT NULL AND ur.data_scope='organization_and_descendants'
+            ), descendants(id) AS (
+                SELECT id FROM descendant_roots UNION SELECT child.id FROM organizations child JOIN descendants parent ON child.parent_id=parent.id
+            ), accessible(id) AS (
+                SELECT ur.organization_id FROM user_roles ur JOIN roles r ON r.id=ur.role_id AND r.status='enabled' JOIN role_permissions rp ON rp.role_id=r.id AND rp.permission_key='asset.manage'
+                WHERE ur.user_id=$1::uuid AND ur.organization_id IS NOT NULL AND ur.data_scope IN ('organization','organization_and_descendants')
+                UNION SELECT id FROM descendants
+            )
+            SELECT count(*) FROM asset_imports i JOIN organizations o ON o.id=i.organization_id
+            WHERE $2::boolean OR o.id IN (SELECT id FROM accessible)
+        `, principal.UserID, principal.HasRole("group_admin")).Scan(&total); err != nil {
+			return pagination.Result[ImportHistory]{}, fmt.Errorf("count imports: %w", err)
+		}
+	}
+	return pagination.NewResult(items, total, page), nil
 }
 
 func (s *Service) authorizeAsset(ctx context.Context, principal auth.Principal, assetID string) (string, error) {
@@ -465,7 +791,7 @@ func (s *Service) authorizeAsset(ctx context.Context, principal auth.Principal, 
 	} else if err != nil {
 		return "", fmt.Errorf("load asset authorization: %w", err)
 	}
-	allowed, err := access.CanAccessOrganization(ctx, s.pool, principal, organizationID)
+	allowed, err := access.CanOperateOrganization(ctx, s.pool, principal, organizationID, "asset.manage")
 	if err != nil {
 		return "", err
 	}
@@ -473,6 +799,29 @@ func (s *Service) authorizeAsset(ctx context.Context, principal auth.Principal, 
 		return "", ErrForbidden
 	}
 	return organizationID, nil
+}
+
+func validateNetworkArea(ctx context.Context, tx pgx.Tx, networkAreaID, organizationID string, allowDisabled bool) (string, error) {
+	networkAreaID = strings.TrimSpace(networkAreaID)
+	if networkAreaID == "" {
+		return "", nil
+	}
+	var areaOrganizationID, areaName, status string
+	err := tx.QueryRow(ctx, `
+		SELECT organization_id::text, area_name, status
+		FROM asset_network_areas
+		WHERE id::text = $1
+	`, networkAreaID).Scan(&areaOrganizationID, &areaName, &status)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return "", ErrNotFound
+	}
+	if err != nil {
+		return "", fmt.Errorf("load asset network area: %w", err)
+	}
+	if areaOrganizationID != organizationID || (status != "enabled" && !allowDisabled) {
+		return "", ErrInvalid
+	}
+	return areaName, nil
 }
 
 func queryAsset(ctx context.Context, querier interface {
@@ -483,9 +832,11 @@ func queryAsset(ctx context.Context, querier interface {
 		SELECT a.id::text, a.asset_type, a.asset_value, a.normalized_value, COALESCE(a.asset_name, ''),
 		       o.id::text, o.organization_code, o.organization_name,
 		       COALESCE(bs.id::text, ''), COALESCE(bs.system_code, ''), COALESCE(bs.system_name, ''),
-		       a.environment, a.network_scope, a.status, a.importance, a.source,
+		       a.environment, a.network_scope, COALESCE(na.id::text, ''), COALESCE(na.area_name, ''),
+		       a.status, a.importance, a.source,
 		       COALESCE(ao.owner_name, ''), COALESCE(a.notes, ''), a.created_at, a.updated_at
 		FROM assets a
+		LEFT JOIN asset_network_areas na ON na.id = a.network_area_id
 		JOIN asset_organizations ao ON ao.asset_id = a.id AND ao.is_primary
 		JOIN organizations o ON o.id = ao.organization_id
 		LEFT JOIN LATERAL (
@@ -498,8 +849,8 @@ func queryAsset(ctx context.Context, querier interface {
 	`, assetID).Scan(&item.ID, &item.Type, &item.Value, &item.NormalizedValue, &item.Name,
 		&item.OrganizationID, &item.OrganizationCode, &item.OrganizationName,
 		&item.BusinessSystemID, &item.BusinessSystemCode, &item.BusinessSystemName,
-		&item.Environment, &item.NetworkScope, &item.Status, &item.Importance, &item.Source,
-		&item.OwnerName, &item.Notes, &item.CreatedAt, &item.UpdatedAt)
+		&item.Environment, &item.NetworkScope, &item.NetworkAreaID, &item.NetworkAreaName,
+		&item.Status, &item.Importance, &item.Source, &item.OwnerName, &item.Notes, &item.CreatedAt, &item.UpdatedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return Asset{}, ErrNotFound
 	}
@@ -510,8 +861,26 @@ func queryAsset(ctx context.Context, querier interface {
 }
 
 func Template(format string) ([]byte, string, string, error) {
-	headers := []string{"资产类型", "资产值", "资产名称", "业务系统编码", "环境", "网络范围", "重要程度", "负责人", "备注"}
-	example := []string{"domain", "portal.example.com", "门户网站域名", "", "production", "public", "important", "张三", "支持 domain/ip/url/service/other"}
+	return buildTemplate(format, nil)
+}
+
+// Template builds an organization-scoped import template containing every
+// currently enabled custom field that the caller may maintain.
+func (s *Service) Template(ctx context.Context, principal auth.Principal, organizationID, format string) ([]byte, string, string, error) {
+	definitions, err := customfield.NewService(s.pool).ActiveDefinitionsForOrganization(ctx, principal, "asset", organizationID)
+	if err != nil {
+		return nil, "", "", err
+	}
+	return buildTemplate(format, definitions)
+}
+
+func buildTemplate(format string, definitions []customfield.Definition) ([]byte, string, string, error) {
+	headers := []string{"资产类型", "资产值", "资产名称", "业务系统编码", "环境", "网络暴露范围", "网络区域", "重要程度", "负责人", "备注"}
+	example := []string{"domain", "portal.example.com", "门户网站域名", "", "production", "public", "上海办事处", "important", "张三", "网络区域按所属组织下已配置的名称填写"}
+	for _, definition := range definitions {
+		headers = append(headers, customfield.ImportHeader(definition))
+		example = append(example, customFieldTemplateExample(definition))
+	}
 	switch strings.ToLower(strings.TrimSpace(format)) {
 	case "csv":
 		var buffer bytes.Buffer
@@ -542,7 +911,20 @@ func Template(format string) ([]byte, string, string, error) {
 		}
 		_ = file.SetColWidth(sheet, "A", "A", 14)
 		_ = file.SetColWidth(sheet, "B", "C", 26)
-		_ = file.SetColWidth(sheet, "D", "I", 18)
+		_ = file.SetColWidth(sheet, "D", "Z", 18)
+		if len(definitions) > 0 {
+			_, err := file.NewSheet("自定义字段说明")
+			if err != nil {
+				return nil, "", "", err
+			}
+			_ = file.SetSheetRow("自定义字段说明", "A1", &[]any{"导入列", "字段名称", "类型", "是否必填", "说明 / 可选项"})
+			for index, definition := range definitions {
+				row := index + 2
+				_ = file.SetSheetRow("自定义字段说明", fmt.Sprintf("A%d", row), &[]any{customfield.ImportHeader(definition), definition.FieldName, definition.FieldType, map[bool]string{true: "是", false: "否"}[definition.IsRequired], customFieldTemplateHint(definition)})
+			}
+			_ = file.SetColWidth("自定义字段说明", "A", "A", 28)
+			_ = file.SetColWidth("自定义字段说明", "B", "E", 24)
+		}
 		var buffer bytes.Buffer
 		if err := file.Write(&buffer); err != nil {
 			return nil, "", "", err
@@ -553,9 +935,44 @@ func Template(format string) ([]byte, string, string, error) {
 	}
 }
 
+func customFieldTemplateExample(definition customfield.Definition) string {
+	switch definition.FieldType {
+	case "number":
+		return "100"
+	case "date":
+		return "2026-01-01"
+	case "boolean":
+		return "是"
+	case "select":
+		if len(definition.Options) > 0 {
+			return definition.Options[0]
+		}
+	case "multiselect":
+		if len(definition.Options) > 0 {
+			return definition.Options[0]
+		}
+	}
+	return ""
+}
+func customFieldTemplateHint(definition customfield.Definition) string {
+	if definition.FieldType == "select" || definition.FieldType == "multiselect" {
+		return "可选项：" + strings.Join(definition.Options, "、")
+	}
+	if definition.FieldType == "boolean" {
+		return "填写 是/否（也支持 true/false、1/0）"
+	}
+	if definition.FieldType == "date" {
+		return "格式：YYYY-MM-DD"
+	}
+	return definition.Description
+}
+
 func (s *Service) Import(ctx context.Context, principal auth.Principal, organizationID, fileName string, reader io.Reader, requestID, ipAddress string) (ImportResult, error) {
+	if !principal.HasPermission("asset.manage") {
+		return ImportResult{}, ErrForbidden
+	}
 	organizationID = strings.TrimSpace(organizationID)
-	allowed, err := access.CanAccessOrganization(ctx, s.pool, principal, organizationID)
+	allowed, err := access.CanOperateOrganization(ctx, s.pool, principal, organizationID, "asset.manage")
 	if err != nil {
 		return ImportResult{}, err
 	}
@@ -573,11 +990,22 @@ func (s *Service) Import(ctx context.Context, principal auth.Principal, organiza
 	if headers["type"] < 0 || headers["value"] < 0 {
 		return ImportResult{}, ErrInvalid
 	}
+	customService := customfield.NewService(s.pool)
+	definitions, err := customService.ActiveDefinitionsForOrganization(ctx, principal, "asset", organizationID)
+	if err != nil {
+		return ImportResult{}, err
+	}
 
 	result := ImportResult{FileName: filepath.Base(fileName), FileType: fileType, Errors: make([]ImportError, 0), TotalCount: len(rows) - 1}
 	for index, row := range rows[1:] {
 		rowNumber := index + 2
 		input := importInput(row, headers, organizationID)
+		customValues, customErr := customfield.ImportValues(definitions, rows[0], row)
+		if customErr != nil {
+			result.FailureCount++
+			result.Errors = append(result.Errors, ImportError{Row: rowNumber, Code: "invalid_custom_field", Message: customErr.Error()})
+			continue
+		}
 		if input.BusinessSystemID != "" {
 			var systemID string
 			err := s.pool.QueryRow(ctx, `
@@ -594,7 +1022,25 @@ func (s *Service) Import(ctx context.Context, principal auth.Principal, organiza
 			}
 			input.BusinessSystemID = systemID
 		}
-		_, err := s.Create(ctx, principal, input, "import", requestID, ipAddress)
+		if input.NetworkAreaID != "" {
+			var networkAreaID string
+			err := s.pool.QueryRow(ctx, `
+				SELECT id::text FROM asset_network_areas
+				WHERE organization_id = $1::uuid AND lower(area_name) = lower($2) AND status = 'enabled'
+			`, organizationID, input.NetworkAreaID).Scan(&networkAreaID)
+			if errors.Is(err, pgx.ErrNoRows) {
+				result.FailureCount++
+				result.Errors = append(result.Errors, ImportError{Row: rowNumber, Code: "network_area_not_found", Message: "网络区域不存在、未启用或不属于当前组织"})
+				continue
+			}
+			if err != nil {
+				return ImportResult{}, fmt.Errorf("resolve import network area: %w", err)
+			}
+			input.NetworkAreaID = networkAreaID
+		}
+		_, err := s.create(ctx, principal, input, "import", requestID, ipAddress, func(tx pgx.Tx, item Asset) error {
+			return customfield.SaveImportedValuesInTx(ctx, tx, "asset", item.ID, definitions, customValues, principal.UserID)
+		})
 		switch {
 		case err == nil:
 			result.SuccessCount++
@@ -662,6 +1108,68 @@ func (s *Service) saveImportResult(ctx context.Context, principal auth.Principal
 	return importID, nil
 }
 
+func assetFieldChanges(current Asset, input CreateInput, organizationName, systemName, networkAreaName string) []fieldChange {
+	changes := make([]fieldChange, 0, 12)
+	add := func(field, label, before, after string) {
+		if before != after {
+			changes = append(changes, fieldChange{Field: field, Label: label, Before: before, After: after})
+		}
+	}
+	add("asset_type", "资产类型", assetTypeLabel(current.Type), assetTypeLabel(input.Type))
+	add("asset_value", "资产值", displayValue(current.Value, "未填写"), displayValue(input.Value, "未填写"))
+	add("asset_name", "资产名称", displayValue(current.Name, "未填写"), displayValue(input.Name, "未填写"))
+	add("organization", "所属组织", displayValue(current.OrganizationName, "未关联"), displayValue(organizationName, "未关联"))
+	add("business_system", "关联业务系统", displayValue(current.BusinessSystemName, "未关联"), displayValue(systemName, "未关联"))
+	add("owner_name", "负责人", displayValue(current.OwnerName, "未填写"), displayValue(input.OwnerName, "未填写"))
+	add("environment", "部署环境", assetEnvironmentLabel(current.Environment), assetEnvironmentLabel(input.Environment))
+	add("network_scope", "网络暴露范围", assetNetworkScopeLabel(current.NetworkScope), assetNetworkScopeLabel(input.NetworkScope))
+	add("network_area", "网络区域", displayValue(current.NetworkAreaName, "未设置"), displayValue(networkAreaName, "未设置"))
+	add("status", "资产状态", assetStatusLabel(current.Status), assetStatusLabel(input.Status))
+	add("importance", "重要程度", assetImportanceLabel(current.Importance), assetImportanceLabel(input.Importance))
+	add("notes", "备注", displayValue(current.Notes, "未填写"), displayValue(input.Notes, "未填写"))
+	return changes
+}
+
+func displayValue(value, fallback string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return fallback
+	}
+	return value
+}
+
+func assetTypeLabel(value string) string {
+	return map[string]string{"domain": "域名", "ip": "IP", "url": "URL", "service": "服务", "other": "其他"}[value]
+}
+
+func assetEnvironmentLabel(value string) string {
+	if label := map[string]string{"production": "生产", "staging": "预发布", "testing": "测试", "development": "开发", "unknown": "待确认"}[value]; label != "" {
+		return label
+	}
+	return displayValue(value, "待确认")
+}
+
+func assetNetworkScopeLabel(value string) string {
+	if label := map[string]string{"public": "公网", "private": "内网", "unknown": "待确认"}[value]; label != "" {
+		return label
+	}
+	return displayValue(value, "待确认")
+}
+
+func assetStatusLabel(value string) string {
+	if label := map[string]string{"active": "正常", "pending": "待确认", "disabled": "已停用", "archived": "已归档"}[value]; label != "" {
+		return label
+	}
+	return displayValue(value, "待确认")
+}
+
+func assetImportanceLabel(value string) string {
+	if label := map[string]string{"normal": "一般", "important": "重要", "critical": "关键"}[value]; label != "" {
+		return label
+	}
+	return displayValue(value, "待确认")
+}
+
 func normalizeInput(input *CreateInput) {
 	input.Type = strings.ToLower(strings.TrimSpace(input.Type))
 	input.Value = strings.TrimSpace(input.Value)
@@ -670,6 +1178,7 @@ func normalizeInput(input *CreateInput) {
 	input.BusinessSystemID = strings.TrimSpace(input.BusinessSystemID)
 	input.Environment = defaultValue(strings.ToLower(strings.TrimSpace(input.Environment)), "production")
 	input.NetworkScope = defaultValue(strings.ToLower(strings.TrimSpace(input.NetworkScope)), "unknown")
+	input.NetworkAreaID = strings.TrimSpace(input.NetworkAreaID)
 	input.Status = defaultValue(strings.ToLower(strings.TrimSpace(input.Status)), "active")
 	input.Importance = defaultValue(strings.ToLower(strings.TrimSpace(input.Importance)), "normal")
 	input.OwnerName = strings.TrimSpace(input.OwnerName)
@@ -681,6 +1190,12 @@ func validInput(input CreateInput) bool {
 		oneOf(input.NetworkScope, "public", "private", "unknown") && oneOf(input.Status, "active", "pending", "disabled", "archived") &&
 		oneOf(input.Importance, "normal", "important", "core")
 }
+
+// NormalizeValue converts an asset value to its canonical form using the same rules as the network asset ledger.
+func NormalizeValue(assetType, value string) (string, error) {
+	return normalizeValue(assetType, value)
+}
+
 func normalizeValue(assetType, value string) (string, error) {
 	value = strings.TrimSpace(value)
 	switch assetType {
@@ -753,10 +1268,10 @@ func mapHeaders(row []string) map[string]int {
 	aliases := map[string]string{
 		"资产类型": "type", "type": "type", "资产值": "value", "value": "value", "资产名称": "name", "name": "name",
 		"业务系统编码": "business_system_code", "business_system_code": "business_system_code", "环境": "environment", "environment": "environment",
-		"网络范围": "network_scope", "network_scope": "network_scope", "重要程度": "importance", "importance": "importance",
+		"网络范围": "network_scope", "网络暴露范围": "network_scope", "network_scope": "network_scope", "网络区域": "network_area", "网络归属": "network_area", "network_area": "network_area", "重要程度": "importance", "importance": "importance",
 		"负责人": "owner_name", "owner_name": "owner_name", "备注": "notes", "notes": "notes",
 	}
-	result := map[string]int{"type": -1, "value": -1, "name": -1, "business_system_code": -1, "environment": -1, "network_scope": -1, "importance": -1, "owner_name": -1, "notes": -1}
+	result := map[string]int{"type": -1, "value": -1, "name": -1, "business_system_code": -1, "environment": -1, "network_scope": -1, "network_area": -1, "importance": -1, "owner_name": -1, "notes": -1}
 	for index, header := range row {
 		if key, ok := aliases[strings.ToLower(strings.TrimSpace(strings.TrimPrefix(header, "\ufeff")))]; ok {
 			result[key] = index
@@ -774,7 +1289,7 @@ func importInput(row []string, headers map[string]int, organizationID string) Cr
 	}
 	return CreateInput{Type: translateAssetType(get("type")), Value: get("value"), Name: get("name"), OrganizationID: organizationID,
 		BusinessSystemID: get("business_system_code"), Environment: translateEnvironment(get("environment")), NetworkScope: translateScope(get("network_scope")),
-		Status: "active", Importance: translateImportance(get("importance")), OwnerName: get("owner_name"), Notes: get("notes")}
+		NetworkAreaID: get("network_area"), Status: "active", Importance: translateImportance(get("importance")), OwnerName: get("owner_name"), Notes: get("notes")}
 }
 func translateAssetType(value string) string {
 	values := map[string]string{"域名": "domain", "IP": "ip", "IP地址": "ip", "IP 地址": "ip", "网址": "url", "网络服务": "service", "服务": "service", "其他": "other"}
