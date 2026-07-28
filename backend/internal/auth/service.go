@@ -18,6 +18,11 @@ import (
 	"netassets/internal/pagination"
 )
 
+const (
+	AuthenticationSession  = "session"
+	AuthenticationAPIToken = "api_token"
+)
+
 var (
 	ErrUnauthorized          = errors.New("unauthorized")
 	ErrOrganizationForbidden = errors.New("organization forbidden")
@@ -48,6 +53,8 @@ type Principal struct {
 	Permissions        []string       `json:"permissions"`
 	SessionID          string         `json:"-"`
 	TokenHash          string         `json:"-"`
+	APITokenID         string         `json:"-"`
+	AuthenticationType string         `json:"-"`
 }
 
 func (p Principal) HasRole(role string) bool {
@@ -186,6 +193,7 @@ func (s *Service) Login(ctx context.Context, input LoginInput) (LoginResult, err
 
 	user.SessionID = sessionID
 	user.TokenHash = tokenHash
+	user.AuthenticationType = AuthenticationSession
 	return LoginResult{Token: token, ExpiresAt: expiresAt, User: user}, nil
 }
 
@@ -214,6 +222,7 @@ func (s *Service) Authenticate(ctx context.Context, token string) (Principal, er
 		return Principal{}, fmt.Errorf("authenticate session: %w", err)
 	}
 	user.TokenHash = tokenHash
+	user.AuthenticationType = AuthenticationSession
 	if err := s.loadPrincipalDetails(ctx, &user, dereference(activeOrganizationID)); err != nil {
 		return Principal{}, err
 	}
@@ -341,6 +350,7 @@ func (s *Service) CurrentBySession(ctx context.Context, sessionID string) (Princ
 	if err != nil {
 		return Principal{}, fmt.Errorf("load current session: %w", err)
 	}
+	user.AuthenticationType = AuthenticationSession
 	if err := s.loadPrincipalDetails(ctx, &user, dereference(activeOrganizationID)); err != nil {
 		return Principal{}, err
 	}

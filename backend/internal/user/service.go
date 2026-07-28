@@ -477,6 +477,9 @@ func (s *Service) UpdateStatus(ctx context.Context, principal auth.Principal, us
 	if _, err := tx.Exec(ctx, `UPDATE sessions SET revoked_at=now() WHERE user_id=$1::uuid AND revoked_at IS NULL`, userID); err != nil {
 		return fmt.Errorf("revoke user sessions: %w", err)
 	}
+	if _, err := tx.Exec(ctx, `UPDATE api_tokens SET revoked_at=now() WHERE user_id=$1::uuid AND revoked_at IS NULL`, userID); err != nil {
+		return fmt.Errorf("revoke user api tokens: %w", err)
+	}
 	if _, err := tx.Exec(ctx, `INSERT INTO audit_logs (user_id,action,resource_type,resource_id,summary,details,request_ip,request_id) VALUES ($1::uuid,'user.status','user',$2,'变更用户状态',jsonb_build_object('status',$3::text),NULLIF($4,'')::inet,NULLIF($5,''))`, principal.UserID, userID, input.Status, ipAddress, requestID); err != nil {
 		return fmt.Errorf("audit user status: %w", err)
 	}
@@ -515,6 +518,9 @@ func (s *Service) ResetPassword(ctx context.Context, principal auth.Principal, u
 	}
 	if _, err := tx.Exec(ctx, `UPDATE sessions SET revoked_at=now() WHERE user_id=$1::uuid AND revoked_at IS NULL`, userID); err != nil {
 		return fmt.Errorf("revoke user sessions: %w", err)
+	}
+	if _, err := tx.Exec(ctx, `UPDATE api_tokens SET revoked_at=now() WHERE user_id=$1::uuid AND revoked_at IS NULL`, userID); err != nil {
+		return fmt.Errorf("revoke user api tokens: %w", err)
 	}
 	if _, err := tx.Exec(ctx, `INSERT INTO audit_logs (user_id,action,resource_type,resource_id,summary,request_ip,request_id) VALUES ($1::uuid,'user.password_reset','user',$2,'重置用户密码',NULLIF($3,'')::inet,NULLIF($4,''))`, principal.UserID, userID, ipAddress, requestID); err != nil {
 		return fmt.Errorf("audit password reset: %w", err)

@@ -11,6 +11,9 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/gin-gonic/gin"
+
+	"netassets/internal/auth"
 	"netassets/internal/config"
 )
 
@@ -123,5 +126,31 @@ func TestAllowsPasswordChangeRequest(t *testing.T) {
 		if actual := allowsPasswordChangeRequest(test.method, test.path); actual != test.allowed {
 			t.Errorf("allowsPasswordChangeRequest(%q, %q) = %v, want %v", test.method, test.path, actual, test.allowed)
 		}
+	}
+}
+
+func TestSessionAuthenticationMiddleware(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	tests := []struct {
+		name       string
+		authType   string
+		wantStatus int
+	}{
+		{name: "browser session", authType: auth.AuthenticationSession, wantStatus: http.StatusNoContent},
+		{name: "api token", authType: auth.AuthenticationAPIToken, wantStatus: http.StatusForbidden},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			router := gin.New()
+			router.GET("/", func(c *gin.Context) {
+				c.Set(principalContextKey, auth.Principal{UserID: "user", AuthenticationType: test.authType})
+				c.Next()
+			}, sessionAuthenticationMiddleware(), func(c *gin.Context) { c.Status(http.StatusNoContent) })
+			response := httptest.NewRecorder()
+			router.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/", nil))
+			if response.Code != test.wantStatus {
+				t.Fatalf("status = %d, want %d", response.Code, test.wantStatus)
+			}
+		})
 	}
 }

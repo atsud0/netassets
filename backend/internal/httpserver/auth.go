@@ -4,6 +4,7 @@ import (
 	"errors"
 	"log/slog"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -48,13 +49,14 @@ func registerAuthRoutes(api *gin.RouterGroup, cfg config.Config, service *auth.S
 	})
 
 	requireAuth := authenticationMiddleware(cfg, service, logger)
+	requireSession := sessionAuthenticationMiddleware()
 	authGroup.GET("/me", requireAuth, func(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{"user": mustPrincipal(c)})
 	})
-	authGroup.GET("/profile", requireAuth, func(c *gin.Context) {
+	authGroup.GET("/profile", requireAuth, requireSession, func(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{"user": mustPrincipal(c)})
 	})
-	authGroup.PUT("/profile", requireAuth, func(c *gin.Context) {
+	authGroup.PUT("/profile", requireAuth, requireSession, func(c *gin.Context) {
 		var input auth.ProfileInput
 		if err := c.ShouldBindJSON(&input); err != nil {
 			writeAPIError(c, http.StatusBadRequest, "invalid_request", "个人资料格式不正确")
@@ -77,7 +79,7 @@ func registerAuthRoutes(api *gin.RouterGroup, cfg config.Config, service *auth.S
 		}
 		c.JSON(http.StatusOK, gin.H{"user": user})
 	})
-	authGroup.PUT("/profile/password", requireAuth, func(c *gin.Context) {
+	authGroup.PUT("/profile/password", requireAuth, requireSession, func(c *gin.Context) {
 		var input auth.ChangePasswordInput
 		if err := c.ShouldBindJSON(&input); err != nil {
 			writeAPIError(c, http.StatusBadRequest, "invalid_request", "密码格式不正确")
@@ -99,7 +101,7 @@ func registerAuthRoutes(api *gin.RouterGroup, cfg config.Config, service *auth.S
 		}
 		c.Status(http.StatusNoContent)
 	})
-	authGroup.GET("/sessions", requireAuth, func(c *gin.Context) {
+	authGroup.GET("/sessions", requireAuth, requireSession, func(c *gin.Context) {
 		page, err := parsePageQuery(c)
 		if err != nil {
 			writeAPIError(c, http.StatusBadRequest, "invalid_query", "分页参数不正确，page_size 最大为 100")
@@ -113,7 +115,7 @@ func registerAuthRoutes(api *gin.RouterGroup, cfg config.Config, service *auth.S
 		}
 		c.JSON(http.StatusOK, result)
 	})
-	authGroup.DELETE("/sessions/others", requireAuth, func(c *gin.Context) {
+	authGroup.DELETE("/sessions/others", requireAuth, requireSession, func(c *gin.Context) {
 		count, err := service.RevokeOtherSessions(c.Request.Context(), mustPrincipal(c), c.GetString("request_id"), c.ClientIP())
 		if err != nil {
 			logger.Error("revoke other login sessions", "error", err, "request_id", c.GetString("request_id"))
@@ -122,7 +124,7 @@ func registerAuthRoutes(api *gin.RouterGroup, cfg config.Config, service *auth.S
 		}
 		c.JSON(http.StatusOK, gin.H{"revoked_count": count})
 	})
-	authGroup.DELETE("/sessions/:id", requireAuth, func(c *gin.Context) {
+	authGroup.DELETE("/sessions/:id", requireAuth, requireSession, func(c *gin.Context) {
 		err := service.RevokeSession(c.Request.Context(), mustPrincipal(c), c.Param("id"), c.GetString("request_id"), c.ClientIP())
 		switch {
 		case errors.Is(err, auth.ErrCurrentSession):
@@ -136,7 +138,7 @@ func registerAuthRoutes(api *gin.RouterGroup, cfg config.Config, service *auth.S
 			c.Status(http.StatusNoContent)
 		}
 	})
-	authGroup.PUT("/current-organization", requireAuth, func(c *gin.Context) {
+	authGroup.PUT("/current-organization", requireAuth, requireSession, func(c *gin.Context) {
 		var request struct {
 			OrganizationID string `json:"organization_id" binding:"required"`
 		}
@@ -156,7 +158,56 @@ func registerAuthRoutes(api *gin.RouterGroup, cfg config.Config, service *auth.S
 		}
 		c.JSON(http.StatusOK, gin.H{"user": user})
 	})
-	authGroup.POST("/logout", requireAuth, func(c *gin.Context) {
+	authGroup.GET("/api-tokens", requireAuth, requireSession, func(c *gin.Context) {
+		page, err := parsePageQuery(c)
+		if err != nil {
+			writeAPIError(c, http.StatusBadRequest, "invalid_query", "分页参数不正确，page_size 最大为 100")
+			return
+		}
+		result, err := service.ListAPITokens(c.Request.Context(), mustPrincipal(c), page)
+		if err != nil {
+			logger.Error("list api tokens", "error", err, "request_id", c.GetString("request_id"))
+			writeAPIError(c, http.StatusInternalServerError, "internal_error", "获取 API Token 失败")
+			return
+		}
+		c.JSON(http.StatusOK, result)
+	})
+	authGroup.POST("/api-tokens", requireAuth, requireSession, func(c *gin.Context) {
+		var input auth.CreateAPITokenInput
+		if err := c.ShouldBindJSON(&input); err != nil {
+			writeAPIError(c, http.StatusBadRequest, "invalid_request", "API Token 信息格式不正确")
+			return
+		}
+		result, err := service.CreateAPIToken(c.Request.Context(), mustPrincipal(c), input, c.GetString("request_id"), c.ClientIP())
+		switch {
+		case errors.Is(err, auth.ErrInvalid):
+			writeAPIError(c, http.StatusBadRequest, "invalid_api_token", "名称不能为空且不超过 100 字，期限应为 1 至 365 天")
+		case errors.Is(err, auth.ErrAPITokenLimit):
+			writeAPIError(c, http.StatusConflict, "api_token_limit_reached", "每个用户最多同时保留 10 个有效 API Token")
+		case errors.Is(err, auth.ErrAPITokenNameConflict):
+			writeAPIError(c, http.StatusConflict, "api_token_name_exists", "已存在同名的未撤销 API Token")
+		case err != nil:
+			logger.Error("create api token", "error", err, "request_id", c.GetString("request_id"))
+			writeAPIError(c, http.StatusInternalServerError, "internal_error", "创建 API Token 失败")
+		default:
+			c.JSON(http.StatusCreated, result)
+		}
+	})
+	authGroup.DELETE("/api-tokens/:id", requireAuth, requireSession, func(c *gin.Context) {
+		err := service.RevokeAPIToken(c.Request.Context(), mustPrincipal(c), c.Param("id"), c.GetString("request_id"), c.ClientIP())
+		switch {
+		case errors.Is(err, auth.ErrInvalid):
+			writeAPIError(c, http.StatusBadRequest, "invalid_api_token", "API Token 标识不正确")
+		case errors.Is(err, auth.ErrAPITokenNotFound):
+			writeAPIError(c, http.StatusNotFound, "api_token_not_found", "API Token 不存在或已撤销")
+		case err != nil:
+			logger.Error("revoke api token", "error", err, "request_id", c.GetString("request_id"))
+			writeAPIError(c, http.StatusInternalServerError, "internal_error", "撤销 API Token 失败")
+		default:
+			c.Status(http.StatusNoContent)
+		}
+	})
+	authGroup.POST("/logout", requireAuth, requireSession, func(c *gin.Context) {
 		principal := mustPrincipal(c)
 		if err := service.Logout(c.Request.Context(), principal, c.GetString("request_id"), c.ClientIP()); err != nil {
 			logger.Error("logout failed", "error", err, "request_id", c.GetString("request_id"))
@@ -171,22 +222,43 @@ func registerAuthRoutes(api *gin.RouterGroup, cfg config.Config, service *auth.S
 
 func authenticationMiddleware(cfg config.Config, service *auth.Service, logger *slog.Logger) gin.HandlerFunc {
 	return func(c *gin.Context) {
-		token, err := c.Cookie(cfg.SessionCookieName)
-		if err != nil || token == "" {
-			clearSessionCookie(c, cfg)
-			writeAPIError(c, http.StatusUnauthorized, "unauthorized", "请先登录")
-			c.Abort()
-			return
+		var (
+			principal auth.Principal
+			err       error
+			isBearer  bool
+		)
+		if authorization := strings.TrimSpace(c.GetHeader("Authorization")); authorization != "" {
+			isBearer = true
+			parts := strings.Fields(authorization)
+			if len(parts) != 2 || !strings.EqualFold(parts[0], "Bearer") {
+				writeAPIError(c, http.StatusUnauthorized, "invalid_authorization", "Authorization 请求头格式不正确")
+				c.Abort()
+				return
+			}
+			principal, err = service.AuthenticateAPIToken(c.Request.Context(), parts[1])
+		} else {
+			var token string
+			token, err = c.Cookie(cfg.SessionCookieName)
+			if err == nil && token != "" {
+				principal, err = service.Authenticate(c.Request.Context(), token)
+			} else {
+				err = auth.ErrUnauthorized
+			}
 		}
-		principal, err := service.Authenticate(c.Request.Context(), token)
 		if errors.Is(err, auth.ErrUnauthorized) {
-			clearSessionCookie(c, cfg)
-			writeAPIError(c, http.StatusUnauthorized, "unauthorized", "登录状态已失效，请重新登录")
+			if !isBearer {
+				clearSessionCookie(c, cfg)
+			}
+			message := "登录状态已失效，请重新登录"
+			if isBearer {
+				message = "API Token 无效、已过期或已撤销"
+			}
+			writeAPIError(c, http.StatusUnauthorized, "unauthorized", message)
 			c.Abort()
 			return
 		}
 		if err != nil {
-			logger.Error("authenticate request", "error", err, "request_id", c.GetString("request_id"))
+			logger.Error("authenticate request", "error", err, "request_id", c.GetString("request_id"), "bearer", isBearer)
 			writeAPIError(c, http.StatusInternalServerError, "internal_error", "认证服务暂不可用")
 			c.Abort()
 			return
@@ -197,6 +269,17 @@ func authenticationMiddleware(cfg config.Config, service *auth.Service, logger *
 			return
 		}
 		c.Set(principalContextKey, principal)
+		c.Next()
+	}
+}
+
+func sessionAuthenticationMiddleware() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		if mustPrincipal(c).AuthenticationType != auth.AuthenticationSession {
+			writeAPIError(c, http.StatusForbidden, "browser_session_required", "该操作只能在登录后的个人账户页面完成")
+			c.Abort()
+			return
+		}
 		c.Next()
 	}
 }

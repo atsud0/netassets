@@ -9,6 +9,7 @@
 - PostgreSQL 17 数据库与 Goose 迁移
 - 集团根组织及集团管理员首次启动初始化
 - 基于服务端 Session Cookie 的登录、会话恢复和退出
+- 个人 API Token：在账户设置中创建、分页查看和撤销，明文仅展示一次、数据库仅保存 SHA-256 摘要；支持 Bearer 认证，固定绑定创建时的当前工作组织并实时继承账号角色与数据权限
 - 集团管理员查看组织、新增子公司/部门，并在线维护集团名称、简称、负责人和联系方式
 - 集团管理员创建子公司管理员或填报员账号
 - 子公司账号按所属组织隔离数据，禁止跨组织访问
@@ -141,9 +142,12 @@ NETASSETS_RESTORE_CONFIRM=YES make restore BACKUP=backups/netassets-20260723T000
 ## 当前 API
 
 ```text
-POST /api/v1/auth/login
-GET  /api/v1/auth/me
-POST /api/v1/auth/logout
+POST   /api/v1/auth/login
+GET    /api/v1/auth/me
+POST   /api/v1/auth/logout
+GET    /api/v1/auth/api-tokens?page=&page_size=
+POST   /api/v1/auth/api-tokens
+DELETE /api/v1/auth/api-tokens/:id
 GET    /api/v1/organizations
 POST   /api/v1/organizations
 PATCH  /api/v1/organizations/:id
@@ -210,7 +214,6 @@ POST   /api/v1/inventory-tasks/:taskID/organizations/:organizationID/submit
 POST   /api/v1/inventory-tasks/:taskID/organizations/:organizationID/review
 PATCH  /api/v1/inventory-tasks/:taskID/status
 
-普通列表接口统一采用 `page` / `page_size` 服务端分页，默认每页 20 条、单页最多 100 条，并返回真实 `total`。业务系统详情的关联资产、填报任务的目标组织进度也使用独立分页接口，详情/任务主列表不再嵌入无界集合；导出接口仍按授权范围生成完整文件。
 GET    /api/v1/security-findings?organization_id=&status=
 POST   /api/v1/security-findings
 PATCH  /api/v1/security-findings/:id
@@ -233,6 +236,18 @@ GET    /api/v1/notifications/summary
 POST   /api/v1/notifications/read
 POST   /api/v1/notifications/read-all
 ```
+
+普通列表接口统一采用 `page` / `page_size` 服务端分页，默认每页 20 条、单页最多 100 条，并返回真实 `total`。业务系统详情的关联资产、填报任务的目标组织进度也使用独立分页接口，详情/任务主列表不再嵌入无界集合；导出接口仍按授权范围生成完整文件。
+
+个人 API Token 可通过 Bearer 方式调用普通业务接口，例如：
+
+```bash
+curl \
+  -H "Authorization: Bearer nat_xxx" \
+  http://127.0.0.1:8080/api/v1/auth/me
+```
+
+Token 管理、个人资料、修改密码、登录设备、切换当前组织和退出登录等账户安全接口仅允许浏览器 Session 调用，不能使用 API Token 自行创建或撤销 Token。
 
 用户管理、集团基本信息维护、填报任务创建和审核、审计日志查询、回收站恢复、网络区域配置、安全发现登记及安全工单下发/复测仅允许集团管理员操作。消息中心按当前用户组织数据范围展示，集团管理员看到集团级复测与风险复核待办，子公司用户只看到本组织工单消息。子公司管理员及填报员可以开始和提交分配给授权组织的填报任务，也可以接收本组织安全工单、更新整改进度、上传整改证明并提交复测。集团管理员可维护所有组织数据，并可按子公司配置网络区域；组织用户只能查看所属组织，并只能在授权组织内登记或导入业务系统、维护或导入网络资产、选择本组织已启用的网络区域、查看本组织导入记录及集团下发的填报任务。网络暴露范围用于描述公网、内网、未知等安全属性，不与办公地点或网络分区混用。业务系统和资产编辑会按字段保存修改前后值，集团管理员及资源授权组织用户均可在对应台账中查看最近 100 条资源历史。业务系统和资产删除均采用软删除；业务系统仍有关联资产时禁止删除，归档不会删除关联关系。集团管理员可在回收站恢复误删资产或业务系统；恢复业务系统后默认保持“已归档”，恢复前若发现同一在用资产或系统编码冲突则会拒绝恢复。资产类型与标准化后的资产值在集团范围内去重。
 

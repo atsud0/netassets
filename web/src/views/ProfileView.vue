@@ -4,6 +4,7 @@ import { ElMessage, ElMessageBox, type FormInstance, type FormRules } from 'elem
 import { useRouter } from 'vue-router'
 import { apiClient, getAPIErrorMessage } from '../api/client'
 import { useAuthStore } from '../stores/auth'
+import APITokenManager from '../components/APITokenManager.vue'
 
 const auth = useAuthStore()
 const router = useRouter()
@@ -242,6 +243,8 @@ async function changePassword() {
         />
       </div>
     </div>
+
+    <APITokenManager v-if="!mustChangePassword" />
   </section>
 </template>
 
