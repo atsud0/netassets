@@ -418,16 +418,17 @@ onMounted(async () => {
 
 <template>
   <section class="page-stack">
-    <div class="page-header">
+    <div class="page-heading">
       <div><span class="eyebrow">DATA QUALITY REMEDIATION</span><h1>质量整改</h1><p>{{ isGroupAdmin ? '查看全集团质量问题，复核子公司整改结果并管理豁免。' : '处理授权组织范围内的数据质量问题，并提交集团总部复核。' }}</p></div>
       <el-button v-if="isGroupAdmin" type="primary" @click="router.push('/data-governance')">执行质量巡检</el-button>
     </div>
 
-    <div class="quality-workflow-summary">
+    <div class="quality-workflow-content">
+      <div class="quality-workflow-summary">
       <div v-for="card in summaryCards" :key="String(card[0])" class="quality-workflow-card" :class="`tone-${card[2]}`"><span>{{ card[0] }}</span><strong>{{ card[1] }}</strong></div>
-    </div>
+      </div>
 
-    <div class="panel quality-workflow-filters">
+      <div class="panel quality-workflow-filters">
       <el-select v-model="filters.organization_id" clearable filterable placeholder="全部组织"><el-option v-for="item in organizations" :key="item.id" :label="`${item.code} · ${item.name}`" :value="item.id" /></el-select>
       <el-select v-model="filters.status" clearable placeholder="全部状态"><el-option v-for="(label, value) in statusLabels" :key="value" :label="label" :value="value" /></el-select>
       <el-select v-model="filters.severity" clearable placeholder="全部级别"><el-option label="错误" value="error" /><el-option label="警告" value="warning" /></el-select>
@@ -437,7 +438,7 @@ onMounted(async () => {
       <SavedFilterViews ref="savedFilterViews" page-key="data_quality_issues" :current-filters="currentIssueFilters" class="quality-saved-views" @apply="applySavedIssueFilters" />
     </div>
 
-    <div class="panel quality-workflow-table-panel">
+      <div class="panel quality-workflow-table-panel quality-issue-panel">
       <div class="table-panel-heading"><div><strong>质量问题清单</strong><span>当前筛选命中 {{ summary.total }} 条</span></div><el-tag type="danger">错误 {{ summary.error }}</el-tag><el-tag type="warning">警告 {{ summary.warning }}</el-tag></div>
       <div class="batch-toolbar quality-batch-toolbar">
         <div><strong>批量整改</strong><span>已选择 {{ selectedIssues.length }} 个问题，单次最多 200 个；指派负责人和开始整改要求属于同一责任组织</span></div>
@@ -467,7 +468,7 @@ onMounted(async () => {
       </div>
     </div>
 
-    <div v-if="isGroupAdmin" class="panel quality-workflow-table-panel" v-loading="batchLoading">
+      <div v-if="isGroupAdmin" class="panel quality-workflow-table-panel quality-scan-batch-panel" v-loading="batchLoading">
       <div class="table-panel-heading"><div><strong>最近巡检批次</strong><span>完整保存每次巡检范围、问题数量和自动关闭结果</span></div><el-button link type="primary" @click="loadBatches">刷新</el-button></div>
       <el-table :data="batches" stripe max-height="360" empty-text="尚未执行持久化质量巡检">
         <el-table-column label="执行时间" width="170"><template #default="scope">{{ formatTime(scope.row.created_at) }}</template></el-table-column>
@@ -482,6 +483,7 @@ onMounted(async () => {
       <div class="table-pagination">
         <el-pagination background layout="total, sizes, prev, pager, next" :total="batchTotal" :current-page="batchPage" :page-size="batchPageSize" :page-sizes="[20, 50, 100]" @current-change="handleBatchPageChange" @size-change="handleBatchPageSizeChange" />
       </div>
+    </div>
     </div>
 
     <el-drawer v-model="detailVisible" title="质量问题详情" size="620px">
@@ -548,6 +550,7 @@ onMounted(async () => {
 </template>
 
 <style scoped>
+.quality-workflow-content { display:grid; gap:16px; }
 .quality-workflow-summary { display:grid; grid-template-columns:repeat(6,minmax(0,1fr)); gap:12px; }
 .quality-workflow-card { padding:16px 18px; border:1px solid var(--line); border-left:4px solid #5b8def; border-radius:10px; background:#fff; }
 .quality-workflow-card span { display:block; margin-bottom:8px; color:var(--muted); font-size:12px; }

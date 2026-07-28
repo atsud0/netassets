@@ -129,4 +129,13 @@ test('治理页面内容卡片与台账页面保持相同圆角和间距', async
   await expect(page.getByRole('heading', { name: '回收站', exact: true })).toBeVisible()
   const recycleCards = await measureCards('.recycle-bin-notice', '.data-table-panel')
   expect(recycleCards).toEqual(ledgerBaseline)
+
+  await page.goto('/data-quality-issues')
+  await expect(page.getByRole('heading', { name: '质量整改', exact: true })).toBeVisible()
+  const qualitySummaryAndFilters = await measureCards('.quality-workflow-summary', '.quality-workflow-filters')
+  expect(qualitySummaryAndFilters).toEqual(ledgerBaseline)
+  const qualityFiltersAndIssues = await measureCards('.quality-workflow-filters', '.quality-issue-panel')
+  expect(qualityFiltersAndIssues).toEqual(ledgerBaseline)
+  const qualityIssuesAndBatches = await measureCards('.quality-issue-panel', '.quality-scan-batch-panel')
+  expect(qualityIssuesAndBatches).toEqual(ledgerBaseline)
 })
