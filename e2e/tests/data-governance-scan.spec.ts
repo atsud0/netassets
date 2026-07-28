@@ -125,8 +125,8 @@ test('独立测试组织完成质量巡检、子公司整改和集团复核闭�
     '创建测试资产',
   ).item
 
-  requireStatus(
-    await api(adminPage, '/custom-fields', `${requestPrefix}-field-create`, 'POST', {
+  const customField = requireStatus(
+    await api<{ item: { id: string } }>(adminPage, '/custom-fields', `${requestPrefix}-field-create`, 'POST', {
       resource_type: 'asset',
       field_key: fieldKey,
       field_name: `质量整改验证字段_${stamp}`,
@@ -139,10 +139,10 @@ test('独立测试组织完成质量巡检、子公司整改和集团复核闭�
     }),
     201,
     '创建测试自定义字段',
-  )
+  ).item
 
-  requireStatus(
-    await api(adminPage, '/data-quality-rules', `${requestPrefix}-rule-create`, 'POST', {
+  const requiredRule = requireStatus(
+    await api<{ item: { id: string } }>(adminPage, '/data-quality-rules', `${requestPrefix}-rule-create`, 'POST', {
       rule_name: ruleName,
       description: 'E2E 专用质量规则',
       resource_type: 'asset',
@@ -154,10 +154,10 @@ test('独立测试组织完成质量巡检、子公司整改和集团复核闭�
     }),
     201,
     '创建测试质量规则',
-  )
+  ).item
 
-  requireStatus(
-    await api(adminPage, '/data-quality-rules', `${requestPrefix}-stale-rule-create`, 'POST', {
+  const staleRule = requireStatus(
+    await api<{ item: { id: string } }>(adminPage, '/data-quality-rules', `${requestPrefix}-stale-rule-create`, 'POST', {
       rule_name: staleRuleName,
       description: 'E2E 专用长期未更新规则',
       resource_type: 'asset',
@@ -170,7 +170,7 @@ test('独立测试组织完成质量巡检、子公司整改和集团复核闭�
     }),
     201,
     '创建测试长期未更新规则',
-  )
+  ).item
 
   await adminPage.goto('/data-governance')
   await adminPage.getByRole('tab', { name: '数据质量规则' }).click()
@@ -297,6 +297,44 @@ test('独立测试组织完成质量巡检、子公司整改和集团复核闭�
   expect(detail.issue.status).toBe('closed')
   expect(detail.issue.resolution_type).toBe('corrected')
   expect(events.map((item) => item.event_type)).toEqual(expect.arrayContaining(['started', 'submitted', 'approved']))
+
+  // 质量规则是集团级配置。完整回归会在同一隔离数据库内继续执行其他业务流程，
+  // 因此验证完成后停用本用例创建的规则和字段，避免改变后续填报任务的校验口径。
+  requireStatus(await api(reviewPage, `/data-quality-rules/${requiredRule.id}`, `${requestPrefix}-rule-disable`, 'PATCH', {
+    rule_name: ruleName,
+    description: 'E2E 专用质量规则',
+    resource_type: 'asset',
+    rule_type: 'required',
+    target_field: `custom:${fieldKey}`,
+    severity: 'error',
+    stale_after_days: 0,
+    conditions: [],
+    is_enabled: false,
+    sort_order: 90000,
+  }), 200, '停用测试质量规则')
+  requireStatus(await api(reviewPage, `/data-quality-rules/${staleRule.id}`, `${requestPrefix}-stale-rule-disable`, 'PATCH', {
+    rule_name: staleRuleName,
+    description: 'E2E 专用长期未更新规则',
+    resource_type: 'asset',
+    rule_type: 'stale',
+    target_field: 'updated_at',
+    severity: 'warning',
+    stale_after_days: 1,
+    conditions: [],
+    is_enabled: false,
+    sort_order: 90010,
+  }), 200, '停用测试长期未更新规则')
+  requireStatus(await api(reviewPage, `/custom-fields/${customField.id}`, `${requestPrefix}-field-disable`, 'PATCH', {
+    resource_type: 'asset',
+    field_key: fieldKey,
+    field_name: `质量整改验证字段_${stamp}`,
+    description: 'E2E 专用必填检查字段',
+    field_type: 'text',
+    options: [],
+    is_required: false,
+    is_enabled: false,
+    sort_order: 90000,
+  }), 200, '停用测试自定义字段')
 
   requireStatus(await api(reviewPage, '/auth/logout', `${requestPrefix}-admin-logout-2`, 'POST'), 204, '集团管理员退出')
   await reviewContext.close()

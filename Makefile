@@ -1,7 +1,8 @@
 SHELL := /bin/sh
 COMPOSE := podman compose
+E2E_COMPOSE := podman compose -p netassets-e2e -f compose.e2e.yaml
 
-.PHONY: help up down build logs ps test test-backend test-frontend e2e fmt migrate-up migrate-down backup restore-verify restore cleanup-e2e
+.PHONY: help up down build logs ps test test-backend test-frontend e2e e2e-roles acceptance-preflight acceptance-running fmt migrate-up migrate-down backup restore-verify restore cleanup-e2e
 
 help:
 	@printf '%s\n' \
@@ -11,6 +12,9 @@ help:
 	  'make logs           Follow application logs' \
 	  'make test           Run backend and frontend unit tests' \
 	  'make e2e            Run Playwright tests in a container' \
+	  'make e2e-roles      Run all built-in role boundary regression tests' \
+	  'make acceptance-preflight  Validate production configuration' \
+	  'make acceptance-running    Validate a running production deployment' \
 	  'make migrate-up     Apply database migrations' \
 	  'make migrate-down   Roll back one migration' \
 	  'make backup         Back up PostgreSQL and application attachments' \
@@ -42,11 +46,24 @@ test-frontend:
 	podman run --rm -v "$$(pwd)/web:/workspace:Z" -w /workspace node:22-alpine sh -lc 'npm ci && npm test -- --run'
 
 e2e:
-	NETASSETS_E2E_CLEANUP_CONFIRM=YES ./scripts/cleanup-e2e-data.sh --apply
-	@status=0; podman compose --profile e2e run --rm playwright || status=$$?; \
-	  NETASSETS_E2E_CLEANUP_CONFIRM=YES ./scripts/cleanup-e2e-data.sh --apply; \
+	@$(E2E_COMPOSE) down -v --remove-orphans >/dev/null 2>&1 || true
+	@status=0; $(E2E_COMPOSE) build app && $(E2E_COMPOSE) run --rm playwright || status=$$?; \
+	  $(E2E_COMPOSE) down -v --remove-orphans >/dev/null 2>&1 || true; \
 	  rm -rf e2e/test-results; \
 	  exit $$status
+
+e2e-roles:
+	@$(E2E_COMPOSE) down -v --remove-orphans >/dev/null 2>&1 || true
+	@status=0; $(E2E_COMPOSE) build app && $(E2E_COMPOSE) run --rm playwright npx playwright test tests/role-boundaries.spec.ts || status=$$?; \
+	  $(E2E_COMPOSE) down -v --remove-orphans >/dev/null 2>&1 || true; \
+	  rm -rf e2e/test-results; \
+	  exit $$status
+
+acceptance-preflight:
+	./scripts/production-acceptance.sh --preflight
+
+acceptance-running:
+	./scripts/production-acceptance.sh --running
 
 fmt:
 	cd backend && gofmt -w ./cmd ./internal

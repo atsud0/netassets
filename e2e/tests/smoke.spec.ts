@@ -45,7 +45,7 @@ test('集团创建子公司账号，子公司隔离登记业务系统和网络�
   await expect(page).toHaveURL(/\/backups$/)
   await expect(page.getByRole('heading', { name: '备份管理' })).toBeVisible()
   await expect(page.getByText('恢复操作仅能在部署宿主机执行')).toBeVisible()
-  await page.getByRole('button', { name: '组织机构', exact: true }).click()
+  await page.getByRole('button', { name: '组织架构', exact: true }).click()
   await expect(page).toHaveURL(/\/organizations$/)
   const rootOrganization = await page.evaluate(async () => {
     const response = await fetch('/api/v1/organizations')
@@ -133,10 +133,15 @@ test('集团创建子公司账号，子公司隔离登记业务系统和网络�
   await expect(page.getByText('填报任务已创建并下发')).toBeVisible()
   await expect(page.getByText(inventoryTaskName, { exact: true })).toBeVisible()
 
-  await page.getByRole('button', { name: '用户与权限' }).click()
+  await page.getByRole('button', { name: '用户和权限', exact: true }).click()
   await expect(page).toHaveURL(/\/users$/)
   await page.getByRole('button', { name: '新增用户', exact: true }).click()
-  dialog = page.getByRole('dialog', { name: '新增组织用户' })
+  dialog = page.getByRole('dialog', { name: '新增用户' })
+  // 新增用户对话框在存在可管理组织时会自动添加第一条任职；只有空表单时才手动新增，
+  // 避免完整回归已有其他测试组织时误加第二个任职，导致测试账号获得额外组织权限。
+  if (await dialog.locator('.appointment-card').count() === 0) {
+    await dialog.getByRole('button', { name: '新增任职组织', exact: true }).click()
+  }
   await dialog.locator('.appointment-topline .el-select').first().click()
   await page.locator('.el-select-dropdown:visible').getByText(`${organizationName}（${organizationCode}）`, { exact: true }).first().click()
   await dialog.locator('.assignment-row .el-select').first().click()
@@ -161,7 +166,7 @@ test('集团创建子公司账号，子公司隔离登记业务系统和网络�
   await expect(page.getByRole('heading', { name: '组织安全治理工作台', exact: true })).toBeVisible()
   await expect(page.getByRole('heading', { name: '安全治理概览', exact: true })).toBeVisible()
   await expect(page.getByText('本组织整改效能', { exact: true })).toBeVisible()
-  await expect(page.getByRole('button', { name: '用户与权限' })).toHaveCount(0)
+  await expect(page.getByRole('button', { name: '用户和权限', exact: true })).toHaveCount(0)
   await expect(page.getByRole('button', { name: '用户管理', exact: true })).toBeVisible()
   await expect(page.getByRole('button', { name: '网络区域配置' })).toHaveCount(0)
 
@@ -192,7 +197,7 @@ test('集团创建子公司账号，子公司隔离登记业务系统和网络�
   })
   expect(forbiddenTaskStatus).toBe(403)
 
-  await page.getByRole('button', { name: '组织机构' }).click()
+  await page.getByRole('button', { name: '组织架构', exact: true }).click()
   await expect(page.getByRole('cell', { name: organizationName }).getByText(organizationName, { exact: true })).toBeVisible()
   await expect(page.locator('.organization-table-panel .el-table__body-wrapper tbody tr')).toHaveCount(1)
 
@@ -681,7 +686,7 @@ test('集团创建安全测试批次并批量导入授权范围内漏洞', async
   await page.goto('/security-test-batches')
   await login(page, adminUsername, adminPassword!)
   await expect(page).toHaveURL(/\/security-test-batches$/)
-  await expect(page.getByRole('heading', { name: '安全测试批次', exact: true })).toBeVisible()
+  await expect(page.getByRole('heading', { name: '安全测试', exact: true })).toBeVisible()
 
   await page.evaluate(async ({ value, code, name }) => {
     const organizationsResponse = await fetch('/api/v1/organizations')

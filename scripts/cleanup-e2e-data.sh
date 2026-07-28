@@ -33,7 +33,7 @@ common_targets_sql() {
 CREATE TEMP TABLE e2e_organizations ON COMMIT DROP AS
   SELECT id
   FROM organizations
-  WHERE organization_code ~ '^(SUB|SCOPE)_PW_[0-9]+$';
+  WHERE organization_code ~ '^(SUB|SCOPE|ROLE)_PW_[0-9]+$';
 
 CREATE TEMP TABLE e2e_tasks ON COMMIT DROP AS
   SELECT id
@@ -80,7 +80,7 @@ CREATE TEMP TABLE e2e_network_areas ON COMMIT DROP AS
 CREATE TEMP TABLE e2e_users ON COMMIT DROP AS
   SELECT id
   FROM users
-  WHERE username ~ '^pw_user_[0-9]+$';
+  WHERE username ~ '^(pw_user|role_pw_(security|admin|editor))_[0-9]+$';
 
 CREATE TEMP TABLE e2e_custom_fields ON COMMIT DROP AS
   SELECT id

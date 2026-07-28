@@ -1,0 +1,74 @@
+services:
+  postgres:
+    image: docker.io/library/postgres:17-alpine
+    environment:
+      POSTGRES_DB: netassets_e2e
+      POSTGRES_USER: netassets_e2e
+      POSTGRES_PASSWORD: ${E2E_POSTGRES_PASSWORD:-e2e-isolated-database-password}
+    volumes:
+      - postgres-e2e-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U netassets_e2e -d netassets_e2e"]
+      interval: 3s
+      timeout: 3s
+      retries: 30
+
+  app:
+    build:
+      context: .
+      dockerfile: deploy/Containerfile
+      args:
+        HTTP_PROXY: ${BUILD_HTTP_PROXY:-http://host.containers.internal:6152}
+        HTTPS_PROXY: ${BUILD_HTTPS_PROXY:-http://host.containers.internal:6152}
+        ALL_PROXY: ${BUILD_ALL_PROXY:-socks5h://host.containers.internal:6153}
+        NO_PROXY: ${BUILD_NO_PROXY:-localhost,127.0.0.1,postgres,app}
+        GOPROXY: ${GOPROXY:-https://proxy.golang.org,direct}
+        VERSION: e2e
+        COMMIT: ${E2E_COMMIT:-local}
+    environment:
+      APP_ENV: test
+      APP_ADDR: :8080
+      DATABASE_URL: postgres://netassets_e2e:${E2E_POSTGRES_PASSWORD:-e2e-isolated-database-password}@postgres:5432/netassets_e2e?sslmode=disable
+      STATIC_DIR: /app/web
+      DATA_DIR: /data
+      SESSION_COOKIE_NAME: netassets_e2e_session
+      SESSION_TTL: 2h
+      SESSION_COOKIE_SECURE: "false"
+      BOOTSTRAP_GROUP_CODE: E2E_GROUP
+      BOOTSTRAP_GROUP_NAME: 端到端测试集团
+      BOOTSTRAP_GROUP_SHORT_NAME: 测试总部
+      BOOTSTRAP_ADMIN_USERNAME: ${BOOTSTRAP_ADMIN_USERNAME:-admin}
+      BOOTSTRAP_ADMIN_PASSWORD: ${BOOTSTRAP_ADMIN_PASSWORD}
+      BOOTSTRAP_ADMIN_DISPLAY_NAME: 端到端集团管理员
+    volumes:
+      - app-e2e-data:/data
+    depends_on:
+      postgres:
+        condition: service_healthy
+    command: ["/bin/sh", "-c", "/app/netassets-migrate up && exec /app/netassets-server"]
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "-", "http://127.0.0.1:8080/health/live"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+
+  playwright:
+    image: mcr.microsoft.com/playwright:v1.55.0-noble
+    working_dir: /workspace
+    volumes:
+      - ./e2e:/workspace:Z
+    environment:
+      BASE_URL: http://app:8080
+      HTTP_PROXY: ${E2E_HTTP_PROXY:-http://host.containers.internal:6152}
+      HTTPS_PROXY: ${E2E_HTTPS_PROXY:-http://host.containers.internal:6152}
+      NO_PROXY: ${E2E_NO_PROXY:-localhost,127.0.0.1,app,postgres}
+      E2E_USERNAME: ${BOOTSTRAP_ADMIN_USERNAME:-admin}
+      E2E_PASSWORD: ${BOOTSTRAP_ADMIN_PASSWORD}
+    depends_on:
+      app:
+        condition: service_healthy
+    command: ["/bin/sh", "-lc", "npm ci && npm test"]
+
+volumes:
+  postgres-e2e-data:
+  app-e2e-data:
