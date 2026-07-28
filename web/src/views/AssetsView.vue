@@ -3,6 +3,7 @@ import { computed, onMounted, reactive, ref, watch } from 'vue'
 import { ElMessage, ElMessageBox, type FormInstance, type FormRules, type UploadFile, type UploadFiles } from 'element-plus'
 import { apiClient, getAPIErrorMessage } from '../api/client'
 import { useAuthStore } from '../stores/auth'
+import SavedFilterViews from '../components/SavedFilterViews.vue'
 
 interface Organization { id: string; code: string; name: string; type: string; status: string }
 interface BusinessSystem { id: string; code: string; name: string; organization_id: string; organization_name: string }
@@ -86,6 +87,7 @@ const search = ref('')
 const typeFilter = ref('')
 const statusFilter = ref('')
 const organizationFilter = ref('')
+const savedFilterViews = ref<InstanceType<typeof SavedFilterViews>>()
 const selectedAssets = ref<Asset[]>([])
 const batchLoading = ref(false)
 const batchStatusValue = ref('')
@@ -132,6 +134,26 @@ const sourceLabels: Record<string, string> = { manual: '手工', import: '导入
 const statusLabels: Record<string, string> = { active: '启用', pending: '待确认', disabled: '停用', archived: '已归档' }
 const importStatusLabels: Record<string, string> = { completed: '完成', partial: '部分成功', failed: '失败' }
 
+const currentAssetFilters = computed<Record<string, string>>(() => ({
+  ...(search.value.trim() ? { q: search.value.trim() } : {}),
+  ...(typeFilter.value ? { type: typeFilter.value } : {}),
+  ...(statusFilter.value ? { status: statusFilter.value } : {}),
+  ...(organizationFilter.value ? { organization_id: organizationFilter.value } : {}),
+}))
+
+function setAssetFilters(filters: Record<string, string>) {
+  search.value = filters.q ?? ''
+  typeFilter.value = filters.type ?? ''
+  statusFilter.value = filters.status ?? ''
+  organizationFilter.value = filters.organization_id ?? ''
+}
+
+function applySavedAssetFilters(filters: Record<string, string>) {
+  setAssetFilters(filters)
+  page.value = 1
+  void loadAssets()
+}
+
 watch(() => form.organization_id, () => {
   if (!availableSystems.value.some((item) => item.id === form.business_system_id)) form.business_system_id = ''
   if (!availableNetworkAreas.value.some((item) => item.id === form.network_area_id)) form.network_area_id = ''
@@ -160,7 +182,7 @@ async function loadAssets() {
   }
 }
 
-async function load() {
+async function load(applyDefaultView = false) {
   try {
     const [organizationResponse, systemResponse, areaResponse] = await Promise.all([
       apiClient.get<ListResponse<Organization>>('/organizations', { params: { page_size: 100 } }),
@@ -179,6 +201,10 @@ async function load() {
     }
   } catch (error) {
     ElMessage.error(getAPIErrorMessage(error, '读取网络资产基础数据失败'))
+  }
+  if (applyDefaultView) {
+    const defaultFilters = await savedFilterViews.value?.initialize()
+    if (defaultFilters) setAssetFilters(defaultFilters)
   }
   await loadAssets()
 }
@@ -557,7 +583,7 @@ function importanceTag(value: string) { return value === 'core' ? 'danger' : val
 function importStatusTag(value: string) { return value === 'completed' ? 'success' : value === 'partial' ? 'warning' : 'danger' }
 function formatDate(value: string) { return new Intl.DateTimeFormat('zh-CN', { dateStyle: 'short', timeStyle: 'short' }).format(new Date(value)) }
 
-onMounted(load)
+onMounted(() => load(true))
 </script>
 
 <template>
@@ -608,6 +634,7 @@ onMounted(load)
       </el-select>
       <el-button @click="resetAndLoadAssets">查询</el-button>
       <span class="asset-filter-count">共 {{ total }} 条</span>
+      <SavedFilterViews ref="savedFilterViews" page-key="assets" :current-filters="currentAssetFilters" style="grid-column:1 / -1" @apply="applySavedAssetFilters" />
     </div>
 
     <div class="panel data-table-panel" v-loading="loading">

@@ -30,6 +30,7 @@ import (
 	"netassets/internal/organization"
 	"netassets/internal/recyclebin"
 	roleDomain "netassets/internal/role"
+	"netassets/internal/savedfilter"
 	"netassets/internal/securitytestbatch"
 	"netassets/internal/securityworkorder"
 	userdomain "netassets/internal/user"
@@ -79,6 +80,7 @@ func New(cfg config.Config, pool *pgxpool.Pool, logger *slog.Logger) http.Handle
 		registerAuditLogRoutes(api, requireAuth, auditlog.NewService(pool), logger)
 		registerChangeHistoryRoutes(api, requireAuth, changehistory.NewService(pool), logger)
 		registerRecycleBinRoutes(api, requireAuth, recyclebin.NewService(pool), logger)
+		registerSavedFilterRoutes(api, requireAuth, savedfilter.NewService(pool), logger)
 		registerNotificationRoutes(api, requireAuth, notification.NewService(pool), logger)
 		registerSecurityWorkOrderRoutes(api, requireAuth, securityworkorder.NewService(pool, cfg.DataDir), logger)
 		registerSecurityTestBatchRoutes(api, requireAuth, securitytestbatch.NewService(pool, cfg.DataDir), logger)

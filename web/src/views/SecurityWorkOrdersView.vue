@@ -1,10 +1,11 @@
 <script setup lang="ts">
-import { computed, onMounted, reactive, ref, watch } from 'vue'
+import { computed, nextTick, onMounted, reactive, ref, watch } from 'vue'
 import type { FormInstance, FormRules } from 'element-plus'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { useRoute } from 'vue-router'
 import { apiClient, getAPIErrorMessage } from '../api/client'
 import { useAuthStore } from '../stores/auth'
+import SavedFilterViews from '../components/SavedFilterViews.vue'
 
 interface ListResponse<T> { items: T[]; total: number; page: number; page_size: number }
 interface ItemResponse<T> { item: T }
@@ -74,6 +75,7 @@ const findingBatchScopeAssetIDs = ref<string[]>([])
 const organizationFilter = ref('')
 const statusFilter = ref('')
 const overdueOnly = ref(false)
+const savedFilterViews = ref<InstanceType<typeof SavedFilterViews>>()
 
 const findingDialogVisible = ref(false)
 const findingFormRef = ref<FormInstance>()
@@ -145,6 +147,24 @@ const eventLabels: Record<string, string> = {
 }
 const attachmentCategoryLabels: Record<string, string> = { remediation: '整改证明', verification: '复测材料', reference: '参考资料' }
 
+const currentWorkOrderFilters = computed<Record<string, string>>(() => ({
+  ...(organizationFilter.value ? { organization_id: organizationFilter.value } : {}),
+  ...(statusFilter.value ? { status: statusFilter.value } : {}),
+  ...(overdueOnly.value ? { overdue: 'true' } : {}),
+}))
+
+function setWorkOrderFilters(filters: Record<string, string>) {
+  organizationFilter.value = filters.organization_id ?? ''
+  statusFilter.value = filters.status ?? ''
+  overdueOnly.value = filters.overdue === 'true'
+}
+
+function applySavedWorkOrderFilters(filters: Record<string, string>) {
+  setWorkOrderFilters(filters)
+  orderPage.value = 1
+  void loadActiveList()
+}
+
 const enabledOrganizations = computed(() => organizations.value.filter(item => item.status === 'enabled' && item.type !== 'group'))
 const scopedAssets = computed(() => assets.value.filter(item => item.organization_id === findingForm.assignee_organization_id && item.status !== 'archived' && (!findingForm.test_batch_id || findingBatchScopeAssetIDs.value.includes(item.id))))
 const scopedSystems = computed(() => systems.value.filter(item => item.organization_id === findingForm.assignee_organization_id && item.status !== 'archived'))
@@ -208,6 +228,14 @@ function applyRouteFilters() {
 
 onMounted(async () => {
   applyRouteFilters()
+  await nextTick()
+  const hasRouteContext = ['organization_id', 'status', 'overdue', 'work_order_id', 'finding_id'].some(key => route.query[key] !== undefined)
+  if (activeTab.value === 'orders' && !hasRouteContext) {
+    const defaultFilters = await savedFilterViews.value?.initialize()
+    if (defaultFilters) setWorkOrderFilters(defaultFilters)
+  } else {
+    await savedFilterViews.value?.loadViews()
+  }
   await Promise.all([loadSupportingData(), loadFindingOptions()])
   await loadActiveList()
   const workOrderID = typeof route.query.work_order_id === 'string' ? route.query.work_order_id : ''
@@ -754,10 +782,11 @@ function riskAcceptanceLabel(item: Finding) {
   if (item.status !== 'accepted_risk') return ''
   return item.risk_acceptance_expired ? '已到期，待复核' : '风险接受中'
 }
-function onTabChange() {
+async function onTabChange() {
   organizationFilter.value = ''
   statusFilter.value = ''
   overdueOnly.value = false
+  if (activeTab.value === 'orders') await savedFilterViews.value?.loadViews()
   void loadActiveList()
 }
 </script>
@@ -812,6 +841,7 @@ function onTabChange() {
         <el-button type="primary" plain @click="applyFilter">筛选</el-button>
         <el-button @click="resetFilters">重置</el-button>
       </div>
+      <SavedFilterViews v-show="activeTab === 'orders'" ref="savedFilterViews" page-key="security_work_orders" :current-filters="currentWorkOrderFilters" class="work-order-saved-views" @apply="applySavedWorkOrderFilters" />
 
       <el-table v-if="activeTab === 'orders'" :data="workOrders" row-key="id" empty-text="暂无安全整改工单">
         <el-table-column label="工单" min-width="230">
@@ -1061,6 +1091,7 @@ function onTabChange() {
 
 <style scoped>
 .security-panel { overflow: hidden; }
+.work-order-saved-views { margin:-8px 0 18px; padding-top:12px; border-top:1px dashed var(--line); }
 .filter-bar { display: flex; flex-wrap: wrap; gap: 10px; margin: 4px 0 18px; }
 .table-pagination { display: flex; justify-content: flex-end; margin-top: 18px; }
 .detail-pagination { overflow-x: auto; padding-bottom: 2px; }

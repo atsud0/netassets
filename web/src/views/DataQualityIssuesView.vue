@@ -4,6 +4,7 @@ import { ElMessage, ElMessageBox, type TableInstance } from 'element-plus'
 import { useRouter } from 'vue-router'
 import { apiClient, getAPIErrorMessage } from '../api/client'
 import { useAuthStore } from '../stores/auth'
+import SavedFilterViews from '../components/SavedFilterViews.vue'
 
 interface Organization { id: string; code: string; name: string; status: string }
 interface UserItem { id: string; username: string; display_name: string; status?: string }
@@ -70,6 +71,10 @@ const bulkResultVisible = ref(false)
 const bulkResult = ref<BatchOperationResult>()
 const bulkResultTitle = ref('批量整改结果')
 const filters = reactive({ organization_id: '', status: '', severity: '', resource_type: '', assignee: '' })
+const savedFilterViews = ref<InstanceType<typeof SavedFilterViews>>()
+const currentIssueFilters = computed<Record<string, string>>(() => Object.fromEntries(
+  Object.entries(filters).filter(([, value]) => Boolean(value)),
+))
 
 const isGroupAdmin = computed(() => auth.isGroupAdmin)
 const summaryCards = computed(() => [
@@ -347,6 +352,18 @@ async function submitBulkAction() {
   }
 }
 
+function applySavedIssueFilters(savedFilters: Record<string, string>) {
+  Object.assign(filters, {
+    organization_id: savedFilters.organization_id ?? '',
+    status: savedFilters.status ?? '',
+    severity: savedFilters.severity ?? '',
+    resource_type: savedFilters.resource_type ?? '',
+    assignee: savedFilters.assignee ?? '',
+  })
+  issuePage.value = 1
+  void loadIssues()
+}
+
 function searchIssues() {
   issueTableRef.value?.clearSelection()
   selectedIssues.value = []
@@ -385,6 +402,16 @@ function handleBatchPageSizeChange(value: number) {
 }
 
 onMounted(async () => {
+  const defaultFilters = await savedFilterViews.value?.initialize()
+  if (defaultFilters) {
+    Object.assign(filters, {
+      organization_id: defaultFilters.organization_id ?? '',
+      status: defaultFilters.status ?? '',
+      severity: defaultFilters.severity ?? '',
+      resource_type: defaultFilters.resource_type ?? '',
+      assignee: defaultFilters.assignee ?? '',
+    })
+  }
   await Promise.all([loadIssues(), loadReferenceData()])
 })
 </script>
@@ -407,6 +434,7 @@ onMounted(async () => {
       <el-select v-model="filters.resource_type" clearable placeholder="全部对象"><el-option label="网络资产" value="asset" /><el-option label="业务系统" value="business_system" /></el-select>
       <el-select v-model="filters.assignee" clearable placeholder="全部负责人"><el-option label="只看我负责的" value="me" /><el-option v-for="user in availableFilterUsers" :key="user.id" :label="user.display_name" :value="user.id" /></el-select>
       <div class="quality-workflow-filter-actions"><el-button type="primary" @click="searchIssues">查询</el-button><el-button @click="resetFilters">重置</el-button></div>
+      <SavedFilterViews ref="savedFilterViews" page-key="data_quality_issues" :current-filters="currentIssueFilters" class="quality-saved-views" @apply="applySavedIssueFilters" />
     </div>
 
     <div class="panel quality-workflow-table-panel">
@@ -526,6 +554,7 @@ onMounted(async () => {
 .quality-workflow-card strong { color:var(--navy); font-size:26px; }
 .quality-workflow-card.tone-danger { border-left-color:#f56c6c; }.quality-workflow-card.tone-warning { border-left-color:#e6a23c; }.quality-workflow-card.tone-success { border-left-color:#67c23a; }.quality-workflow-card.tone-info { border-left-color:#909399; }.quality-workflow-card.tone-total { border-left-color:var(--cyan); }
 .quality-workflow-filters { display:grid; grid-template-columns:repeat(5,minmax(150px,1fr)) auto; gap:12px; align-items:center; }
+.quality-saved-views { grid-column:1 / -1; padding-top:4px; border-top:1px dashed var(--line); }
 .quality-workflow-filter-actions { display:flex; gap:8px; }.table-pagination { display:flex; justify-content:flex-end; margin-top:18px; }.quality-workflow-table-panel { padding-top:14px; }.row-actions { display:flex; flex-wrap:wrap; gap:2px 8px; }
 .quality-batch-toolbar { margin:14px 0; }.quality-batch-form { margin-top:18px; }
 .quality-note { margin:14px 0; padding:14px 16px; background:#f8fafc; border-radius:9px; }.quality-note span { color:var(--muted); font-size:12px; }.quality-note p { margin:7px 0; white-space:pre-wrap; line-height:1.65; }.quality-note small { color:var(--muted); }
