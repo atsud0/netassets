@@ -23,6 +23,7 @@ import (
 	"netassets/internal/auth"
 	"netassets/internal/customfield"
 	"netassets/internal/exportfile"
+	"netassets/internal/notification"
 	"netassets/internal/pagination"
 )
 
@@ -664,23 +665,46 @@ func (s *Service) SetArchived(ctx context.Context, principal auth.Principal, sys
 	}
 	status := "running"
 	action, summary := "business_system.restore", "恢复业务系统"
+	eventType := notification.EventBusinessSystemRestored
 	if archived {
 		status = "archived"
 		action, summary = "business_system.archive", "归档业务系统"
+		eventType = notification.EventBusinessSystemArchived
 	}
-	_, err = s.pool.Exec(ctx, `UPDATE business_systems SET system_status=$1, updated_by=$2::uuid, updated_at=now() WHERE id=$3::uuid AND deleted_at IS NULL`, status, principal.UserID, systemID)
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return BusinessSystem{}, fmt.Errorf("begin business system status update: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	command, err := tx.Exec(ctx, `UPDATE business_systems SET system_status=$1, updated_by=$2::uuid, updated_at=now() WHERE id=$3::uuid AND deleted_at IS NULL`, status, principal.UserID, systemID)
 	if err != nil {
 		return BusinessSystem{}, fmt.Errorf("set business system status: %w", err)
+	}
+	if command.RowsAffected() == 0 {
+		return BusinessSystem{}, ErrNotFound
 	}
 	changesJSON, err := json.Marshal([]fieldChange{{Field: "system_status", Label: "运行状态", Before: businessSystemStatusLabel(current.Status), After: businessSystemStatusLabel(status)}})
 	if err != nil {
 		return BusinessSystem{}, fmt.Errorf("encode business system status changes: %w", err)
 	}
-	if _, err := s.pool.Exec(ctx, `
+	if _, err := tx.Exec(ctx, `
 		INSERT INTO audit_logs (user_id, organization_id, action, resource_type, resource_id, summary, details, request_ip, request_id)
 		VALUES ($1::uuid, $2::uuid, $3, 'business_system', $4, $5, jsonb_build_object('changes', $6::jsonb), NULLIF($7,'')::inet, NULLIF($8,''))
 	`, principal.UserID, current.OrganizationID, action, systemID, summary, changesJSON, ipAddress, requestID); err != nil {
 		return BusinessSystem{}, fmt.Errorf("write business system status audit: %w", err)
+	}
+	if current.Status != status {
+		if err := notification.WriteEvent(ctx, tx, notification.EventInput{
+			EventType: eventType, Category: notification.CategoryBusinessSystemChange,
+			TargetOrganizationID: current.OrganizationID, ActorUserID: principal.UserID, RequiredPermission: "system.manage",
+			ResourceType: "business_system", ResourceID: systemID, ResourceLabel: current.Name, BatchKey: requestID, Level: "warning",
+			Details: map[string]any{"before": current.Status, "after": status, "system_code": current.Code},
+		}); err != nil {
+			return BusinessSystem{}, err
+		}
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return BusinessSystem{}, fmt.Errorf("commit business system status update: %w", err)
 	}
 	item, err := queryBusinessSystem(ctx, s.pool, systemID, false)
 	if err != nil {
@@ -715,15 +739,36 @@ func (s *Service) Delete(ctx context.Context, principal auth.Principal, systemID
 	if linkedAssets > 0 {
 		return ErrInUse
 	}
-	_, err = s.pool.Exec(ctx, `UPDATE business_systems SET deleted_at=now(), system_status='archived', updated_by=$1::uuid, updated_at=now() WHERE id=$2::uuid AND deleted_at IS NULL`, principal.UserID, systemID)
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("begin business system delete: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	command, err := tx.Exec(ctx, `UPDATE business_systems SET deleted_at=now(), system_status='archived', updated_by=$1::uuid, updated_at=now() WHERE id=$2::uuid AND deleted_at IS NULL`, principal.UserID, systemID)
 	if err != nil {
 		return fmt.Errorf("delete business system: %w", err)
 	}
-	_, err = s.pool.Exec(ctx, `
+	if command.RowsAffected() == 0 {
+		return ErrNotFound
+	}
+	if _, err := tx.Exec(ctx, `
 		INSERT INTO audit_logs (user_id, organization_id, action, resource_type, resource_id, summary, details, request_ip, request_id)
 		VALUES ($1::uuid, $2::uuid, 'business_system.delete', 'business_system', $3, '删除业务系统', '{}'::jsonb, NULLIF($4,'')::inet, NULLIF($5,''))
-	`, principal.UserID, current.OrganizationID, systemID, ipAddress, requestID)
-	return err
+	`, principal.UserID, current.OrganizationID, systemID, ipAddress, requestID); err != nil {
+		return fmt.Errorf("write business system delete audit: %w", err)
+	}
+	if err := notification.WriteEvent(ctx, tx, notification.EventInput{
+		EventType: notification.EventBusinessSystemDeleted, Category: notification.CategoryBusinessSystemChange,
+		TargetOrganizationID: current.OrganizationID, ActorUserID: principal.UserID, RequiredPermission: "system.manage",
+		ResourceType: "business_system", ResourceID: systemID, ResourceLabel: current.Name, BatchKey: requestID, Level: "danger",
+		Details: map[string]any{"system_code": current.Code},
+	}); err != nil {
+		return err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("commit business system delete: %w", err)
+	}
+	return nil
 }
 
 func businessSystemFieldChanges(current BusinessSystem, input CreateInput, organizationName string) []fieldChange {

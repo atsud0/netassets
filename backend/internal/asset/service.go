@@ -24,6 +24,7 @@ import (
 	"netassets/internal/auth"
 	"netassets/internal/customfield"
 	"netassets/internal/exportfile"
+	"netassets/internal/notification"
 	"netassets/internal/pagination"
 )
 
@@ -668,6 +669,35 @@ func (s *Service) Update(ctx context.Context, principal auth.Principal, assetID 
 	`, principal.UserID, input.OrganizationID, assetID, changesJSON, ipAddress, requestID); err != nil {
 		return Asset{}, fmt.Errorf("write asset update audit: %w", err)
 	}
+	resourceLabel := strings.TrimSpace(input.Name)
+	if resourceLabel == "" {
+		resourceLabel = input.Value
+	}
+	if current.Status != input.Status {
+		eventType := notification.EventAssetStatusChanged
+		level := "warning"
+		if input.Status == "archived" {
+			eventType = notification.EventAssetArchived
+		}
+		if err := notification.WriteEvent(ctx, tx, notification.EventInput{
+			EventType: eventType, Category: notification.CategoryAssetChange,
+			TargetOrganizationID: input.OrganizationID, ActorUserID: principal.UserID, RequiredPermission: "asset.manage",
+			ResourceType: "asset", ResourceID: assetID, ResourceLabel: resourceLabel, BatchKey: requestID, Level: level,
+			Details: map[string]any{"before": current.Status, "after": input.Status},
+		}); err != nil {
+			return Asset{}, err
+		}
+	}
+	if current.NetworkAreaID != input.NetworkAreaID {
+		if err := notification.WriteEvent(ctx, tx, notification.EventInput{
+			EventType: notification.EventAssetNetworkAreaChanged, Category: notification.CategoryAssetChange,
+			TargetOrganizationID: input.OrganizationID, ActorUserID: principal.UserID, RequiredPermission: "asset.manage",
+			ResourceType: "asset", ResourceID: assetID, ResourceLabel: resourceLabel, BatchKey: requestID, Level: "info",
+			Details: map[string]any{"before": current.NetworkAreaName, "after": networkAreaName},
+		}); err != nil {
+			return Asset{}, err
+		}
+	}
 	if err := tx.Commit(ctx); err != nil {
 		return Asset{}, fmt.Errorf("commit asset update: %w", err)
 	}
@@ -703,6 +733,18 @@ func (s *Service) Delete(ctx context.Context, principal auth.Principal, assetID,
 		        jsonb_build_object('type', $4::text, 'value', $5::text), NULLIF($6, '')::inet, NULLIF($7, ''))
 	`, principal.UserID, current.OrganizationID, assetID, current.Type, current.Value, ipAddress, requestID); err != nil {
 		return fmt.Errorf("write asset delete audit: %w", err)
+	}
+	resourceLabel := strings.TrimSpace(current.Name)
+	if resourceLabel == "" {
+		resourceLabel = current.Value
+	}
+	if err := notification.WriteEvent(ctx, tx, notification.EventInput{
+		EventType: notification.EventAssetDeleted, Category: notification.CategoryAssetChange,
+		TargetOrganizationID: current.OrganizationID, ActorUserID: principal.UserID, RequiredPermission: "asset.manage",
+		ResourceType: "asset", ResourceID: assetID, ResourceLabel: resourceLabel, BatchKey: requestID, Level: "danger",
+		Details: map[string]any{"asset_type": current.Type, "asset_value": current.Value},
+	}); err != nil {
+		return err
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return fmt.Errorf("commit asset delete: %w", err)

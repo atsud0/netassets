@@ -115,7 +115,98 @@ WITH RECURSIVE descendant_roots(id) AS (
 	UNION SELECT id FROM quality_descendants
 ), quality_scoped_organizations(id) AS (
 	SELECT o.id FROM organizations o WHERE o.status='enabled' AND ($2::boolean OR o.id IN (SELECT id FROM quality_accessible))
+), event_permission_descendant_roots(permission_key,id) AS (
+	SELECT rp.permission_key, ur.organization_id
+	FROM user_roles ur
+	JOIN roles r ON r.id=ur.role_id AND r.status='enabled'
+	JOIN role_permissions rp ON rp.role_id=r.id
+	WHERE ur.user_id=$1::uuid AND ur.organization_id IS NOT NULL AND ur.data_scope='organization_and_descendants'
+), event_permission_descendants(permission_key,id) AS (
+	SELECT permission_key,id FROM event_permission_descendant_roots
+	UNION
+	SELECT parent.permission_key,child.id
+	FROM organizations child
+	JOIN event_permission_descendants parent ON child.parent_id=parent.id
+), event_permission_accessible(permission_key,id) AS (
+	SELECT rp.permission_key,ur.organization_id
+	FROM user_roles ur
+	JOIN roles r ON r.id=ur.role_id AND r.status='enabled'
+	JOIN role_permissions rp ON rp.role_id=r.id
+	WHERE ur.user_id=$1::uuid AND ur.organization_id IS NOT NULL AND ur.data_scope IN ('organization','organization_and_descendants')
+	UNION SELECT permission_key,id FROM event_permission_descendants
 ), notification_candidates AS (
+	SELECT
+		'ledger_event:' || ne.id::text AS notification_key,
+		ne.category::text AS category,
+		CASE ne.event_type
+			WHEN 'asset.status_changed' THEN CASE WHEN ne.item_count>1 THEN '网络资产状态已批量调整' ELSE '网络资产状态已调整' END
+			WHEN 'asset.network_area_changed' THEN CASE WHEN ne.item_count>1 THEN '网络区域已批量调整' ELSE '网络区域已调整' END
+			WHEN 'asset.archived' THEN CASE WHEN ne.item_count>1 THEN '网络资产已批量归档' ELSE '网络资产已归档' END
+			WHEN 'asset.deleted' THEN CASE WHEN ne.item_count>1 THEN '网络资产已批量删除' ELSE '网络资产已删除' END
+			WHEN 'asset.restored' THEN CASE WHEN ne.item_count>1 THEN '网络资产已批量恢复' ELSE '网络资产已恢复' END
+			WHEN 'business_system.archived' THEN CASE WHEN ne.item_count>1 THEN '业务系统已批量归档' ELSE '业务系统已归档' END
+			WHEN 'business_system.restored' THEN CASE WHEN ne.item_count>1 THEN '业务系统已批量恢复' ELSE '业务系统已恢复' END
+			WHEN 'business_system.deleted' THEN CASE WHEN ne.item_count>1 THEN '业务系统已批量删除' ELSE '业务系统已删除' END
+			WHEN 'security_finding.created_on_asset' THEN CASE WHEN ne.item_count>1 THEN '网络资产新增多项安全发现' ELSE '网络资产新增安全发现' END
+			WHEN 'security_finding.created_on_system' THEN CASE WHEN ne.item_count>1 THEN '业务系统新增多项安全发现' ELSE '业务系统新增安全发现' END
+			ELSE '台账发生变更'
+		END::text AS title,
+		CASE ne.event_type
+			WHEN 'asset.status_changed' THEN CASE WHEN ne.item_count>1
+				THEN format('%s 已批量调整本组织 %s 项网络资产的状态，请及时核对台账。', COALESCE(NULLIF(actor.display_name,''),actor.username,'管理员'),ne.item_count)
+				ELSE format('%s 已调整网络资产“%s”的状态，请及时核对。', COALESCE(NULLIF(actor.display_name,''),actor.username,'管理员'),ne.resource_label) END
+			WHEN 'asset.network_area_changed' THEN CASE WHEN ne.item_count>1
+				THEN format('%s 已批量调整本组织 %s 项网络资产的网络区域，请及时核对台账。', COALESCE(NULLIF(actor.display_name,''),actor.username,'管理员'),ne.item_count)
+				ELSE format('%s 已调整网络资产“%s”的网络区域，请及时核对。', COALESCE(NULLIF(actor.display_name,''),actor.username,'管理员'),ne.resource_label) END
+			WHEN 'asset.archived' THEN CASE WHEN ne.item_count>1
+				THEN format('%s 已批量归档本组织 %s 项网络资产。', COALESCE(NULLIF(actor.display_name,''),actor.username,'管理员'),ne.item_count)
+				ELSE format('%s 已归档网络资产“%s”。', COALESCE(NULLIF(actor.display_name,''),actor.username,'管理员'),ne.resource_label) END
+			WHEN 'asset.deleted' THEN CASE WHEN ne.item_count>1
+				THEN format('%s 已将本组织 %s 项网络资产批量移入回收站。', COALESCE(NULLIF(actor.display_name,''),actor.username,'管理员'),ne.item_count)
+				ELSE format('%s 已将网络资产“%s”移入回收站。', COALESCE(NULLIF(actor.display_name,''),actor.username,'管理员'),ne.resource_label) END
+			WHEN 'asset.restored' THEN CASE WHEN ne.item_count>1
+				THEN format('%s 已从回收站批量恢复本组织 %s 项网络资产。', COALESCE(NULLIF(actor.display_name,''),actor.username,'管理员'),ne.item_count)
+				ELSE format('%s 已从回收站恢复网络资产“%s”。', COALESCE(NULLIF(actor.display_name,''),actor.username,'管理员'),ne.resource_label) END
+			WHEN 'business_system.archived' THEN CASE WHEN ne.item_count>1
+				THEN format('%s 已批量归档本组织 %s 个业务系统。', COALESCE(NULLIF(actor.display_name,''),actor.username,'管理员'),ne.item_count)
+				ELSE format('%s 已归档业务系统“%s”。', COALESCE(NULLIF(actor.display_name,''),actor.username,'管理员'),ne.resource_label) END
+			WHEN 'business_system.restored' THEN CASE WHEN ne.item_count>1
+				THEN format('%s 已批量恢复本组织 %s 个业务系统，请确认当前运行状态。', COALESCE(NULLIF(actor.display_name,''),actor.username,'管理员'),ne.item_count)
+				ELSE format('%s 已恢复业务系统“%s”，请确认当前运行状态。', COALESCE(NULLIF(actor.display_name,''),actor.username,'管理员'),ne.resource_label) END
+			WHEN 'business_system.deleted' THEN CASE WHEN ne.item_count>1
+				THEN format('%s 已将本组织 %s 个业务系统批量移入回收站。', COALESCE(NULLIF(actor.display_name,''),actor.username,'管理员'),ne.item_count)
+				ELSE format('%s 已将业务系统“%s”移入回收站。', COALESCE(NULLIF(actor.display_name,''),actor.username,'管理员'),ne.resource_label) END
+			WHEN 'security_finding.created_on_asset' THEN CASE WHEN ne.item_count>1
+				THEN format('%s 已在本组织网络资产上登记 %s 项安全发现，请及时查看和跟进。', COALESCE(NULLIF(actor.display_name,''),actor.username,'安全运营人员'),ne.item_count)
+				ELSE format('%s 已在本组织网络资产上登记安全发现 %s，请及时查看和跟进。', COALESCE(NULLIF(actor.display_name,''),actor.username,'安全运营人员'),ne.resource_label) END
+			WHEN 'security_finding.created_on_system' THEN CASE WHEN ne.item_count>1
+				THEN format('%s 已在本组织业务系统上登记 %s 项安全发现，请及时查看和跟进。', COALESCE(NULLIF(actor.display_name,''),actor.username,'安全运营人员'),ne.item_count)
+				ELSE format('%s 已在本组织业务系统上登记安全发现 %s，请及时查看和跟进。', COALESCE(NULLIF(actor.display_name,''),actor.username,'安全运营人员'),ne.resource_label) END
+			ELSE '本组织台账发生变更，请及时查看。'
+		END::text AS message,
+		ne.level::text AS level,
+		ne.resource_type::text AS resource_type,
+		COALESCE(ne.resource_id,'')::text AS resource_id,
+		CASE
+			WHEN ne.event_type='asset.deleted' THEN '/recycle-bin?resource_type=asset&organization_id=' || ne.target_organization_id::text
+			WHEN ne.event_type LIKE 'asset.%' THEN '/assets?organization_id=' || ne.target_organization_id::text || CASE WHEN ne.resource_id IS NOT NULL THEN '&asset_id=' || ne.resource_id ELSE '' END
+			WHEN ne.event_type='business_system.deleted' THEN '/recycle-bin?resource_type=business_system&organization_id=' || ne.target_organization_id::text
+			WHEN ne.event_type LIKE 'business_system.%' THEN '/business-systems?organization_id=' || ne.target_organization_id::text || CASE WHEN ne.resource_id IS NOT NULL THEN '&system_id=' || ne.resource_id ELSE '' END
+			WHEN ne.event_type LIKE 'security_finding.%' THEN '/security-work-orders?tab=findings&organization_id=' || ne.target_organization_id::text || CASE WHEN ne.resource_id IS NOT NULL THEN '&finding_id=' || ne.resource_id ELSE '' END
+			ELSE ''
+		END::text AS action_path,
+		ne.updated_at AS occurred_at,
+		NULL::timestamptz AS due_at
+	FROM notification_events ne
+	LEFT JOIN users actor ON actor.id=ne.actor_user_id
+	WHERE ne.actor_user_id IS DISTINCT FROM $1::uuid
+	  AND ($2::boolean OR EXISTS (
+		SELECT 1 FROM event_permission_accessible visible
+		WHERE visible.permission_key=ne.required_permission AND visible.id=ne.target_organization_id
+	  ))
+
+	UNION ALL
+
 	SELECT
 		'work_order:pending_verification:' || wo.id::text || ':' || extract(epoch FROM COALESCE(wo.submitted_at, wo.updated_at))::bigint::text AS notification_key,
 		'work_order_review'::text AS category,
@@ -448,7 +539,7 @@ func ValidateCategory(category string) bool {
 		return true
 	}
 	switch strings.TrimSpace(category) {
-	case "work_order_review", "work_order_received", "work_order_returned", "work_order_overdue", "work_order_due_soon", "risk_review", "quality_review", "quality_received", "quality_returned", "quality_exemption":
+	case "work_order_review", "work_order_received", "work_order_returned", "work_order_overdue", "work_order_due_soon", "risk_review", "quality_review", "quality_received", "quality_returned", "quality_exemption", CategoryAssetChange, CategoryBusinessSystemChange, CategoryFindingReceived:
 		return true
 	default:
 		return false

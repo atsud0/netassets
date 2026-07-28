@@ -7,7 +7,7 @@ import (
 )
 
 func TestValidateCategory(t *testing.T) {
-	for _, category := range []string{"", "work_order_review", "work_order_received", "work_order_returned", "work_order_overdue", "work_order_due_soon", "risk_review"} {
+	for _, category := range []string{"", "work_order_review", "work_order_received", "work_order_returned", "work_order_overdue", "work_order_due_soon", "risk_review", "quality_review", "quality_received", "quality_returned", "quality_exemption", CategoryAssetChange, CategoryBusinessSystemChange, CategoryFindingReceived} {
 		if !ValidateCategory(category) {
 			t.Fatalf("ValidateCategory(%q) = false", category)
 		}

@@ -16,6 +16,7 @@ import (
 
 	"netassets/internal/access"
 	"netassets/internal/auth"
+	"netassets/internal/notification"
 	"netassets/internal/pagination"
 )
 
@@ -250,11 +251,23 @@ func (s *Service) SearchFindings(ctx context.Context, principal auth.Principal, 
 		WHERE (
 		        $2::boolean
 		        OR (
-		            f.assignee_organization_id IN (SELECT id FROM accessible)
-		            AND EXISTS (
-		                SELECT 1 FROM security_work_order_findings visible_link
-		                JOIN security_work_orders visible_order ON visible_order.id = visible_link.work_order_id
-		                WHERE visible_link.finding_id = f.id AND visible_order.issued_at IS NOT NULL
+		            (
+		                (f.asset_id IS NOT NULL AND EXISTS (
+		                    SELECT 1 FROM finding_permission_accessible scope
+		                    WHERE scope.permission_key = 'asset.manage' AND scope.id = f.assignee_organization_id
+		                ))
+		                OR (f.asset_id IS NULL AND f.business_system_id IS NOT NULL AND EXISTS (
+		                    SELECT 1 FROM finding_permission_accessible scope
+		                    WHERE scope.permission_key = 'system.manage' AND scope.id = f.assignee_organization_id
+		                ))
+		            )
+		            OR (
+		                f.assignee_organization_id IN (SELECT id FROM accessible)
+		                AND EXISTS (
+		                    SELECT 1 FROM security_work_order_findings visible_link
+		                    JOIN security_work_orders visible_order ON visible_order.id = visible_link.work_order_id
+		                    WHERE visible_link.finding_id = f.id AND visible_order.issued_at IS NOT NULL
+		                )
 		            )
 		        )
 		      )
@@ -284,11 +297,23 @@ func (s *Service) SearchFindings(ctx context.Context, principal auth.Principal, 
             WHERE (
                     $2::boolean
                     OR (
-                        f.assignee_organization_id IN (SELECT id FROM accessible)
-                        AND EXISTS (
-                            SELECT 1 FROM security_work_order_findings visible_link
-                            JOIN security_work_orders visible_order ON visible_order.id = visible_link.work_order_id
-                            WHERE visible_link.finding_id = f.id AND visible_order.issued_at IS NOT NULL
+                        (
+                            (f.asset_id IS NOT NULL AND EXISTS (
+                                SELECT 1 FROM finding_permission_accessible scope
+                                WHERE scope.permission_key = 'asset.manage' AND scope.id = f.assignee_organization_id
+                            ))
+                            OR (f.asset_id IS NULL AND f.business_system_id IS NOT NULL AND EXISTS (
+                                SELECT 1 FROM finding_permission_accessible scope
+                                WHERE scope.permission_key = 'system.manage' AND scope.id = f.assignee_organization_id
+                            ))
+                        )
+                        OR (
+                            f.assignee_organization_id IN (SELECT id FROM accessible)
+                            AND EXISTS (
+                                SELECT 1 FROM security_work_order_findings visible_link
+                                JOIN security_work_orders visible_order ON visible_order.id = visible_link.work_order_id
+                                WHERE visible_link.finding_id = f.id AND visible_order.issued_at IS NOT NULL
+                            )
                         )
                     )
                   )
@@ -343,6 +368,26 @@ func (s *Service) CreateFinding(ctx context.Context, principal auth.Principal, i
 	}
 	if err := writeAudit(ctx, tx, principal, input.AssigneeOrganizationID, "security_finding.create", "security_finding", id,
 		"登记安全发现 "+code, map[string]any{"severity": input.Severity, "asset_id": input.AssetID, "business_system_id": input.BusinessSystemID, "test_batch_id": input.TestBatchID}, requestID, ipAddress); err != nil {
+		return Finding{}, err
+	}
+	eventType := notification.EventFindingCreatedOnSystem
+	requiredPermission := "system.manage"
+	if input.AssetID != "" {
+		eventType = notification.EventFindingCreatedOnAsset
+		requiredPermission = "asset.manage"
+	}
+	level := "info"
+	if input.Severity == "medium" {
+		level = "warning"
+	} else if input.Severity == "high" || input.Severity == "critical" {
+		level = "danger"
+	}
+	if err := notification.WriteEvent(ctx, tx, notification.EventInput{
+		EventType: eventType, Category: notification.CategoryFindingReceived,
+		TargetOrganizationID: input.AssigneeOrganizationID, ActorUserID: principal.UserID, RequiredPermission: requiredPermission,
+		ResourceType: "security_finding", ResourceID: id, ResourceLabel: code + "《" + input.Title + "》", BatchKey: requestID, Level: level,
+		Details: map[string]any{"severity": input.Severity, "asset_id": input.AssetID, "business_system_id": input.BusinessSystemID, "test_batch_id": input.TestBatchID},
+	}); err != nil {
 		return Finding{}, err
 	}
 	if err := tx.Commit(ctx); err != nil {
@@ -429,8 +474,9 @@ func (s *Service) UpdateFinding(ctx context.Context, principal auth.Principal, i
 }
 
 // GetFinding returns one finding when it is visible to the current principal.
-// Group administrators can inspect all findings; subsidiary users can only inspect
-// findings from their organization after the related work order has been issued.
+// Group security operators can inspect all findings. Organization users can inspect
+// pre-work-order findings when the role covering that organization grants management
+// of the referenced asset/system; issued work orders retain their existing visibility.
 func (s *Service) GetFinding(ctx context.Context, principal auth.Principal, id string) (Finding, error) {
 	if !validUUID(id) {
 		return Finding{}, ErrInvalid
@@ -440,6 +486,17 @@ func (s *Service) GetFinding(ctx context.Context, principal auth.Principal, id s
 		return Finding{}, err
 	}
 	if principal.CanManageSecurityFindings() {
+		return item, nil
+	}
+	requiredPermission := "system.manage"
+	if item.AssetID != "" {
+		requiredPermission = "asset.manage"
+	}
+	canManageLedger, err := access.CanOperateOrganization(ctx, s.pool, principal, item.AssigneeOrganizationID, requiredPermission)
+	if err != nil {
+		return Finding{}, err
+	}
+	if canManageLedger {
 		return item, nil
 	}
 	allowed, err := access.CanAccessOrganization(ctx, s.pool, principal, item.AssigneeOrganizationID)
@@ -1167,6 +1224,31 @@ const accessibleCTE = `
 		WHERE ur.user_id = $1::uuid AND ur.organization_id IS NOT NULL
 		  AND ur.data_scope IN ('organization', 'organization_and_descendants')
 		UNION SELECT id FROM descendants
+	), finding_permission_descendant_roots(permission_key, id) AS (
+		SELECT rp.permission_key, ur.organization_id
+		FROM user_roles ur
+		JOIN roles r ON r.id = ur.role_id AND r.status = 'enabled'
+		JOIN role_permissions rp ON rp.role_id = r.id
+		WHERE ur.user_id = $1::uuid
+		  AND ur.organization_id IS NOT NULL
+		  AND ur.data_scope = 'organization_and_descendants'
+		  AND rp.permission_key IN ('asset.manage', 'system.manage')
+	), finding_permission_descendants(permission_key, id) AS (
+		SELECT permission_key, id FROM finding_permission_descendant_roots
+		UNION
+		SELECT parent.permission_key, child.id
+		FROM organizations child
+		JOIN finding_permission_descendants parent ON child.parent_id = parent.id
+	), finding_permission_accessible(permission_key, id) AS (
+		SELECT rp.permission_key, ur.organization_id
+		FROM user_roles ur
+		JOIN roles r ON r.id = ur.role_id AND r.status = 'enabled'
+		JOIN role_permissions rp ON rp.role_id = r.id
+		WHERE ur.user_id = $1::uuid
+		  AND ur.organization_id IS NOT NULL
+		  AND ur.data_scope IN ('organization', 'organization_and_descendants')
+		  AND rp.permission_key IN ('asset.manage', 'system.manage')
+		UNION SELECT permission_key, id FROM finding_permission_descendants
 	)
 `
 

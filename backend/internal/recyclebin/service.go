@@ -13,6 +13,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"netassets/internal/auth"
+	"netassets/internal/notification"
 	"netassets/internal/pagination"
 )
 
@@ -180,6 +181,14 @@ func (s *Service) RestoreAsset(ctx context.Context, principal auth.Principal, as
 	`, principal.UserID, organizationID, assetID, assetType, value, ipAddress, requestID); err != nil {
 		return fmt.Errorf("write asset restore audit: %w", err)
 	}
+	if err := notification.WriteEvent(ctx, tx, notification.EventInput{
+		EventType: notification.EventAssetRestored, Category: notification.CategoryAssetChange,
+		TargetOrganizationID: organizationID, ActorUserID: principal.UserID, RequiredPermission: "asset.manage",
+		ResourceType: "asset", ResourceID: assetID, ResourceLabel: value, BatchKey: requestID, Level: "info",
+		Details: map[string]any{"asset_type": assetType, "asset_value": value},
+	}); err != nil {
+		return err
+	}
 	if err := tx.Commit(ctx); err != nil {
 		return fmt.Errorf("commit asset restore: %w", err)
 	}
@@ -252,6 +261,14 @@ func (s *Service) RestoreBusinessSystem(ctx context.Context, principal auth.Prin
 		        NULLIF($6, '')::inet, NULLIF($7, ''))
 	`, principal.UserID, organizationID, systemID, systemCode, systemName, ipAddress, requestID); err != nil {
 		return fmt.Errorf("write business system restore audit: %w", err)
+	}
+	if err := notification.WriteEvent(ctx, tx, notification.EventInput{
+		EventType: notification.EventBusinessSystemRestored, Category: notification.CategoryBusinessSystemChange,
+		TargetOrganizationID: organizationID, ActorUserID: principal.UserID, RequiredPermission: "system.manage",
+		ResourceType: "business_system", ResourceID: systemID, ResourceLabel: systemName, BatchKey: requestID, Level: "info",
+		Details: map[string]any{"system_code": systemCode, "restored_status": "archived", "source": "recycle_bin"},
+	}); err != nil {
+		return err
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return fmt.Errorf("commit business system restore: %w", err)
