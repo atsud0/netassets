@@ -79,6 +79,17 @@ test('左侧导航按业务分组，消息中心仅保留在顶栏', async ({ pa
   await expect(navigation.getByText('消息中心', { exact: true })).toHaveCount(0)
   await expect(page.locator('.topbar').getByText('消息中心', { exact: true })).toBeVisible()
 
+  const notificationButton = page.getByRole('button', { name: '消息中心', exact: true })
+  await expect(notificationButton).toBeVisible()
+  await page.setViewportSize({ width: 700, height: 900 })
+  await expect(notificationButton).toBeVisible()
+  const notificationButtonBox = await notificationButton.boundingBox()
+  expect(notificationButtonBox).not.toBeNull()
+  expect(notificationButtonBox!.x).toBeGreaterThanOrEqual(0)
+  expect(notificationButtonBox!.x + notificationButtonBox!.width).toBeLessThanOrEqual(700)
+  await notificationButton.click()
+  await expect(page.getByRole('heading', { name: '消息中心', exact: true })).toBeVisible()
+
   const systemSettings = navigation.getByRole('button', { name: '系统设置', exact: true })
   await systemSettings.click()
   await expect(navigation.getByRole('button', { name: '组织架构', exact: true })).toBeHidden()

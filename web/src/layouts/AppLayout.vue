@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import { ElMessage } from 'element-plus'
+import { Bell } from '@element-plus/icons-vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useAuthStore } from '../stores/auth'
 import { loadNotificationSummary } from '../api/notifications'
@@ -185,9 +186,11 @@ async function logout() {
           <span class="topbar-subtitle">{{ perspective }}</span>
         </div>
         <div class="topbar-actions">
-          <el-button class="notification-topbar-button" text @click="navigate('/notifications')">
-            消息中心
-            <el-badge v-if="unreadNotificationCount" :value="unreadNotificationCount" :max="99" />
+          <el-button class="notification-topbar-button" text aria-label="消息中心" @click="navigate('/notifications')">
+            <el-badge class="notification-topbar-badge" :value="unreadNotificationCount" :max="99" :hidden="unreadNotificationCount === 0">
+              <el-icon class="notification-topbar-icon"><Bell /></el-icon>
+            </el-badge>
+            <span class="notification-topbar-label">消息中心</span>
           </el-button>
           <el-select v-if="availableOrganizations.length > 1" v-model="activeOrganizationID" size="small" :loading="switchingOrganization" class="work-organization-switcher" aria-label="当前工作组织">
             <el-option v-for="organization in availableOrganizations" :key="organization.id" :value="organization.id" :label="`${organization.name}（${organization.code}）`" />
