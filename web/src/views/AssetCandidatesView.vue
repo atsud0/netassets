@@ -169,5 +169,6 @@ onMounted(async () => {
 </template>
 
 <style scoped>
+.candidate-filter-panel { margin-bottom: 16px; }
 .table-pagination { display:flex; justify-content:flex-end; margin-top:18px; }
 </style>

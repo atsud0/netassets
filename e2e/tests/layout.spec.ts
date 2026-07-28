@@ -85,3 +85,48 @@ test('左侧导航按业务分组，消息中心仅保留在顶栏', async ({ pa
   await systemSettings.click()
   await expect(navigation.getByRole('button', { name: '组织架构', exact: true })).toBeVisible()
 })
+
+test('治理页面内容卡片与台账页面保持相同圆角和间距', async ({ page }) => {
+  test.skip(!adminPassword, 'E2E_PASSWORD/BOOTSTRAP_ADMIN_PASSWORD 未配置')
+
+  await page.goto('/assets')
+  await login(page, adminUsername, adminPassword!)
+  await expect(page.getByRole('heading', { name: '网络资产', exact: true })).toBeVisible()
+
+  const measureCards = async (upperSelector: string, lowerSelector: string) => page.evaluate(
+    ({ upperSelector, lowerSelector }) => {
+      const upper = document.querySelector<HTMLElement>(upperSelector)
+      const lower = document.querySelector<HTMLElement>(lowerSelector)
+      if (!upper || !lower) throw new Error(`卡片节点不存在：${upperSelector} / ${lowerSelector}`)
+      const upperRect = upper.getBoundingClientRect()
+      const lowerRect = lower.getBoundingClientRect()
+      const lowerStyle = getComputedStyle(lower)
+      return {
+        gap: lowerRect.top - upperRect.bottom,
+        radius: lowerStyle.borderTopLeftRadius,
+        borderStyle: lowerStyle.borderTopStyle,
+      }
+    },
+    { upperSelector, lowerSelector },
+  )
+
+  const ledgerBaseline = await measureCards('.asset-filter-panel', '.data-table-panel')
+  expect(ledgerBaseline.gap).toBe(16)
+  expect(ledgerBaseline.radius).toBe('14px')
+  expect(ledgerBaseline.borderStyle).toBe('solid')
+
+  await page.goto('/asset-candidates')
+  await expect(page.getByRole('heading', { name: '待确认资产', exact: true })).toBeVisible()
+  const candidateCards = await measureCards('.candidate-filter-panel', '.data-table-panel')
+  expect(candidateCards).toEqual(ledgerBaseline)
+
+  await page.goto('/data-governance')
+  await expect(page.getByRole('heading', { name: '数据治理', exact: true })).toBeVisible()
+  const governanceCards = await measureCards('.governance-filter-panel', '.data-table-panel')
+  expect(governanceCards).toEqual(ledgerBaseline)
+
+  await page.goto('/recycle-bin')
+  await expect(page.getByRole('heading', { name: '回收站', exact: true })).toBeVisible()
+  const recycleCards = await measureCards('.recycle-bin-notice', '.data-table-panel')
+  expect(recycleCards).toEqual(ledgerBaseline)
+})
