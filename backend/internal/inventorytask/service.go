@@ -13,6 +13,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"netassets/internal/auth"
+	"netassets/internal/dataquality"
 	"netassets/internal/exportfile"
 	"netassets/internal/pagination"
 )
@@ -641,24 +642,21 @@ func buildQualityCheck(requiredFields []string, counts qualityCounts) QualityChe
 	return result
 }
 
-type configuredQualityRule struct {
-	ID           string
-	RuleName     string
-	ResourceType string
-	TargetField  string
-	Severity     string
-}
-
 func appendConfiguredQualityRules(ctx context.Context, q qualityCheckQuerier, organizationID string, result *QualityCheck) error {
-	rows, err := q.Query(ctx, `SELECT id::text,rule_name,resource_type,target_field,severity FROM data_quality_rules WHERE is_enabled AND rule_type='required' ORDER BY sort_order,created_at`)
+	rows, err := q.Query(ctx, `SELECT id::text,rule_name,resource_type,target_field,severity,conditions FROM data_quality_rules WHERE is_enabled AND rule_type='required' ORDER BY sort_order,created_at`)
 	if err != nil {
 		return fmt.Errorf("load configured quality rules: %w", err)
 	}
 	defer rows.Close()
 	for rows.Next() {
-		var rule configuredQualityRule
-		if err := rows.Scan(&rule.ID, &rule.RuleName, &rule.ResourceType, &rule.TargetField, &rule.Severity); err != nil {
+		var rule dataquality.Rule
+		var rawConditions []byte
+		if err := rows.Scan(&rule.ID, &rule.RuleName, &rule.ResourceType, &rule.TargetField, &rule.Severity, &rawConditions); err != nil {
 			return err
+		}
+		rule.RuleType = "required"
+		if err := json.Unmarshal(rawConditions, &rule.Conditions); err != nil {
+			return fmt.Errorf("decode configured quality rule conditions: %w", err)
 		}
 		missing, err := configuredMissingCount(ctx, q, rule, organizationID)
 		if err != nil {
@@ -678,35 +676,10 @@ func appendConfiguredQualityRules(ctx context.Context, q qualityCheckQuerier, or
 	return rows.Err()
 }
 
-func configuredMissingCount(ctx context.Context, q qualityCheckQuerier, rule configuredQualityRule, organizationID string) (int64, error) {
-	var query string
-	args := []any{organizationID}
-	if strings.HasPrefix(rule.TargetField, "custom:") {
-		key := strings.TrimPrefix(rule.TargetField, "custom:")
-		args = append(args, key)
-		if rule.ResourceType == "asset" {
-			query = `SELECT count(*) FROM assets a JOIN asset_organizations ao ON ao.asset_id=a.id AND ao.is_primary WHERE ao.organization_id=$1::uuid AND a.deleted_at IS NULL AND NOT EXISTS (SELECT 1 FROM custom_field_values v JOIN custom_field_definitions d ON d.id=v.field_definition_id WHERE v.resource_type='asset' AND v.resource_id=a.id AND d.field_key=$2 AND jsonb_typeof(v.value) <> 'null' AND btrim(trim(both '"' from v.value::text)) <> '' AND v.value <> '[]'::jsonb)`
-		} else {
-			query = `SELECT count(*) FROM business_systems bs WHERE bs.owner_organization_id=$1::uuid AND bs.deleted_at IS NULL AND NOT EXISTS (SELECT 1 FROM custom_field_values v JOIN custom_field_definitions d ON d.id=v.field_definition_id WHERE v.resource_type='business_system' AND v.resource_id=bs.id AND d.field_key=$2 AND jsonb_typeof(v.value) <> 'null' AND btrim(trim(both '"' from v.value::text)) <> '' AND v.value <> '[]'::jsonb)`
-		}
-	} else if rule.ResourceType == "asset" {
-		conditions := map[string]string{
-			"value": "btrim(COALESCE(a.asset_value,'')) = ''", "name": "btrim(COALESCE(a.asset_name,'')) = ''", "network_scope": "a.network_scope = 'unknown'", "network_area_id": "a.network_area_id IS NULL", "owner_name": "btrim(COALESCE(ao.owner_name,'')) = ''", "business_system_id": "NOT EXISTS (SELECT 1 FROM system_assets sa WHERE sa.asset_id=a.id)", "importance": "a.importance IS NULL",
-		}
-		condition, ok := conditions[rule.TargetField]
-		if !ok {
-			return 0, fmt.Errorf("unsupported asset quality target: %s", rule.TargetField)
-		}
-		query = `SELECT count(*) FROM assets a JOIN asset_organizations ao ON ao.asset_id=a.id AND ao.is_primary WHERE ao.organization_id=$1::uuid AND a.deleted_at IS NULL AND ` + condition
-	} else {
-		conditions := map[string]string{
-			"code": "btrim(COALESCE(bs.system_code,'')) = ''", "name": "btrim(COALESCE(bs.system_name,'')) = ''", "owner_name": "btrim(COALESCE(bs.owner_name,'')) = ''", "owner_contact": "btrim(COALESCE(bs.owner_contact,'')) = ''", "system_level": "bs.system_level IS NULL", "internet_exposure": "bs.internet_exposure = 'unknown'", "contains_personal_information": "COALESCE(p.contains_personal_information,'unknown') = 'unknown'", "contains_sensitive_personal_information": "COALESCE(p.contains_sensitive_personal_information,'unknown') = 'unknown'", "data_volume_over_100k": "COALESCE(p.data_volume_over_100k,'unknown') = 'unknown'", "contains_important_data": "COALESCE(p.contains_important_data,'unknown') = 'unknown'", "contains_core_data": "COALESCE(p.contains_core_data,'unknown') = 'unknown'",
-		}
-		condition, ok := conditions[rule.TargetField]
-		if !ok {
-			return 0, fmt.Errorf("unsupported business system quality target: %s", rule.TargetField)
-		}
-		query = `SELECT count(*) FROM business_systems bs LEFT JOIN business_system_data_security_profiles p ON p.business_system_id=bs.id WHERE bs.owner_organization_id=$1::uuid AND bs.deleted_at IS NULL AND ` + condition
+func configuredMissingCount(ctx context.Context, q qualityCheckQuerier, rule dataquality.Rule, organizationID string) (int64, error) {
+	query, args, err := dataquality.BuildRuleIssueCountQuery(rule, organizationID)
+	if err != nil {
+		return 0, fmt.Errorf("build configured quality rule %s: %w", rule.ID, err)
 	}
 	var count int64
 	if err := q.QueryRow(ctx, query, args...).Scan(&count); err != nil {

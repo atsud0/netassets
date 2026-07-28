@@ -290,47 +290,271 @@ func scanQueryParts(rule Rule, organizationID string) (string, string, []any, er
 	args := []any{organizationID}
 	if rule.ResourceType == "asset" {
 		from := `FROM assets a JOIN asset_organizations ao ON ao.asset_id=a.id AND ao.is_primary JOIN organizations o ON o.id=ao.organization_id WHERE a.deleted_at IS NULL AND (NULLIF($1::text,'') IS NULL OR ao.organization_id=$1::uuid)`
+		var issueCondition string
 		if rule.RuleType == "stale" {
 			if rule.TargetField != "updated_at" || rule.StaleAfterDays < 1 || rule.StaleAfterDays > 3650 {
 				return "", "", nil, ErrInvalid
 			}
 			args = append(args, rule.StaleAfterDays)
-			return from, `a.updated_at < now() - ($2::integer * interval '1 day')`, args, nil
+			issueCondition = fmt.Sprintf(`a.updated_at < now() - ($%d::integer * interval '1 day')`, len(args))
+		} else {
+			if rule.RuleType != "required" {
+				return "", "", nil, ErrInvalid
+			}
+			if strings.HasPrefix(rule.TargetField, "custom:") {
+				args = append(args, strings.TrimPrefix(rule.TargetField, "custom:"))
+				issueCondition = fmt.Sprintf(`NOT EXISTS (SELECT 1 FROM custom_field_values v JOIN custom_field_definitions d ON d.id=v.field_definition_id WHERE v.resource_type='asset' AND v.resource_id=a.id AND d.field_key=$%d AND jsonb_typeof(v.value)<>'null' AND btrim(trim(both '"' from v.value::text))<>'' AND v.value<>'[]'::jsonb)`, len(args))
+			} else {
+				condition, ok := map[string]string{"value": "btrim(COALESCE(a.asset_value,''))=''", "name": "btrim(COALESCE(a.asset_name,''))=''", "network_scope": "a.network_scope='unknown'", "network_area_id": "a.network_area_id IS NULL", "owner_name": "btrim(COALESCE(ao.owner_name,''))=''", "business_system_id": "NOT EXISTS (SELECT 1 FROM system_assets sa WHERE sa.asset_id=a.id)", "importance": "a.importance IS NULL"}[rule.TargetField]
+				if !ok {
+					return "", "", nil, fmt.Errorf("unsupported asset quality target: %s", rule.TargetField)
+				}
+				issueCondition = condition
+			}
 		}
-		if rule.RuleType != "required" {
-			return "", "", nil, ErrInvalid
-		}
-		if strings.HasPrefix(rule.TargetField, "custom:") {
-			args = append(args, strings.TrimPrefix(rule.TargetField, "custom:"))
-			return from, `NOT EXISTS (SELECT 1 FROM custom_field_values v JOIN custom_field_definitions d ON d.id=v.field_definition_id WHERE v.resource_type='asset' AND v.resource_id=a.id AND d.field_key=$2 AND jsonb_typeof(v.value)<>'null' AND btrim(trim(both '"' from v.value::text))<>'' AND v.value<>'[]'::jsonb)`, args, nil
-		}
-		condition, ok := map[string]string{"value": "btrim(COALESCE(a.asset_value,''))=''", "name": "btrim(COALESCE(a.asset_name,''))=''", "network_scope": "a.network_scope='unknown'", "network_area_id": "a.network_area_id IS NULL", "owner_name": "btrim(COALESCE(ao.owner_name,''))=''", "business_system_id": "NOT EXISTS (SELECT 1 FROM system_assets sa WHERE sa.asset_id=a.id)", "importance": "a.importance IS NULL"}[rule.TargetField]
-		if !ok {
-			return "", "", nil, fmt.Errorf("unsupported asset quality target: %s", rule.TargetField)
-		}
-		return from, condition, args, nil
+		condition, args, err := appendRuleConditions(rule.ResourceType, rule.Conditions, issueCondition, args)
+		return from, condition, args, err
 	}
 	if rule.ResourceType == "business_system" {
 		from := `FROM business_systems bs JOIN organizations o ON o.id=bs.owner_organization_id LEFT JOIN business_system_data_security_profiles p ON p.business_system_id=bs.id WHERE bs.deleted_at IS NULL AND (NULLIF($1::text,'') IS NULL OR bs.owner_organization_id=$1::uuid)`
+		var issueCondition string
 		if rule.RuleType == "stale" {
 			if rule.TargetField != "updated_at" || rule.StaleAfterDays < 1 || rule.StaleAfterDays > 3650 {
 				return "", "", nil, ErrInvalid
 			}
 			args = append(args, rule.StaleAfterDays)
-			return from, `bs.updated_at < now() - ($2::integer * interval '1 day')`, args, nil
+			issueCondition = fmt.Sprintf(`bs.updated_at < now() - ($%d::integer * interval '1 day')`, len(args))
+		} else {
+			if rule.RuleType != "required" {
+				return "", "", nil, ErrInvalid
+			}
+			if strings.HasPrefix(rule.TargetField, "custom:") {
+				args = append(args, strings.TrimPrefix(rule.TargetField, "custom:"))
+				issueCondition = fmt.Sprintf(`NOT EXISTS (SELECT 1 FROM custom_field_values v JOIN custom_field_definitions d ON d.id=v.field_definition_id WHERE v.resource_type='business_system' AND v.resource_id=bs.id AND d.field_key=$%d AND jsonb_typeof(v.value)<>'null' AND btrim(trim(both '"' from v.value::text))<>'' AND v.value<>'[]'::jsonb)`, len(args))
+			} else {
+				condition, ok := map[string]string{"code": "btrim(COALESCE(bs.system_code,''))=''", "name": "btrim(COALESCE(bs.system_name,''))=''", "owner_name": "btrim(COALESCE(bs.owner_name,''))=''", "owner_contact": "btrim(COALESCE(bs.owner_contact,''))=''", "system_level": "bs.system_level IS NULL", "internet_exposure": "bs.internet_exposure='unknown'", "contains_personal_information": "COALESCE(p.contains_personal_information,'unknown')='unknown'", "contains_sensitive_personal_information": "COALESCE(p.contains_sensitive_personal_information,'unknown')='unknown'", "data_volume_over_100k": "COALESCE(p.data_volume_over_100k,'unknown')='unknown'", "contains_important_data": "COALESCE(p.contains_important_data,'unknown')='unknown'", "contains_core_data": "COALESCE(p.contains_core_data,'unknown')='unknown'"}[rule.TargetField]
+				if !ok {
+					return "", "", nil, fmt.Errorf("unsupported business system quality target: %s", rule.TargetField)
+				}
+				issueCondition = condition
+			}
 		}
-		if rule.RuleType != "required" {
-			return "", "", nil, ErrInvalid
-		}
-		if strings.HasPrefix(rule.TargetField, "custom:") {
-			args = append(args, strings.TrimPrefix(rule.TargetField, "custom:"))
-			return from, `NOT EXISTS (SELECT 1 FROM custom_field_values v JOIN custom_field_definitions d ON d.id=v.field_definition_id WHERE v.resource_type='business_system' AND v.resource_id=bs.id AND d.field_key=$2 AND jsonb_typeof(v.value)<>'null' AND btrim(trim(both '"' from v.value::text))<>'' AND v.value<>'[]'::jsonb)`, args, nil
-		}
-		condition, ok := map[string]string{"code": "btrim(COALESCE(bs.system_code,''))=''", "name": "btrim(COALESCE(bs.system_name,''))=''", "owner_name": "btrim(COALESCE(bs.owner_name,''))=''", "owner_contact": "btrim(COALESCE(bs.owner_contact,''))=''", "system_level": "bs.system_level IS NULL", "internet_exposure": "bs.internet_exposure='unknown'", "contains_personal_information": "COALESCE(p.contains_personal_information,'unknown')='unknown'", "contains_sensitive_personal_information": "COALESCE(p.contains_sensitive_personal_information,'unknown')='unknown'", "data_volume_over_100k": "COALESCE(p.data_volume_over_100k,'unknown')='unknown'", "contains_important_data": "COALESCE(p.contains_important_data,'unknown')='unknown'", "contains_core_data": "COALESCE(p.contains_core_data,'unknown')='unknown'"}[rule.TargetField]
-		if !ok {
-			return "", "", nil, fmt.Errorf("unsupported business system quality target: %s", rule.TargetField)
-		}
-		return from, condition, args, nil
+		condition, args, err := appendRuleConditions(rule.ResourceType, rule.Conditions, issueCondition, args)
+		return from, condition, args, err
 	}
 	return "", "", nil, ErrInvalid
+}
+
+// BuildRuleIssueCountQuery builds the same parameterized rule query used by
+// active scans so inventory submissions cannot bypass conditional rules.
+func BuildRuleIssueCountQuery(rule Rule, organizationID string) (string, []any, error) {
+	from, condition, args, err := scanQueryParts(rule, organizationID)
+	if err != nil {
+		return "", nil, err
+	}
+	return `SELECT count(*) ` + from + ` AND ` + condition, args, nil
+}
+
+func appendRuleConditions(resourceType string, conditions []RuleCondition, issueCondition string, args []any) (string, []any, error) {
+	parts := []string{issueCondition}
+	for _, condition := range conditions {
+		part, nextArgs, err := ruleConditionSQL(resourceType, condition, args)
+		if err != nil {
+			return "", nil, err
+		}
+		args = nextArgs
+		parts = append(parts, "("+part+")")
+	}
+	return strings.Join(parts, " AND "), args, nil
+}
+
+func ruleConditionSQL(resourceType string, condition RuleCondition, args []any) (string, []any, error) {
+	if strings.HasPrefix(condition.Field, "custom:") {
+		resourceAlias := "a.id"
+		if resourceType == "business_system" {
+			resourceAlias = "bs.id"
+		} else if resourceType != "asset" {
+			return "", nil, ErrInvalid
+		}
+		return customConditionSQL(resourceType, resourceAlias, strings.TrimPrefix(condition.Field, "custom:"), condition, args)
+	}
+
+	expressions := map[string]map[string]string{
+		"asset": {
+			"asset_type":      "a.asset_type",
+			"status":          "a.status",
+			"environment":     "a.environment",
+			"importance":      "a.importance",
+			"network_scope":   "a.network_scope",
+			"organization_id": "ao.organization_id::text",
+			"network_area_id": "a.network_area_id::text",
+		},
+		"business_system": {
+			"status":                        "bs.system_status",
+			"system_level":                  "bs.system_level",
+			"deployment_type":               "bs.deployment_type",
+			"internet_exposure":             "bs.internet_exposure",
+			"contains_personal_information": "p.contains_personal_information",
+			"contains_sensitive_personal_information": "p.contains_sensitive_personal_information",
+			"data_volume_over_100k":                   "p.data_volume_over_100k",
+			"contains_important_data":                 "p.contains_important_data",
+			"contains_core_data":                      "p.contains_core_data",
+			"organization_id":                         "bs.owner_organization_id::text",
+		},
+	}
+	if resourceType == "asset" && condition.Field == "business_system_id" {
+		return assetBusinessSystemConditionSQL(condition, args)
+	}
+	if resourceType == "asset" && condition.Field == "has_business_system" {
+		if len(condition.Values) != 0 {
+			return "", nil, ErrInvalid
+		}
+		exists := `EXISTS (SELECT 1 FROM system_assets sa WHERE sa.asset_id=a.id)`
+		switch condition.Operator {
+		case "is_true":
+			return exists, args, nil
+		case "is_false":
+			return "NOT " + exists, args, nil
+		default:
+			return "", nil, ErrInvalid
+		}
+	}
+	expression, ok := expressions[resourceType][condition.Field]
+	if !ok {
+		return "", nil, ErrInvalid
+	}
+	return scalarConditionSQL(expression, condition, args)
+}
+
+func assetBusinessSystemConditionSQL(condition RuleCondition, args []any) (string, []any, error) {
+	base := `SELECT 1 FROM system_assets sa WHERE sa.asset_id=a.id`
+	switch condition.Operator {
+	case "empty":
+		if len(condition.Values) != 0 {
+			return "", nil, ErrInvalid
+		}
+		return `NOT EXISTS (` + base + `)`, args, nil
+	case "not_empty":
+		if len(condition.Values) != 0 {
+			return "", nil, ErrInvalid
+		}
+		return `EXISTS (` + base + `)`, args, nil
+	case "eq", "ne":
+		if len(condition.Values) != 1 {
+			return "", nil, ErrInvalid
+		}
+		args = append(args, condition.Values[0])
+		match := fmt.Sprintf(`EXISTS (%s AND sa.business_system_id::text=$%d)`, base, len(args))
+		if condition.Operator == "ne" {
+			match = `EXISTS (` + base + `) AND NOT ` + match
+		}
+		return match, args, nil
+	case "in", "not_in":
+		if len(condition.Values) == 0 || len(condition.Values) > maxConditionValues {
+			return "", nil, ErrInvalid
+		}
+		args = append(args, condition.Values)
+		match := fmt.Sprintf(`EXISTS (%s AND sa.business_system_id::text=ANY($%d::text[]))`, base, len(args))
+		if condition.Operator == "not_in" {
+			match = `EXISTS (` + base + `) AND NOT ` + match
+		}
+		return match, args, nil
+	default:
+		return "", nil, ErrInvalid
+	}
+}
+
+func scalarConditionSQL(expression string, condition RuleCondition, args []any) (string, []any, error) {
+	switch condition.Operator {
+	case "empty":
+		if len(condition.Values) != 0 {
+			return "", nil, ErrInvalid
+		}
+		return `NULLIF(btrim(COALESCE(` + expression + `,'')),'') IS NULL`, args, nil
+	case "not_empty":
+		if len(condition.Values) != 0 {
+			return "", nil, ErrInvalid
+		}
+		return `NULLIF(btrim(COALESCE(` + expression + `,'')),'') IS NOT NULL`, args, nil
+	case "eq", "ne":
+		if len(condition.Values) != 1 {
+			return "", nil, ErrInvalid
+		}
+		args = append(args, condition.Values[0])
+		operator := "="
+		prefix := ""
+		if condition.Operator == "ne" {
+			operator = "<>"
+			prefix = fmt.Sprintf(`NULLIF(btrim(COALESCE(%s,'')),'') IS NOT NULL AND `, expression)
+		}
+		return prefix + fmt.Sprintf(`COALESCE(%s,'') %s $%d`, expression, operator, len(args)), args, nil
+	case "in", "not_in":
+		if len(condition.Values) == 0 || len(condition.Values) > maxConditionValues {
+			return "", nil, ErrInvalid
+		}
+		args = append(args, condition.Values)
+		operator := "= ANY"
+		prefix := ""
+		if condition.Operator == "not_in" {
+			operator = "<> ALL"
+			prefix = fmt.Sprintf(`NULLIF(btrim(COALESCE(%s,'')),'') IS NOT NULL AND `, expression)
+		}
+		return prefix + fmt.Sprintf(`COALESCE(%s,'') %s($%d::text[])`, expression, operator, len(args)), args, nil
+	default:
+		return "", nil, ErrInvalid
+	}
+}
+
+func customConditionSQL(resourceType, resourceAlias, fieldKey string, condition RuleCondition, args []any) (string, []any, error) {
+	if fieldKey == "" {
+		return "", nil, ErrInvalid
+	}
+	args = append(args, fieldKey)
+	keyPlaceholder := fmt.Sprintf("$%d", len(args))
+	base := fmt.Sprintf(`SELECT 1 FROM custom_field_values v JOIN custom_field_definitions d ON d.id=v.field_definition_id WHERE v.resource_type='%s' AND v.resource_id=%s AND d.field_key=%s`, resourceType, resourceAlias, keyPlaceholder)
+	nonBlank := `jsonb_typeof(v.value)<>'null' AND btrim(trim(both '"' from v.value::text))<>'' AND v.value<>'[]'::jsonb`
+
+	switch condition.Operator {
+	case "empty":
+		if len(condition.Values) != 0 {
+			return "", nil, ErrInvalid
+		}
+		return `NOT EXISTS (` + base + ` AND ` + nonBlank + `)`, args, nil
+	case "not_empty":
+		if len(condition.Values) != 0 {
+			return "", nil, ErrInvalid
+		}
+		return `EXISTS (` + base + ` AND ` + nonBlank + `)`, args, nil
+	case "is_true", "is_false":
+		if len(condition.Values) != 0 {
+			return "", nil, ErrInvalid
+		}
+		value := "true"
+		if condition.Operator == "is_false" {
+			value = "false"
+		}
+		return `EXISTS (` + base + ` AND v.value='` + value + `'::jsonb)`, args, nil
+	case "eq", "ne":
+		if len(condition.Values) != 1 {
+			return "", nil, ErrInvalid
+		}
+		args = append(args, condition.Values[0])
+		operator := "="
+		if condition.Operator == "ne" {
+			operator = "<>"
+		}
+		return fmt.Sprintf(`EXISTS (%s AND %s AND trim(both '"' from v.value::text) %s $%d)`, base, nonBlank, operator, len(args)), args, nil
+	case "in", "not_in":
+		if len(condition.Values) == 0 || len(condition.Values) > maxConditionValues {
+			return "", nil, ErrInvalid
+		}
+		args = append(args, condition.Values)
+		match := fmt.Sprintf(`((jsonb_typeof(v.value)='array' AND EXISTS (SELECT 1 FROM jsonb_array_elements_text(v.value) e(value) WHERE e.value=ANY($%d::text[]))) OR (jsonb_typeof(v.value)<>'array' AND trim(both '"' from v.value::text)=ANY($%d::text[])))`, len(args), len(args))
+		if condition.Operator == "not_in" {
+			match = "NOT " + match
+		}
+		return `EXISTS (` + base + ` AND ` + nonBlank + ` AND ` + match + `)`, args, nil
+	default:
+		return "", nil, ErrInvalid
+	}
 }

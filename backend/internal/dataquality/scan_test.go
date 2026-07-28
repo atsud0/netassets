@@ -103,3 +103,135 @@ func TestScanQueryPartsRejectsInvalidStaleRule(t *testing.T) {
 		}
 	}
 }
+
+func TestScanQueryPartsAppliesAssetConditionsWithDynamicParameters(t *testing.T) {
+	rule := Rule{
+		RuleType: "required", ResourceType: "asset", TargetField: "owner_name",
+		Conditions: []RuleCondition{
+			{Field: "network_scope", Operator: "eq", Values: []string{"public"}},
+			{Field: "importance", Operator: "in", Values: []string{"important", "core"}},
+		},
+	}
+	_, condition, args, err := scanQueryParts(rule, "organization-id")
+	if err != nil {
+		t.Fatalf("scanQueryParts returned error: %v", err)
+	}
+	if !strings.Contains(condition, "a.network_scope") || !strings.Contains(condition, "$2") || !strings.Contains(condition, "a.importance") || !strings.Contains(condition, "$3::text[]") || strings.Count(condition, " AND ") < 2 {
+		t.Fatalf("unexpected condition: %s", condition)
+	}
+	if len(args) != 3 || args[1] != "public" {
+		t.Fatalf("args = %#v", args)
+	}
+	values, ok := args[2].([]string)
+	if !ok || len(values) != 2 || values[1] != "core" {
+		t.Fatalf("multi-value args = %#v", args[2])
+	}
+}
+
+func TestScanQueryPartsStaleConditionParameterFollowsThreshold(t *testing.T) {
+	rule := Rule{
+		RuleType: "stale", ResourceType: "business_system", TargetField: "updated_at", StaleAfterDays: 90,
+		Conditions: []RuleCondition{{Field: "contains_personal_information", Operator: "eq", Values: []string{"yes"}}},
+	}
+	_, condition, args, err := scanQueryParts(rule, "")
+	if err != nil {
+		t.Fatalf("scanQueryParts returned error: %v", err)
+	}
+	if !strings.Contains(condition, "$2::integer") || !strings.Contains(condition, "p.contains_personal_information") || !strings.Contains(condition, "$3") {
+		t.Fatalf("unexpected condition: %s", condition)
+	}
+	if len(args) != 3 || args[1] != 90 || args[2] != "yes" {
+		t.Fatalf("args = %#v", args)
+	}
+}
+
+func TestScanQueryPartsAssetBusinessSystemPresence(t *testing.T) {
+	tests := []struct {
+		operator string
+		want     string
+	}{
+		{operator: "is_true", want: "EXISTS (SELECT 1 FROM system_assets"},
+		{operator: "is_false", want: "NOT EXISTS (SELECT 1 FROM system_assets"},
+	}
+	for _, test := range tests {
+		rule := Rule{RuleType: "required", ResourceType: "asset", TargetField: "owner_name", Conditions: []RuleCondition{{Field: "has_business_system", Operator: test.operator}}}
+		_, condition, _, err := scanQueryParts(rule, "")
+		if err != nil {
+			t.Fatalf("operator=%s error=%v", test.operator, err)
+		}
+		if !strings.Contains(condition, test.want) {
+			t.Fatalf("operator=%s condition=%s", test.operator, condition)
+		}
+	}
+}
+
+func TestScanQueryPartsCustomConditionUsesOnlyParameters(t *testing.T) {
+	malicious := `critical' OR true --`
+	rule := Rule{
+		RuleType: "required", ResourceType: "asset", TargetField: "custom:data_owner",
+		Conditions: []RuleCondition{{Field: "custom:data_level", Operator: "eq", Values: []string{malicious}}},
+	}
+	_, condition, args, err := scanQueryParts(rule, "organization-id")
+	if err != nil {
+		t.Fatalf("scanQueryParts returned error: %v", err)
+	}
+	if strings.Contains(condition, malicious) || !strings.Contains(condition, "d.field_key=$3") || !strings.Contains(condition, "$4") {
+		t.Fatalf("unsafe or unexpected condition: %s", condition)
+	}
+	if len(args) != 4 || args[1] != "data_owner" || args[2] != "data_level" || args[3] != malicious {
+		t.Fatalf("args = %#v", args)
+	}
+}
+
+func TestScanQueryPartsCustomMultiselectCondition(t *testing.T) {
+	rule := Rule{
+		RuleType: "required", ResourceType: "business_system", TargetField: "owner_contact",
+		Conditions: []RuleCondition{{Field: "custom:data_categories", Operator: "in", Values: []string{"个人信息", "重要数据"}}},
+	}
+	_, condition, args, err := scanQueryParts(rule, "")
+	if err != nil {
+		t.Fatalf("scanQueryParts returned error: %v", err)
+	}
+	if !strings.Contains(condition, "jsonb_array_elements_text") || !strings.Contains(condition, "$3::text[]") {
+		t.Fatalf("unexpected condition: %s", condition)
+	}
+	if len(args) != 3 || args[1] != "data_categories" {
+		t.Fatalf("args = %#v", args)
+	}
+}
+
+func TestBuildRuleIssueCountQueryUsesScanSemantics(t *testing.T) {
+	query, args, err := BuildRuleIssueCountQuery(Rule{
+		RuleType: "required", ResourceType: "asset", TargetField: "owner_name",
+		Conditions: []RuleCondition{{Field: "network_scope", Operator: "eq", Values: []string{"public"}}},
+	}, "organization-id")
+	if err != nil {
+		t.Fatalf("BuildRuleIssueCountQuery returned error: %v", err)
+	}
+	if !strings.HasPrefix(query, "SELECT count(*) FROM assets") || !strings.Contains(query, "a.network_scope") || len(args) != 2 {
+		t.Fatalf("query=%s args=%#v", query, args)
+	}
+}
+
+func TestScanQueryPartsRejectsUnsupportedConditionField(t *testing.T) {
+	_, _, _, err := scanQueryParts(Rule{
+		RuleType: "required", ResourceType: "asset", TargetField: "owner_name",
+		Conditions: []RuleCondition{{Field: "raw_sql", Operator: "eq", Values: []string{"1=1"}}},
+	}, "")
+	if !errors.Is(err, ErrInvalid) {
+		t.Fatalf("err=%v, want ErrInvalid", err)
+	}
+}
+
+func TestScalarNegativeConditionsExcludeBlankValues(t *testing.T) {
+	for _, operator := range []string{"ne", "not_in"} {
+		values := []string{"production"}
+		query, _, err := scalarConditionSQL("bs.deployment_type", RuleCondition{Operator: operator, Values: values}, nil)
+		if err != nil {
+			t.Fatalf("operator=%s error=%v", operator, err)
+		}
+		if !strings.Contains(query, "IS NOT NULL AND") {
+			t.Fatalf("operator=%s should exclude blank values: %s", operator, query)
+		}
+	}
+}
