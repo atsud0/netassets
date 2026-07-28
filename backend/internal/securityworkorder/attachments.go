@@ -67,7 +67,7 @@ func (s *Service) AddAttachment(ctx context.Context, principal auth.Principal, w
 	if _, ok := allowedAttachmentExtensions[ext]; !ok {
 		return Attachment{}, ErrInvalid
 	}
-	if !principal.HasRole("group_admin") {
+	if !principal.CanManageSecurityWorkOrders() {
 		if input.Category != "remediation" || item.Status == "draft" || item.Status == "closed" || item.Status == "cancelled" {
 			return Attachment{}, ErrForbidden
 		}
@@ -181,7 +181,7 @@ func (s *Service) DeleteAttachment(ctx context.Context, principal auth.Principal
 	if err != nil {
 		return err
 	}
-	if !principal.HasRole("group_admin") && (attachment.UploadedBy != principal.UserID || order.Status == "closed" || order.Status == "cancelled") {
+	if !principal.CanManageSecurityWorkOrders() && (attachment.UploadedBy != principal.UserID || order.Status == "closed" || order.Status == "cancelled") {
 		return ErrForbidden
 	}
 	tx, err := s.pool.Begin(ctx)

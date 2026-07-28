@@ -261,7 +261,7 @@ func (s *Service) SearchFindings(ctx context.Context, principal auth.Principal, 
 		  AND ($3::text = '' OR f.assignee_organization_id::text = $3)
 		  AND ($4::text = '' OR f.status = $4)
 		ORDER BY f.discovered_at DESC, f.created_at DESC
-		LIMIT $5 OFFSET $6`, principal.UserID, principal.HasRole("group_admin"), organizationID, status, page.PageSize, page.Offset())
+		LIMIT $5 OFFSET $6`, principal.UserID, principal.CanManageSecurityFindings(), organizationID, status, page.PageSize, page.Offset())
 	if err != nil {
 		return pagination.Result[Finding]{}, fmt.Errorf("search security findings: %w", err)
 	}
@@ -294,7 +294,7 @@ func (s *Service) SearchFindings(ctx context.Context, principal auth.Principal, 
                   )
               AND ($3::text = '' OR f.assignee_organization_id::text = $3)
               AND ($4::text = '' OR f.status = $4)
-        `, principal.UserID, principal.HasRole("group_admin"), organizationID, status).Scan(&total); err != nil {
+        `, principal.UserID, principal.CanManageSecurityFindings(), organizationID, status).Scan(&total); err != nil {
 			return pagination.Result[Finding]{}, fmt.Errorf("count security findings: %w", err)
 		}
 	}
@@ -302,7 +302,7 @@ func (s *Service) SearchFindings(ctx context.Context, principal auth.Principal, 
 }
 
 func (s *Service) CreateFinding(ctx context.Context, principal auth.Principal, input FindingInput, requestID, ipAddress string) (Finding, error) {
-	if !principal.HasRole("group_admin") {
+	if !principal.CanManageSecurityFindings() {
 		return Finding{}, ErrForbidden
 	}
 	normalizeFindingInput(&input)
@@ -352,7 +352,7 @@ func (s *Service) CreateFinding(ctx context.Context, principal auth.Principal, i
 }
 
 func (s *Service) UpdateFinding(ctx context.Context, principal auth.Principal, id string, input FindingInput, requestID, ipAddress string) (Finding, error) {
-	if !principal.HasRole("group_admin") {
+	if !principal.CanManageSecurityFindings() {
 		return Finding{}, ErrForbidden
 	}
 	if !validUUID(id) {
@@ -439,7 +439,7 @@ func (s *Service) GetFinding(ctx context.Context, principal auth.Principal, id s
 	if err != nil {
 		return Finding{}, err
 	}
-	if principal.HasRole("group_admin") {
+	if principal.CanManageSecurityFindings() {
 		return item, nil
 	}
 	allowed, err := access.CanAccessOrganization(ctx, s.pool, principal, item.AssigneeOrganizationID)
@@ -465,7 +465,7 @@ func (s *Service) GetFinding(ctx context.Context, principal auth.Principal, id s
 }
 
 func (s *Service) AcceptRisk(ctx context.Context, principal auth.Principal, id string, input RiskAcceptanceInput, requestID, ipAddress string) (Finding, error) {
-	if !principal.HasRole("group_admin") {
+	if !principal.CanManageSecurityFindings() {
 		return Finding{}, ErrForbidden
 	}
 	input.Reason = strings.TrimSpace(input.Reason)
@@ -524,7 +524,7 @@ func (s *Service) AcceptRisk(ctx context.Context, principal auth.Principal, id s
 }
 
 func (s *Service) RevokeRisk(ctx context.Context, principal auth.Principal, id, requestID, ipAddress string) (Finding, error) {
-	if !principal.HasRole("group_admin") {
+	if !principal.CanManageSecurityFindings() {
 		return Finding{}, ErrForbidden
 	}
 	if !validUUID(id) {
@@ -568,7 +568,7 @@ func (s *Service) RevokeRisk(ctx context.Context, principal auth.Principal, id, 
 }
 
 func (s *Service) ReviewRisk(ctx context.Context, principal auth.Principal, id string, input RiskReviewInput, requestID, ipAddress string) (Finding, error) {
-	if !principal.HasRole("group_admin") {
+	if !principal.CanManageSecurityFindings() {
 		return Finding{}, ErrForbidden
 	}
 	input.Comment = strings.TrimSpace(input.Comment)
@@ -667,7 +667,7 @@ func (s *Service) SearchWorkOrdersWithFilter(ctx context.Context, principal auth
 		  AND (NOT $5::boolean OR (wo.due_at < now() AND wo.status NOT IN ('closed', 'cancelled')))
 		ORDER BY CASE WHEN wo.status IN ('closed', 'cancelled') THEN 1 ELSE 0 END,
 		         wo.due_at, wo.created_at DESC
-		LIMIT $6 OFFSET $7`, principal.UserID, principal.HasRole("group_admin"), filter.OrganizationID, filter.Status, filter.OverdueOnly, filter.Page.PageSize, filter.Page.Offset())
+		LIMIT $6 OFFSET $7`, principal.UserID, principal.CanManageSecurityWorkOrders(), filter.OrganizationID, filter.Status, filter.OverdueOnly, filter.Page.PageSize, filter.Page.Offset())
 	if err != nil {
 		return pagination.Result[WorkOrder]{}, fmt.Errorf("search security work orders: %w", err)
 	}
@@ -694,7 +694,7 @@ func (s *Service) SearchWorkOrdersWithFilter(ctx context.Context, principal auth
               AND ($3::text = '' OR wo.assignee_organization_id::text = $3)
               AND ($4::text = '' OR wo.status = $4)
               AND (NOT $5::boolean OR (wo.due_at < now() AND wo.status NOT IN ('closed', 'cancelled')))
-        `, principal.UserID, principal.HasRole("group_admin"), filter.OrganizationID, filter.Status, filter.OverdueOnly).Scan(&total); err != nil {
+        `, principal.UserID, principal.CanManageSecurityWorkOrders(), filter.OrganizationID, filter.Status, filter.OverdueOnly).Scan(&total); err != nil {
 			return pagination.Result[WorkOrder]{}, fmt.Errorf("count security work orders: %w", err)
 		}
 	}
@@ -713,7 +713,7 @@ func (s *Service) GetWorkOrder(ctx context.Context, principal auth.Principal, id
 	if err != nil {
 		return WorkOrder{}, err
 	}
-	if !allowed || (!principal.HasRole("group_admin") && item.Status == "draft") {
+	if !allowed || (!principal.CanManageSecurityWorkOrders() && item.Status == "draft") {
 		return WorkOrder{}, ErrForbidden
 	}
 	return item, nil
@@ -800,7 +800,7 @@ func (s *Service) SearchWorkOrderEvents(ctx context.Context, principal auth.Prin
 }
 
 func (s *Service) CreateWorkOrder(ctx context.Context, principal auth.Principal, input WorkOrderInput, requestID, ipAddress string) (WorkOrder, error) {
-	if !principal.HasRole("group_admin") {
+	if !principal.CanManageSecurityWorkOrders() {
 		return WorkOrder{}, ErrForbidden
 	}
 	normalizeWorkOrderInput(&input)
@@ -858,7 +858,7 @@ func (s *Service) CreateWorkOrder(ctx context.Context, principal auth.Principal,
 }
 
 func (s *Service) Issue(ctx context.Context, principal auth.Principal, id string, input CommentInput, requestID, ipAddress string) (WorkOrder, error) {
-	if !principal.HasRole("group_admin") {
+	if !principal.CanManageSecurityWorkOrders() {
 		return WorkOrder{}, ErrForbidden
 	}
 	input.Comment = strings.TrimSpace(input.Comment)
@@ -915,7 +915,7 @@ func (s *Service) Submit(ctx context.Context, principal auth.Principal, id strin
 }
 
 func (s *Service) Review(ctx context.Context, principal auth.Principal, id string, input ReviewInput, requestID, ipAddress string) (WorkOrder, error) {
-	if !principal.HasRole("group_admin") {
+	if !principal.CanManageSecurityWorkOrders() {
 		return WorkOrder{}, ErrForbidden
 	}
 	input.Decision = strings.TrimSpace(input.Decision)
@@ -948,7 +948,7 @@ func (s *Service) Review(ctx context.Context, principal auth.Principal, id strin
 }
 
 func (s *Service) Cancel(ctx context.Context, principal auth.Principal, id string, input CommentInput, requestID, ipAddress string) (WorkOrder, error) {
-	if !principal.HasRole("group_admin") {
+	if !principal.CanManageSecurityWorkOrders() {
 		return WorkOrder{}, ErrForbidden
 	}
 	input.Comment = strings.TrimSpace(input.Comment)
@@ -1000,7 +1000,7 @@ func (s *Service) transition(ctx context.Context, principal auth.Principal, id s
 	if !contains(fromStatuses, fromStatus) {
 		return WorkOrder{}, ErrState
 	}
-	if !principal.HasRole("group_admin") && (action == "issue" || action == "return" || action == "close" || action == "cancel") {
+	if !principal.CanManageSecurityWorkOrders() && (action == "issue" || action == "return" || action == "close" || action == "cancel") {
 		return WorkOrder{}, ErrForbidden
 	}
 	if extra != nil {

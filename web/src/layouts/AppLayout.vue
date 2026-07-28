@@ -18,7 +18,8 @@ const organizationName = computed(() => auth.user?.organization?.name ?? '集团
 const activeOrganizationID = computed({ get: () => auth.user?.organization?.id ?? '', set: (value: string) => { if (value) void switchOrganization(value) } })
 const availableOrganizations = computed(() => auth.user?.organizations ?? [])
 const switchingOrganization = ref(false)
-const perspective = computed(() => auth.isGroupAdmin ? '集团视角' : '所属组织视角')
+const perspective = computed(() => auth.isGroupAdmin ? '集团管理视角' : auth.isSecurityOperator ? '集团安全运营视角' : '所属组织视角')
+const roleLabel = computed(() => auth.isGroupAdmin ? '集团管理员' : auth.isSecurityOperator ? '集团安全运营' : '组织用户')
 const avatarText = computed(() => (auth.user?.display_name || auth.user?.username || '用').slice(0, 1))
 type NavigationItem = { path: string; label: string }
 type NavigationGroup = { key: string; label: string; shortLabel: string; items: NavigationItem[] }
@@ -36,8 +37,8 @@ const navigationGroups = computed<NavigationGroup[]>(() => {
     ...(auth.hasPermission('data_quality.manage') ? [{ path: '/data-quality-issues', label: '质量整改' }] : []),
   ]
   const securityOperations: NavigationItem[] = [
-    ...(auth.isGroupAdmin ? [{ path: '/security-test-batches', label: '安全测试' }] : []),
-    { path: '/security-work-orders', label: '安全工单' },
+    ...(auth.canManageSecurityTests ? [{ path: '/security-test-batches', label: '安全测试' }] : []),
+    ...(auth.canManageSecurityFindings || auth.canManageSecurityWorkOrders || !auth.hasGroupSecurityRole ? [{ path: '/security-work-orders', label: '安全工单' }] : []),
   ]
   const systemSettings: NavigationItem[] = [
     ...(auth.hasPermission('organization.read') ? [{ path: '/organizations', label: '组织架构' }] : []),
@@ -191,7 +192,7 @@ async function logout() {
           <el-select v-if="availableOrganizations.length > 1" v-model="activeOrganizationID" size="small" :loading="switchingOrganization" class="work-organization-switcher" aria-label="当前工作组织">
             <el-option v-for="organization in availableOrganizations" :key="organization.id" :value="organization.id" :label="`${organization.name}（${organization.code}）`" />
           </el-select>
-          <span class="status-pill">{{ auth.isGroupAdmin ? '集团管理员' : '组织用户' }}</span>
+          <span class="status-pill">{{ roleLabel }}</span>
           <div class="user-summary">
             <span class="avatar">{{ avatarText }}</span>
             <span>{{ auth.user?.display_name }}</span>

@@ -121,6 +121,38 @@ func TestUserManagementPermissionBoundaries(t *testing.T) {
 		}
 	})
 
+	t.Run("group administrator can create a global-role-only account", func(t *testing.T) {
+		created, err := fixture.service.Create(ctx, fixture.groupAdmin, user.CreateInput{
+			Username:      "global_only_test",
+			Password:      "InitialPassword123!",
+			DisplayName:   "仅集团角色用户",
+			GlobalRoleIDs: []string{fixture.groupRole},
+		}, "test-global-only-create", "")
+		if err != nil {
+			t.Fatalf("Create(global-role-only account) error = %v", err)
+		}
+		if len(created.Appointments) != 0 {
+			t.Fatalf("global-role-only account appointments = %+v, want none", created.Appointments)
+		}
+		if len(created.GlobalRoles) != 1 || created.GlobalRoles[0].RoleID != fixture.groupRole {
+			t.Fatalf("global-role-only account roles = %+v, want assigned group role", created.GlobalRoles)
+		}
+		login, err := fixture.authService.Login(ctx, auth.LoginInput{
+			Username:  "global_only_test",
+			Password:  "InitialPassword123!",
+			RequestID: "test-global-only-login",
+		})
+		if err != nil {
+			t.Fatalf("Login(global-role-only account) error = %v", err)
+		}
+		if login.User.Organization != nil || len(login.User.Organizations) != 0 {
+			t.Fatalf("global-role-only login organizations = current:%+v all:%+v, want none", login.User.Organization, login.User.Organizations)
+		}
+		if !login.User.HasRole("group_admin") {
+			t.Fatalf("global-role-only login roles = %+v, want group_admin", login.User.Roles)
+		}
+	})
+
 	t.Run("created and reset passwords are temporary", func(t *testing.T) {
 		created, err := fixture.service.Create(ctx, fixture.groupAdmin, validCreateInput(fixture.organizationAID, fixture.organizationRole, "temporary_password_test"), "test-temporary-create", "")
 		if err != nil {

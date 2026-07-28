@@ -312,13 +312,13 @@ func (s *Service) Create(ctx context.Context, principal auth.Principal, input Cr
 	if !usernamePattern.MatchString(input.Username) || len(input.Password) < 10 || input.DisplayName == "" || len(input.DisplayName) > 128 || len(input.Email) > 255 || len(input.MobilePhone) > 64 || len(input.OfficePhone) > 64 {
 		return User{}, ErrInvalid
 	}
+	if err := normalizeGlobalRoleIDs(&input.GlobalRoleIDs); err != nil {
+		return User{}, err
+	}
 	if err := s.compatibilityAppointments(ctx, &input); err != nil {
 		return User{}, err
 	}
-	if err := normalizeAppointments(&input.Appointments); err != nil {
-		return User{}, err
-	}
-	if err := normalizeGlobalRoleIDs(&input.GlobalRoleIDs); err != nil {
+	if err := normalizeAppointments(&input.Appointments, len(input.GlobalRoleIDs) > 0); err != nil {
 		return User{}, err
 	}
 	if err := s.validateManagementInput(ctx, principal, input.Appointments, input.GlobalRoleIDs); err != nil {
@@ -375,10 +375,10 @@ func (s *Service) Update(ctx context.Context, principal auth.Principal, userID s
 	if userID == "" || input.DisplayName == "" || len(input.DisplayName) > 128 || len(input.Email) > 255 || len(input.MobilePhone) > 64 || len(input.OfficePhone) > 64 {
 		return User{}, ErrInvalid
 	}
-	if err := normalizeAppointments(&input.Appointments); err != nil {
+	if err := normalizeGlobalRoleIDs(&input.GlobalRoleIDs); err != nil {
 		return User{}, err
 	}
-	if err := normalizeGlobalRoleIDs(&input.GlobalRoleIDs); err != nil {
+	if err := normalizeAppointments(&input.Appointments, len(input.GlobalRoleIDs) > 0); err != nil {
 		return User{}, err
 	}
 	if userID == principal.UserID {
@@ -619,6 +619,9 @@ func (s *Service) compatibilityAppointments(ctx context.Context, input *CreateIn
 	}
 	input.OrganizationID = strings.TrimSpace(input.OrganizationID)
 	input.RoleKey = strings.TrimSpace(input.RoleKey)
+	if input.OrganizationID == "" && input.RoleKey == "" && len(input.GlobalRoleIDs) > 0 {
+		return nil
+	}
 	if input.OrganizationID == "" || input.RoleKey == "" {
 		return ErrInvalid
 	}
@@ -632,8 +635,12 @@ func (s *Service) compatibilityAppointments(ctx context.Context, input *CreateIn
 	return nil
 }
 
-func normalizeAppointments(items *[]AppointmentInput) error {
+func normalizeAppointments(items *[]AppointmentInput, allowEmpty bool) error {
 	if len(*items) == 0 {
+		if allowEmpty {
+			*items = []AppointmentInput{}
+			return nil
+		}
 		return ErrInvalid
 	}
 	primary := 0

@@ -70,7 +70,8 @@ const isGroupAdmin = computed(() => auth.isGroupAdmin)
 const eligibleOrganizations = computed(() => organizations.value.filter((item) => item.status === 'enabled' && item.type !== 'group'))
 const organizationRoles = computed(() => roleOptions.value.filter((item) => item.scope === 'organization' && item.status === 'enabled'))
 const groupRoles = computed(() => isGroupAdmin.value ? roleOptions.value.filter((item) => item.scope === 'group' && item.status === 'enabled') : [])
-const userDialogTitle = computed(() => editingUser.value ? `编辑用户：${editingUser.value.display_name}` : '新增组织用户')
+const canOmitAppointments = computed(() => isGroupAdmin.value && userForm.global_role_ids.length > 0)
+const userDialogTitle = computed(() => editingUser.value ? `编辑用户：${editingUser.value.display_name}` : '新增用户')
 const roleDialogTitle = computed(() => editingRole.value ? `编辑角色：${editingRole.value.name}` : '新增自定义角色')
 const pageDescription = computed(() => isGroupAdmin.value
   ? '维护集团统一账号、多个组织任职、主组织和组织范围角色。角色或任职变更后，受影响用户会被强制重新登录。'
@@ -170,7 +171,7 @@ async function changePageSize(value: number) { pageSize.value = value; page.valu
 
 function resetUserForm() {
   Object.assign(userForm, { username: '', password: '', display_name: '', email: '', mobile_phone: '', office_phone: '', global_role_ids: [], appointments: [] })
-  addAppointment()
+  if (eligibleOrganizations.value.length > 0) addAppointment()
 }
 function addAppointment() {
   const selected = new Set(userForm.appointments.map((item) => item.organization_id))
@@ -179,10 +180,13 @@ function addAppointment() {
   userForm.appointments.push({ organization_id: organization.id, is_primary: userForm.appointments.length === 0, assignments: [{ role_id: organizationRoles.value[0]?.id ?? '', data_scope: 'organization' }] })
 }
 function removeAppointment(index: number) {
-  if (userForm.appointments.length <= 1) { ElMessage.warning('用户至少需要保留一个组织任职'); return }
+  if (userForm.appointments.length <= 1 && !canOmitAppointments.value) {
+    ElMessage.warning('普通账号至少需要一个组织任职；如需仅保留集团角色，请先选择集团范围角色')
+    return
+  }
   const removedPrimary = userForm.appointments[index].is_primary
   userForm.appointments.splice(index, 1)
-  if (removedPrimary) userForm.appointments[0].is_primary = true
+  if (removedPrimary && userForm.appointments.length > 0) userForm.appointments[0].is_primary = true
 }
 function setPrimary(index: number) { userForm.appointments.forEach((item, current) => { item.is_primary = current === index }) }
 function addRoleAssignment(appointment: AppointmentForm) { appointment.assignments.push({ role_id: organizationRoles.value[0]?.id ?? '', data_scope: 'organization' }) }
@@ -221,12 +225,13 @@ async function openUserDetail(item: UserItem) {
   }
 }
 function validAppointments() {
-  if (!userForm.appointments.length || userForm.appointments.filter((item) => item.is_primary).length !== 1) return false
+  if (!userForm.appointments.length) return canOmitAppointments.value
+  if (userForm.appointments.filter((item) => item.is_primary).length !== 1) return false
   const ids = new Set<string>()
   return userForm.appointments.every((item) => item.organization_id && !ids.has(item.organization_id) && (ids.add(item.organization_id), item.assignments.length > 0 && item.assignments.every((assignment) => assignment.role_id && assignment.data_scope)))
 }
 async function submitUser() {
-  if (!userFormRef.value || !(await userFormRef.value.validate()) || !validAppointments()) { ElMessage.warning('请完整设置组织任职、主组织和角色'); return }
+  if (!userFormRef.value || !(await userFormRef.value.validate()) || !validAppointments()) { ElMessage.warning('请完整设置集团角色，或设置组织任职、主组织和组织角色'); return }
   submitting.value = true
   try {
     const payload = { display_name: userForm.display_name, email: userForm.email, mobile_phone: userForm.mobile_phone, office_phone: userForm.office_phone, global_role_ids: isGroupAdmin.value ? userForm.global_role_ids : [], appointments: userForm.appointments }
@@ -291,7 +296,7 @@ onMounted(load)
   <section>
     <div class="page-heading">
       <div><span class="eyebrow">IDENTITY & ACCESS</span><h1>{{ isGroupAdmin ? '用户与权限' : '用户管理' }}</h1><p>{{ pageDescription }}</p></div>
-      <el-button type="primary" :disabled="eligibleOrganizations.length === 0" @click="openCreateUser">新增用户</el-button>
+      <el-button type="primary" :disabled="!isGroupAdmin && eligibleOrganizations.length === 0" @click="openCreateUser">新增用户</el-button>
     </div>
 
     <el-tabs v-model="activeTab" v-loading="loading" class="access-tabs">
@@ -371,8 +376,9 @@ onMounted(load)
     <el-dialog v-model="userDialogVisible" :title="userDialogTitle" width="780px" destroy-on-close>
       <el-form ref="userFormRef" :model="userForm" :rules="userRules" label-position="top">
         <div class="form-grid two-columns"><el-form-item label="用户名" prop="username"><el-input v-model="userForm.username" :disabled="!!editingUser" /></el-form-item><el-form-item v-if="!editingUser" label="临时密码" prop="password"><el-input v-model="userForm.password" type="password" show-password /></el-form-item><el-form-item label="姓名" prop="display_name"><el-input v-model="userForm.display_name" maxlength="128" /></el-form-item><el-form-item label="邮箱"><el-input v-model="userForm.email" maxlength="255" /></el-form-item><el-form-item label="手机号码"><el-input v-model="userForm.mobile_phone" maxlength="64" /></el-form-item><el-form-item label="办公电话"><el-input v-model="userForm.office_phone" maxlength="64" /></el-form-item></div>
-        <el-form-item v-if="isGroupAdmin && groupRoles.length" label="集团范围角色"><el-checkbox-group v-model="userForm.global_role_ids"><el-checkbox v-for="role in groupRoles" :key="role.id" :label="role.id">{{ role.name }}</el-checkbox></el-checkbox-group><div class="form-hint">集团角色适用于全集团；组织任职与组织范围角色仍需在下方单独配置。</div></el-form-item>
-        <div class="appointment-header"><strong>组织任职与角色</strong><el-button size="small" plain type="primary" @click="addAppointment">新增任职组织</el-button></div>
+        <el-form-item v-if="isGroupAdmin && groupRoles.length" label="集团范围角色"><el-checkbox-group v-model="userForm.global_role_ids"><el-checkbox v-for="role in groupRoles" :key="role.id" :label="role.id">{{ role.name }}</el-checkbox></el-checkbox-group><div class="form-hint">集团角色适用于全集团。仅承担集团安全运营等集团职责的账号可不配置组织任职，避免额外获得子公司岗位权限。</div></el-form-item>
+        <div class="appointment-header"><strong>组织任职与角色{{ isGroupAdmin ? '（集团角色账号可选）' : '' }}</strong><el-button size="small" plain type="primary" :disabled="eligibleOrganizations.length === 0" @click="addAppointment">新增任职组织</el-button></div>
+        <el-alert v-if="userForm.appointments.length === 0" :title="canOmitAppointments ? '当前账号仅授予集团范围角色，不附加任何组织岗位权限。' : '未选择集团范围角色时，至少需要配置一个组织任职。'" :type="canOmitAppointments ? 'info' : 'warning'" :closable="false" show-icon class="appointment-empty-alert" />
         <div v-for="(appointment, index) in userForm.appointments" :key="`${appointment.organization_id}-${index}`" class="appointment-card"><div class="appointment-topline"><el-select v-model="appointment.organization_id" filterable placeholder="请选择组织" style="width: 320px"><el-option v-for="organization in eligibleOrganizations" :key="organization.id" :label="`${organization.name}（${organization.code}）`" :value="organization.id" /></el-select><el-radio :model-value="appointment.is_primary" :label="true" @change="setPrimary(index)">主组织</el-radio><el-button link type="danger" @click="removeAppointment(index)">移除任职</el-button></div><div v-for="(assignment, roleIndex) in appointment.assignments" :key="`${assignment.role_id}-${roleIndex}`" class="assignment-row"><el-select v-model="assignment.role_id" placeholder="选择组织角色" style="width: 320px"><el-option v-for="role in organizationRoles" :key="role.id" :label="role.name" :value="role.id" /></el-select><el-select v-model="assignment.data_scope" style="width: 190px"><el-option value="organization" label="仅本组织" /><el-option value="organization_and_descendants" label="组织及下级" /><el-option value="owned" label="仅本人创建" /></el-select><el-button link type="danger" @click="removeRoleAssignment(appointment, roleIndex)">移除角色</el-button></div><el-button size="small" text type="primary" @click="addRoleAssignment(appointment)">+ 添加角色</el-button></div>
       </el-form>
       <template #footer><el-button @click="userDialogVisible=false">取消</el-button><el-button type="primary" :loading="submitting" @click="submitUser">保存</el-button></template>
@@ -393,6 +399,7 @@ onMounted(load)
 .appointment-header { justify-content: space-between; margin: 12px 0; }
 .form-hint, .self-hint { color: var(--el-text-color-secondary); font-size: 12px; }
 .self-hint { line-height: 1.4; margin-left: 6px; }
+.appointment-empty-alert { margin-bottom: 12px; }
 .appointment-card, .detail-appointment-card { border: 1px solid var(--el-border-color-lighter); border-radius: 8px; padding: 14px; margin-bottom: 12px; background: var(--el-fill-color-lighter); }
 .assignment-row { margin: 10px 0; }
 .permission-tag { margin: 2px 6px 2px 0; }

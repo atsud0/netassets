@@ -109,7 +109,7 @@ func FindingImportTemplate(format string) ([]byte, string, string, error) {
 }
 
 func (s *Service) ImportFindings(ctx context.Context, principal auth.Principal, testBatchID, fileName string, reader io.Reader, requestID, ipAddress string) (FindingImportResult, error) {
-	if !principal.HasRole("group_admin") {
+	if !principal.CanManageSecurityFindings() {
 		return FindingImportResult{}, ErrForbidden
 	}
 	testBatchID = strings.TrimSpace(testBatchID)
@@ -272,7 +272,7 @@ func (s *Service) ListFindingImports(ctx context.Context, principal auth.Princip
 }
 
 func (s *Service) SearchFindingImports(ctx context.Context, principal auth.Principal, page pagination.Query) (pagination.Result[FindingImportHistory], error) {
-	if !principal.HasRole("group_admin") {
+	if !principal.CanManageSecurityFindings() {
 		return pagination.Result[FindingImportHistory]{}, ErrForbidden
 	}
 	rows, err := s.pool.Query(ctx, `

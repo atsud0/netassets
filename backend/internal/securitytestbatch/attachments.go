@@ -51,7 +51,7 @@ var allowedAttachmentExtensions = map[string]struct{}{
 }
 
 func (s *Service) AddAttachment(ctx context.Context, principal auth.Principal, batchID string, input AttachmentInput, requestID, ipAddress string) (Attachment, error) {
-	if !principal.HasRole("group_admin") {
+	if !principal.CanManageSecurityTests() {
 		return Attachment{}, ErrForbidden
 	}
 	batch, err := s.Get(ctx, principal, batchID)
@@ -160,7 +160,7 @@ func (s *Service) AddAttachment(ctx context.Context, principal auth.Principal, b
 }
 
 func (s *Service) GetAttachment(ctx context.Context, principal auth.Principal, batchID, attachmentID string) (Attachment, error) {
-	if !principal.HasRole("group_admin") {
+	if !principal.CanManageSecurityTests() {
 		return Attachment{}, ErrForbidden
 	}
 	if !validUUID(batchID) || !validUUID(attachmentID) {
@@ -178,7 +178,7 @@ func (s *Service) GetAttachment(ctx context.Context, principal auth.Principal, b
 }
 
 func (s *Service) DeleteAttachment(ctx context.Context, principal auth.Principal, batchID, attachmentID, requestID, ipAddress string) error {
-	if !principal.HasRole("group_admin") {
+	if !principal.CanManageSecurityTests() {
 		return ErrForbidden
 	}
 	batch, err := s.Get(ctx, principal, batchID)
@@ -222,7 +222,7 @@ func (s *Service) DeleteAttachment(ctx context.Context, principal auth.Principal
 // SearchAttachments returns attachment metadata without loading file contents.
 // The dedicated download endpoint continues to enforce authorization per file.
 func (s *Service) SearchAttachments(ctx context.Context, principal auth.Principal, batchID string, query pagination.Query) (pagination.Result[Attachment], error) {
-	if !principal.HasRole("group_admin") {
+	if !principal.CanManageSecurityTests() {
 		return pagination.Result[Attachment]{}, ErrForbidden
 	}
 	if !validUUID(batchID) {

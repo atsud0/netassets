@@ -54,7 +54,21 @@ type Service struct {
 	pool *pgxpool.Pool
 }
 
+type candidateScope struct {
+	groupAdmin                  bool
+	canManageSecurityWorkOrders bool
+	canManageSecurityFindings   bool
+}
+
 func NewService(pool *pgxpool.Pool) *Service { return &Service{pool: pool} }
+
+func scopeFor(principal auth.Principal) candidateScope {
+	return candidateScope{
+		groupAdmin:                  principal.HasRole(auth.RoleGroupAdmin),
+		canManageSecurityWorkOrders: principal.CanManageSecurityWorkOrders(),
+		canManageSecurityFindings:   principal.CanManageSecurityFindings(),
+	}
+}
 
 const notificationCandidatesCTE = `
 WITH RECURSIVE descendant_roots(id) AS (
@@ -114,7 +128,7 @@ WITH RECURSIVE descendant_roots(id) AS (
 		COALESCE(wo.submitted_at, wo.updated_at) AS occurred_at,
 		wo.due_at AS due_at
 	FROM security_work_orders wo
-	WHERE $2::boolean
+	WHERE $3::boolean
 	  AND wo.status = 'pending_verification'
 
 	UNION ALL
@@ -131,7 +145,7 @@ WITH RECURSIVE descendant_roots(id) AS (
 		COALESCE(wo.issued_at, wo.updated_at),
 		wo.due_at
 	FROM security_work_orders wo
-	WHERE NOT $2::boolean
+	WHERE NOT $3::boolean
 	  AND wo.status = 'issued'
 	  AND wo.issued_at IS NOT NULL
 	  AND wo.assignee_organization_id IN (SELECT id FROM scoped_organizations)
@@ -150,7 +164,7 @@ WITH RECURSIVE descendant_roots(id) AS (
 		wo.updated_at,
 		wo.due_at
 	FROM security_work_orders wo
-	WHERE NOT $2::boolean
+	WHERE NOT $3::boolean
 	  AND wo.status = 'returned'
 	  AND wo.assignee_organization_id IN (SELECT id FROM scoped_organizations)
 
@@ -170,8 +184,8 @@ WITH RECURSIVE descendant_roots(id) AS (
 	FROM security_work_orders wo
 	WHERE wo.status NOT IN ('draft', 'closed', 'cancelled')
 	  AND wo.due_at < now()
-	  AND ($2::boolean OR wo.assignee_organization_id IN (SELECT id FROM scoped_organizations))
-	  AND ($2::boolean OR wo.issued_at IS NOT NULL)
+	  AND ($3::boolean OR wo.assignee_organization_id IN (SELECT id FROM scoped_organizations))
+	  AND ($3::boolean OR wo.issued_at IS NOT NULL)
 
 	UNION ALL
 
@@ -190,8 +204,8 @@ WITH RECURSIVE descendant_roots(id) AS (
 	WHERE wo.status NOT IN ('draft', 'closed', 'cancelled')
 	  AND wo.due_at >= now()
 	  AND wo.due_at < now() + interval '3 days'
-	  AND ($2::boolean OR wo.assignee_organization_id IN (SELECT id FROM scoped_organizations))
-	  AND ($2::boolean OR wo.issued_at IS NOT NULL)
+	  AND ($3::boolean OR wo.assignee_organization_id IN (SELECT id FROM scoped_organizations))
+	  AND ($3::boolean OR wo.issued_at IS NOT NULL)
 
 	UNION ALL
 
@@ -207,7 +221,7 @@ WITH RECURSIVE descendant_roots(id) AS (
 		sf.risk_accepted_until,
 		sf.risk_accepted_until
 	FROM security_findings sf
-	WHERE $2::boolean
+	WHERE $4::boolean
 	  AND sf.status = 'accepted_risk'
 	  AND sf.risk_accepted_until IS NOT NULL
 	  AND sf.risk_accepted_until < now()
@@ -226,7 +240,7 @@ WITH RECURSIVE descendant_roots(id) AS (
 		now(),
 		sf.risk_accepted_until
 	FROM security_findings sf
-	WHERE $2::boolean
+	WHERE $4::boolean
 	  AND sf.status = 'accepted_risk'
 	  AND sf.risk_accepted_until IS NOT NULL
 	  AND sf.risk_accepted_until >= now()
@@ -312,7 +326,7 @@ func (s *Service) List(ctx context.Context, principal auth.Principal, input List
 // filtered total from count(*) OVER (), rather than a length of page items.
 func (s *Service) Search(ctx context.Context, principal auth.Principal, input SearchInput) (pagination.Result[Item], Summary, error) {
 	input.Category = strings.TrimSpace(input.Category)
-	isGroupAdmin := principal.HasRole("group_admin")
+	scope := scopeFor(principal)
 	query := notificationCandidatesCTE + `
 SELECT nc.notification_key, nc.category, nc.title, nc.message, nc.level,
        nc.resource_type, nc.resource_id, nc.action_path, nc.occurred_at, nc.due_at,
@@ -320,13 +334,13 @@ SELECT nc.notification_key, nc.category, nc.title, nc.message, nc.level,
 FROM notification_candidates nc
 LEFT JOIN notification_reads nr
   ON nr.user_id = $1::uuid AND nr.notification_key = nc.notification_key
-WHERE ($3::boolean = false OR nr.read_at IS NULL)
-  AND ($4 = '' OR nc.category = $4)
+WHERE ($5::boolean = false OR nr.read_at IS NULL)
+  AND ($6 = '' OR nc.category = $6)
 ORDER BY (nr.read_at IS NULL) DESC,
          CASE nc.level WHEN 'danger' THEN 3 WHEN 'warning' THEN 2 ELSE 1 END DESC,
          nc.occurred_at DESC
-LIMIT $5 OFFSET $6`
-	rows, err := s.pool.Query(ctx, query, principal.UserID, isGroupAdmin, input.UnreadOnly, input.Category, input.Page.PageSize, input.Page.Offset())
+LIMIT $7 OFFSET $8`
+	rows, err := s.pool.Query(ctx, query, principal.UserID, scope.groupAdmin, scope.canManageSecurityWorkOrders, scope.canManageSecurityFindings, input.UnreadOnly, input.Category, input.Page.PageSize, input.Page.Offset())
 	if err != nil {
 		return pagination.Result[Item]{}, Summary{}, fmt.Errorf("search notifications: %w", err)
 	}
@@ -350,13 +364,13 @@ SELECT count(*)
 FROM notification_candidates nc
 LEFT JOIN notification_reads nr
   ON nr.user_id = $1::uuid AND nr.notification_key = nc.notification_key
-WHERE ($3::boolean = false OR nr.read_at IS NULL)
-  AND ($4 = '' OR nc.category = $4)`
-		if err := s.pool.QueryRow(ctx, countQuery, principal.UserID, isGroupAdmin, input.UnreadOnly, input.Category).Scan(&total); err != nil {
+WHERE ($5::boolean = false OR nr.read_at IS NULL)
+  AND ($6 = '' OR nc.category = $6)`
+		if err := s.pool.QueryRow(ctx, countQuery, principal.UserID, scope.groupAdmin, scope.canManageSecurityWorkOrders, scope.canManageSecurityFindings, input.UnreadOnly, input.Category).Scan(&total); err != nil {
 			return pagination.Result[Item]{}, Summary{}, fmt.Errorf("count notifications: %w", err)
 		}
 	}
-	summary, err := s.summaryWithCandidates(ctx, principal, isGroupAdmin)
+	summary, err := s.summaryWithCandidates(ctx, principal, scope)
 	if err != nil {
 		return pagination.Result[Item]{}, Summary{}, err
 	}
@@ -364,16 +378,16 @@ WHERE ($3::boolean = false OR nr.read_at IS NULL)
 }
 
 func (s *Service) Summary(ctx context.Context, principal auth.Principal) (Summary, error) {
-	return s.summaryWithCandidates(ctx, principal, principal.HasRole("group_admin"))
+	return s.summaryWithCandidates(ctx, principal, scopeFor(principal))
 }
 
-func (s *Service) summaryWithCandidates(ctx context.Context, principal auth.Principal, isGroupAdmin bool) (Summary, error) {
+func (s *Service) summaryWithCandidates(ctx context.Context, principal auth.Principal, scope candidateScope) (Summary, error) {
 	var result Summary
 	err := s.pool.QueryRow(ctx, notificationCandidatesCTE+`
 SELECT count(*)::bigint, count(*) FILTER (WHERE nr.read_at IS NULL)::bigint
 FROM notification_candidates nc
 LEFT JOIN notification_reads nr
-  ON nr.user_id = $1::uuid AND nr.notification_key = nc.notification_key`, principal.UserID, isGroupAdmin).Scan(&result.Total, &result.UnreadCount)
+  ON nr.user_id = $1::uuid AND nr.notification_key = nc.notification_key`, principal.UserID, scope.groupAdmin, scope.canManageSecurityWorkOrders, scope.canManageSecurityFindings).Scan(&result.Total, &result.UnreadCount)
 	if err != nil {
 		return Summary{}, fmt.Errorf("load notification summary: %w", err)
 	}
@@ -403,11 +417,12 @@ func (s *Service) MarkRead(ctx context.Context, principal auth.Principal, key st
 }
 
 func (s *Service) MarkAllRead(ctx context.Context, principal auth.Principal) error {
+	scope := scopeFor(principal)
 	_, err := s.pool.Exec(ctx, notificationCandidatesCTE+`
 INSERT INTO notification_reads (user_id, notification_key, read_at)
 SELECT $1::uuid, notification_key, now()
 FROM notification_candidates
-ON CONFLICT (user_id, notification_key) DO UPDATE SET read_at = EXCLUDED.read_at`, principal.UserID, principal.HasRole("group_admin"))
+ON CONFLICT (user_id, notification_key) DO UPDATE SET read_at = EXCLUDED.read_at`, principal.UserID, scope.groupAdmin, scope.canManageSecurityWorkOrders, scope.canManageSecurityFindings)
 	if err != nil {
 		return fmt.Errorf("mark all notifications read: %w", err)
 	}
@@ -415,9 +430,10 @@ ON CONFLICT (user_id, notification_key) DO UPDATE SET read_at = EXCLUDED.read_at
 }
 
 func (s *Service) isVisible(ctx context.Context, principal auth.Principal, key string) (bool, error) {
+	scope := scopeFor(principal)
 	var visible bool
 	err := s.pool.QueryRow(ctx, notificationCandidatesCTE+`
-SELECT EXISTS (SELECT 1 FROM notification_candidates WHERE notification_key = $3)`, principal.UserID, principal.HasRole("group_admin"), key).Scan(&visible)
+SELECT EXISTS (SELECT 1 FROM notification_candidates WHERE notification_key = $5)`, principal.UserID, scope.groupAdmin, scope.canManageSecurityWorkOrders, scope.canManageSecurityFindings, key).Scan(&visible)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return false, nil
 	}

@@ -23,6 +23,7 @@ var permissions = map[string]string{
 	"inventory.manage":          "管理资产填报与审核",
 	"data_quality.manage":       "处理数据质量问题",
 	"security_test.manage":      "管理安全测试批次",
+	"security_finding.manage":   "管理安全发现与风险接受",
 	"security_workorder.manage": "管理安全工单",
 	"audit.read":                "查看审计日志和变更记录",
 	"recycle_bin.manage":        "管理回收站",
@@ -89,6 +90,28 @@ func Ensure(ctx context.Context, pool *pgxpool.Pool, cfg config.Config, logger *
 		ON CONFLICT DO NOTHING
 	`, roleID); err != nil {
 		return fmt.Errorf("bootstrap role permissions: %w", err)
+	}
+
+	var securityOperatorRoleID string
+	if err := tx.QueryRow(ctx, `
+		INSERT INTO roles (role_key, role_name, role_scope, description, is_system)
+		VALUES ('security_operator', '集团安全运营管理员', 'group', '负责集团范围安全测试、漏洞治理和安全工单闭环', true)
+		ON CONFLICT (role_key) DO UPDATE SET
+			role_name = EXCLUDED.role_name,
+			role_scope = EXCLUDED.role_scope,
+			description = EXCLUDED.description,
+			is_system = true,
+			status = 'enabled'
+		RETURNING id::text
+	`).Scan(&securityOperatorRoleID); err != nil {
+		return fmt.Errorf("bootstrap security operator role: %w", err)
+	}
+	if _, err := tx.Exec(ctx, `
+		INSERT INTO role_permissions (role_id, permission_key)
+		SELECT $1::uuid, unnest($2::varchar[])
+		ON CONFLICT DO NOTHING
+	`, securityOperatorRoleID, []string{"security_test.manage", "security_finding.manage", "security_workorder.manage"}); err != nil {
+		return fmt.Errorf("bootstrap security operator permissions: %w", err)
 	}
 
 	organizationRoles := []struct {

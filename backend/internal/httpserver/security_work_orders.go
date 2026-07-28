@@ -36,7 +36,7 @@ func registerSecurityWorkOrderRoutes(api *gin.RouterGroup, requireAuth gin.Handl
 		result, err := service.SearchFindingImports(c.Request.Context(), mustPrincipal(c), page)
 		switch {
 		case errors.Is(err, securityworkorder.ErrForbidden):
-			writeAPIError(c, http.StatusForbidden, "forbidden", "仅集团管理员可以查看漏洞导入历史")
+			writeAPIError(c, http.StatusForbidden, "forbidden", "当前账号无安全发现导入历史查看权限")
 		case err != nil:
 			logger.Error("list finding imports", "error", err, "request_id", c.GetString("request_id"))
 			writeAPIError(c, http.StatusInternalServerError, "internal_error", "读取漏洞导入历史失败")
@@ -322,7 +322,7 @@ func writeFindingResult(c *gin.Context, logger *slog.Logger, operation string, s
 func writeFindingRiskResult(c *gin.Context, logger *slog.Logger, operation string, item securityworkorder.Finding, err error) {
 	switch {
 	case errors.Is(err, securityworkorder.ErrForbidden):
-		writeAPIError(c, http.StatusForbidden, "forbidden", "仅集团管理员可以执行风险接受、撤销或复核")
+		writeAPIError(c, http.StatusForbidden, "forbidden", "当前账号无安全发现风险管理权限")
 	case errors.Is(err, securityworkorder.ErrInvalid):
 		writeAPIError(c, http.StatusBadRequest, "invalid_risk_acceptance", "请填写有效的风险接受原因、未来有效期或复核意见")
 	case errors.Is(err, securityworkorder.ErrNotFound):
@@ -340,7 +340,7 @@ func writeFindingRiskResult(c *gin.Context, logger *slog.Logger, operation strin
 func writeFindingImportResult(c *gin.Context, logger *slog.Logger, result securityworkorder.FindingImportResult, err error) {
 	switch {
 	case errors.Is(err, securityworkorder.ErrForbidden):
-		writeAPIError(c, http.StatusForbidden, "forbidden", "仅集团管理员可以批量导入安全发现")
+		writeAPIError(c, http.StatusForbidden, "forbidden", "当前账号无安全发现导入权限")
 	case errors.Is(err, securityworkorder.ErrInvalid):
 		writeAPIError(c, http.StatusBadRequest, "invalid_finding_import", "请检查测试批次、文件格式、表头和数据行；最多支持 5000 行")
 	case errors.Is(err, securityworkorder.ErrNotFound):

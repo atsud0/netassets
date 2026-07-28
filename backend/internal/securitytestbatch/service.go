@@ -115,7 +115,7 @@ func NewService(pool *pgxpool.Pool, storageDirs ...string) *Service {
 }
 
 func (s *Service) List(ctx context.Context, principal auth.Principal, status string) ([]Batch, error) {
-	if !principal.HasRole("group_admin") {
+	if !principal.CanManageSecurityTests() {
 		return nil, ErrForbidden
 	}
 	status = strings.TrimSpace(status)
@@ -151,7 +151,7 @@ func (s *Service) List(ctx context.Context, principal auth.Principal, status str
 }
 
 func (s *Service) Search(ctx context.Context, principal auth.Principal, status string, query pagination.Query) (pagination.Result[Batch], error) {
-	if !principal.HasRole("group_admin") {
+	if !principal.CanManageSecurityTests() {
 		return pagination.Result[Batch]{}, ErrForbidden
 	}
 	status = strings.TrimSpace(status)
@@ -198,7 +198,7 @@ func (s *Service) Search(ctx context.Context, principal auth.Principal, status s
 }
 
 func (s *Service) Get(ctx context.Context, principal auth.Principal, id string) (Batch, error) {
-	if !principal.HasRole("group_admin") {
+	if !principal.CanManageSecurityTests() {
 		return Batch{}, ErrForbidden
 	}
 	if !validUUID(id) {
@@ -218,7 +218,7 @@ func (s *Service) Get(ctx context.Context, principal auth.Principal, id string) 
 // SearchEvents returns the newest batch workflow events first. Events are
 // loaded separately so the batch detail response does not grow without bound.
 func (s *Service) SearchEvents(ctx context.Context, principal auth.Principal, id string, query pagination.Query) (pagination.Result[BatchEvent], error) {
-	if !principal.HasRole("group_admin") {
+	if !principal.CanManageSecurityTests() {
 		return pagination.Result[BatchEvent]{}, ErrForbidden
 	}
 	if !validUUID(id) {
@@ -257,7 +257,7 @@ func (s *Service) SearchEvents(ctx context.Context, principal auth.Principal, id
 }
 
 func (s *Service) Create(ctx context.Context, principal auth.Principal, input Input, requestID, ipAddress string) (Batch, error) {
-	if !principal.HasRole("group_admin") {
+	if !principal.CanManageSecurityTests() {
 		return Batch{}, ErrForbidden
 	}
 	normalizeInput(&input)
@@ -300,7 +300,7 @@ func (s *Service) Create(ctx context.Context, principal auth.Principal, input In
 }
 
 func (s *Service) Update(ctx context.Context, principal auth.Principal, id string, input Input, requestID, ipAddress string) (Batch, error) {
-	if !principal.HasRole("group_admin") {
+	if !principal.CanManageSecurityTests() {
 		return Batch{}, ErrForbidden
 	}
 	if !validUUID(id) {
@@ -367,7 +367,7 @@ func (s *Service) Cancel(ctx context.Context, principal auth.Principal, id strin
 }
 
 func (s *Service) transition(ctx context.Context, principal auth.Principal, id string, fromStatuses []string, toStatus, action, comment, requestID, ipAddress, extraSet string) (Batch, error) {
-	if !principal.HasRole("group_admin") {
+	if !principal.CanManageSecurityTests() {
 		return Batch{}, ErrForbidden
 	}
 	if !validUUID(id) || len(comment) > 2000 {

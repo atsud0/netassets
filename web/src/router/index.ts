@@ -31,16 +31,16 @@ const router = createRouter({
         { path: '', redirect: '/dashboard' },
         { path: 'dashboard', name: 'dashboard', component: DashboardView },
         { path: 'notifications', name: 'notifications', component: NotificationsView },
-        { path: 'organizations', name: 'organizations', component: OrganizationsView },
+        { path: 'organizations', name: 'organizations', component: OrganizationsView, meta: { permission: 'organization.read' } },
         { path: 'users', name: 'users', component: UsersView, meta: { permission: 'user.manage' } },
         { path: 'profile', name: 'profile', component: ProfileView },
-        { path: 'systems', name: 'systems', component: BusinessSystemsView },
-        { path: 'assets', name: 'assets', component: AssetsView },
+        { path: 'systems', name: 'systems', component: BusinessSystemsView, meta: { permission: 'system.manage' } },
+        { path: 'assets', name: 'assets', component: AssetsView, meta: { permission: 'asset.manage' } },
         { path: 'asset-candidates', name: 'asset-candidates', component: AssetCandidatesView, meta: { groupAdminOnly: true } },
         { path: 'data-governance', name: 'data-governance', component: DataGovernanceView, meta: { groupAdminOnly: true } },
         { path: 'data-quality-issues', name: 'data-quality-issues', component: DataQualityIssuesView, meta: { permission: 'data_quality.manage' } },
-        { path: 'inventory-tasks', name: 'inventory-tasks', component: InventoryTasksView },
-        { path: 'security-test-batches', name: 'security-test-batches', component: SecurityTestBatchesView, meta: { groupAdminOnly: true } },
+        { path: 'inventory-tasks', name: 'inventory-tasks', component: InventoryTasksView, meta: { permission: 'inventory.manage' } },
+        { path: 'security-test-batches', name: 'security-test-batches', component: SecurityTestBatchesView, meta: { permission: 'security_test.manage', groupSecurityOnly: true } },
         { path: 'security-work-orders', name: 'security-work-orders', component: SecurityWorkOrdersView },
         { path: 'audit-logs', name: 'audit-logs', component: AuditLogsView, meta: { groupAdminOnly: true } },
         { path: 'recycle-bin', name: 'recycle-bin', component: RecycleBinView, meta: { groupAdminOnly: true } },
@@ -65,6 +65,9 @@ router.beforeEach(async (to) => {
     return { name: 'profile', query: { password_change_required: '1' } }
   }
   if (to.meta.groupAdminOnly && !auth.isGroupAdmin) {
+    return { name: 'dashboard' }
+  }
+  if (to.meta.groupSecurityOnly && !auth.hasGroupSecurityRole) {
     return { name: 'dashboard' }
   }
   if (to.meta.permission && !auth.hasPermission(String(to.meta.permission))) {

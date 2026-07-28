@@ -252,12 +252,13 @@ async function loadSupportingData() {
   try {
     const listParams = { page: 1, page_size: 100 }
     const emptyResponse = { data: { items: [], total: 0, page: 1, page_size: 20 } }
+    const referencePrefix = auth.hasGroupSecurityRole ? '/security-reference' : ''
     const [orgResponse, assetResponse, systemResponse, batchResponse, importResponse] = await Promise.all([
-      apiClient.get<ListResponse<Organization>>('/organizations', { params: listParams }),
-      apiClient.get<ListResponse<Asset>>('/assets', { params: listParams }),
-      apiClient.get<ListResponse<BusinessSystem>>('/business-systems', { params: listParams }),
-      auth.isGroupAdmin ? apiClient.get<ListResponse<SecurityTestBatch>>('/security-test-batches', { params: listParams }) : Promise.resolve(emptyResponse),
-      auth.isGroupAdmin ? apiClient.get<ListResponse<FindingImportResult>>('/security-findings/imports', { params: listParams }) : Promise.resolve(emptyResponse),
+      apiClient.get<ListResponse<Organization>>(`${referencePrefix}/organizations`, { params: listParams }),
+      apiClient.get<ListResponse<Asset>>(`${referencePrefix}/assets`, { params: listParams }),
+      apiClient.get<ListResponse<BusinessSystem>>(`${referencePrefix}/business-systems`, { params: listParams }),
+      auth.canManageSecurityTests ? apiClient.get<ListResponse<SecurityTestBatch>>('/security-test-batches', { params: listParams }) : Promise.resolve(emptyResponse),
+      auth.canManageSecurityFindings ? apiClient.get<ListResponse<FindingImportResult>>('/security-findings/imports', { params: listParams }) : Promise.resolve(emptyResponse),
     ])
     organizations.value = orgResponse.data.items
     assets.value = assetResponse.data.items
@@ -270,7 +271,7 @@ async function loadSupportingData() {
 }
 
 async function loadFindingOptions() {
-  if (!auth.isGroupAdmin) {
+  if (!auth.canManageSecurityWorkOrders) {
     findingOptions.value = []
     return
   }
@@ -350,7 +351,7 @@ function handlePageSizeChange(value: number) {
 }
 
 function defaultOrganizationID() {
-  return auth.isGroupAdmin ? (enabledOrganizations.value[0]?.id ?? '') : (auth.user?.organization?.id ?? '')
+  return auth.hasGroupSecurityRole ? (enabledOrganizations.value[0]?.id ?? '') : (auth.user?.organization?.id ?? '')
 }
 
 function defaultDueAt() {
@@ -708,7 +709,7 @@ async function uploadAttachment() {
   if (!selectedOrder.value || !selectedAttachmentFile.value) return ElMessage.warning('请先选择附件')
   const data = new FormData()
   data.append('file', selectedAttachmentFile.value)
-  data.append('category', auth.isGroupAdmin ? attachmentForm.category : 'remediation')
+  data.append('category', auth.canManageSecurityWorkOrders ? attachmentForm.category : 'remediation')
   data.append('description', attachmentForm.description)
   attachmentUploading.value = true
   try {
@@ -757,7 +758,7 @@ async function deleteAttachment(item: WorkOrderAttachment) {
 }
 
 function canDeleteAttachment(item: WorkOrderAttachment) {
-  return auth.isGroupAdmin || (item.uploaded_by === auth.user?.id && !['closed', 'cancelled'].includes(selectedOrder.value?.status || ''))
+  return auth.canManageSecurityWorkOrders || (item.uploaded_by === auth.user?.id && !['closed', 'cancelled'].includes(selectedOrder.value?.status || ''))
 }
 
 function formatFileSize(value: number) {
@@ -799,14 +800,14 @@ async function onTabChange() {
         <h1>安全工单</h1>
         <p>集团基于已填报资产登记漏洞、下发整改要求，子公司在线反馈整改结果，集团复测后关闭。</p>
       </div>
-      <div class="heading-actions" v-if="auth.isGroupAdmin">
-        <el-button @click="openFindingImport">批量导入漏洞</el-button>
-        <el-button @click="openCreateFinding">登记安全发现</el-button>
-        <el-button type="primary" @click="openCreateWorkOrder()">新建整改工单</el-button>
+      <div v-if="auth.canManageSecurityFindings || auth.canManageSecurityWorkOrders" class="heading-actions">
+        <el-button v-if="auth.canManageSecurityFindings" @click="openFindingImport">批量导入漏洞</el-button>
+        <el-button v-if="auth.canManageSecurityFindings" @click="openCreateFinding">登记安全发现</el-button>
+        <el-button v-if="auth.canManageSecurityWorkOrders" type="primary" @click="openCreateWorkOrder()">新建整改工单</el-button>
       </div>
     </div>
 
-    <el-alert v-if="auth.isGroupAdmin" type="info" :closable="false" show-icon>
+    <el-alert v-if="auth.hasGroupSecurityRole" type="info" :closable="false" show-icon>
       <template #title>渗透测试仍在线下或专业工具中执行；本系统保存测试结果和整改协同记录，不直接执行攻击利用。</template>
     </el-alert>
     <el-alert v-else type="warning" :closable="false" show-icon>
@@ -826,7 +827,7 @@ async function onTabChange() {
         <el-tab-pane label="漏洞与安全发现" name="findings" />
       </el-tabs>
       <div class="filter-bar">
-        <el-select v-if="auth.isGroupAdmin" v-model="organizationFilter" clearable filterable placeholder="全部责任组织" style="width: 220px">
+        <el-select v-if="auth.hasGroupSecurityRole" v-model="organizationFilter" clearable filterable placeholder="全部责任组织" style="width: 220px">
           <el-option v-for="item in enabledOrganizations" :key="item.id" :label="`${item.name}（${item.code}）`" :value="item.id" />
         </el-select>
         <el-select v-model="statusFilter" clearable placeholder="全部状态" style="width: 170px">
@@ -859,7 +860,7 @@ async function onTabChange() {
         <el-table-column label="操作" fixed="right" min-width="260">
           <template #default="scope">
             <el-button link type="primary" @click="openDetail(scope.row)">详情</el-button>
-            <template v-if="auth.isGroupAdmin">
+            <template v-if="auth.canManageSecurityWorkOrders">
               <el-button v-if="scope.row.status === 'draft'" link type="primary" @click="openAction(scope.row, 'issue')">下发</el-button>
               <el-button v-if="scope.row.status === 'pending_verification'" link type="danger" @click="openAction(scope.row, 'return')">退回</el-button>
               <el-button v-if="scope.row.status === 'pending_verification'" link type="success" @click="openAction(scope.row, 'close')">复测通过</el-button>
@@ -884,14 +885,14 @@ async function onTabChange() {
         <el-table-column label="等级" width="85"><template #default="scope"><el-tag :type="severityTag(scope.row.severity)" effect="dark">{{ severityLabels[scope.row.severity] }}</el-tag></template></el-table-column>
         <el-table-column label="状态" width="135"><template #default="scope"><el-tag :type="findingStatusTag(scope.row.status)" effect="plain">{{ findingStatusLabels[scope.row.status] }}</el-tag><span v-if="scope.row.status === 'accepted_risk'" class="table-secondary risk-state" :class="{ expired: scope.row.risk_acceptance_expired }">{{ riskAcceptanceLabel(scope.row) }}</span></template></el-table-column>
         <el-table-column label="发现时间" min-width="165"><template #default="scope">{{ formatDate(scope.row.discovered_at) }}</template></el-table-column>
-        <el-table-column label="操作" fixed="right" :width="auth.isGroupAdmin ? 265 : 80">
+        <el-table-column label="操作" fixed="right" :width="auth.canManageSecurityFindings || auth.canManageSecurityWorkOrders ? 285 : 80">
           <template #default="scope">
             <el-button link type="primary" @click="openFindingDetail(scope.row)">详情</el-button>
-            <template v-if="auth.isGroupAdmin">
-              <el-button link type="primary" @click="openEditFinding(scope.row)">编辑</el-button>
-              <el-button v-if="scope.row.status === 'open'" link type="success" @click="openCreateWorkOrder(scope.row)">生成工单</el-button>
-              <el-button v-if="['open', 'resolved'].includes(scope.row.status)" link type="warning" @click="openRiskDialog(scope.row, 'accept')">接受风险</el-button>
-              <el-button v-if="scope.row.status === 'accepted_risk'" link type="warning" @click="openRiskDialog(scope.row, 'review')">复核</el-button>
+            <template v-if="auth.canManageSecurityFindings || auth.canManageSecurityWorkOrders">
+              <el-button v-if="auth.canManageSecurityFindings" link type="primary" @click="openEditFinding(scope.row)">编辑</el-button>
+              <el-button v-if="auth.canManageSecurityWorkOrders && scope.row.status === 'open'" link type="success" @click="openCreateWorkOrder(scope.row)">生成工单</el-button>
+              <el-button v-if="auth.canManageSecurityFindings && ['open', 'resolved'].includes(scope.row.status)" link type="warning" @click="openRiskDialog(scope.row, 'accept')">接受风险</el-button>
+              <el-button v-if="auth.canManageSecurityFindings && scope.row.status === 'accepted_risk'" link type="warning" @click="openRiskDialog(scope.row, 'review')">复核</el-button>
             </template>
           </template>
         </el-table-column>
@@ -917,7 +918,7 @@ async function onTabChange() {
           <div><span class="mono-text">{{ selectedFinding.code }}</span><h2>{{ selectedFinding.title }}</h2></div>
           <div class="finding-detail-tags"><el-tag :type="severityTag(selectedFinding.severity)" effect="dark">{{ severityLabels[selectedFinding.severity] }}</el-tag><el-tag :type="findingStatusTag(selectedFinding.status)" effect="plain">{{ findingStatusLabels[selectedFinding.status] }}</el-tag></div>
         </div>
-        <el-alert v-if="selectedFinding.status === 'accepted_risk' && selectedFinding.risk_acceptance_expired" title="风险接受已到期，请集团管理员及时复核、延长有效期或撤销风险接受。" type="error" :closable="false" show-icon class="detail-alert" />
+        <el-alert v-if="selectedFinding.status === 'accepted_risk' && selectedFinding.risk_acceptance_expired" title="风险接受已到期，请集团安全运营人员及时复核、延长有效期或撤销风险接受。" type="error" :closable="false" show-icon class="detail-alert" />
         <el-descriptions :column="2" border>
           <el-descriptions-item label="责任组织">{{ selectedFinding.assignee_organization_name }}</el-descriptions-item>
           <el-descriptions-item label="漏洞类型">{{ selectedFinding.vulnerability_type || '未分类' }}</el-descriptions-item>
@@ -938,11 +939,11 @@ async function onTabChange() {
             <el-descriptions-item v-if="selectedFinding.risk_reviewed_at" label="最近复核">{{ selectedFinding.risk_reviewed_by_name || '—' }} · {{ formatDate(selectedFinding.risk_reviewed_at) }}<p class="review-comment">{{ selectedFinding.risk_review_comment }}</p></el-descriptions-item>
           </el-descriptions>
         </div>
-        <div v-if="auth.isGroupAdmin" class="finding-detail-actions">
-          <el-button v-if="['open', 'resolved'].includes(selectedFinding.status)" type="warning" @click="openRiskDialog(selectedFinding, 'accept')">接受风险</el-button>
-          <el-button v-if="selectedFinding.status === 'accepted_risk'" type="warning" @click="openRiskDialog(selectedFinding, 'review')">复核并延长有效期</el-button>
-          <el-button v-if="selectedFinding.status === 'accepted_risk'" type="danger" plain @click="revokeFindingRisk(selectedFinding)">撤销风险接受</el-button>
-          <el-button v-if="selectedFinding.status === 'open'" type="primary" @click="openCreateWorkOrder(selectedFinding)">生成整改工单</el-button>
+        <div v-if="auth.canManageSecurityFindings || auth.canManageSecurityWorkOrders" class="finding-detail-actions">
+          <el-button v-if="auth.canManageSecurityFindings && ['open', 'resolved'].includes(selectedFinding.status)" type="warning" @click="openRiskDialog(selectedFinding, 'accept')">接受风险</el-button>
+          <el-button v-if="auth.canManageSecurityFindings && selectedFinding.status === 'accepted_risk'" type="warning" @click="openRiskDialog(selectedFinding, 'review')">复核并延长有效期</el-button>
+          <el-button v-if="auth.canManageSecurityFindings && selectedFinding.status === 'accepted_risk'" type="danger" plain @click="revokeFindingRisk(selectedFinding)">撤销风险接受</el-button>
+          <el-button v-if="auth.canManageSecurityWorkOrders && selectedFinding.status === 'open'" type="primary" @click="openCreateWorkOrder(selectedFinding)">生成整改工单</el-button>
         </div>
       </div>
     </el-drawer>
@@ -1040,8 +1041,8 @@ async function onTabChange() {
         <div v-if="selectedOrder.verification_result" class="detail-block"><h3>集团复测结论</h3><p>{{ selectedOrder.verification_result }}</p></div>
         <div v-loading="orderAttachmentLoading" class="detail-block">
           <div class="detail-block-heading"><h3>整改与复测附件（{{ orderAttachmentTotal }}）</h3><span>支持 PDF、图片、TXT、CSV、XLSX、DOCX、ZIP，单文件不超过 20MB</span></div>
-          <div v-if="auth.isGroupAdmin || !['closed', 'cancelled'].includes(selectedOrder.status)" class="attachment-upload-box">
-            <el-select v-if="auth.isGroupAdmin" v-model="attachmentForm.category" size="small" style="width: 130px">
+          <div v-if="auth.canManageSecurityWorkOrders || !['closed', 'cancelled'].includes(selectedOrder.status)" class="attachment-upload-box">
+            <el-select v-if="auth.canManageSecurityWorkOrders" v-model="attachmentForm.category" size="small" style="width: 130px">
               <el-option v-for="(label, value) in attachmentCategoryLabels" :key="value" :label="label" :value="value" />
             </el-select>
             <input ref="attachmentFileInput" type="file" accept=".pdf,.png,.jpg,.jpeg,.txt,.csv,.xlsx,.docx,.zip" @change="onAttachmentSelected">

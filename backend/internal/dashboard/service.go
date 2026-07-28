@@ -136,7 +136,7 @@ func (s *Service) Get(ctx context.Context, principal auth.Principal) (Summary, e
 			count(*) FILTER (WHERE wo.status NOT IN ('closed', 'cancelled', 'draft') AND wo.due_at >= now() AND wo.due_at < now() + interval '3 days')
 		FROM security_work_orders wo
 		WHERE ($2::boolean OR (wo.assignee_organization_id IN (SELECT id FROM scoped_organizations) AND wo.status <> 'draft'))
-	`, principal.UserID, principal.HasRole("group_admin")).Scan(
+	`, principal.UserID, principal.CanManageSecurityWorkOrders()).Scan(
 		&result.ActiveWorkOrderCount, &result.PendingVerificationCount,
 		&result.OverdueWorkOrderCount, &result.DueSoonWorkOrderCount,
 	); err != nil {
@@ -222,7 +222,7 @@ func (s *Service) GetSecurityOverview(ctx context.Context, principal auth.Princi
 		) AS definitions(key, label, sort_order)
 		LEFT JOIN security_findings f ON f.severity = definitions.key AND `+findingVisible("f")+`
 		GROUP BY definitions.key, definitions.label, definitions.sort_order
-		ORDER BY definitions.sort_order`, principal.UserID, principal.HasRole("group_admin"))
+		ORDER BY definitions.sort_order`, principal.UserID, principal.CanViewGroupSecurityDashboard())
 	if err != nil {
 		return SecurityOverview{}, fmt.Errorf("load security severity overview: %w", err)
 	}
@@ -246,7 +246,7 @@ func (s *Service) GetSecurityOverview(ctx context.Context, principal auth.Princi
 		) AS definitions(key, label, sort_order)
 		LEFT JOIN security_findings f ON f.status = definitions.key AND `+findingVisible("f")+`
 		GROUP BY definitions.key, definitions.label, definitions.sort_order
-		ORDER BY definitions.sort_order`, principal.UserID, principal.HasRole("group_admin"))
+		ORDER BY definitions.sort_order`, principal.UserID, principal.CanViewGroupSecurityDashboard())
 	if err != nil {
 		return SecurityOverview{}, fmt.Errorf("load security finding status overview: %w", err)
 	}
@@ -280,7 +280,7 @@ func (s *Service) GetSecurityOverview(ctx context.Context, principal auth.Princi
 			AND ($2::boolean OR (closed_order.assignee_organization_id IN (SELECT id FROM scoped_organizations) AND closed_order.issued_at IS NOT NULL))
 		LEFT JOIN security_work_order_findings closed_link ON closed_link.work_order_id = closed_order.id
 		GROUP BY days.day
-		ORDER BY days.day`, principal.UserID, principal.HasRole("group_admin"))
+		ORDER BY days.day`, principal.UserID, principal.CanViewGroupSecurityDashboard())
 	if err != nil {
 		return SecurityOverview{}, fmt.Errorf("load security finding trend: %w", err)
 	}
@@ -309,7 +309,7 @@ func (s *Service) GetSecurityOverview(ctx context.Context, principal auth.Princi
 		GROUP BY o.id, o.organization_code, o.organization_name
 		ORDER BY count(wo.id) FILTER (WHERE wo.status NOT IN ('draft', 'closed', 'cancelled') AND wo.due_at < now()) DESC,
 			count(wo.id) FILTER (WHERE wo.status NOT IN ('draft', 'closed', 'cancelled')) DESC, o.organization_name
-		LIMIT 20`, principal.UserID, principal.HasRole("group_admin"))
+		LIMIT 20`, principal.UserID, principal.CanViewGroupSecurityDashboard())
 	if err != nil {
 		return SecurityOverview{}, fmt.Errorf("load organization security performance: %w", err)
 	}
@@ -350,7 +350,7 @@ func (s *Service) GetSecurityOverview(ctx context.Context, principal auth.Princi
 			(SELECT count(*) FROM security_findings f WHERE f.test_batch_id IS NOT NULL
 			   AND f.status IN ('resolved', 'false_positive') AND ` + findingVisible("f") + `)
 	`
-	if err := s.pool.QueryRow(ctx, coverageQuery, principal.UserID, principal.HasRole("group_admin")).Scan(
+	if err := s.pool.QueryRow(ctx, coverageQuery, principal.UserID, principal.CanViewGroupSecurityDashboard()).Scan(
 		&result.TestCoverage.PublicAssetCount, &result.TestCoverage.TestedPublicAssetCount,
 		&result.TestCoverage.ActiveBatchCount, &result.TestCoverage.CompletedBatchCount,
 		&result.TestCoverage.TestFindingCount, &result.TestCoverage.ClosedTestFindingCount,

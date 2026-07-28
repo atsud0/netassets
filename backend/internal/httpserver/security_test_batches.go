@@ -152,7 +152,7 @@ func writeSecurityTestBatchResult(c *gin.Context, logger *slog.Logger, operation
 func writeSecurityTestBatchError(c *gin.Context, logger *slog.Logger, operation string, err error) {
 	switch {
 	case errors.Is(err, securitytestbatch.ErrForbidden):
-		writeAPIError(c, http.StatusForbidden, "forbidden", "仅集团管理员可以管理安全测试批次")
+		writeAPIError(c, http.StatusForbidden, "forbidden", "当前账号无安全测试管理权限")
 	case errors.Is(err, securitytestbatch.ErrInvalid):
 		writeAPIError(c, http.StatusBadRequest, "invalid_security_test_batch", "请检查批次信息、测试时间和操作说明，范围需包含 1 至 200 项公网资产")
 	case errors.Is(err, securitytestbatch.ErrNotFound):

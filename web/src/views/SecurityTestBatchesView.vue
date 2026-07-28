@@ -168,7 +168,7 @@ onMounted(async () => {
 
 async function loadAssets() {
   try {
-    const response = await apiClient.get<ListResponse<Asset>>('/assets', { params: { page: 1, page_size: 100 } })
+    const response = await apiClient.get<ListResponse<Asset>>('/security-reference/assets', { params: { page: 1, page_size: 100, public_only: true } })
     assets.value = response.data.items
   } catch (error) {
     ElMessage.error(getAPIErrorMessage(error, '读取公网资产候选失败'))
@@ -576,7 +576,7 @@ function formatTime(value?: string) {
         </el-table>
 
         <div class="section-heading attachment-heading">
-          <div><h3>测试报告与参考材料</h3><p>上传正式测试报告、扫描结果或授权参考材料，附件受集团管理员权限保护，单个附件不超过 20MB。</p></div>
+          <div><h3>测试报告与参考材料</h3><p>上传正式测试报告、扫描结果或授权参考材料，附件仅限具备安全测试管理权限的集团人员访问，单个附件不超过 20MB。</p></div>
         </div>
         <div v-if="!['draft', 'cancelled'].includes(currentBatch.status)" class="attachment-upload-panel">
           <input ref="attachmentInput" data-testid="security-test-batch-attachment-input" class="hidden-file-input" type="file" accept=".pdf,.png,.jpg,.jpeg,.txt,.csv,.xlsx,.docx,.zip" @change="onAttachmentSelected">

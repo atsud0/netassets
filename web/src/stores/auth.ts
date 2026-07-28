@@ -34,7 +34,13 @@ export const useAuthStore = defineStore('auth', () => {
   const initialized = ref(false)
   const authenticated = computed(() => user.value !== null)
   const isGroupAdmin = computed(() => user.value?.roles.includes('group_admin') ?? false)
+  const isSecurityOperator = computed(() => user.value?.roles.includes('security_operator') ?? false)
+  const hasGroupSecurityRole = computed(() => isGroupAdmin.value || isSecurityOperator.value)
   const hasPermission = (permission: string) => user.value?.permissions.includes(permission) ?? false
+
+  const canManageSecurityTests = computed(() => hasGroupSecurityRole.value && hasPermission('security_test.manage'))
+  const canManageSecurityFindings = computed(() => hasGroupSecurityRole.value && hasPermission('security_finding.manage'))
+  const canManageSecurityWorkOrders = computed(() => hasGroupSecurityRole.value && hasPermission('security_workorder.manage'))
 
   function setCurrentUser(currentUser: CurrentUser) {
     user.value = currentUser
@@ -75,5 +81,5 @@ export const useAuthStore = defineStore('auth', () => {
     }
   }
 
-  return { user, initialized, authenticated, isGroupAdmin, hasPermission, setCurrentUser, fetchCurrentUser, login, switchOrganization, logout }
+  return { user, initialized, authenticated, isGroupAdmin, isSecurityOperator, hasGroupSecurityRole, canManageSecurityTests, canManageSecurityFindings, canManageSecurityWorkOrders, hasPermission, setCurrentUser, fetchCurrentUser, login, switchOrganization, logout }
 })

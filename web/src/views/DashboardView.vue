@@ -72,17 +72,26 @@ const overview = ref<SecurityOverview>({
   },
 })
 
-const stats = computed(() => auth.isGroupAdmin ? [
-  { label: '下级组织', value: summary.value.organization_count, hint: '已启用的子公司和部门' },
-  { label: '业务系统', value: summary.value.system_count, hint: '集团当前系统台账' },
-  { label: '网络资产', value: summary.value.asset_count, hint: `${summary.value.public_asset_count} 项公网资产` },
-  { label: '待集团审核', value: summary.value.pending_review_count, hint: `${summary.value.overdue_count} 个组织已逾期` },
-] : [
-  { label: '业务系统', value: summary.value.system_count, hint: '本组织及授权范围' },
-  { label: '网络资产', value: summary.value.asset_count, hint: `${summary.value.public_asset_count} 项公网资产` },
-  { label: '待填报任务', value: summary.value.pending_task_count, hint: `${summary.value.returned_task_count} 项被退回` },
-  { label: '逾期任务', value: summary.value.overdue_count, hint: '请优先完成逾期填报' },
-])
+const stats = computed(() => {
+  if (auth.isGroupAdmin) return [
+    { label: '下级组织', value: summary.value.organization_count, hint: '已启用的子公司和部门' },
+    { label: '业务系统', value: summary.value.system_count, hint: '集团当前系统台账' },
+    { label: '网络资产', value: summary.value.asset_count, hint: `${summary.value.public_asset_count} 项公网资产` },
+    { label: '待集团审核', value: summary.value.pending_review_count, hint: `${summary.value.overdue_count} 个组织已逾期` },
+  ]
+  if (auth.isSecurityOperator) return [
+    { label: '处理中工单', value: summary.value.active_work_order_count, hint: '集团范围未关闭工单' },
+    { label: '待复测工单', value: summary.value.pending_verification_work_order_count, hint: '等待集团复测确认' },
+    { label: '逾期工单', value: summary.value.overdue_work_order_count, hint: '需优先督办整改' },
+    { label: '三日内到期', value: summary.value.due_soon_work_order_count, hint: '尚未关闭的临期工单' },
+  ]
+  return [
+    { label: '业务系统', value: summary.value.system_count, hint: '本组织及授权范围' },
+    { label: '网络资产', value: summary.value.asset_count, hint: `${summary.value.public_asset_count} 项公网资产` },
+    { label: '待填报任务', value: summary.value.pending_task_count, hint: `${summary.value.returned_task_count} 项被退回` },
+    { label: '逾期任务', value: summary.value.overdue_count, hint: '请优先完成逾期填报' },
+  ]
+})
 const trendMax = computed(() => Math.max(1, ...overview.value.finding_trend.flatMap(item => [item.new_finding_count, item.closed_finding_count])))
 const latestTrend = computed(() => overview.value.finding_trend.slice(-14))
 const severityTotal = computed(() => overview.value.finding_severity.reduce((total, item) => total + item.count, 0))
@@ -134,11 +143,11 @@ onMounted(load)
     <div class="page-heading">
       <div>
         <span class="eyebrow">OVERVIEW</span>
-        <h1>{{ auth.isGroupAdmin ? '集团安全治理工作台' : '组织安全治理工作台' }}</h1>
-        <p>{{ auth.isGroupAdmin ? '统一掌握集团资产、漏洞风险、测试覆盖和子公司整改效能。' : `查看${auth.user?.organization?.name || '本组织'}在授权范围内的资产台账、安全风险和整改待办。` }}</p>
+        <h1>{{ auth.hasGroupSecurityRole ? '集团安全治理工作台' : '组织安全治理工作台' }}</h1>
+        <p>{{ auth.hasGroupSecurityRole ? '统一掌握集团漏洞风险、测试覆盖和子公司整改效能。' : `查看${auth.user?.organization?.name || '本组织'}在授权范围内的资产台账、安全风险和整改待办。` }}</p>
       </div>
       <div class="heading-actions">
-        <el-button @click="router.push('/inventory-tasks')">{{ auth.isGroupAdmin ? '创建填报任务' : '处理填报任务' }}</el-button>
+        <el-button v-if="auth.hasPermission('inventory.manage')" @click="router.push('/inventory-tasks')">{{ auth.isGroupAdmin ? '创建填报任务' : '处理填报任务' }}</el-button>
         <el-button type="primary" @click="toWorkOrders()">处理安全工单</el-button>
       </div>
     </div>
@@ -149,7 +158,7 @@ onMounted(load)
       </article>
     </div>
 
-    <div class="content-grid">
+    <div v-if="!auth.isSecurityOperator" class="content-grid">
       <article class="panel dashboard-panel">
         <div class="panel-header">
           <div><h2>填报进度</h2><p>{{ auth.isGroupAdmin ? '最近一项进行中或已完成的集团任务。' : '最近一项与本组织相关的填报任务。' }}</p></div>
@@ -238,14 +247,14 @@ onMounted(load)
 
       <div class="security-content-grid">
         <article class="panel security-panel test-coverage-panel">
-          <div class="panel-header"><div><h2>安全测试覆盖</h2><p>以已完成批次统计公网资产覆盖与测试发现闭环。</p></div><el-button v-if="auth.isGroupAdmin" text type="primary" @click="router.push('/security-test-batches')">查看测试批次</el-button></div>
+          <div class="panel-header"><div><h2>安全测试覆盖</h2><p>以已完成批次统计公网资产覆盖与测试发现闭环。</p></div><el-button v-if="auth.canManageSecurityTests" text type="primary" @click="router.push('/security-test-batches')">查看测试批次</el-button></div>
           <div class="coverage-progress-row"><div><span>公网资产已测试</span><strong>{{ overview.test_coverage.public_asset_coverage_rate }}%</strong></div><el-progress :percentage="overview.test_coverage.public_asset_coverage_rate" :stroke-width="12" /></div>
           <div class="coverage-progress-row"><div><span>测试发现已关闭</span><strong>{{ overview.test_coverage.test_finding_closure_rate }}%</strong></div><el-progress status="success" :percentage="overview.test_coverage.test_finding_closure_rate" :stroke-width="12" /></div>
           <div class="coverage-metrics"><span>执行中批次 <strong>{{ overview.test_coverage.active_batch_count }}</strong></span><span>已完成批次 <strong>{{ overview.test_coverage.completed_batch_count }}</strong></span><button type="button" @click="toFindings()">测试发现 <strong>{{ overview.test_coverage.test_finding_count }}</strong></button></div>
         </article>
 
         <article class="panel security-panel">
-          <div class="panel-header"><div><h2>{{ auth.isGroupAdmin ? '子公司整改效能' : '本组织整改效能' }}</h2><p>按工单关闭时间计算按期整改率，优先关注逾期项。</p></div><el-button text type="primary" @click="toWorkOrders()">查看工单</el-button></div>
+          <div class="panel-header"><div><h2>{{ auth.hasGroupSecurityRole ? '子公司整改效能' : '本组织整改效能' }}</h2><p>按工单关闭时间计算按期整改率，优先关注逾期项。</p></div><el-button text type="primary" @click="toWorkOrders()">查看工单</el-button></div>
           <el-table :data="overview.organization_performance" size="small" max-height="220" empty-text="暂无工单数据" @row-click="onOrganizationRowClick">
             <el-table-column prop="organization_name" label="组织" min-width="145" />
             <el-table-column label="处理中" width="82" align="center"><template #default="{ row }">{{ row.active_work_order_count }}</template></el-table-column>
