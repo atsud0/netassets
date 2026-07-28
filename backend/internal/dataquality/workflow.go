@@ -401,6 +401,10 @@ func (s *Service) SearchIssueEvents(ctx context.Context, p auth.Principal, issue
 }
 
 func (s *Service) StartIssue(ctx context.Context, p auth.Principal, issueID string, input StartInput, requestID, ipAddress string) (Issue, error) {
+	return s.startIssue(ctx, p, issueID, input, []string{"pending", "in_progress"}, requestID, ipAddress)
+}
+
+func (s *Service) startIssue(ctx context.Context, p auth.Principal, issueID string, input StartInput, allowedStatuses []string, requestID, ipAddress string) (Issue, error) {
 	input.AssigneeUserID = strings.TrimSpace(input.AssigneeUserID)
 	input.Note = strings.TrimSpace(input.Note)
 	if input.AssigneeUserID == "" {
@@ -409,25 +413,44 @@ func (s *Service) StartIssue(ctx context.Context, p auth.Principal, issueID stri
 	if !scanUUIDPattern.MatchString(input.AssigneeUserID) || len(input.Note) > 5000 {
 		return Issue{}, ErrInvalid
 	}
-	return s.transitionIssue(ctx, p, issueID, requestID, ipAddress, "started", []string{"pending", "in_progress"}, "in_progress", input.Note, func(ctx context.Context, tx pgx.Tx, item Issue) error {
-		var valid bool
-		if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM users u JOIN user_organizations uo ON uo.user_id=u.id WHERE u.id=$1::uuid AND uo.organization_id=$2::uuid AND u.status='enabled' AND u.deleted_at IS NULL)`, input.AssigneeUserID, item.OrganizationID).Scan(&valid); err != nil {
-			return err
-		}
-		if !valid {
-			return ErrInvalid
-		}
-		_, err := tx.Exec(ctx, `UPDATE data_quality_issues SET assignee_user_id=$2::uuid,updated_by=$3::uuid,updated_at=now() WHERE id=$1::uuid`, item.ID, input.AssigneeUserID, p.UserID)
-		return err
+	return s.transitionIssue(ctx, p, issueID, requestID, ipAddress, "started", allowedStatuses, "in_progress", input.Note, func(ctx context.Context, tx pgx.Tx, item Issue) error {
+		return updateIssueAssignee(ctx, tx, item, input.AssigneeUserID, p.UserID)
 	})
 }
 
+func (s *Service) AssignIssue(ctx context.Context, p auth.Principal, issueID string, input StartInput, requestID, ipAddress string) (Issue, error) {
+	input.AssigneeUserID = strings.TrimSpace(input.AssigneeUserID)
+	input.Note = strings.TrimSpace(input.Note)
+	if !scanUUIDPattern.MatchString(input.AssigneeUserID) || len(input.Note) > 5000 {
+		return Issue{}, ErrInvalid
+	}
+	return s.transitionIssue(ctx, p, issueID, requestID, ipAddress, "assigned", []string{"pending", "in_progress"}, "", input.Note, func(ctx context.Context, tx pgx.Tx, item Issue) error {
+		return updateIssueAssignee(ctx, tx, item, input.AssigneeUserID, p.UserID)
+	})
+}
+
+func updateIssueAssignee(ctx context.Context, tx pgx.Tx, item Issue, assigneeUserID, actorUserID string) error {
+	var valid bool
+	if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM users u JOIN user_organizations uo ON uo.user_id=u.id WHERE u.id=$1::uuid AND uo.organization_id=$2::uuid AND u.status='enabled' AND u.deleted_at IS NULL)`, assigneeUserID, item.OrganizationID).Scan(&valid); err != nil {
+		return err
+	}
+	if !valid {
+		return ErrInvalid
+	}
+	_, err := tx.Exec(ctx, `UPDATE data_quality_issues SET assignee_user_id=$2::uuid,updated_by=$3::uuid,updated_at=now() WHERE id=$1::uuid`, item.ID, assigneeUserID, actorUserID)
+	return err
+}
+
 func (s *Service) SubmitIssue(ctx context.Context, p auth.Principal, issueID string, input SubmitInput, requestID, ipAddress string) (Issue, error) {
+	return s.submitIssue(ctx, p, issueID, input, []string{"pending", "in_progress"}, requestID, ipAddress)
+}
+
+func (s *Service) submitIssue(ctx context.Context, p auth.Principal, issueID string, input SubmitInput, allowedStatuses []string, requestID, ipAddress string) (Issue, error) {
 	input.Note = strings.TrimSpace(input.Note)
 	if input.Note == "" || len(input.Note) > 5000 {
 		return Issue{}, ErrInvalid
 	}
-	return s.transitionIssue(ctx, p, issueID, requestID, ipAddress, "submitted", []string{"pending", "in_progress"}, "pending_review", input.Note, func(ctx context.Context, tx pgx.Tx, item Issue) error {
+	return s.transitionIssue(ctx, p, issueID, requestID, ipAddress, "submitted", allowedStatuses, "pending_review", input.Note, func(ctx context.Context, tx pgx.Tx, item Issue) error {
 		_, err := tx.Exec(ctx, `UPDATE data_quality_issues SET rectification_note=$2,submitted_by=$3::uuid,submitted_at=now(),assignee_user_id=COALESCE(assignee_user_id,$3::uuid),updated_by=$3::uuid,updated_at=now() WHERE id=$1::uuid`, item.ID, input.Note, p.UserID)
 		return err
 	})
@@ -523,6 +546,9 @@ func (s *Service) transitionIssue(ctx context.Context, p auth.Principal, issueID
 		return Issue{}, ErrInvalidTransition
 	}
 	fromStatus := item.Status
+	if nextStatus == "" {
+		nextStatus = fromStatus
+	}
 	if apply != nil {
 		if err := apply(ctx, tx, item); err != nil {
 			return Issue{}, err
@@ -607,7 +633,7 @@ func containsString(items []string, value string) bool {
 
 func qualityEventLabel(eventType string) string {
 	return map[string]string{
-		"started": "开始整改数据质量问题", "submitted": "提交数据质量问题复核", "approved": "复核关闭数据质量问题",
+		"assigned": "调整数据质量问题负责人", "started": "开始整改数据质量问题", "submitted": "提交数据质量问题复核", "approved": "复核关闭数据质量问题",
 		"returned": "退回数据质量问题整改", "exempted": "豁免数据质量问题", "reopened": "重新打开数据质量问题",
 	}[eventType]
 }

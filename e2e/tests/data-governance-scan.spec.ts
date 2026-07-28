@@ -234,21 +234,30 @@ test('独立测试组织完成质量巡检、子公司整改和集团复核闭�
   expect(scopedIssues.some((item) => item.id === issue!.issue_id && item.organization_id === organization.id)).toBeTruthy()
   expect(scopedIssues.every((item) => item.organization_id === organization.id)).toBeTruthy()
 
-  requireStatus(
-    await api(childPage, `/data-quality-issues/${issue!.issue_id}/start`, `${requestPrefix}-start`, 'POST', {
+  const batchStart = requireStatus(
+    await api<{ result: { total_count: number; success_count: number; failure_count: number; items: Array<{ id: string; success: boolean }> } }>(childPage, '/data-quality-issues/batch', `${requestPrefix}-batch-start`, 'POST', {
+      ids: [issue!.issue_id],
+      action: 'start',
       assignee_user_id: childUser.id,
-      note: '子公司开始整改',
+      note: '子公司批量开始整改',
     }),
     200,
-    '开始整改',
-  )
-  requireStatus(
-    await api(childPage, `/data-quality-issues/${issue!.issue_id}/submit`, `${requestPrefix}-submit`, 'POST', {
-      note: '已补充核验材料，提交集团复核',
+    '批量开始整改',
+  ).result
+  expect(batchStart).toMatchObject({ total_count: 1, success_count: 1, failure_count: 0 })
+  expect(batchStart.items).toEqual([expect.objectContaining({ id: issue!.issue_id, success: true })])
+
+  const batchSubmit = requireStatus(
+    await api<{ result: { total_count: number; success_count: number; failure_count: number; items: Array<{ id: string; success: boolean }> } }>(childPage, '/data-quality-issues/batch', `${requestPrefix}-batch-submit`, 'POST', {
+      ids: [issue!.issue_id],
+      action: 'submit',
+      note: '已补充核验材料，批量提交集团复核',
     }),
     200,
-    '提交集团复核',
-  )
+    '批量提交集团复核',
+  ).result
+  expect(batchSubmit).toMatchObject({ total_count: 1, success_count: 1, failure_count: 0 })
+  expect(batchSubmit.items).toEqual([expect.objectContaining({ id: issue!.issue_id, success: true })])
   requireStatus(
     await api(childPage, `/data-quality-issues/${issue!.issue_id}/review`, `${requestPrefix}-child-review-denied`, 'POST', {
       approved: true,
@@ -276,13 +285,18 @@ test('独立测试组织完成质量巡检、子公司整改和集团复核闭�
     '集团复核通过',
   )
   const detail = requireStatus(
-    await api<{ issue: { status: string; resolution_type: string }; events: Array<{ event_type: string }> }>(reviewPage, `/data-quality-issues/${issue!.issue_id}`, `${requestPrefix}-detail`),
+    await api<{ issue: { status: string; resolution_type: string } }>(reviewPage, `/data-quality-issues/${issue!.issue_id}`, `${requestPrefix}-detail`),
     200,
     '读取闭环结果',
   )
+  const events = requireStatus(
+    await api<{ items: Array<{ event_type: string }> }>(reviewPage, `/data-quality-issues/${issue!.issue_id}/events?page=1&page_size=100`, `${requestPrefix}-events`),
+    200,
+    '读取问题处理记录',
+  ).items
   expect(detail.issue.status).toBe('closed')
   expect(detail.issue.resolution_type).toBe('corrected')
-  expect(detail.events.map((item) => item.event_type)).toEqual(expect.arrayContaining(['started', 'submitted', 'approved']))
+  expect(events.map((item) => item.event_type)).toEqual(expect.arrayContaining(['started', 'submitted', 'approved']))
 
   requireStatus(await api(reviewPage, '/auth/logout', `${requestPrefix}-admin-logout-2`, 'POST'), 204, '集团管理员退出')
   await reviewContext.close()

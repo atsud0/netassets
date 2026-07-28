@@ -80,6 +80,22 @@ func registerDataQualityRuleRoutes(api *gin.RouterGroup, requireAuth gin.Handler
 		}
 		c.JSON(http.StatusOK, gin.H{"items": result.Items, "summary": summary, "total": result.Total, "page": result.Page, "page_size": result.PageSize})
 	})
+	issues.POST("/batch", func(c *gin.Context) {
+		var input dataquality.BatchIssueInput
+		if err := c.ShouldBindJSON(&input); err != nil {
+			writeAPIError(c, http.StatusBadRequest, "invalid_request", "批量整改信息格式不正确")
+			return
+		}
+		result, err := svc.OperateIssuesBatch(c.Request.Context(), mustPrincipal(c), input, c.GetString("request_id"), c.ClientIP())
+		switch {
+		case errors.Is(err, dataquality.ErrInvalid):
+			writeAPIError(c, http.StatusBadRequest, "invalid_batch", "单次请选择 1 至 200 个问题，并检查批量动作、整改负责人和处理说明")
+		case err != nil:
+			writeDataQualityIssueError(c, logger, err)
+		default:
+			c.JSON(http.StatusOK, gin.H{"result": result})
+		}
+	})
 
 	issues.GET("/:id/assignees", func(c *gin.Context) {
 		page, err := parsePageQuery(c)
@@ -114,6 +130,15 @@ func registerDataQualityRuleRoutes(api *gin.RouterGroup, requireAuth gin.Handler
 			return
 		}
 		c.JSON(http.StatusOK, item)
+	})
+	issues.POST("/:id/assign", func(c *gin.Context) {
+		var input dataquality.StartInput
+		if err := c.ShouldBindJSON(&input); err != nil {
+			writeAPIError(c, http.StatusBadRequest, "invalid_request", "负责人指派信息格式不正确")
+			return
+		}
+		item, err := svc.AssignIssue(c.Request.Context(), mustPrincipal(c), c.Param("id"), input, c.GetString("request_id"), c.ClientIP())
+		writeDataQualityIssueResult(c, logger, item, err)
 	})
 	issues.POST("/:id/start", func(c *gin.Context) {
 		var input dataquality.StartInput

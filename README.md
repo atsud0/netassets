@@ -26,6 +26,7 @@
 - 子公司提交前自动检查必填台账、负责人、数据安全属性和公网资产关联情况；错误阻止提交、提醒项允许提交
 - 集团管理员可统一维护网络资产/业务系统自定义字段，并配置“字段必填”与“长期未更新”数据质量规则
 - 数据质量规则支持最多 10 个白名单生效条件，多个条件按 AND 组合，可按组织、网络区域、资产类型、网络范围、环境、重要程度、业务系统状态、数据属性及自定义字段限定适用范围；必填规则在主动巡检与填报提交前复用同一判定语义
+- 数据质量问题支持单次 1～200 项批量指派负责人、批量开始整改和批量提交集团复核；服务端逐项执行组织权限与状态机校验，允许部分成功，并为每个成功项写入处理事件和审计日志
 - 子公司开始填报并提交当前业务系统、网络资产数量快照及填报说明
 - 每次提交生成不可变的业务系统与网络资产明细快照；退回重提形成新版本，并自动与本组织最近一次提交比较新增、修改和删除/归档项
 - 集团审核人员和授权组织用户可在填报任务中查看提交差异，修改项按字段展示前后值；历史存量提交未生成明细快照时保持兼容且不显示差异入口
@@ -183,8 +184,15 @@ GET    /api/v1/audit-logs/options
 GET    /api/v1/audit-logs?page=&page_size=&action=&resource_type=&result=&user_id=&organization_id=&q=&start_at=&end_at=
 GET    /api/v1/data-quality-issues?page=&page_size=&organization_id=&status=&severity=&resource_type=&assignee=
 GET    /api/v1/data-quality-issues/:id
+POST   /api/v1/data-quality-issues/batch
 GET    /api/v1/data-quality-issues/:id/assignees?page=&page_size=
 GET    /api/v1/data-quality-issues/:id/events?page=&page_size=
+POST   /api/v1/data-quality-issues/:id/assign
+POST   /api/v1/data-quality-issues/:id/start
+POST   /api/v1/data-quality-issues/:id/submit
+POST   /api/v1/data-quality-issues/:id/review
+POST   /api/v1/data-quality-issues/:id/exempt
+POST   /api/v1/data-quality-issues/:id/reopen
 GET    /api/v1/data-quality-scan-batches?page=&page_size=
 GET    /api/v1/inventory-tasks?page=&page_size=
 POST   /api/v1/inventory-tasks

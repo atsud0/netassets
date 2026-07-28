@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, onMounted, reactive, ref } from 'vue'
-import { ElMessage } from 'element-plus'
+import { ElMessage, ElMessageBox, type TableInstance } from 'element-plus'
 import { useRouter } from 'vue-router'
 import { apiClient, getAPIErrorMessage } from '../api/client'
 import { useAuthStore } from '../stores/auth'
@@ -20,6 +20,8 @@ interface QualityIssue {
 interface IssueSummary { total: number; pending: number; in_progress: number; pending_review: number; closed: number; exempted: number; error: number; warning: number }
 interface IssueEvent { id: number; event_type: string; from_status?: string; to_status: string; note?: string; actor_display_name?: string; created_at: string }
 interface ListResponse<T> { items: T[]; total: number; page: number; page_size: number }
+interface BatchOperationItem { id: string; success: boolean; code?: string; message: string; item?: QualityIssue; resource_name?: string }
+interface BatchOperationResult { total_count: number; success_count: number; failure_count: number; items: BatchOperationItem[] }
 interface ScanBatch {
   id: string; organization_name?: string; resource_type?: string; severity?: string; asset_count: number; system_count: number
   enabled_rule_count: number; total_issue_count: number; error_count: number; warning_count: number; auto_closed_count: number
@@ -32,6 +34,7 @@ const loading = ref(false)
 const batchLoading = ref(false)
 const acting = ref(false)
 const items = ref<QualityIssue[]>([])
+const issueTableRef = ref<TableInstance>()
 const issuePage = ref(1)
 const issuePageSize = ref(20)
 const issueTotal = ref(0)
@@ -53,9 +56,19 @@ const eventPage = ref(1)
 const eventPageSize = ref(20)
 const eventTotal = ref(0)
 const actionVisible = ref(false)
-const actionType = ref<'start' | 'submit' | 'approve' | 'return' | 'exempt' | 'reopen'>('start')
+const actionType = ref<'assign' | 'start' | 'submit' | 'approve' | 'return' | 'exempt' | 'reopen'>('start')
 const actionIssue = ref<QualityIssue | null>(null)
 const actionForm = reactive({ assignee_user_id: '', note: '', expires_at: null as Date | null })
+const selectedIssues = ref<QualityIssue[]>([])
+const bulkLoading = ref(false)
+const bulkActionVisible = ref(false)
+const bulkActionType = ref<'assign' | 'start' | 'submit'>('assign')
+const bulkForm = reactive({ assignee_user_id: '', note: '' })
+const bulkAssignees = ref<UserItem[]>([])
+const bulkAssigneeLoading = ref(false)
+const bulkResultVisible = ref(false)
+const bulkResult = ref<BatchOperationResult>()
+const bulkResultTitle = ref('批量整改结果')
 const filters = reactive({ organization_id: '', status: '', severity: '', resource_type: '', assignee: '' })
 
 const isGroupAdmin = computed(() => auth.isGroupAdmin)
@@ -64,12 +77,13 @@ const summaryCards = computed(() => [
   ['待集团复核', summary.pending_review, 'primary'], ['已关闭', summary.closed, 'success'], ['已豁免', summary.exempted, 'info'],
 ])
 const availableFilterUsers = computed(() => filterUsers.value.filter((item) => item.status === 'enabled'))
-const actionTitle = computed(() => ({ start: '开始整改', submit: '提交集团复核', approve: '复核通过', return: '退回整改', exempt: '问题豁免', reopen: '重新打开问题' }[actionType.value]))
+const actionTitle = computed(() => ({ assign: '调整负责人', start: '开始整改', submit: '提交集团复核', approve: '复核通过', return: '退回整改', exempt: '问题豁免', reopen: '重新打开问题' }[actionType.value]))
+const bulkActionTitle = computed(() => ({ assign: '批量指派负责人', start: '批量开始整改', submit: '批量提交集团复核' }[bulkActionType.value]))
 const actionButtonType = computed(() => actionType.value === 'return' || actionType.value === 'exempt' ? 'warning' : 'primary')
 
 const statusLabels: Record<string, string> = { pending: '待处理', in_progress: '整改中', pending_review: '待复核', closed: '已关闭', exempted: '已豁免' }
 const statusTypes: Record<string, string> = { pending: 'danger', in_progress: 'warning', pending_review: 'primary', closed: 'success', exempted: 'info' }
-const eventLabels: Record<string, string> = { detected: '巡检发现', started: '开始整改', submitted: '提交复核', approved: '复核通过', returned: '退回整改', exempted: '问题豁免', reopened: '重新打开', auto_resolved: '巡检自动关闭' }
+const eventLabels: Record<string, string> = { detected: '巡检发现', assigned: '调整负责人', started: '开始整改', submitted: '提交复核', approved: '复核通过', returned: '退回整改', exempted: '问题豁免', reopened: '重新打开', auto_resolved: '巡检自动关闭' }
 const targetLabels: Record<string, string> = {
   value: '资产值', name: '名称', network_scope: '网络范围', network_area_id: '网络区域', owner_name: '负责人', business_system_id: '关联业务系统', importance: '重要性',
   code: '系统编码', owner_contact: '负责人联系方式', system_level: '系统等级', internet_exposure: '互联网暴露情况', contains_personal_information: '是否含个人信息',
@@ -193,7 +207,7 @@ async function openAction(type: typeof actionType.value, item: QualityIssue) {
   actionForm.expires_at = null
   issueAssignees.value = []
   actionVisible.value = true
-  if (type !== 'start') return
+  if (!['assign', 'start'].includes(type)) return
 
   assigneeLoading.value = true
   try {
@@ -219,13 +233,14 @@ async function submitAction() {
     ElMessage.warning(actionType.value === 'exempt' ? '请填写豁免原因' : '请填写处理说明')
     return
   }
-  if (actionType.value === 'start' && !actionForm.assignee_user_id) {
+  if (['assign', 'start'].includes(actionType.value) && !actionForm.assignee_user_id) {
     ElMessage.warning('请选择整改负责人')
     return
   }
   acting.value = true
   try {
     const endpoint = `/data-quality-issues/${item.id}`
+    if (actionType.value === 'assign') await apiClient.post(`${endpoint}/assign`, { assignee_user_id: actionForm.assignee_user_id, note: actionForm.note })
     if (actionType.value === 'start') await apiClient.post(`${endpoint}/start`, { assignee_user_id: actionForm.assignee_user_id, note: actionForm.note })
     if (actionType.value === 'submit') await apiClient.post(`${endpoint}/submit`, { note: actionForm.note })
     if (actionType.value === 'approve') await apiClient.post(`${endpoint}/review`, { approved: true, note: actionForm.note })
@@ -244,6 +259,8 @@ async function submitAction() {
 }
 
 async function refreshIssuesAfterMutation() {
+  issueTableRef.value?.clearSelection()
+  selectedIssues.value = []
   await loadIssues()
   if (items.value.length === 0 && issueTotal.value > 0 && issuePage.value > 1) {
     issuePage.value -= 1
@@ -251,12 +268,95 @@ async function refreshIssuesAfterMutation() {
   }
 }
 
+function handleSelectionChange(rows: QualityIssue[]) {
+  selectedIssues.value = rows
+}
+
+async function openBulkAction(type: typeof bulkActionType.value) {
+  if (!selectedIssues.value.length) {
+    ElMessage.warning('请先选择要处理的数据质量问题')
+    return
+  }
+  if (selectedIssues.value.length > 200) {
+    ElMessage.warning('单次最多处理 200 个数据质量问题')
+    return
+  }
+  bulkActionType.value = type
+  bulkForm.assignee_user_id = ''
+  bulkForm.note = ''
+  bulkAssignees.value = []
+  if (type === 'assign' || type === 'start') {
+    const organizationIDs = new Set(selectedIssues.value.map((item) => item.organization_id))
+    if (organizationIDs.size !== 1) {
+      ElMessage.warning('批量指派或开始整改时，请选择同一责任组织的问题')
+      return
+    }
+    bulkAssigneeLoading.value = true
+    try {
+      const first = selectedIssues.value[0]
+      const response = await apiClient.get<ListResponse<UserItem>>(`/data-quality-issues/${first.id}/assignees`, { params: { page: 1, page_size: 100 } })
+      bulkAssignees.value = response.data.items
+      const sharedAssignee = selectedIssues.value.every((item) => item.assignee_user_id === first.assignee_user_id) ? first.assignee_user_id : ''
+      const preferred = sharedAssignee || auth.user?.id || ''
+      if (preferred && bulkAssignees.value.some((user) => user.id === preferred)) bulkForm.assignee_user_id = preferred
+      else if (bulkAssignees.value.length === 1) bulkForm.assignee_user_id = bulkAssignees.value[0].id
+    } catch (error) {
+      ElMessage.error(getAPIErrorMessage(error, '读取责任组织可选整改负责人失败'))
+      return
+    } finally {
+      bulkAssigneeLoading.value = false
+    }
+  }
+  bulkActionVisible.value = true
+}
+
+async function submitBulkAction() {
+  if ((bulkActionType.value === 'assign' || bulkActionType.value === 'start') && !bulkForm.assignee_user_id) {
+    ElMessage.warning('请选择整改负责人')
+    return
+  }
+  if (bulkActionType.value === 'submit' && !bulkForm.note.trim()) {
+    ElMessage.warning('请填写批量整改说明')
+    return
+  }
+  const targets = [...selectedIssues.value]
+  try {
+    await ElMessageBox.confirm(`确认对选中的 ${targets.length} 个数据质量问题执行“${bulkActionTitle.value}”吗？系统将逐项校验组织权限和当前状态。`, '批量操作确认', {
+      type: 'warning', confirmButtonText: '确认执行', cancelButtonText: '取消',
+    })
+    bulkLoading.value = true
+    const response = await apiClient.post<{ result: BatchOperationResult }>('/data-quality-issues/batch', {
+      ids: targets.map((item) => item.id), action: bulkActionType.value,
+      assignee_user_id: bulkForm.assignee_user_id, note: bulkForm.note,
+    })
+    const names = new Map(targets.map((item) => [item.id, item.resource_name]))
+    bulkResult.value = {
+      ...response.data.result,
+      items: response.data.result.items.map((item) => ({ ...item, resource_name: item.item?.resource_name || names.get(item.id) || item.id })),
+    }
+    bulkResultTitle.value = `${bulkActionTitle.value}结果`
+    bulkActionVisible.value = false
+    bulkResultVisible.value = true
+    if (response.data.result.failure_count === 0) ElMessage.success(`已成功处理 ${response.data.result.success_count} 个数据质量问题`)
+    else ElMessage.warning(`批量处理完成：成功 ${response.data.result.success_count} 个，失败 ${response.data.result.failure_count} 个`)
+    await refreshIssuesAfterMutation()
+  } catch (error) {
+    if (error !== 'cancel' && error !== 'close') ElMessage.error(getAPIErrorMessage(error, `${bulkActionTitle.value}失败`))
+  } finally {
+    bulkLoading.value = false
+  }
+}
+
 function searchIssues() {
+  issueTableRef.value?.clearSelection()
+  selectedIssues.value = []
   issuePage.value = 1
   void loadIssues()
 }
 
 function resetFilters() {
+  issueTableRef.value?.clearSelection()
+  selectedIssues.value = []
   Object.assign(filters, { organization_id: '', status: '', severity: '', resource_type: '', assignee: '' })
   issuePage.value = 1
   void loadIssues()
@@ -311,7 +411,12 @@ onMounted(async () => {
 
     <div class="panel quality-workflow-table-panel">
       <div class="table-panel-heading"><div><strong>质量问题清单</strong><span>当前筛选命中 {{ summary.total }} 条</span></div><el-tag type="danger">错误 {{ summary.error }}</el-tag><el-tag type="warning">警告 {{ summary.warning }}</el-tag></div>
-      <el-table v-loading="loading" :data="items" stripe max-height="560" empty-text="当前范围暂无数据质量问题">
+      <div class="batch-toolbar quality-batch-toolbar">
+        <div><strong>批量整改</strong><span>已选择 {{ selectedIssues.length }} 个问题，单次最多 200 个；指派负责人和开始整改要求属于同一责任组织</span></div>
+        <div class="button-row"><el-button :disabled="selectedIssues.length === 0" :loading="bulkLoading" @click="openBulkAction('assign')">批量指派</el-button><el-button type="primary" plain :disabled="selectedIssues.length === 0" :loading="bulkLoading" @click="openBulkAction('start')">批量开始整改</el-button><el-button type="success" plain :disabled="selectedIssues.length === 0" :loading="bulkLoading" @click="openBulkAction('submit')">批量提交复核</el-button></div>
+      </div>
+      <el-table ref="issueTableRef" v-loading="loading" :data="items" row-key="id" stripe max-height="560" empty-text="当前范围暂无数据质量问题" @selection-change="handleSelectionChange">
+        <el-table-column type="selection" width="46" :reserve-selection="true" />
         <el-table-column label="问题" min-width="230"><template #default="scope"><el-button class="table-link" link type="primary" @click="openDetail(scope.row)">{{ scope.row.rule_name }}</el-button><div class="muted-text">检查项：{{ targetLabel(scope.row.target_field, scope.row) }}</div></template></el-table-column>
         <el-table-column label="资源" min-width="190"><template #default="scope"><strong>{{ scope.row.resource_name }}</strong><div class="muted-text">{{ resourceTypeLabel(scope.row.resource_type) }}</div></template></el-table-column>
         <el-table-column label="责任组织" min-width="170"><template #default="scope"><strong>{{ scope.row.organization_name }}</strong><div class="muted-text">{{ scope.row.organization_code }}</div></template></el-table-column>
@@ -320,7 +425,8 @@ onMounted(async () => {
         <el-table-column label="负责人" min-width="110"><template #default="scope">{{ scope.row.assignee_display_name || '未指派' }}</template></el-table-column>
         <el-table-column label="最近发现" width="155"><template #default="scope">{{ formatTime(scope.row.last_detected_at) }}</template></el-table-column>
         <el-table-column label="操作" fixed="right" width="250"><template #default="scope"><div class="row-actions">
-          <el-button v-if="['pending','in_progress'].includes(scope.row.status)" link type="primary" @click="openAction('start', scope.row)">{{ scope.row.status === 'pending' ? '开始整改' : '调整负责人' }}</el-button>
+          <el-button v-if="scope.row.status === 'pending'" link type="primary" @click="openAction('start', scope.row)">开始整改</el-button>
+          <el-button v-if="scope.row.status === 'in_progress'" link type="primary" @click="openAction('assign', scope.row)">调整负责人</el-button>
           <el-button v-if="['pending','in_progress'].includes(scope.row.status)" link type="success" @click="openAction('submit', scope.row)">提交复核</el-button>
           <el-button v-if="isGroupAdmin && scope.row.status === 'pending_review'" link type="success" @click="openAction('approve', scope.row)">通过</el-button>
           <el-button v-if="isGroupAdmin && scope.row.status === 'pending_review'" link type="warning" @click="openAction('return', scope.row)">退回</el-button>
@@ -371,9 +477,35 @@ onMounted(async () => {
       </div>
     </el-drawer>
 
+    <el-dialog v-model="bulkActionVisible" :title="bulkActionTitle" width="600px" destroy-on-close>
+      <el-alert :title="`本次将处理 ${selectedIssues.length} 个问题，服务端会逐项校验并允许部分成功`" type="info" :closable="false" show-icon />
+      <el-form label-width="110px" class="quality-batch-form">
+        <el-form-item v-if="['assign','start'].includes(bulkActionType)" label="整改负责人" required>
+          <div class="assignee-field">
+            <el-select v-model="bulkForm.assignee_user_id" :loading="bulkAssigneeLoading" filterable clearable placeholder="请选择责任组织的有效任职用户" style="width:100%"><el-option v-for="user in bulkAssignees" :key="user.id" :label="`${user.display_name}（${user.username}）`" :value="user.id" /></el-select>
+            <small v-if="!bulkAssigneeLoading && bulkAssignees.length === 0">该责任组织暂无可用用户，请先由有权限的管理员补充用户任职。</small>
+          </div>
+        </el-form-item>
+        <el-form-item label="处理说明" :required="bulkActionType === 'submit'"><el-input v-model="bulkForm.note" type="textarea" :rows="4" maxlength="5000" show-word-limit :placeholder="bulkActionType === 'submit' ? '请填写本批问题的整改说明' : '可选，记录本次批量操作说明'" /></el-form-item>
+      </el-form>
+      <template #footer><el-button @click="bulkActionVisible=false">取消</el-button><el-button type="primary" :loading="bulkLoading" @click="submitBulkAction">确认执行</el-button></template>
+    </el-dialog>
+
+    <el-dialog v-model="bulkResultVisible" :title="bulkResultTitle" width="760px">
+      <template v-if="bulkResult">
+        <el-alert :title="`共处理 ${bulkResult.total_count} 个，成功 ${bulkResult.success_count} 个，失败 ${bulkResult.failure_count} 个`" :type="bulkResult.failure_count ? 'warning' : 'success'" :closable="false" show-icon />
+        <el-table :data="bulkResult.items" max-height="420" class="batch-result-table">
+          <el-table-column prop="resource_name" label="问题资源" min-width="220" />
+          <el-table-column label="结果" width="90"><template #default="scope"><el-tag :type="scope.row.success ? 'success' : 'danger'">{{ scope.row.success ? '成功' : '失败' }}</el-tag></template></el-table-column>
+          <el-table-column prop="message" label="说明" min-width="260" />
+        </el-table>
+      </template>
+      <template #footer><el-button type="primary" @click="bulkResultVisible=false">关闭</el-button></template>
+    </el-dialog>
+
     <el-dialog v-model="actionVisible" :title="actionTitle" width="560px" destroy-on-close>
       <el-form label-width="100px">
-        <el-form-item v-if="actionType === 'start'" label="整改负责人" required>
+        <el-form-item v-if="['assign','start'].includes(actionType)" label="整改负责人" required>
           <div class="assignee-field">
             <el-select v-model="actionForm.assignee_user_id" :loading="assigneeLoading" filterable clearable placeholder="请选择该责任组织的有效任职用户" style="width:100%"><el-option v-for="user in issueAssignees" :key="user.id" :label="`${user.display_name}（${user.username}）`" :value="user.id" /></el-select>
             <small v-if="!assigneeLoading && issueAssignees.length === 0">该责任组织暂无可用用户，请先由有权限的管理员补充用户任职。</small>
@@ -395,6 +527,7 @@ onMounted(async () => {
 .quality-workflow-card.tone-danger { border-left-color:#f56c6c; }.quality-workflow-card.tone-warning { border-left-color:#e6a23c; }.quality-workflow-card.tone-success { border-left-color:#67c23a; }.quality-workflow-card.tone-info { border-left-color:#909399; }.quality-workflow-card.tone-total { border-left-color:var(--cyan); }
 .quality-workflow-filters { display:grid; grid-template-columns:repeat(5,minmax(150px,1fr)) auto; gap:12px; align-items:center; }
 .quality-workflow-filter-actions { display:flex; gap:8px; }.table-pagination { display:flex; justify-content:flex-end; margin-top:18px; }.quality-workflow-table-panel { padding-top:14px; }.row-actions { display:flex; flex-wrap:wrap; gap:2px 8px; }
+.quality-batch-toolbar { margin:14px 0; }.quality-batch-form { margin-top:18px; }
 .quality-note { margin:14px 0; padding:14px 16px; background:#f8fafc; border-radius:9px; }.quality-note span { color:var(--muted); font-size:12px; }.quality-note p { margin:7px 0; white-space:pre-wrap; line-height:1.65; }.quality-note small { color:var(--muted); }
 .assignee-field { width:100%; }.assignee-field small { display:block; margin-top:7px; color:#e6a23c; line-height:1.5; }
 .quality-event-list { min-height:120px; max-height:420px; overflow:auto; padding:4px 10px 0 2px; }
