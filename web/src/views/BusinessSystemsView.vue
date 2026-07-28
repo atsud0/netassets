@@ -493,7 +493,7 @@ onMounted(load)
   <section>
     <div class="page-heading">
       <div><span class="eyebrow">BUSINESS SYSTEMS</span><h1>业务系统</h1><p>登记子公司的业务系统、负责人、系统等级以及个人信息和重要数据属性。</p></div>
-      <div class="button-row"><el-dropdown><el-button :loading="exporting">导出台账</el-button><template #dropdown><el-dropdown-menu><el-dropdown-item @click="exportLedger('xlsx')">导出 XLSX</el-dropdown-item><el-dropdown-item @click="exportLedger('csv')">导出 CSV</el-dropdown-item></el-dropdown-menu></template></el-dropdown><el-button @click="openImportHistory">导入记录</el-button><el-button @click="openImportDialog">批量导入</el-button><el-button type="primary" :disabled="eligibleOrganizations.length === 0" @click="openCreateDialog">新增业务系统</el-button></div>
+      <div class="button-row ledger-page-actions business-system-page-actions"><el-dropdown><el-button :loading="exporting">导出台账</el-button><template #dropdown><el-dropdown-menu><el-dropdown-item @click="exportLedger('xlsx')">导出 XLSX</el-dropdown-item><el-dropdown-item @click="exportLedger('csv')">导出 CSV</el-dropdown-item></el-dropdown-menu></template></el-dropdown><el-button @click="openImportHistory">导入记录</el-button><el-button @click="openImportDialog">批量导入</el-button><el-button type="primary" :disabled="eligibleOrganizations.length === 0" @click="openCreateDialog">新增业务系统</el-button></div>
     </div>
     <div class="organization-summary">
       <div><span>符合条件系统</span><strong>{{ total }}</strong></div>

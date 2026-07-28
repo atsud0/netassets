@@ -594,7 +594,7 @@ onMounted(() => load(true))
         <h1>网络资产</h1>
         <p>集团统一维护域名、IP、URL 和网络服务，子公司仅管理授权组织范围内的数据。</p>
       </div>
-      <div class="button-row asset-page-actions">
+      <div class="button-row ledger-page-actions asset-page-actions">
         <el-dropdown>
           <el-button :loading="exporting">导出台账</el-button>
           <template #dropdown><el-dropdown-menu><el-dropdown-item @click="exportLedger('xlsx')">导出 XLSX</el-dropdown-item><el-dropdown-item @click="exportLedger('csv')">导出 CSV</el-dropdown-item></el-dropdown-menu></template>
