@@ -184,5 +184,6 @@ onMounted(load)
 </template>
 
 <style scoped>
+.recycle-bin-notice { margin-bottom: 16px; }
 .table-pagination { display: flex; justify-content: flex-end; margin-top: 18px; }
 </style>

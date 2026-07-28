@@ -444,9 +444,9 @@ onMounted(load)
       <div><span class="eyebrow">DATA GOVERNANCE</span><h1>数据治理</h1><p>集团统一定义补充字段和质量规则，并可主动检查当前网络资产与业务系统台账。</p></div>
       <div class="button-row"><el-button v-if="activeTab === 'quality'" type="primary" @click="openRuleCreate">新增质量规则</el-button><el-button v-else type="primary" @click="openCreate">新增自定义字段</el-button></div>
     </div>
-    <div class="panel filter-panel"><el-tabs v-model="activeTab" @tab-change="onTabChange"><el-tab-pane label="网络资产字段" name="asset" /><el-tab-pane label="业务系统字段" name="business_system" /><el-tab-pane label="数据质量规则" name="quality" /></el-tabs></div>
+    <div class="panel governance-filter-panel"><el-tabs v-model="activeTab" @tab-change="onTabChange"><el-tab-pane label="网络资产字段" name="asset" /><el-tab-pane label="业务系统字段" name="business_system" /><el-tab-pane label="数据质量规则" name="quality" /></el-tabs></div>
 
-    <div v-if="activeTab !== 'quality'" class="data-table-panel">
+    <div v-if="activeTab !== 'quality'" class="panel data-table-panel">
       <el-table v-loading="loading" :data="items" stripe max-height="620" empty-text="暂未配置自定义字段">
         <el-table-column prop="field_name" label="字段名称" min-width="180"><template #default="{ row }"><strong>{{ row.field_name }}</strong><div class="table-subtext">{{ row.field_key }}</div></template></el-table-column>
         <el-table-column label="字段类型" width="130"><template #default="{ row }">{{ types.find((item) => item[0] === row.field_type)?.[1] || row.field_type }}</template></el-table-column>
@@ -489,7 +489,7 @@ onMounted(load)
         </template>
       </div>
 
-      <div class="data-table-panel quality-rule-panel">
+      <div class="panel data-table-panel quality-rule-panel">
         <div class="quality-section-heading compact"><div><h2>规则配置</h2><p>集团可配置字段必填和长期未更新规则；错误用于重点整改，警告用于一般提醒。</p></div></div>
         <el-table v-loading="ruleLoading" :data="ruleItems" stripe max-height="620" empty-text="暂未配置数据质量规则">
           <el-table-column prop="rule_name" label="规则名称" min-width="200"><template #default="{ row }"><strong>{{ row.rule_name }}</strong><div class="table-subtext">{{ row.description || qualityTargetLabel(row) }}</div></template></el-table-column>
@@ -558,7 +558,8 @@ onMounted(load)
 </template>
 
 <style scoped>
-.quality-scan-panel { margin-bottom: 18px; }
+.governance-filter-panel { margin-bottom: 16px; }
+.quality-scan-panel { margin-bottom: 16px; }
 .quality-rule-panel { padding-top: 18px; }
 .table-pagination { display:flex; justify-content:flex-end; margin-top:18px; }
 .quality-section-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 20px; margin-bottom: 18px; }
