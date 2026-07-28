@@ -93,6 +93,21 @@ test('治理页面内容卡片与台账页面保持相同圆角和间距', async
   await login(page, adminUsername, adminPassword!)
   await expect(page.getByRole('heading', { name: '网络资产', exact: true })).toBeVisible()
 
+  const assetActionGaps = await page.locator('.asset-page-actions').evaluate((element) => {
+    const children = Array.from(element.children) as HTMLElement[]
+    return children.slice(1).map((child, index) => {
+      const previous = children[index].getBoundingClientRect()
+      return child.getBoundingClientRect().left - previous.right
+    })
+  })
+  expect(assetActionGaps).toEqual([10, 10, 10, 10])
+  await expect(page.locator('.asset-page-actions .el-dropdown')).toHaveCount(1)
+  await page.getByRole('button', { name: '批量导入', exact: true }).click()
+  const assetImportDialog = page.getByRole('dialog', { name: '批量导入网络资产' })
+  await expect(assetImportDialog).toBeVisible()
+  await expect(assetImportDialog.getByRole('button', { name: '下载 XLSX 模板', exact: true })).toBeVisible()
+  await assetImportDialog.getByRole('button', { name: '关闭', exact: true }).click()
+
   const measureCards = async (upperSelector: string, lowerSelector: string) => page.evaluate(
     ({ upperSelector, lowerSelector }) => {
       const upper = document.querySelector<HTMLElement>(upperSelector)

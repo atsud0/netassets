@@ -594,22 +594,14 @@ onMounted(() => load(true))
         <h1>网络资产</h1>
         <p>集团统一维护域名、IP、URL 和网络服务，子公司仅管理授权组织范围内的数据。</p>
       </div>
-      <div class="button-row">
+      <div class="button-row asset-page-actions">
         <el-dropdown>
           <el-button :loading="exporting">导出台账</el-button>
           <template #dropdown><el-dropdown-menu><el-dropdown-item @click="exportLedger('xlsx')">导出 XLSX</el-dropdown-item><el-dropdown-item @click="exportLedger('csv')">导出 CSV</el-dropdown-item></el-dropdown-menu></template>
         </el-dropdown>
         <el-button v-if="auth.isGroupAdmin" @click="openAreaManagement">网络区域配置</el-button>
         <el-button @click="openImportHistory">导入记录</el-button>
-        <el-dropdown split-button :loading="downloading" @click="openImportDialog">
-          批量导入
-          <template #dropdown>
-            <el-dropdown-menu>
-              <el-dropdown-item @click="downloadTemplate('xlsx')">下载 XLSX 模板</el-dropdown-item>
-              <el-dropdown-item @click="downloadTemplate('csv')">下载 CSV 模板</el-dropdown-item>
-            </el-dropdown-menu>
-          </template>
-        </el-dropdown>
+        <el-button @click="openImportDialog">批量导入</el-button>
         <el-button type="primary" @click="openCreateDialog">新增资产</el-button>
       </div>
     </div>
