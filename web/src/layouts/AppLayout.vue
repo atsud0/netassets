@@ -20,8 +20,6 @@ const activeOrganizationID = computed({ get: () => auth.user?.organization?.id ?
 const availableOrganizations = computed(() => auth.user?.organizations ?? [])
 const switchingOrganization = ref(false)
 const perspective = computed(() => auth.isGroupAdmin ? '集团管理视角' : auth.isSecurityOperator ? '集团安全运营视角' : '所属组织视角')
-const roleLabel = computed(() => auth.isGroupAdmin ? '集团管理员' : auth.isSecurityOperator ? '集团安全运营' : '组织用户')
-const avatarText = computed(() => (auth.user?.display_name || auth.user?.username || '用').slice(0, 1))
 type NavigationItem = { path: string; label: string }
 type NavigationGroup = { key: string; label: string; shortLabel: string; items: NavigationItem[] }
 
@@ -181,27 +179,24 @@ async function logout() {
 
     <div class="main-shell">
       <header class="topbar">
-        <div>
-          <strong>{{ organizationName }}</strong>
-          <span class="topbar-subtitle">{{ perspective }}</span>
+        <div class="topbar-context">
+          <div class="topbar-organization">
+            <strong>{{ organizationName }}</strong>
+            <span class="topbar-subtitle">{{ perspective }}</span>
+          </div>
+          <el-select v-if="availableOrganizations.length > 1" v-model="activeOrganizationID" size="small" :loading="switchingOrganization" class="work-organization-switcher" aria-label="当前工作组织">
+            <el-option v-for="organization in availableOrganizations" :key="organization.id" :value="organization.id" :label="`${organization.name}（${organization.code}）`" />
+          </el-select>
         </div>
         <div class="topbar-actions">
-          <el-button class="notification-topbar-button" text aria-label="消息中心" @click="navigate('/notifications')">
+          <el-button class="topbar-action-button notification-topbar-button" text aria-label="消息中心" @click="navigate('/notifications')">
             <el-badge class="notification-topbar-badge" :value="unreadNotificationCount" :max="99" :hidden="unreadNotificationCount === 0">
               <el-icon class="notification-topbar-icon"><Bell /></el-icon>
             </el-badge>
             <span class="notification-topbar-label">消息中心</span>
           </el-button>
-          <el-select v-if="availableOrganizations.length > 1" v-model="activeOrganizationID" size="small" :loading="switchingOrganization" class="work-organization-switcher" aria-label="当前工作组织">
-            <el-option v-for="organization in availableOrganizations" :key="organization.id" :value="organization.id" :label="`${organization.name}（${organization.code}）`" />
-          </el-select>
-          <span class="status-pill">{{ roleLabel }}</span>
-          <div class="user-summary">
-            <span class="avatar">{{ avatarText }}</span>
-            <span>{{ auth.user?.display_name }}</span>
-          </div>
-          <el-button text @click="navigate('/profile')">账户设置</el-button>
-          <el-button text :loading="loggingOut" @click="logout">退出</el-button>
+          <el-button class="topbar-action-button user-name-topbar-button" text @click="navigate('/profile')">{{ auth.user?.display_name || auth.user?.username }}</el-button>
+          <el-button class="topbar-action-button logout-topbar-button" text :loading="loggingOut" @click="logout">退出</el-button>
         </div>
       </header>
       <main class="page-content">

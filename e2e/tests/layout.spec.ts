@@ -79,16 +79,33 @@ test('左侧导航按业务分组，消息中心仅保留在顶栏', async ({ pa
   await expect(navigation.getByText('消息中心', { exact: true })).toHaveCount(0)
   await expect(page.locator('.topbar').getByText('消息中心', { exact: true })).toBeVisible()
 
+  const topbarActions = page.locator('.topbar-actions')
+  const topbarActionButtons = topbarActions.locator(':scope > .el-button')
   const notificationButton = page.getByRole('button', { name: '消息中心', exact: true })
+  const userNameButton = topbarActions.locator('.user-name-topbar-button')
+  await expect(topbarActionButtons).toHaveCount(3)
   await expect(notificationButton).toBeVisible()
+  await expect(userNameButton).toHaveText(/\S+/)
+  await expect(topbarActionButtons.nth(2)).toHaveText('退出')
+  await expect(topbarActions.getByRole('button', { name: '账户设置', exact: true })).toHaveCount(0)
+
+  const measureTopbarActionGaps = () => topbarActions.evaluate((element) => {
+    const buttons = Array.from(element.children) as HTMLElement[]
+    return buttons.slice(1).map((button, index) => button.getBoundingClientRect().left - buttons[index].getBoundingClientRect().right)
+  })
+  expect(await measureTopbarActionGaps()).toEqual([10, 10])
+
   await page.setViewportSize({ width: 700, height: 900 })
   await expect(notificationButton).toBeVisible()
+  expect(await measureTopbarActionGaps()).toEqual([10, 10])
   const notificationButtonBox = await notificationButton.boundingBox()
   expect(notificationButtonBox).not.toBeNull()
   expect(notificationButtonBox!.x).toBeGreaterThanOrEqual(0)
   expect(notificationButtonBox!.x + notificationButtonBox!.width).toBeLessThanOrEqual(700)
   await notificationButton.click()
   await expect(page.getByRole('heading', { name: '消息中心', exact: true })).toBeVisible()
+  await userNameButton.click()
+  await expect(page.getByRole('heading', { name: '账户设置', exact: true })).toBeVisible()
 
   const systemSettings = navigation.getByRole('button', { name: '系统设置', exact: true })
   await systemSettings.click()
