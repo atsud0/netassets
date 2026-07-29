@@ -22,20 +22,21 @@ type ScanFilter struct {
 }
 
 type ScanIssue struct {
-	IssueID          string `json:"issue_id,omitempty"`
-	Status           string `json:"status,omitempty"`
-	RuleID           string `json:"rule_id"`
-	RuleName         string `json:"rule_name"`
-	RuleType         string `json:"rule_type"`
-	Severity         string `json:"severity"`
-	StaleAfterDays   int    `json:"stale_after_days,omitempty"`
-	ResourceType     string `json:"resource_type"`
-	ResourceID       string `json:"resource_id"`
-	ResourceName     string `json:"resource_name"`
-	OrganizationID   string `json:"organization_id"`
-	OrganizationCode string `json:"organization_code"`
-	OrganizationName string `json:"organization_name"`
-	TargetField      string `json:"target_field"`
+	IssueID           string `json:"issue_id,omitempty"`
+	Status            string `json:"status,omitempty"`
+	RuleID            string `json:"rule_id"`
+	RuleName          string `json:"rule_name"`
+	RuleType          string `json:"rule_type"`
+	Severity          string `json:"severity"`
+	StaleAfterDays    int    `json:"stale_after_days,omitempty"`
+	ExpiryWarningDays int    `json:"expiry_warning_days,omitempty"`
+	ResourceType      string `json:"resource_type"`
+	ResourceID        string `json:"resource_id"`
+	ResourceName      string `json:"resource_name"`
+	OrganizationID    string `json:"organization_id"`
+	OrganizationCode  string `json:"organization_code"`
+	OrganizationName  string `json:"organization_name"`
+	TargetField       string `json:"target_field"`
 }
 
 type ScanSummary struct {
@@ -160,7 +161,7 @@ func (s *Service) Scan(ctx context.Context, p auth.Principal, filter ScanFilter,
 				status='closed',resolution_type='auto_resolved',closed_at=now(),reviewed_at=now(),reviewed_by=$5::uuid,
 				review_note='重新巡检后未再命中该规则，系统自动关闭',updated_by=$5::uuid,updated_at=now()
 			FROM data_quality_rules r
-			WHERE i.rule_id=r.id AND r.is_enabled AND r.rule_type IN ('required','stale')
+			WHERE i.rule_id=r.id AND r.is_enabled AND r.rule_type IN ('required','stale','expiry')
 			  AND i.last_detected_batch_id<>$1::uuid
 			  AND i.status IN ('pending','in_progress','pending_review')
 			  AND (NULLIF($2::text,'') IS NULL OR i.organization_id=$2::uuid)
@@ -182,7 +183,7 @@ func (s *Service) Scan(ctx context.Context, p auth.Principal, filter ScanFilter,
 	}
 
 	rows, err := tx.Query(ctx, `
-		SELECT i.id::text,i.status,i.rule_id::text,i.rule_name,r.rule_type,i.severity,COALESCE(r.stale_after_days,0),i.resource_type,i.resource_id::text,
+		SELECT i.id::text,i.status,i.rule_id::text,i.rule_name,r.rule_type,i.severity,COALESCE(r.stale_after_days,0),COALESCE(r.expiry_warning_days,0),i.resource_type,i.resource_id::text,
 		       i.resource_name,i.organization_id::text,i.organization_code,i.organization_name,i.target_field
 		FROM data_quality_scan_batch_issues bi
 		JOIN data_quality_issues i ON i.id=bi.issue_id
@@ -196,7 +197,7 @@ func (s *Service) Scan(ctx context.Context, p auth.Principal, filter ScanFilter,
 	}
 	for rows.Next() {
 		var item ScanIssue
-		if err := rows.Scan(&item.IssueID, &item.Status, &item.RuleID, &item.RuleName, &item.RuleType, &item.Severity, &item.StaleAfterDays, &item.ResourceType, &item.ResourceID, &item.ResourceName, &item.OrganizationID, &item.OrganizationCode, &item.OrganizationName, &item.TargetField); err != nil {
+		if err := rows.Scan(&item.IssueID, &item.Status, &item.RuleID, &item.RuleName, &item.RuleType, &item.Severity, &item.StaleAfterDays, &item.ExpiryWarningDays, &item.ResourceType, &item.ResourceID, &item.ResourceName, &item.OrganizationID, &item.OrganizationCode, &item.OrganizationName, &item.TargetField); err != nil {
 			rows.Close()
 			return ScanResult{}, err
 		}
@@ -226,7 +227,7 @@ func (s *Service) scanRules(ctx context.Context, filter ScanFilter) ([]Rule, err
 func scanRulesWith(ctx context.Context, q interface {
 	Query(context.Context, string, ...any) (pgx.Rows, error)
 }, filter ScanFilter) ([]Rule, error) {
-	rows, err := q.Query(ctx, `SELECT `+fields+` FROM data_quality_rules WHERE is_enabled AND rule_type IN ('required','stale') AND (NULLIF($1::text,'') IS NULL OR resource_type=$1) AND (NULLIF($2::text,'') IS NULL OR severity=$2) ORDER BY resource_type,sort_order,created_at`, filter.ResourceType, filter.Severity)
+	rows, err := q.Query(ctx, `SELECT `+fields+` FROM data_quality_rules WHERE is_enabled AND rule_type IN ('required','stale','expiry') AND (NULLIF($1::text,'') IS NULL OR resource_type=$1) AND (NULLIF($2::text,'') IS NULL OR severity=$2) ORDER BY resource_type,sort_order,created_at`, filter.ResourceType, filter.Severity)
 	if err != nil {
 		return nil, fmt.Errorf("load scan rules: %w", err)
 	}
@@ -260,7 +261,7 @@ func listRuleIssues(ctx context.Context, q interface {
 	defer rows.Close()
 	items := []ScanIssue{}
 	for rows.Next() {
-		item := ScanIssue{RuleID: rule.ID, RuleName: rule.RuleName, RuleType: rule.RuleType, Severity: rule.Severity, StaleAfterDays: rule.StaleAfterDays, ResourceType: rule.ResourceType, TargetField: rule.TargetField}
+		item := ScanIssue{RuleID: rule.ID, RuleName: rule.RuleName, RuleType: rule.RuleType, Severity: rule.Severity, StaleAfterDays: rule.StaleAfterDays, ExpiryWarningDays: rule.ExpiryWarningDays, ResourceType: rule.ResourceType, TargetField: rule.TargetField}
 		if err := rows.Scan(&item.ResourceID, &item.ResourceName, &item.OrganizationID, &item.OrganizationCode, &item.OrganizationName); err != nil {
 			return nil, err
 		}
@@ -297,6 +298,12 @@ func scanQueryParts(rule Rule, organizationID string) (string, string, []any, er
 			}
 			args = append(args, rule.StaleAfterDays)
 			issueCondition = fmt.Sprintf(`a.updated_at < now() - ($%d::integer * interval '1 day')`, len(args))
+		} else if rule.RuleType == "expiry" {
+			if rule.TargetField != "expires_at" || rule.ExpiryWarningDays < 0 || rule.ExpiryWarningDays > 3650 {
+				return "", "", nil, ErrInvalid
+			}
+			args = append(args, rule.ExpiryWarningDays)
+			issueCondition = fmt.Sprintf(`a.status<>'archived' AND a.expires_at IS NOT NULL AND a.expires_at <= now() + ($%d::integer * interval '1 day')`, len(args))
 		} else {
 			if rule.RuleType != "required" {
 				return "", "", nil, ErrInvalid

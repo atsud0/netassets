@@ -39,32 +39,34 @@ type RuleCondition struct {
 }
 
 type Rule struct {
-	ID             string          `json:"id"`
-	RuleName       string          `json:"rule_name"`
-	Description    string          `json:"description,omitempty"`
-	ResourceType   string          `json:"resource_type"`
-	RuleType       string          `json:"rule_type"`
-	TargetField    string          `json:"target_field"`
-	Severity       string          `json:"severity"`
-	StaleAfterDays int             `json:"stale_after_days,omitempty"`
-	Conditions     []RuleCondition `json:"conditions"`
-	IsEnabled      bool            `json:"is_enabled"`
-	SortOrder      int             `json:"sort_order"`
-	CreatedAt      time.Time       `json:"created_at"`
-	UpdatedAt      time.Time       `json:"updated_at"`
+	ID                string          `json:"id"`
+	RuleName          string          `json:"rule_name"`
+	Description       string          `json:"description,omitempty"`
+	ResourceType      string          `json:"resource_type"`
+	RuleType          string          `json:"rule_type"`
+	TargetField       string          `json:"target_field"`
+	Severity          string          `json:"severity"`
+	StaleAfterDays    int             `json:"stale_after_days,omitempty"`
+	ExpiryWarningDays int             `json:"expiry_warning_days,omitempty"`
+	Conditions        []RuleCondition `json:"conditions"`
+	IsEnabled         bool            `json:"is_enabled"`
+	SortOrder         int             `json:"sort_order"`
+	CreatedAt         time.Time       `json:"created_at"`
+	UpdatedAt         time.Time       `json:"updated_at"`
 }
 
 type Input struct {
-	RuleName       string          `json:"rule_name"`
-	Description    string          `json:"description"`
-	ResourceType   string          `json:"resource_type"`
-	RuleType       string          `json:"rule_type"`
-	TargetField    string          `json:"target_field"`
-	Severity       string          `json:"severity"`
-	StaleAfterDays int             `json:"stale_after_days"`
-	Conditions     []RuleCondition `json:"conditions"`
-	IsEnabled      bool            `json:"is_enabled"`
-	SortOrder      int             `json:"sort_order"`
+	RuleName          string          `json:"rule_name"`
+	Description       string          `json:"description"`
+	ResourceType      string          `json:"resource_type"`
+	RuleType          string          `json:"rule_type"`
+	TargetField       string          `json:"target_field"`
+	Severity          string          `json:"severity"`
+	StaleAfterDays    int             `json:"stale_after_days"`
+	ExpiryWarningDays int             `json:"expiry_warning_days"`
+	Conditions        []RuleCondition `json:"conditions"`
+	IsEnabled         bool            `json:"is_enabled"`
+	SortOrder         int             `json:"sort_order"`
 }
 
 type conditionFieldSpec struct {
@@ -302,15 +304,19 @@ func (s *Service) validateConditions(ctx context.Context, resourceType string, c
 }
 
 func (s *Service) valid(ctx context.Context, in Input) error {
-	if in.RuleName == "" || len(in.RuleName) > 128 || (in.ResourceType != "asset" && in.ResourceType != "business_system") || (in.RuleType != "required" && in.RuleType != "stale") || (in.Severity != "error" && in.Severity != "warning") || in.SortOrder < 0 || in.SortOrder > 100000 {
+	if in.RuleName == "" || len(in.RuleName) > 128 || (in.ResourceType != "asset" && in.ResourceType != "business_system") || (in.RuleType != "required" && in.RuleType != "stale" && in.RuleType != "expiry") || (in.Severity != "error" && in.Severity != "warning") || in.SortOrder < 0 || in.SortOrder > 100000 {
 		return ErrInvalid
 	}
 	if in.RuleType == "stale" {
-		if in.TargetField != "updated_at" || in.StaleAfterDays < 1 || in.StaleAfterDays > 3650 {
+		if in.TargetField != "updated_at" || in.StaleAfterDays < 1 || in.StaleAfterDays > 3650 || in.ExpiryWarningDays != 0 {
+			return ErrInvalid
+		}
+	} else if in.RuleType == "expiry" {
+		if in.ResourceType != "asset" || in.TargetField != "expires_at" || in.StaleAfterDays != 0 || in.ExpiryWarningDays < 0 || in.ExpiryWarningDays > 3650 {
 			return ErrInvalid
 		}
 	} else {
-		if in.StaleAfterDays != 0 {
+		if in.StaleAfterDays != 0 || in.ExpiryWarningDays != 0 {
 			return ErrInvalid
 		}
 		if !builtinTarget(in.ResourceType, in.TargetField) {
@@ -333,7 +339,7 @@ func (s *Service) valid(ctx context.Context, in Input) error {
 func scanRule(row pgx.Row) (Rule, error) {
 	var item Rule
 	var rawConditions []byte
-	err := row.Scan(&item.ID, &item.RuleName, &item.Description, &item.ResourceType, &item.RuleType, &item.TargetField, &item.Severity, &item.StaleAfterDays, &rawConditions, &item.IsEnabled, &item.SortOrder, &item.CreatedAt, &item.UpdatedAt)
+	err := row.Scan(&item.ID, &item.RuleName, &item.Description, &item.ResourceType, &item.RuleType, &item.TargetField, &item.Severity, &item.StaleAfterDays, &item.ExpiryWarningDays, &rawConditions, &item.IsEnabled, &item.SortOrder, &item.CreatedAt, &item.UpdatedAt)
 	if err != nil {
 		return item, err
 	}
@@ -346,7 +352,7 @@ func scanRule(row pgx.Row) (Rule, error) {
 	return item, nil
 }
 
-const fields = `id::text,rule_name,COALESCE(description,''),resource_type,rule_type,target_field,severity,COALESCE(stale_after_days,0),conditions,is_enabled,sort_order,created_at,updated_at`
+const fields = `id::text,rule_name,COALESCE(description,''),resource_type,rule_type,target_field,severity,COALESCE(stale_after_days,0),COALESCE(expiry_warning_days,0),conditions,is_enabled,sort_order,created_at,updated_at`
 
 func (s *Service) List(ctx context.Context, p auth.Principal) ([]Rule, error) {
 	result, err := s.Search(ctx, p, pagination.Query{Page: 1, PageSize: pagination.MaxPageSize})
@@ -367,7 +373,7 @@ func (s *Service) Search(ctx context.Context, p auth.Principal, page pagination.
 	for rows.Next() {
 		var item Rule
 		var rawConditions []byte
-		if err := rows.Scan(&item.ID, &item.RuleName, &item.Description, &item.ResourceType, &item.RuleType, &item.TargetField, &item.Severity, &item.StaleAfterDays, &rawConditions, &item.IsEnabled, &item.SortOrder, &item.CreatedAt, &item.UpdatedAt, &total); err != nil {
+		if err := rows.Scan(&item.ID, &item.RuleName, &item.Description, &item.ResourceType, &item.RuleType, &item.TargetField, &item.Severity, &item.StaleAfterDays, &item.ExpiryWarningDays, &rawConditions, &item.IsEnabled, &item.SortOrder, &item.CreatedAt, &item.UpdatedAt, &total); err != nil {
 			return pagination.Result[Rule]{}, err
 		}
 		if err := json.Unmarshal(rawConditions, &item.Conditions); err != nil {
@@ -398,7 +404,7 @@ func (s *Service) Create(ctx context.Context, p auth.Principal, in Input, rid, i
 		return Rule{}, err
 	}
 	rawConditions, _ := json.Marshal(in.Conditions)
-	item, err := scanRule(s.pool.QueryRow(ctx, `INSERT INTO data_quality_rules(rule_name,description,resource_type,rule_type,target_field,severity,stale_after_days,conditions,is_enabled,sort_order,created_by) VALUES($1,NULLIF($2,''),$3,$4,$5,$6,NULLIF($7,0),$8::jsonb,$9,$10,$11::uuid) RETURNING `+fields, in.RuleName, in.Description, in.ResourceType, in.RuleType, in.TargetField, in.Severity, in.StaleAfterDays, rawConditions, in.IsEnabled, in.SortOrder, p.UserID))
+	item, err := scanRule(s.pool.QueryRow(ctx, `INSERT INTO data_quality_rules(rule_name,description,resource_type,rule_type,target_field,severity,stale_after_days,expiry_warning_days,conditions,is_enabled,sort_order,created_by) VALUES($1,NULLIF($2,''),$3,$4::varchar,$5,$6,NULLIF($7,0),CASE WHEN $4::varchar='expiry' THEN $8::integer ELSE NULL::integer END,$9::jsonb,$10,$11,$12::uuid) RETURNING `+fields, in.RuleName, in.Description, in.ResourceType, in.RuleType, in.TargetField, in.Severity, in.StaleAfterDays, in.ExpiryWarningDays, rawConditions, in.IsEnabled, in.SortOrder, p.UserID))
 	if err != nil {
 		if strings.Contains(err.Error(), "duplicate key") {
 			return Rule{}, ErrConflict
@@ -418,7 +424,7 @@ func (s *Service) Update(ctx context.Context, p auth.Principal, id string, in In
 		return Rule{}, err
 	}
 	rawConditions, _ := json.Marshal(in.Conditions)
-	item, err := scanRule(s.pool.QueryRow(ctx, `UPDATE data_quality_rules SET rule_name=$2,description=NULLIF($3,''),resource_type=$4,rule_type=$5,target_field=$6,severity=$7,stale_after_days=NULLIF($8,0),conditions=$9::jsonb,is_enabled=$10,sort_order=$11,updated_at=now() WHERE id=$1::uuid RETURNING `+fields, id, in.RuleName, in.Description, in.ResourceType, in.RuleType, in.TargetField, in.Severity, in.StaleAfterDays, rawConditions, in.IsEnabled, in.SortOrder))
+	item, err := scanRule(s.pool.QueryRow(ctx, `UPDATE data_quality_rules SET rule_name=$2,description=NULLIF($3,''),resource_type=$4,rule_type=$5::varchar,target_field=$6,severity=$7,stale_after_days=NULLIF($8,0),expiry_warning_days=CASE WHEN $5::varchar='expiry' THEN $9::integer ELSE NULL::integer END,conditions=$10::jsonb,is_enabled=$11,sort_order=$12,updated_at=now() WHERE id=$1::uuid RETURNING `+fields, id, in.RuleName, in.Description, in.ResourceType, in.RuleType, in.TargetField, in.Severity, in.StaleAfterDays, in.ExpiryWarningDays, rawConditions, in.IsEnabled, in.SortOrder))
 	if errors.Is(err, pgx.ErrNoRows) {
 		return Rule{}, ErrNotFound
 	}

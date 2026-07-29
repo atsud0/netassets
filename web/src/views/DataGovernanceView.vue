@@ -17,16 +17,17 @@ interface Field {
 }
 type ConditionOperator = 'eq' | 'ne' | 'in' | 'not_in' | 'empty' | 'not_empty' | 'is_true' | 'is_false'
 interface RuleCondition { field: string; operator: ConditionOperator; values: string[] }
-interface QualityRule { id: string; rule_name: string; description?: string; resource_type: string; rule_type: 'required' | 'stale'; target_field: string; severity: string; stale_after_days?: number; conditions: RuleCondition[]; is_enabled: boolean; sort_order: number }
+interface QualityRule { id: string; rule_name: string; description?: string; resource_type: string; rule_type: 'required' | 'stale' | 'expiry'; target_field: string; severity: string; stale_after_days?: number; expiry_warning_days?: number; conditions: RuleCondition[]; is_enabled: boolean; sort_order: number }
 interface ConditionFieldOption { value: string; label: string; kind: 'enum' | 'text' | 'uuid' | 'presence' | 'boolean' | 'multiselect'; options?: Array<[string, string]> }
 interface Organization { id: string; code: string; name: string; status: string }
 interface NetworkArea { id: string; organization_code: string; organization_name: string; name: string; code?: string; status: string }
 interface ScanIssue {
   rule_id: string
   rule_name: string
-  rule_type: 'required' | 'stale'
+  rule_type: 'required' | 'stale' | 'expiry'
   severity: 'error' | 'warning'
   stale_after_days?: number
+  expiry_warning_days?: number
   resource_type: 'asset' | 'business_system'
   resource_id: string
   resource_name: string
@@ -48,7 +49,7 @@ interface ScanSummary {
 interface ScanResult { summary: ScanSummary; issues: ScanIssue[] }
 interface ListResponse<T> { items: T[]; total: number; page: number; page_size: number }
 
-type QualityTarget = Pick<ScanIssue, 'resource_type' | 'target_field'> & { rule_type?: 'required' | 'stale'; stale_after_days?: number }
+type QualityTarget = Pick<ScanIssue, 'resource_type' | 'target_field'> & { rule_type?: 'required' | 'stale' | 'expiry'; stale_after_days?: number; expiry_warning_days?: number }
 
 const activeTab = ref('asset')
 const resourceType = ref('asset')
@@ -74,7 +75,7 @@ const ruleLoading = ref(false)
 const ruleVisible = ref(false)
 const editingRuleID = ref('')
 const ruleFormRef = ref<FormInstance>()
-const ruleForm = reactive({ rule_name: '', description: '', resource_type: 'asset', rule_type: 'required' as 'required' | 'stale', target_field: 'owner_name', severity: 'error', stale_after_days: 0, conditions: [] as RuleCondition[], is_enabled: true, sort_order: 0 })
+const ruleForm = reactive({ rule_name: '', description: '', resource_type: 'asset', rule_type: 'required' as 'required' | 'stale' | 'expiry', target_field: 'owner_name', severity: 'error', stale_after_days: 0, expiry_warning_days: 30, conditions: [] as RuleCondition[], is_enabled: true, sort_order: 0 })
 const qualityCustomFields = ref<Field[]>([])
 const ruleOptionsLoaded = ref(false)
 const organizations = ref<Organization[]>([])
@@ -88,6 +89,7 @@ const builtinTargets: Record<string, Array<[string, string]>> = {
 }
 const ruleTargetOptions = computed<Array<[string, string]>>(() => {
   if (ruleForm.rule_type === 'stale') return [['updated_at', '最后更新时间']]
+  if (ruleForm.rule_type === 'expiry') return [['expires_at', '有效期至']]
   return [
     ...(builtinTargets[ruleForm.resource_type] ?? []),
     ...qualityCustomFields.value.filter((field) => field.resource_type === ruleForm.resource_type && field.is_enabled).map((field) => [`custom:${field.field_key}`, `自定义字段：${field.field_name}`] as [string, string]),
@@ -333,12 +335,12 @@ function ruleConditionSummary(rule: QualityRule) {
 
 function openRuleCreate() {
   editingRuleID.value = ''
-  Object.assign(ruleForm, { rule_name: '', description: '', resource_type: 'asset', rule_type: 'required', target_field: 'owner_name', severity: 'error', stale_after_days: 0, conditions: [], is_enabled: true, sort_order: ruleTotal.value * 10 })
+  Object.assign(ruleForm, { rule_name: '', description: '', resource_type: 'asset', rule_type: 'required', target_field: 'owner_name', severity: 'error', stale_after_days: 0, expiry_warning_days: 30, conditions: [], is_enabled: true, sort_order: ruleTotal.value * 10 })
   ruleVisible.value = true
 }
 function openRuleEdit(item: QualityRule) {
   editingRuleID.value = item.id
-  Object.assign(ruleForm, { rule_name: item.rule_name, description: item.description ?? '', resource_type: item.resource_type, rule_type: item.rule_type, target_field: item.target_field, severity: item.severity, stale_after_days: item.stale_after_days ?? 0, conditions: (item.conditions ?? []).map((condition) => ({ ...condition, values: [...(condition.values ?? [])] })), is_enabled: item.is_enabled, sort_order: item.sort_order })
+  Object.assign(ruleForm, { rule_name: item.rule_name, description: item.description ?? '', resource_type: item.resource_type, rule_type: item.rule_type, target_field: item.target_field, severity: item.severity, stale_after_days: item.stale_after_days ?? 0, expiry_warning_days: item.expiry_warning_days ?? 0, conditions: (item.conditions ?? []).map((condition) => ({ ...condition, values: [...(condition.values ?? [])] })), is_enabled: item.is_enabled, sort_order: item.sort_order })
   ruleVisible.value = true
 }
 async function saveRule() {
@@ -349,8 +351,13 @@ async function saveRule() {
   }
   saving.value = true
   try {
-    if (editingRuleID.value) await apiClient.patch(`/data-quality-rules/${editingRuleID.value}`, ruleForm)
-    else await apiClient.post('/data-quality-rules', ruleForm)
+    const payload = {
+      ...ruleForm,
+      stale_after_days: ruleForm.rule_type === 'stale' ? ruleForm.stale_after_days : 0,
+      expiry_warning_days: ruleForm.rule_type === 'expiry' ? ruleForm.expiry_warning_days : 0,
+    }
+    if (editingRuleID.value) await apiClient.patch(`/data-quality-rules/${editingRuleID.value}`, payload)
+    else await apiClient.post('/data-quality-rules', payload)
     ElMessage.success(editingRuleID.value ? '数据质量规则已更新' : '数据质量规则已创建')
     ruleVisible.value = false
     scanResult.value = null
@@ -410,6 +417,9 @@ function qualityTargetLabel(issue: QualityTarget) {
   if (issue.rule_type === 'stale' || issue.target_field === 'updated_at') {
     return issue.stale_after_days ? `最后更新时间（超过 ${issue.stale_after_days} 天未维护）` : '最后更新时间'
   }
+  if (issue.rule_type === 'expiry' || issue.target_field === 'expires_at') {
+    return `有效期至（提前 ${issue.expiry_warning_days ?? 0} 天提醒）`
+  }
   if (issue.target_field.startsWith('custom:')) {
     const key = issue.target_field.slice('custom:'.length)
     const field = qualityCustomFields.value.find((item) => item.resource_type === issue.resource_type && item.field_key === key)
@@ -432,7 +442,11 @@ watch([() => ruleForm.resource_type, () => ruleForm.rule_type], () => {
     if (!ruleForm.stale_after_days) ruleForm.stale_after_days = 90
     return
   }
-  ruleForm.stale_after_days = 0
+  if (ruleForm.rule_type === 'expiry') {
+    ruleForm.resource_type = 'asset'
+    ruleForm.target_field = 'expires_at'
+    return
+  }
   if (!ruleTargetOptions.value.some(([value]) => value === ruleForm.target_field)) ruleForm.target_field = 'owner_name'
 })
 onMounted(load)
@@ -490,11 +504,11 @@ onMounted(load)
       </div>
 
       <div class="panel data-table-panel quality-rule-panel">
-        <div class="quality-section-heading compact"><div><h2>规则配置</h2><p>集团可配置字段必填和长期未更新规则；错误用于重点整改，警告用于一般提醒。</p></div></div>
+        <div class="quality-section-heading compact"><div><h2>规则配置</h2><p>集团可配置字段必填、长期未更新和资产到期规则；错误用于重点整改，警告用于一般提醒。</p></div></div>
         <el-table v-loading="ruleLoading" :data="ruleItems" stripe max-height="620" empty-text="暂未配置数据质量规则">
           <el-table-column prop="rule_name" label="规则名称" min-width="200"><template #default="{ row }"><strong>{{ row.rule_name }}</strong><div class="table-subtext">{{ row.description || qualityTargetLabel(row) }}</div></template></el-table-column>
           <el-table-column label="对象" width="120"><template #default="{ row }">{{ row.resource_type === 'asset' ? '网络资产' : '业务系统' }}</template></el-table-column>
-          <el-table-column label="类型" width="120"><template #default="{ row }">{{ row.rule_type === 'stale' ? '长期未更新' : '字段必填' }}</template></el-table-column>
+          <el-table-column label="类型" width="120"><template #default="{ row }">{{ row.rule_type === 'stale' ? '长期未更新' : row.rule_type === 'expiry' ? '资产到期' : '字段必填' }}</template></el-table-column>
           <el-table-column label="检查项" min-width="190"><template #default="{ row }">{{ qualityTargetLabel(row) }}</template></el-table-column>
           <el-table-column label="生效条件" min-width="260"><template #default="{ row }"><span class="condition-summary">{{ ruleConditionSummary(row) }}</span></template></el-table-column>
           <el-table-column label="级别" width="100"><template #default="{ row }"><el-tag :type="row.severity === 'error' ? 'danger' : 'warning'">{{ row.severity === 'error' ? '错误' : '警告' }}</el-tag></template></el-table-column>
@@ -522,12 +536,13 @@ onMounted(load)
       <template #footer><el-button @click="visible = false">取消</el-button><el-button type="primary" :loading="saving" @click="save">保存</el-button></template>
     </el-dialog>
     <el-dialog v-model="ruleVisible" :title="editingRuleID ? '编辑数据质量规则' : '新增数据质量规则'" width="860px" destroy-on-close>
-      <el-form ref="ruleFormRef" :model="ruleForm" label-width="110px" :rules="{ rule_name: [{ required: true, message: '请输入规则名称', trigger: 'blur' }], target_field: [{ required: true, message: '请选择目标字段', trigger: 'change' }], stale_after_days: [{ required: ruleForm.rule_type === 'stale', message: '请设置未维护天数', trigger: 'change' }] }">
+      <el-form ref="ruleFormRef" :model="ruleForm" label-width="110px" :rules="{ rule_name: [{ required: true, message: '请输入规则名称', trigger: 'blur' }], target_field: [{ required: true, message: '请选择目标字段', trigger: 'change' }], stale_after_days: [{ required: ruleForm.rule_type === 'stale', message: '请设置未维护天数', trigger: 'change' }], expiry_warning_days: [{ required: ruleForm.rule_type === 'expiry', message: '请设置提前提醒天数', trigger: 'change' }] }">
         <el-form-item label="规则名称" prop="rule_name"><el-input v-model="ruleForm.rule_name" placeholder="如：资产责任人必填" /></el-form-item>
-        <el-form-item label="检查对象"><el-select v-model="ruleForm.resource_type" style="width:100%"><el-option label="网络资产" value="asset" /><el-option label="业务系统" value="business_system" /></el-select></el-form-item>
-        <el-form-item label="规则类型"><el-select v-model="ruleForm.rule_type" style="width:100%"><el-option label="字段必填" value="required" /><el-option label="长期未更新" value="stale" /></el-select></el-form-item>
-        <el-form-item label="目标字段" prop="target_field"><el-select v-model="ruleForm.target_field" :disabled="ruleForm.rule_type === 'stale'" filterable style="width:100%"><el-option v-for="item in ruleTargetOptions" :key="item[0]" :label="item[1]" :value="item[0]" /></el-select></el-form-item>
+        <el-form-item label="检查对象"><el-select v-model="ruleForm.resource_type" :disabled="ruleForm.rule_type === 'expiry'" style="width:100%"><el-option label="网络资产" value="asset" /><el-option label="业务系统" value="business_system" /></el-select></el-form-item>
+        <el-form-item label="规则类型"><el-select v-model="ruleForm.rule_type" style="width:100%"><el-option label="字段必填" value="required" /><el-option label="长期未更新" value="stale" /><el-option label="资产到期" value="expiry" /></el-select></el-form-item>
+        <el-form-item label="目标字段" prop="target_field"><el-select v-model="ruleForm.target_field" :disabled="ruleForm.rule_type === 'stale' || ruleForm.rule_type === 'expiry'" filterable style="width:100%"><el-option v-for="item in ruleTargetOptions" :key="item[0]" :label="item[1]" :value="item[0]" /></el-select></el-form-item>
         <el-form-item v-if="ruleForm.rule_type === 'stale'" label="未维护天数" prop="stale_after_days"><el-input-number v-model="ruleForm.stale_after_days" :min="1" :max="3650" :step="30" /><span class="form-help-inline">超过该天数未更新即产生问题</span></el-form-item>
+        <el-form-item v-if="ruleForm.rule_type === 'expiry'" label="提前提醒天数" prop="expiry_warning_days"><el-input-number v-model="ruleForm.expiry_warning_days" :min="0" :max="3650" :step="1" /><span class="form-help-inline">到期前 N 天及已过期资产都会产生问题；0 表示仅在到期时提醒</span></el-form-item>
         <el-form-item label="生效条件">
           <div class="condition-editor">
             <div class="condition-editor-heading"><span>不配置时检查全部资源；多个条件按“且（AND）”同时满足。</span><el-button type="primary" plain size="small" :disabled="ruleForm.conditions.length >= 10" @click="addCondition">添加条件</el-button></div>

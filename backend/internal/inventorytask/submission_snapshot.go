@@ -119,6 +119,7 @@ var snapshotFields = map[string][]snapshotField{
 		{Name: "network_area_name", Label: "网络区域"},
 		{Name: "status", Label: "状态"},
 		{Name: "importance", Label: "重要程度"},
+		{Name: "expires_at", Label: "有效期至"},
 		{Name: "linked_system_codes", Label: "关联业务系统"},
 		{Name: "notes", Label: "备注"},
 	},
@@ -724,6 +725,7 @@ func createSubmissionSnapshot(ctx context.Context, tx pgx.Tx, principal auth.Pri
 			   'network_area_name', COALESCE(area.area_name, ''),
 			   'status', asset.status,
 			   'importance', asset.importance,
+			   'expires_at', asset.expires_at,
 			   'linked_system_codes', COALESCE((
 			       SELECT jsonb_agg(system.system_code ORDER BY system.system_code)
 			       FROM system_assets link

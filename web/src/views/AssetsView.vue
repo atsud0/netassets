@@ -13,7 +13,7 @@ interface Asset {
   business_system_id?: string; business_system_code?: string; business_system_name?: string
   environment: string; network_scope: string; network_area_id?: string; network_area_name?: string
   status: string; importance: string; source: string
-  owner_name?: string; notes?: string; created_at: string; updated_at: string
+  owner_name?: string; notes?: string; expires_at?: string; created_at: string; updated_at: string
 }
 interface NetworkArea {
   id: string; organization_id: string; organization_code: string; organization_name: string
@@ -99,7 +99,7 @@ const batchResultTitle = ref('批量更新结果')
 
 const form = reactive({
   type: 'domain', value: '', name: '', organization_id: '', business_system_id: '', network_area_id: '',
-  environment: 'production', network_scope: 'public', status: 'active', importance: 'normal', owner_name: '', notes: '',
+  environment: 'production', network_scope: 'public', status: 'active', importance: 'normal', owner_name: '', notes: '', expires_at: null as Date | null,
 })
 const networkAreaForm = reactive({ organization_id: '', name: '', code: '', status: 'enabled', sort_order: 0, notes: '' })
 const importForm = reactive({ organization_id: '' })
@@ -242,7 +242,7 @@ function resetForm() {
   customFields.value.forEach((field) => { customValues[field.field_key] = field.field_type === 'multiselect' ? [] : field.field_type === 'boolean' ? false : '' })
   Object.assign(form, {
     type: 'domain', value: '', name: '', organization_id: defaultOrganizationID(), business_system_id: '', network_area_id: '',
-    environment: 'production', network_scope: 'public', status: 'active', importance: 'normal', owner_name: '', notes: '',
+    environment: 'production', network_scope: 'public', status: 'active', importance: 'normal', owner_name: '', notes: '', expires_at: null,
   })
 }
 function openCreateDialog() {
@@ -255,7 +255,7 @@ function openEditDialog(item: Asset) {
   Object.assign(form, {
     type: item.type, value: item.value, name: item.name ?? '', organization_id: item.organization_id,
     business_system_id: item.business_system_id ?? '', network_area_id: item.network_area_id ?? '', environment: item.environment, network_scope: item.network_scope,
-    status: item.status, importance: item.importance, owner_name: item.owner_name ?? '', notes: item.notes ?? '',
+    status: item.status, importance: item.importance, owner_name: item.owner_name ?? '', notes: item.notes ?? '', expires_at: item.expires_at ? new Date(item.expires_at) : null,
   })
   void loadCustomValues(item.id)
   editDialogVisible.value = true
@@ -300,7 +300,7 @@ function assetPayload(item: Asset, overrides: Partial<typeof form> = {}) {
   return {
     type: item.type, value: item.value, name: item.name ?? '', organization_id: item.organization_id,
     business_system_id: item.business_system_id ?? '', network_area_id: item.network_area_id ?? '', environment: item.environment, network_scope: item.network_scope,
-    status: item.status, importance: item.importance, owner_name: item.owner_name ?? '', notes: item.notes ?? '', ...overrides,
+    status: item.status, importance: item.importance, owner_name: item.owner_name ?? '', notes: item.notes ?? '', expires_at: item.expires_at ?? null, ...overrides,
   }
 }
 async function submit() {
@@ -309,7 +309,8 @@ async function submit() {
   try {
     const missing = customFields.value.find((field) => field.is_required && isEmptyCustomValue(customValues[field.field_key]))
     if (missing) { ElMessage.warning(`请填写自定义字段：${missing.field_name}`); return }
-    const response = editingAssetID.value ? await apiClient.patch<{ item: Asset }>(`/assets/${editingAssetID.value}`, form) : await apiClient.post<{ item: Asset }>('/assets', form)
+    const payload = { ...form, expires_at: form.expires_at?.toISOString() ?? null }
+    const response = editingAssetID.value ? await apiClient.patch<{ item: Asset }>(`/assets/${editingAssetID.value}`, payload) : await apiClient.post<{ item: Asset }>('/assets', payload)
     const id = editingAssetID.value || response.data.item.id
     if (customFields.value.length) await apiClient.put(`/assets/${id}/custom-fields`, { values: customFields.value.map((field) => ({ field_key: field.field_key, value: customValues[field.field_key] })) })
     ElMessage.success(editingAssetID.value ? '网络资产已更新' : '网络资产已新增')
@@ -602,6 +603,19 @@ function statusTag(value: string) { return value === 'active' ? 'success' : valu
 function importanceTag(value: string) { return value === 'core' ? 'danger' : value === 'important' ? 'warning' : 'info' }
 function importStatusTag(value: string) { return value === 'completed' ? 'success' : value === 'partial' ? 'warning' : 'danger' }
 function formatDate(value: string) { return new Intl.DateTimeFormat('zh-CN', { dateStyle: 'short', timeStyle: 'short' }).format(new Date(value)) }
+function expiryLabel(value?: string) {
+  if (!value) return '长期有效'
+  const expiresAt = new Date(value).getTime()
+  const remainingDays = Math.ceil((expiresAt - Date.now()) / 86400000)
+  if (remainingDays < 0) return `已到期 · ${formatDate(value)}`
+  if (remainingDays <= 30) return `即将到期 · ${formatDate(value)}`
+  return formatDate(value)
+}
+function expiryTag(value?: string) {
+  if (!value) return 'info'
+  const remaining = new Date(value).getTime() - Date.now()
+  return remaining < 0 ? 'danger' : remaining <= 30 * 86400000 ? 'warning' : 'success'
+}
 
 onMounted(() => load(true))
 </script>
@@ -672,6 +686,7 @@ onMounted(() => load(true))
         <el-table-column label="业务系统" min-width="150"><template #default="scope"><div v-if="scope.row.business_system_id" class="organization-name-cell"><strong>{{ scope.row.business_system_name }}</strong><span>{{ scope.row.business_system_code }}</span></div><span v-else class="muted-text">未绑定</span></template></el-table-column>
         <el-table-column label="环境 / 暴露范围" width="145"><template #default="scope">{{ environmentLabel(scope.row.environment) }} / {{ scopeLabel(scope.row.network_scope) }}</template></el-table-column>
         <el-table-column label="网络区域" min-width="135"><template #default="scope"><span>{{ scope.row.network_area_name || '未指定' }}</span></template></el-table-column>
+        <el-table-column label="有效期" min-width="185"><template #default="scope"><el-tag :type="expiryTag(scope.row.expires_at)" effect="plain">{{ expiryLabel(scope.row.expires_at) }}</el-tag></template></el-table-column>
         <el-table-column label="状态" width="90"><template #default="scope"><el-tag :type="statusTag(scope.row.status)" effect="plain">{{ statusLabel(scope.row.status) }}</el-tag></template></el-table-column>
         <el-table-column label="重要程度" width="95"><template #default="scope"><el-tag :type="importanceTag(scope.row.importance)" effect="plain">{{ importanceLabel(scope.row.importance) }}</el-tag></template></el-table-column>
         <el-table-column label="来源" width="75"><template #default="scope">{{ sourceLabel(scope.row.source) }}</template></el-table-column>
@@ -706,7 +721,7 @@ onMounted(() => load(true))
       <div v-loading="detailLoading" class="detail-drawer">
         <template v-if="detail">
           <div class="detail-hero"><div><span class="eyebrow">NETWORK ASSET</span><h2>{{ detail.name || detail.value }}</h2><p>{{ typeLabel(detail.type) }} · {{ detail.value }}</p></div><el-tag :type="statusTag(detail.status)" effect="plain">{{ statusLabel(detail.status) }}</el-tag></div>
-          <div class="detail-grid"><div><span>所属组织</span><strong>{{ detail.organization_name }}</strong></div><div><span>关联业务系统</span><strong>{{ detail.business_system_name || '未绑定' }}</strong></div><div><span>负责人</span><strong>{{ detail.owner_name || '未填写' }}</strong></div><div><span>环境</span><strong>{{ environmentLabel(detail.environment) }}</strong></div><div><span>网络暴露范围</span><strong>{{ scopeLabel(detail.network_scope) }}</strong></div><div><span>网络区域</span><strong>{{ detail.network_area_name || '未指定' }}</strong></div><div><span>重要程度</span><strong>{{ importanceLabel(detail.importance) }}</strong></div><div><span>登记来源</span><strong>{{ sourceLabel(detail.source) }}</strong></div><div><span>最近更新</span><strong>{{ formatDate(detail.updated_at) }}</strong></div></div>
+          <div class="detail-grid"><div><span>所属组织</span><strong>{{ detail.organization_name }}</strong></div><div><span>关联业务系统</span><strong>{{ detail.business_system_name || '未绑定' }}</strong></div><div><span>负责人</span><strong>{{ detail.owner_name || '未填写' }}</strong></div><div><span>环境</span><strong>{{ environmentLabel(detail.environment) }}</strong></div><div><span>网络暴露范围</span><strong>{{ scopeLabel(detail.network_scope) }}</strong></div><div><span>网络区域</span><strong>{{ detail.network_area_name || '未指定' }}</strong></div><div><span>重要程度</span><strong>{{ importanceLabel(detail.importance) }}</strong></div><div><span>登记来源</span><strong>{{ sourceLabel(detail.source) }}</strong></div><div><span>有效期至</span><strong><el-tag :type="expiryTag(detail.expires_at)" effect="plain">{{ expiryLabel(detail.expires_at) }}</el-tag></strong></div><div><span>最近更新</span><strong>{{ formatDate(detail.updated_at) }}</strong></div></div>
           <template v-if="detailCustomFields.length">
             <div class="form-section-title">集团自定义字段</div>
             <div class="detail-grid"><div v-for="field in detailCustomFields" :key="field.id"><span>{{ field.field_name }}</span><strong>{{ customValueLabel(detailCustomValues[field.field_key]) }}</strong></div></div>
@@ -731,6 +746,7 @@ onMounted(() => load(true))
           <el-form-item label="网络区域"><el-select v-model="form.network_area_id" clearable filterable placeholder="如：上海办事处（可选）" style="width: 100%"><el-option v-for="item in availableNetworkAreas" :key="item.id" :label="item.code ? `${item.name}（${item.code}）` : item.name" :value="item.id" :disabled="item.status !== 'enabled'" /></el-select></el-form-item>
           <el-form-item label="重要程度"><el-select v-model="form.importance" style="width: 100%"><el-option v-for="(label, value) in importanceLabels" :key="value" :label="label" :value="value" /></el-select></el-form-item>
           <el-form-item label="资产状态"><el-select v-model="form.status" style="width: 100%"><el-option v-for="(label, value) in statusLabels" :key="value" :label="label" :value="value" /></el-select></el-form-item>
+          <el-form-item label="有效期至" class="full-span"><el-date-picker v-model="form.expires_at" type="datetime" placeholder="留空表示长期有效" style="width: 100%" /><div class="form-tip">适用于域名、临时 URL、公网 IP 租约等资产生命周期；该字段不是“最后更新时间”。</div></el-form-item>
           <el-form-item label="备注" class="full-span"><el-input v-model="form.notes" type="textarea" :rows="3" placeholder="补充资产用途、管理要求等信息" /></el-form-item><template v-if="customFields.length"><el-divider class="full-span" content-position="left">集团自定义字段</el-divider><el-form-item v-for="field in customFields" :key="field.id" :label="field.field_name" :required="field.is_required"><el-input v-if="field.field_type === 'text'" v-model="customValues[field.field_key]"/><el-input v-else-if="field.field_type === 'textarea'" v-model="customValues[field.field_key]" type="textarea" :rows="2"/><el-input-number v-else-if="field.field_type === 'number'" v-model="customValues[field.field_key]"/><el-date-picker v-else-if="field.field_type === 'date'" v-model="customValues[field.field_key]" type="date" value-format="YYYY-MM-DD"/><el-switch v-else-if="field.field_type === 'boolean'" v-model="customValues[field.field_key]"/><el-select v-else-if="field.field_type === 'multiselect'" v-model="customValues[field.field_key]" multiple><el-option v-for="option in field.options" :key="option" :label="option" :value="option"/></el-select><el-select v-else v-model="customValues[field.field_key]"><el-option v-for="option in field.options" :key="option" :label="option" :value="option"/></el-select><div v-if="field.description" class="form-tip">{{ field.description }}</div></el-form-item></template>
         </div>
       </el-form>
@@ -763,11 +779,11 @@ onMounted(() => load(true))
     </el-dialog>
 
     <el-dialog v-model="importDialogVisible" title="批量导入网络资产" width="760px" destroy-on-close>
-      <el-alert title="单次最多导入 5000 行，资产类型和值在集团范围内去重；允许部分成功。请先选择所属组织再下载模板，模板会包含当前启用的集团自定义字段。网络区域按所属组织已配置的名称填写。" type="info" :closable="false" show-icon />
+      <el-alert title="单次最多导入 5000 行，资产类型和值在集团范围内去重；允许部分成功。请先选择所属组织再下载模板，模板会包含当前启用的集团自定义字段。网络区域按所属组织已配置的名称填写；有效期支持 YYYY-MM-DD、YYYY-MM-DD HH:mm:ss 或 RFC3339；无时区值按 UTC+8 解释，留空表示长期有效。" type="info" :closable="false" show-icon />
       <div class="import-toolbar"><el-button link type="primary" :loading="downloading" @click="downloadTemplate('xlsx')">下载 XLSX 模板</el-button><el-button link type="primary" :loading="downloading" @click="downloadTemplate('csv')">下载 CSV 模板</el-button></div>
       <el-form label-position="top">
         <el-form-item label="导入到所属组织" required><el-select v-model="importForm.organization_id" filterable :disabled="!auth.isGroupAdmin" @change="resetImportPreview" style="width: 100%"><el-option v-for="item in enabledOrganizations" :key="item.id" :label="`${item.name}（${item.code}）`" :value="item.id" /></el-select></el-form-item>
-        <el-form-item label="CSV / XLSX 文件" required><el-upload drag :auto-upload="false" :limit="1" accept=".csv,.xlsx" :on-change="handleFileChange" :on-remove="handleFileRemove"><div class="el-upload__text">拖入文件，或<em>点击选择</em></div><template #tip><div class="el-upload__tip">文件不超过 10 MB；业务系统使用同组织内的系统编码匹配。</div></template></el-upload></el-form-item>
+        <el-form-item label="CSV / XLSX 文件" required><el-upload drag :auto-upload="false" :limit="1" accept=".csv,.xlsx" :on-change="handleFileChange" :on-remove="handleFileRemove"><div class="el-upload__text">拖入文件，或<em>点击选择</em></div><template #tip><div class="el-upload__tip">文件不超过 10 MB；业务系统使用同组织内的系统编码匹配；有效期格式错误会在预检中逐行提示。</div></template></el-upload></el-form-item>
       </el-form>
       <div v-if="importResult" class="import-result" data-testid="import-result">
         <el-alert :title="importResultMode === 'preview' ? '预检结果：尚未写入台账，请确认后执行正式导入' : '正式导入结果'" :type="importResultMode === 'preview' ? 'info' : 'success'" :closable="false" show-icon />

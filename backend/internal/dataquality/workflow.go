@@ -23,6 +23,7 @@ type Issue struct {
 	TargetField         string     `json:"target_field"`
 	RuleType            string     `json:"rule_type"`
 	StaleAfterDays      int        `json:"stale_after_days,omitempty"`
+	ExpiryWarningDays   int        `json:"expiry_warning_days,omitempty"`
 	Severity            string     `json:"severity"`
 	ResourceType        string     `json:"resource_type"`
 	ResourceID          string     `json:"resource_id"`
@@ -130,7 +131,7 @@ type ScanBatch struct {
 }
 
 const issueFields = `
-	i.id::text,i.rule_id::text,i.rule_name,i.target_field,quality_rule.rule_type,COALESCE(quality_rule.stale_after_days,0),i.severity,i.resource_type,i.resource_id::text,i.resource_name,
+	i.id::text,i.rule_id::text,i.rule_name,i.target_field,quality_rule.rule_type,COALESCE(quality_rule.stale_after_days,0),COALESCE(quality_rule.expiry_warning_days,0),i.severity,i.resource_type,i.resource_id::text,i.resource_name,
 	i.organization_id::text,i.organization_code,i.organization_name,i.status,COALESCE(i.assignee_user_id::text,''),
 	COALESCE(assignee.display_name,''),COALESCE(i.rectification_note,''),COALESCE(submitter.display_name,''),i.submitted_at,
 	COALESCE(i.review_note,''),COALESCE(reviewer.display_name,''),i.reviewed_at,COALESCE(i.exemption_reason,''),
@@ -614,7 +615,7 @@ func (s *Service) SearchScanBatches(ctx context.Context, p auth.Principal, page 
 
 func scanIssue(row pgx.Row) (Issue, error) {
 	var item Issue
-	err := row.Scan(&item.ID, &item.RuleID, &item.RuleName, &item.TargetField, &item.RuleType, &item.StaleAfterDays, &item.Severity, &item.ResourceType, &item.ResourceID, &item.ResourceName,
+	err := row.Scan(&item.ID, &item.RuleID, &item.RuleName, &item.TargetField, &item.RuleType, &item.StaleAfterDays, &item.ExpiryWarningDays, &item.Severity, &item.ResourceType, &item.ResourceID, &item.ResourceName,
 		&item.OrganizationID, &item.OrganizationCode, &item.OrganizationName, &item.Status, &item.AssigneeUserID, &item.AssigneeDisplayName,
 		&item.RectificationNote, &item.SubmittedByName, &item.SubmittedAt, &item.ReviewNote, &item.ReviewedByName, &item.ReviewedAt,
 		&item.ExemptionReason, &item.ExemptionExpiresAt, &item.ResolutionType, &item.FirstDetectedAt, &item.LastDetectedAt,

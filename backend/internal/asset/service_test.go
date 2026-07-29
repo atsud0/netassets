@@ -49,7 +49,10 @@ func TestNormalizeValue(t *testing.T) {
 
 func TestImportHeaderAndChineseEnums(t *testing.T) {
 	headers := mapHeaders([]string{"\ufeff资产类型", "资产值", "资产名称", "业务系统编码", "环境", "网络暴露范围", "网络区域", "重要程度", "负责人", "备注"})
-	input := importInput([]string{"域名", "Portal.Example.com", "门户", "SYS_001", "生产", "公网", "上海办事处", "核心", "张三", "测试资产"}, headers, "org-id")
+	input, err := importInput([]string{"域名", "Portal.Example.com", "门户", "SYS_001", "生产", "公网", "上海办事处", "核心", "张三", "测试资产"}, headers, "org-id")
+	if err != nil {
+		t.Fatal(err)
+	}
 	if input.Type != "domain" || input.Environment != "production" || input.NetworkScope != "public" || input.Importance != "core" {
 		t.Fatalf("unexpected translated input: %+v", input)
 	}
@@ -71,7 +74,7 @@ func TestTemplateCSV(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(rows) != 2 || rows[0][0] != "资产类型" || rows[0][1] != "资产值" {
+	if len(rows) != 2 || rows[0][0] != "资产类型" || rows[0][1] != "资产值" || rows[0][9] != "有效期至" || rows[1][9] != "2027-12-31" {
 		t.Fatalf("unexpected CSV template: %#v", rows)
 	}
 }
@@ -93,7 +96,7 @@ func TestTemplateXLSX(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(rows) != 2 || rows[0][0] != "资产类型" || rows[0][1] != "资产值" {
+	if len(rows) != 2 || rows[0][0] != "资产类型" || rows[0][1] != "资产值" || rows[0][9] != "有效期至" || rows[1][9] != "2027-12-31" {
 		t.Fatalf("unexpected XLSX template: %#v", rows)
 	}
 }
@@ -115,10 +118,11 @@ func TestFilterExportAssets(t *testing.T) {
 
 func TestBuildAssetExportCSV(t *testing.T) {
 	createdAt := time.Date(2026, time.July, 22, 10, 30, 0, 0, time.FixedZone("CST", 8*60*60))
+	expiresAt := time.Date(2027, time.December, 31, 23, 59, 59, 0, time.FixedZone("CST", 8*60*60))
 	data, contentType, fileName, err := buildExport([]Asset{{
 		OrganizationCode: "SUB_A", OrganizationName: "甲公司", Type: "domain", Value: "portal.example.com", Name: "门户",
 		BusinessSystemCode: "PORTAL_001", BusinessSystemName: "门户系统", Environment: "production", NetworkScope: "public", NetworkAreaName: "上海办事处",
-		Status: "active", Importance: "core", Source: "import", OwnerName: "张三", CreatedAt: createdAt,
+		Status: "active", Importance: "core", Source: "import", OwnerName: "张三", ExpiresAt: &expiresAt, CreatedAt: createdAt,
 	}}, "csv")
 	if err != nil {
 		t.Fatal(err)
@@ -133,8 +137,8 @@ func TestBuildAssetExportCSV(t *testing.T) {
 	if len(rows) != 2 || rows[1][2] != "域名" || rows[1][7] != "生产" || rows[1][8] != "公网" || rows[1][9] != "上海办事处" || rows[1][10] != "启用" || rows[1][11] != "核心" || rows[1][12] != "导入" {
 		t.Fatalf("unexpected export row: %#v", rows)
 	}
-	if rows[1][15] != "2026-07-22 10:30:00+08:00" {
-		t.Fatalf("unexpected exported time: %q", rows[1][15])
+	if rows[0][15] != "有效期至" || rows[1][15] != "2027-12-31 23:59:59+08:00" || rows[1][16] != "2026-07-22 10:30:00+08:00" {
+		t.Fatalf("unexpected exported expiry/times: %#v", rows[1])
 	}
 }
 
@@ -230,10 +234,51 @@ func TestCreateInputFromAssetPreservesEditableFields(t *testing.T) {
 	item := Asset{
 		Type: "url", Value: "https://portal.example.com", Name: "门户", OrganizationID: "org-a",
 		BusinessSystemID: "system-a", Environment: "production", NetworkScope: "public", NetworkAreaID: "area-a",
-		Status: "active", Importance: "core", OwnerName: "张三", Notes: "备注",
+		Status: "active", Importance: "core", OwnerName: "张三", Notes: "备注", ExpiresAt: timePtr(time.Date(2027, 12, 31, 15, 59, 59, 0, time.UTC)),
 	}
 	input := createInputFromAsset(item)
-	if input.Type != item.Type || input.Value != item.Value || input.OrganizationID != item.OrganizationID || input.NetworkAreaID != item.NetworkAreaID || input.Status != item.Status || input.Notes != item.Notes {
+	if input.Type != item.Type || input.Value != item.Value || input.OrganizationID != item.OrganizationID || input.NetworkAreaID != item.NetworkAreaID || input.Status != item.Status || input.Notes != item.Notes || input.ExpiresAt != item.ExpiresAt {
 		t.Fatalf("unexpected input: %#v", input)
 	}
 }
+
+func TestParseImportExpiry(t *testing.T) {
+	tests := []struct {
+		name      string
+		value     string
+		want      time.Time
+		wantNil   bool
+		wantError bool
+	}{
+		{name: "empty", value: "", wantNil: true},
+		{name: "date uses end of day UTC plus eight", value: "2027-12-31", want: time.Date(2027, 12, 31, 23, 59, 59, 0, time.FixedZone("UTC+8", 8*60*60))},
+		{name: "local date time uses UTC plus eight", value: "2027-12-31 16:30:45", want: time.Date(2027, 12, 31, 16, 30, 45, 0, time.FixedZone("UTC+8", 8*60*60))},
+		{name: "RFC3339", value: "2027-12-31T16:00:00+08:00", want: time.Date(2027, 12, 31, 16, 0, 0, 0, time.FixedZone("UTC+8", 8*60*60))},
+		{name: "invalid", value: "2027/12/31", wantError: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := parseImportExpiry(tt.value)
+			if tt.wantError {
+				if err == nil {
+					t.Fatal("parseImportExpiry() error = nil, want error")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if tt.wantNil {
+				if got != nil {
+					t.Fatalf("parseImportExpiry() = %v, want nil", got)
+				}
+				return
+			}
+			if got == nil || !got.Equal(tt.want) {
+				t.Fatalf("parseImportExpiry() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func timePtr(value time.Time) *time.Time { return &value }

@@ -29,6 +29,35 @@ func TestValidStaleRule(t *testing.T) {
 	}
 }
 
+func TestValidExpiryRule(t *testing.T) {
+	svc := &Service{}
+	valid := Input{
+		RuleName: "资产到期前30天提醒", ResourceType: "asset", RuleType: "expiry",
+		TargetField: "expires_at", Severity: "warning", ExpiryWarningDays: 30,
+	}
+	if err := svc.valid(context.Background(), valid); err != nil {
+		t.Fatalf("valid expiry rule rejected: %v", err)
+	}
+	if err := svc.valid(context.Background(), Input{RuleName: "到期当天提醒", ResourceType: "asset", RuleType: "expiry", TargetField: "expires_at", Severity: "error", ExpiryWarningDays: 0}); err != nil {
+		t.Fatalf("zero-day expiry rule rejected: %v", err)
+	}
+
+	invalid := []Input{
+		{RuleName: "系统到期", ResourceType: "business_system", RuleType: "expiry", TargetField: "expires_at", Severity: "warning", ExpiryWarningDays: 30},
+		{RuleName: "错误字段", ResourceType: "asset", RuleType: "expiry", TargetField: "updated_at", Severity: "warning", ExpiryWarningDays: 30},
+		{RuleName: "负数天数", ResourceType: "asset", RuleType: "expiry", TargetField: "expires_at", Severity: "warning", ExpiryWarningDays: -1},
+		{RuleName: "天数过大", ResourceType: "asset", RuleType: "expiry", TargetField: "expires_at", Severity: "warning", ExpiryWarningDays: 3651},
+		{RuleName: "混用陈旧阈值", ResourceType: "asset", RuleType: "expiry", TargetField: "expires_at", Severity: "warning", StaleAfterDays: 30, ExpiryWarningDays: 30},
+		{RuleName: "必填规则混入到期阈值", ResourceType: "asset", RuleType: "required", TargetField: "owner_name", Severity: "error", ExpiryWarningDays: 30},
+		{RuleName: "陈旧规则混入到期阈值", ResourceType: "asset", RuleType: "stale", TargetField: "updated_at", Severity: "warning", StaleAfterDays: 90, ExpiryWarningDays: 30},
+	}
+	for _, input := range invalid {
+		if err := svc.valid(context.Background(), input); !errors.Is(err, ErrInvalid) {
+			t.Fatalf("input=%#v err=%v, want ErrInvalid", input, err)
+		}
+	}
+}
+
 func TestNormalizeRuleConditions(t *testing.T) {
 	input := Input{Conditions: []RuleCondition{
 		{Field: " Network_Scope ", Operator: " IN ", Values: []string{" public ", "public", "private", ""}},

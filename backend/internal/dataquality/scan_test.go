@@ -91,6 +91,32 @@ func TestScanQueryPartsBusinessSystemStale(t *testing.T) {
 	}
 }
 
+func TestScanQueryPartsAssetExpiry(t *testing.T) {
+	from, condition, args, err := scanQueryParts(Rule{RuleType: "expiry", ResourceType: "asset", TargetField: "expires_at", ExpiryWarningDays: 30}, "organization-id")
+	if err != nil {
+		t.Fatalf("scanQueryParts returned error: %v", err)
+	}
+	if !strings.Contains(from, "FROM assets") || condition != "a.status<>'archived' AND a.expires_at IS NOT NULL AND a.expires_at <= now() + ($2::integer * interval '1 day')" {
+		t.Fatalf("unexpected expiry asset query parts: from=%q condition=%q", from, condition)
+	}
+	if len(args) != 2 || args[0] != "organization-id" || args[1] != 30 {
+		t.Fatalf("args = %#v", args)
+	}
+}
+
+func TestScanQueryPartsRejectsInvalidExpiryRule(t *testing.T) {
+	tests := []Rule{
+		{RuleType: "expiry", ResourceType: "asset", TargetField: "updated_at", ExpiryWarningDays: 30},
+		{RuleType: "expiry", ResourceType: "asset", TargetField: "expires_at", ExpiryWarningDays: -1},
+		{RuleType: "expiry", ResourceType: "business_system", TargetField: "expires_at", ExpiryWarningDays: 30},
+	}
+	for _, rule := range tests {
+		if _, _, _, err := scanQueryParts(rule, ""); !errors.Is(err, ErrInvalid) {
+			t.Fatalf("rule=%#v err=%v, want ErrInvalid", rule, err)
+		}
+	}
+}
+
 func TestScanQueryPartsRejectsInvalidStaleRule(t *testing.T) {
 	tests := []Rule{
 		{RuleType: "stale", ResourceType: "asset", TargetField: "owner_name", StaleAfterDays: 90},

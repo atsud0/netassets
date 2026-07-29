@@ -9,7 +9,7 @@ import SavedFilterViews from '../components/SavedFilterViews.vue'
 interface Organization { id: string; code: string; name: string; status: string }
 interface UserItem { id: string; username: string; display_name: string; status?: string }
 interface QualityIssue {
-  id: string; rule_id: string; rule_name: string; target_field: string; rule_type: 'required' | 'stale'; stale_after_days?: number; severity: 'error' | 'warning'
+  id: string; rule_id: string; rule_name: string; target_field: string; rule_type: 'required' | 'stale' | 'expiry'; stale_after_days?: number; expiry_warning_days?: number; severity: 'error' | 'warning'
   resource_type: 'asset' | 'business_system'; resource_id: string; resource_name: string
   organization_id: string; organization_code: string; organization_name: string
   status: 'pending' | 'in_progress' | 'pending_review' | 'closed' | 'exempted'
@@ -92,7 +92,7 @@ const eventLabels: Record<string, string> = { detected: '巡检发现', assigned
 const targetLabels: Record<string, string> = {
   value: '资产值', name: '名称', network_scope: '网络范围', network_area_id: '网络区域', owner_name: '负责人', business_system_id: '关联业务系统', importance: '重要性',
   code: '系统编码', owner_contact: '负责人联系方式', system_level: '系统等级', internet_exposure: '互联网暴露情况', contains_personal_information: '是否含个人信息',
-  updated_at: '最后更新时间', contains_sensitive_personal_information: '是否含敏感个人信息', data_volume_over_100k: '数据量是否超过10万条', contains_important_data: '是否含重要数据', contains_core_data: '是否含核心数据',
+  updated_at: '最后更新时间', expires_at: '有效期至', contains_sensitive_personal_information: '是否含敏感个人信息', data_volume_over_100k: '数据量是否超过10万条', contains_important_data: '是否含重要数据', contains_core_data: '是否含核心数据',
 }
 
 function formatTime(value?: string) {
@@ -101,6 +101,7 @@ function formatTime(value?: string) {
 }
 function targetLabel(value: string, issue?: QualityIssue) {
   if (value === 'updated_at' && issue?.stale_after_days) return `最后更新时间（超过 ${issue.stale_after_days} 天未维护）`
+  if (value === 'expires_at' && issue) return `有效期至（提前 ${issue.expiry_warning_days ?? 0} 天提醒）`
   return value.startsWith('custom:') ? `自定义字段：${value.slice(7)}` : (targetLabels[value] ?? value)
 }
 function resourceTypeLabel(value?: string) { return value === 'asset' ? '网络资产' : value === 'business_system' ? '业务系统' : '全部对象' }

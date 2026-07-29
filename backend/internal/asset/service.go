@@ -38,43 +38,45 @@ var (
 const MaxImportRows = 5000
 
 type Asset struct {
-	ID                 string    `json:"id"`
-	Type               string    `json:"type"`
-	Value              string    `json:"value"`
-	NormalizedValue    string    `json:"normalized_value"`
-	Name               string    `json:"name,omitempty"`
-	OrganizationID     string    `json:"organization_id"`
-	OrganizationCode   string    `json:"organization_code"`
-	OrganizationName   string    `json:"organization_name"`
-	BusinessSystemID   string    `json:"business_system_id,omitempty"`
-	BusinessSystemCode string    `json:"business_system_code,omitempty"`
-	BusinessSystemName string    `json:"business_system_name,omitempty"`
-	Environment        string    `json:"environment"`
-	NetworkScope       string    `json:"network_scope"`
-	NetworkAreaID      string    `json:"network_area_id,omitempty"`
-	NetworkAreaName    string    `json:"network_area_name,omitempty"`
-	Status             string    `json:"status"`
-	Importance         string    `json:"importance"`
-	Source             string    `json:"source"`
-	OwnerName          string    `json:"owner_name,omitempty"`
-	Notes              string    `json:"notes,omitempty"`
-	CreatedAt          time.Time `json:"created_at"`
-	UpdatedAt          time.Time `json:"updated_at"`
+	ID                 string     `json:"id"`
+	Type               string     `json:"type"`
+	Value              string     `json:"value"`
+	NormalizedValue    string     `json:"normalized_value"`
+	Name               string     `json:"name,omitempty"`
+	OrganizationID     string     `json:"organization_id"`
+	OrganizationCode   string     `json:"organization_code"`
+	OrganizationName   string     `json:"organization_name"`
+	BusinessSystemID   string     `json:"business_system_id,omitempty"`
+	BusinessSystemCode string     `json:"business_system_code,omitempty"`
+	BusinessSystemName string     `json:"business_system_name,omitempty"`
+	Environment        string     `json:"environment"`
+	NetworkScope       string     `json:"network_scope"`
+	NetworkAreaID      string     `json:"network_area_id,omitempty"`
+	NetworkAreaName    string     `json:"network_area_name,omitempty"`
+	Status             string     `json:"status"`
+	Importance         string     `json:"importance"`
+	Source             string     `json:"source"`
+	OwnerName          string     `json:"owner_name,omitempty"`
+	Notes              string     `json:"notes,omitempty"`
+	ExpiresAt          *time.Time `json:"expires_at,omitempty"`
+	CreatedAt          time.Time  `json:"created_at"`
+	UpdatedAt          time.Time  `json:"updated_at"`
 }
 
 type CreateInput struct {
-	Type             string `json:"type"`
-	Value            string `json:"value"`
-	Name             string `json:"name"`
-	OrganizationID   string `json:"organization_id"`
-	BusinessSystemID string `json:"business_system_id"`
-	Environment      string `json:"environment"`
-	NetworkScope     string `json:"network_scope"`
-	NetworkAreaID    string `json:"network_area_id"`
-	Status           string `json:"status"`
-	Importance       string `json:"importance"`
-	OwnerName        string `json:"owner_name"`
-	Notes            string `json:"notes"`
+	Type             string     `json:"type"`
+	Value            string     `json:"value"`
+	Name             string     `json:"name"`
+	OrganizationID   string     `json:"organization_id"`
+	BusinessSystemID string     `json:"business_system_id"`
+	Environment      string     `json:"environment"`
+	NetworkScope     string     `json:"network_scope"`
+	NetworkAreaID    string     `json:"network_area_id"`
+	Status           string     `json:"status"`
+	Importance       string     `json:"importance"`
+	OwnerName        string     `json:"owner_name"`
+	Notes            string     `json:"notes"`
+	ExpiresAt        *time.Time `json:"expires_at"`
 }
 
 type ImportError struct {
@@ -159,7 +161,7 @@ func (s *Service) List(ctx context.Context, principal auth.Principal) ([]Asset, 
 		       COALESCE(bs.id::text, ''), COALESCE(bs.system_code, ''), COALESCE(bs.system_name, ''),
 		       a.environment, a.network_scope, COALESCE(na.id::text, ''), COALESCE(na.area_name, ''),
 		       a.status, a.importance, a.source,
-		       COALESCE(ao.owner_name, ''), COALESCE(a.notes, ''), a.created_at, a.updated_at
+		       COALESCE(ao.owner_name, ''), COALESCE(a.notes, ''), a.expires_at, a.created_at, a.updated_at
 		FROM assets a
 		LEFT JOIN asset_network_areas na ON na.id = a.network_area_id
 		JOIN asset_organizations ao ON ao.asset_id = a.id AND ao.is_primary
@@ -184,7 +186,7 @@ func (s *Service) List(ctx context.Context, principal auth.Principal) ([]Asset, 
 			&item.OrganizationID, &item.OrganizationCode, &item.OrganizationName,
 			&item.BusinessSystemID, &item.BusinessSystemCode, &item.BusinessSystemName,
 			&item.Environment, &item.NetworkScope, &item.NetworkAreaID, &item.NetworkAreaName,
-			&item.Status, &item.Importance, &item.Source, &item.OwnerName, &item.Notes, &item.CreatedAt, &item.UpdatedAt); err != nil {
+			&item.Status, &item.Importance, &item.Source, &item.OwnerName, &item.Notes, &item.ExpiresAt, &item.CreatedAt, &item.UpdatedAt); err != nil {
 			return nil, fmt.Errorf("scan asset: %w", err)
 		}
 		items = append(items, item)
@@ -232,7 +234,7 @@ func (s *Service) SearchWithFilter(ctx context.Context, principal auth.Principal
 		       COALESCE(bs.id::text, ''), COALESCE(bs.system_code, ''), COALESCE(bs.system_name, ''),
 		       a.environment, a.network_scope, COALESCE(na.id::text, ''), COALESCE(na.area_name, ''),
 		       a.status, a.importance, a.source,
-		       COALESCE(ao.owner_name, ''), COALESCE(a.notes, ''), a.created_at, a.updated_at,
+		       COALESCE(ao.owner_name, ''), COALESCE(a.notes, ''), a.expires_at, a.created_at, a.updated_at,
 		       count(*) OVER ()
 		FROM assets a
 		LEFT JOIN asset_network_areas na ON na.id = a.network_area_id
@@ -264,7 +266,7 @@ func (s *Service) SearchWithFilter(ctx context.Context, principal auth.Principal
 			&item.OrganizationID, &item.OrganizationCode, &item.OrganizationName,
 			&item.BusinessSystemID, &item.BusinessSystemCode, &item.BusinessSystemName,
 			&item.Environment, &item.NetworkScope, &item.NetworkAreaID, &item.NetworkAreaName,
-			&item.Status, &item.Importance, &item.Source, &item.OwnerName, &item.Notes, &item.CreatedAt, &item.UpdatedAt, &total); err != nil {
+			&item.Status, &item.Importance, &item.Source, &item.OwnerName, &item.Notes, &item.ExpiresAt, &item.CreatedAt, &item.UpdatedAt, &total); err != nil {
 			return pagination.Result[Asset]{}, fmt.Errorf("scan asset page: %w", err)
 		}
 		items = append(items, item)
@@ -387,7 +389,7 @@ func buildExport(items []Asset, format string) ([]byte, string, string, error) {
 }
 
 func buildExportWithCustomFields(items []Asset, definitions []customfield.Definition, values map[string]map[string]any, format string) ([]byte, string, string, error) {
-	headers := []string{"所属组织编码", "所属组织名称", "资产类型", "资产值", "资产名称", "业务系统编码", "业务系统名称", "环境", "网络暴露范围", "网络区域", "状态", "重要程度", "来源", "负责人", "备注", "创建时间", "更新时间"}
+	headers := []string{"所属组织编码", "所属组织名称", "资产类型", "资产值", "资产名称", "业务系统编码", "业务系统名称", "环境", "网络暴露范围", "网络区域", "状态", "重要程度", "来源", "负责人", "备注", "有效期至", "创建时间", "更新时间"}
 	for _, definition := range definitions {
 		headers = append(headers, "自定义："+definition.FieldName)
 	}
@@ -397,7 +399,7 @@ func buildExportWithCustomFields(items []Asset, definitions []customfield.Defini
 			item.OrganizationCode, item.OrganizationName, assetExportLabel("type", item.Type), item.Value, item.Name,
 			item.BusinessSystemCode, item.BusinessSystemName, assetExportLabel("environment", item.Environment), assetExportLabel("scope", item.NetworkScope), item.NetworkAreaName,
 			assetExportLabel("status", item.Status), assetExportLabel("importance", item.Importance), assetExportLabel("source", item.Source),
-			item.OwnerName, item.Notes, formatExportTime(item.CreatedAt), formatExportTime(item.UpdatedAt),
+			item.OwnerName, item.Notes, formatOptionalExportTime(item.ExpiresAt), formatExportTime(item.CreatedAt), formatExportTime(item.UpdatedAt),
 		}
 		for _, definition := range definitions {
 			row = append(row, customfield.ExportValue(definition, values[item.ID][definition.FieldKey]))
@@ -424,6 +426,13 @@ func assetExportLabel(kind, value string) string {
 		return label
 	}
 	return value
+}
+
+func formatOptionalExportTime(value *time.Time) string {
+	if value == nil {
+		return ""
+	}
+	return formatExportTime(*value)
 }
 
 func formatExportTime(value time.Time) string {
@@ -515,11 +524,11 @@ func createInTx(ctx context.Context, tx pgx.Tx, principal auth.Principal, input 
 	var item Asset
 	err = tx.QueryRow(ctx, `
 		INSERT INTO assets (asset_type, asset_value, normalized_value, asset_name, environment, network_scope, network_area_id,
-		                    status, importance, source, notes, created_by, updated_by, first_seen_at, last_seen_at)
-		VALUES ($1, $2, $3, NULLIF($4, ''), $5, $6, NULLIF($7, '')::uuid, $8, $9, $10, NULLIF($11, ''), $12::uuid, $12::uuid, now(), now())
+		                    status, importance, source, notes, expires_at, created_by, updated_by, first_seen_at, last_seen_at)
+		VALUES ($1, $2, $3, NULLIF($4, ''), $5, $6, NULLIF($7, '')::uuid, $8, $9, $10, NULLIF($11, ''), $12, $13::uuid, $13::uuid, now(), now())
 		RETURNING id::text, created_at, updated_at
 	`, input.Type, input.Value, normalizedValue, input.Name, input.Environment, input.NetworkScope, input.NetworkAreaID,
-		input.Status, input.Importance, source, input.Notes, principal.UserID).Scan(&item.ID, &item.CreatedAt, &item.UpdatedAt)
+		input.Status, input.Importance, source, input.Notes, input.ExpiresAt, principal.UserID).Scan(&item.ID, &item.CreatedAt, &item.UpdatedAt)
 	if err != nil {
 		var pgErr *pgconn.PgError
 		if errors.As(err, &pgErr) && pgErr.Code == "23505" {
@@ -546,7 +555,7 @@ func createInTx(ctx context.Context, tx pgx.Tx, principal auth.Principal, input 
 	item.BusinessSystemID, item.BusinessSystemCode, item.BusinessSystemName = input.BusinessSystemID, systemCode, systemName
 	item.Environment, item.NetworkScope, item.NetworkAreaID, item.NetworkAreaName = input.Environment, input.NetworkScope, input.NetworkAreaID, networkAreaName
 	item.Status, item.Importance = input.Status, input.Importance
-	item.Source, item.OwnerName, item.Notes = source, input.OwnerName, input.Notes
+	item.Source, item.OwnerName, item.Notes, item.ExpiresAt = source, input.OwnerName, input.Notes, input.ExpiresAt
 	return item, nil
 }
 
@@ -624,10 +633,10 @@ func (s *Service) Update(ctx context.Context, principal auth.Principal, assetID 
 	command, err := tx.Exec(ctx, `
 		UPDATE assets SET asset_type = $2, asset_value = $3, normalized_value = $4, asset_name = NULLIF($5, ''),
 		                  environment = $6, network_scope = $7, network_area_id = NULLIF($8, '')::uuid, status = $9, importance = $10,
-		                  notes = NULLIF($11, ''), updated_by = $12::uuid, updated_at = now()
+		                  notes = NULLIF($11, ''), expires_at = $12, updated_by = $13::uuid, updated_at = now()
 		WHERE id::text = $1 AND deleted_at IS NULL
 	`, assetID, input.Type, input.Value, normalizedValue, input.Name, input.Environment, input.NetworkScope, input.NetworkAreaID,
-		input.Status, input.Importance, input.Notes, principal.UserID)
+		input.Status, input.Importance, input.Notes, input.ExpiresAt, principal.UserID)
 	if err != nil {
 		var pgErr *pgconn.PgError
 		if errors.As(err, &pgErr) && pgErr.Code == "23505" {
@@ -876,7 +885,7 @@ func queryAsset(ctx context.Context, querier interface {
 		       COALESCE(bs.id::text, ''), COALESCE(bs.system_code, ''), COALESCE(bs.system_name, ''),
 		       a.environment, a.network_scope, COALESCE(na.id::text, ''), COALESCE(na.area_name, ''),
 		       a.status, a.importance, a.source,
-		       COALESCE(ao.owner_name, ''), COALESCE(a.notes, ''), a.created_at, a.updated_at
+		       COALESCE(ao.owner_name, ''), COALESCE(a.notes, ''), a.expires_at, a.created_at, a.updated_at
 		FROM assets a
 		LEFT JOIN asset_network_areas na ON na.id = a.network_area_id
 		JOIN asset_organizations ao ON ao.asset_id = a.id AND ao.is_primary
@@ -892,7 +901,7 @@ func queryAsset(ctx context.Context, querier interface {
 		&item.OrganizationID, &item.OrganizationCode, &item.OrganizationName,
 		&item.BusinessSystemID, &item.BusinessSystemCode, &item.BusinessSystemName,
 		&item.Environment, &item.NetworkScope, &item.NetworkAreaID, &item.NetworkAreaName,
-		&item.Status, &item.Importance, &item.Source, &item.OwnerName, &item.Notes, &item.CreatedAt, &item.UpdatedAt)
+		&item.Status, &item.Importance, &item.Source, &item.OwnerName, &item.Notes, &item.ExpiresAt, &item.CreatedAt, &item.UpdatedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return Asset{}, ErrNotFound
 	}
@@ -917,8 +926,8 @@ func (s *Service) Template(ctx context.Context, principal auth.Principal, organi
 }
 
 func buildTemplate(format string, definitions []customfield.Definition) ([]byte, string, string, error) {
-	headers := []string{"资产类型", "资产值", "资产名称", "业务系统编码", "环境", "网络暴露范围", "网络区域", "重要程度", "负责人", "备注"}
-	example := []string{"domain", "portal.example.com", "门户网站域名", "", "production", "public", "上海办事处", "important", "张三", "网络区域按所属组织下已配置的名称填写"}
+	headers := []string{"资产类型", "资产值", "资产名称", "业务系统编码", "环境", "网络暴露范围", "网络区域", "重要程度", "负责人", "有效期至", "备注"}
+	example := []string{"domain", "portal.example.com", "门户网站域名", "", "production", "public", "上海办事处", "important", "张三", "2027-12-31", "网络区域按所属组织下已配置的名称填写；有效期支持 YYYY-MM-DD、YYYY-MM-DD HH:mm:ss 或 RFC3339；无时区值按 UTC+8 解释"}
 	for _, definition := range definitions {
 		headers = append(headers, customfield.ImportHeader(definition))
 		example = append(example, customFieldTemplateExample(definition))
@@ -1040,7 +1049,12 @@ func (s *Service) PreviewImport(ctx context.Context, principal auth.Principal, o
 	seen := make(map[string]struct{}, result.TotalCount)
 	for index, row := range rows[1:] {
 		rowNumber := index + 2
-		input := importInput(row, headers, organizationID)
+		input, inputErr := importInput(row, headers, organizationID)
+		if inputErr != nil {
+			result.FailureCount++
+			result.Errors = append(result.Errors, ImportError{Row: rowNumber, Code: "invalid_expiry", Message: "有效期格式不正确，请使用 YYYY-MM-DD、YYYY-MM-DD HH:mm:ss 或 RFC3339"})
+			continue
+		}
 		if _, customErr := customfield.ImportValues(definitions, rows[0], row); customErr != nil {
 			result.FailureCount++
 			result.Errors = append(result.Errors, ImportError{Row: rowNumber, Code: "invalid_custom_field", Message: customErr.Error()})
@@ -1145,7 +1159,12 @@ func (s *Service) Import(ctx context.Context, principal auth.Principal, organiza
 	result := ImportResult{FileName: filepath.Base(fileName), FileType: fileType, Errors: make([]ImportError, 0), TotalCount: len(rows) - 1}
 	for index, row := range rows[1:] {
 		rowNumber := index + 2
-		input := importInput(row, headers, organizationID)
+		input, inputErr := importInput(row, headers, organizationID)
+		if inputErr != nil {
+			result.FailureCount++
+			result.Errors = append(result.Errors, ImportError{Row: rowNumber, Code: "invalid_expiry", Message: "有效期格式不正确，请使用 YYYY-MM-DD、YYYY-MM-DD HH:mm:ss 或 RFC3339"})
+			continue
+		}
 		customValues, customErr := customfield.ImportValues(definitions, rows[0], row)
 		if customErr != nil {
 			result.FailureCount++
@@ -1272,8 +1291,16 @@ func assetFieldChanges(current Asset, input CreateInput, organizationName, syste
 	add("network_area", "网络区域", displayValue(current.NetworkAreaName, "未设置"), displayValue(networkAreaName, "未设置"))
 	add("status", "资产状态", assetStatusLabel(current.Status), assetStatusLabel(input.Status))
 	add("importance", "重要程度", assetImportanceLabel(current.Importance), assetImportanceLabel(input.Importance))
+	add("expires_at", "有效期至", formatOptionalDisplayTime(current.ExpiresAt), formatOptionalDisplayTime(input.ExpiresAt))
 	add("notes", "备注", displayValue(current.Notes, "未填写"), displayValue(input.Notes, "未填写"))
 	return changes
+}
+
+func formatOptionalDisplayTime(value *time.Time) string {
+	if value == nil {
+		return "长期有效"
+	}
+	return value.Format("2006-01-02 15:04:05Z07:00")
 }
 
 func displayValue(value, fallback string) string {
@@ -1415,9 +1442,9 @@ func mapHeaders(row []string) map[string]int {
 		"资产类型": "type", "type": "type", "资产值": "value", "value": "value", "资产名称": "name", "name": "name",
 		"业务系统编码": "business_system_code", "business_system_code": "business_system_code", "环境": "environment", "environment": "environment",
 		"网络范围": "network_scope", "网络暴露范围": "network_scope", "network_scope": "network_scope", "网络区域": "network_area", "网络归属": "network_area", "network_area": "network_area", "重要程度": "importance", "importance": "importance",
-		"负责人": "owner_name", "owner_name": "owner_name", "备注": "notes", "notes": "notes",
+		"负责人": "owner_name", "owner_name": "owner_name", "有效期至": "expires_at", "到期时间": "expires_at", "expires_at": "expires_at", "备注": "notes", "notes": "notes",
 	}
-	result := map[string]int{"type": -1, "value": -1, "name": -1, "business_system_code": -1, "environment": -1, "network_scope": -1, "network_area": -1, "importance": -1, "owner_name": -1, "notes": -1}
+	result := map[string]int{"type": -1, "value": -1, "name": -1, "business_system_code": -1, "environment": -1, "network_scope": -1, "network_area": -1, "importance": -1, "owner_name": -1, "expires_at": -1, "notes": -1}
 	for index, header := range row {
 		if key, ok := aliases[strings.ToLower(strings.TrimSpace(strings.TrimPrefix(header, "\ufeff")))]; ok {
 			result[key] = index
@@ -1425,7 +1452,7 @@ func mapHeaders(row []string) map[string]int {
 	}
 	return result
 }
-func importInput(row []string, headers map[string]int, organizationID string) CreateInput {
+func importInput(row []string, headers map[string]int, organizationID string) (CreateInput, error) {
 	get := func(key string) string {
 		index := headers[key]
 		if index < 0 || index >= len(row) {
@@ -1433,10 +1460,36 @@ func importInput(row []string, headers map[string]int, organizationID string) Cr
 		}
 		return strings.TrimSpace(row[index])
 	}
+	expiresAt, err := parseImportExpiry(get("expires_at"))
+	if err != nil {
+		return CreateInput{}, err
+	}
 	return CreateInput{Type: translateAssetType(get("type")), Value: get("value"), Name: get("name"), OrganizationID: organizationID,
 		BusinessSystemID: get("business_system_code"), Environment: translateEnvironment(get("environment")), NetworkScope: translateScope(get("network_scope")),
-		NetworkAreaID: get("network_area"), Status: "active", Importance: translateImportance(get("importance")), OwnerName: get("owner_name"), Notes: get("notes")}
+		NetworkAreaID: get("network_area"), Status: "active", Importance: translateImportance(get("importance")), OwnerName: get("owner_name"), Notes: get("notes"), ExpiresAt: expiresAt}, nil
 }
+
+func parseImportExpiry(value string) (*time.Time, error) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return nil, nil
+	}
+	if parsed, err := time.Parse(time.RFC3339, value); err == nil {
+		return &parsed, nil
+	}
+	zone := time.FixedZone("UTC+8", 8*60*60)
+	if parsed, err := time.ParseInLocation("2006-01-02 15:04:05", value, zone); err == nil {
+		return &parsed, nil
+	}
+	parsed, err := time.ParseInLocation("2006-01-02", value, zone)
+	if err != nil {
+		return nil, err
+	}
+	// Date-only imports represent validity through the end of that UTC+8 calendar day.
+	expiresAt := time.Date(parsed.Year(), parsed.Month(), parsed.Day(), 23, 59, 59, 0, zone)
+	return &expiresAt, nil
+}
+
 func translateAssetType(value string) string {
 	values := map[string]string{"域名": "domain", "IP": "ip", "IP地址": "ip", "IP 地址": "ip", "网址": "url", "网络服务": "service", "服务": "service", "其他": "other"}
 	if v := values[value]; v != "" {

@@ -117,7 +117,7 @@ func createInputFromAsset(item Asset) CreateInput {
 	return CreateInput{
 		Type: item.Type, Value: item.Value, Name: item.Name, OrganizationID: item.OrganizationID,
 		BusinessSystemID: item.BusinessSystemID, Environment: item.Environment, NetworkScope: item.NetworkScope,
-		NetworkAreaID: item.NetworkAreaID, Status: item.Status, Importance: item.Importance, OwnerName: item.OwnerName, Notes: item.Notes,
+		NetworkAreaID: item.NetworkAreaID, Status: item.Status, Importance: item.Importance, OwnerName: item.OwnerName, Notes: item.Notes, ExpiresAt: item.ExpiresAt,
 	}
 }
 
