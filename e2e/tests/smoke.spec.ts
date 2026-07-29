@@ -767,7 +767,9 @@ test('集团创建安全测试批次并批量导入授权范围内漏洞', async
   const batchName = `安全测试批次_PW_${suffix}`
   const assetValue = `scope-pw-${suffix}.example.com`
   const outOfScopeValue = `out-of-scope-pw-${suffix}.example.com`
+  const scopeIP = `198.51.100.${Number(suffix.slice(-3)) % 250 + 1}`
   const importFindingTitle = `批量导入漏洞_PW_${suffix}`
+  const linkedFindingTitle = `端口标识待关联漏洞_PW_${suffix}`
   const reportName = `测试报告_PW_${suffix}.txt`
   const organizationCode = `SCOPE_PW_${suffix}`
   const organizationName = `测试范围子公司_PW_${suffix}`
@@ -777,7 +779,7 @@ test('集团创建安全测试批次并批量导入授权范围内漏洞', async
   await expect(page).toHaveURL(/\/security-test-batches$/)
   await expect(page.getByRole('heading', { name: '安全测试', exact: true })).toBeVisible()
 
-  await page.evaluate(async ({ value, code, name }) => {
+  await page.evaluate(async ({ value, scopeIP, outOfScopeValue, code, name }) => {
     const organizationsResponse = await fetch('/api/v1/organizations')
     if (!organizationsResponse.ok) throw new Error(`organizations request failed: ${organizationsResponse.status}`)
     const organizations = await organizationsResponse.json()
@@ -788,16 +790,22 @@ test('集团创建安全测试批次并批量导入授权范围内漏洞', async
     })
     if (!organizationResponse.ok) throw new Error(`create scope organization failed: ${organizationResponse.status}`)
     const organization = (await organizationResponse.json()).item
-    const response = await fetch('/api/v1/assets', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        type: 'domain', value, name: `授权范围测试资产_${Date.now()}`, organization_id: organization.id,
-        environment: 'production', network_scope: 'public', status: 'active', importance: 'important',
-      }),
-    })
-    if (!response.ok) throw new Error(`create scope asset failed: ${response.status}`)
-  }, { value: assetValue, code: organizationCode, name: organizationName })
+    for (const asset of [
+      { type: 'domain', value, name: `授权范围测试域名_${Date.now()}` },
+      { type: 'ip', value: scopeIP, name: `授权范围测试主机_${Date.now()}` },
+      { type: 'domain', value: outOfScopeValue, name: `批次外测试资产_${Date.now()}` },
+    ]) {
+      const response = await fetch('/api/v1/assets', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          ...asset, organization_id: organization.id,
+          environment: 'production', network_scope: 'public', status: 'active', importance: 'important',
+        }),
+      })
+      if (!response.ok) throw new Error(`create scope asset failed: ${response.status}`)
+    }
+  }, { value: assetValue, scopeIP, outOfScopeValue, code: organizationCode, name: organizationName })
   await page.reload()
 
   await page.getByTestId('create-security-test-batch').click()
@@ -806,14 +814,16 @@ test('集团创建安全测试批次并批量导入授权范围内漏洞', async
   await dialog.getByPlaceholder('说明授权人、授权依据、允许的测试方式与边界').fill('经集团信息安全负责人授权，仅对本批次资产执行非破坏性渗透测试。')
   const scopeItem = dialog.locator('.el-form-item').filter({ hasText: '公网资产范围' })
   await scopeItem.locator('.el-select').click()
-  await page.locator('.el-select-dropdown:visible').getByText(new RegExp(assetValue.replaceAll('.', '\\.'))).click()
+  await page.locator('.el-select-dropdown:visible').getByText(`[域名] ${assetValue} · ${organizationName}`, { exact: true }).click()
+  await scopeItem.locator('.el-select').click()
+  await page.locator('.el-select-dropdown:visible').getByText(`[IP] ${scopeIP} · ${organizationName}`, { exact: true }).click()
   await page.keyboard.press('Escape')
   await dialog.getByTestId('save-security-test-batch').click()
   await expect(page.getByText('安全测试批次已创建')).toBeVisible()
 
   let row = page.locator('.el-table__body-wrapper tbody tr').filter({ hasText: batchName }).first()
   await expect(row).toContainText('草稿')
-  await expect(row).toContainText('1 项')
+  await expect(row).toContainText('2 项')
   await row.getByRole('button', { name: '授权', exact: true }).click()
   let prompt = page.getByRole('dialog', { name: '确认授权测试' })
   await prompt.getByRole('button', { name: '确认', exact: true }).click()
@@ -870,13 +880,36 @@ test('集团创建安全测试批次并批量导入授权范围内漏洞', async
   const csv = [
     '资产类型,资产值,漏洞标题,严重等级,漏洞类型,漏洞描述,验证证据,整改建议,发现时间',
     `domain,${assetValue},${importFindingTitle},高危,配置风险,授权范围内测试发现,测试证据,完成安全配置加固,2026-07-22 10:00:00`,
-    `domain,${outOfScopeValue},范围外漏洞_PW_${suffix},中危,配置风险,该资产不在授权范围,测试证据,完成安全配置加固,2026-07-22 10:00:00`,
+    `ip,${scopeIP}:443,${linkedFindingTitle},中危,端口暴露,扫描器以IP端口输出,测试证据,核查端口服务并完成加固,2026-07-22 10:05:00`,
   ].join('\n')
   await importDialog.locator('input[type=file]').setInputFiles({ name: `findings-${suffix}.csv`, mimeType: 'text/csv', buffer: Buffer.from(csv) })
   await importDialog.getByRole('button', { name: '开始导入', exact: true }).click()
-  await expect(page.getByText(/导入完成：成功 1 条，失败 1 条，重复 0 条/)).toBeVisible()
-  await expect(importDialog.getByText('asset_out_of_scope', { exact: true })).toBeVisible()
-  await importDialog.getByRole('button', { name: '关闭', exact: true }).click()
+  await expect(page.getByText(/导入完成：成功 1 条，待关联 1 条，失败 0 条，重复 0 条/)).toBeVisible()
+  await expect(importDialog.getByText('待关联', { exact: true })).toBeVisible()
+  await importDialog.getByRole('button', { name: '处理 1 条待关联漏洞', exact: true }).click()
+  await expect(page.getByRole('tab', { name: /待关联漏洞/ })).toHaveAttribute('aria-selected', 'true')
+  const candidateRow = page.locator('.security-panel .el-table__body-wrapper tbody tr').filter({ hasText: linkedFindingTitle }).first()
+  await expect(candidateRow).toContainText(`${scopeIP}:443`)
+  await expect(candidateRow).toContainText(scopeIP)
+  await expect(candidateRow).toContainText('IP 与端口主机匹配 90%')
+  await candidateRow.getByRole('button', { name: '关联资产', exact: true }).click()
+  const candidateDialog = page.getByRole('dialog', { name: '关联漏洞到测试范围资产' })
+  await expect(candidateDialog).toContainText('只允许关联当前安全测试批次中的授权资产')
+  await expect(candidateDialog).toContainText(`${scopeIP}:443`)
+  const candidateSelect = candidateDialog.locator('.el-form-item').filter({ hasText: '关联授权资产（必选）' }).locator('.el-select')
+  await candidateSelect.click()
+  const candidateOptions = page.locator('.el-select-dropdown:visible')
+  await expect(candidateOptions).toContainText(scopeIP)
+  await expect(candidateOptions).toContainText(assetValue)
+  await expect(candidateOptions).not.toContainText(outOfScopeValue)
+  await page.keyboard.press('Escape')
+  await candidateDialog.getByPlaceholder('可记录扫描器标识与台账资产的对应依据').fill('确认扫描器端口标识属于该授权主机')
+  await candidateDialog.getByRole('button', { name: '确认关联并生成安全发现', exact: true }).click()
+  await expect(page.getByText(/已生成安全发现 F/)).toBeVisible()
+  await page.getByRole('tab', { name: '漏洞与安全发现', exact: true }).click()
+  const linkedFindingRow = page.locator('.security-panel .el-table__body-wrapper tbody tr').filter({ hasText: linkedFindingTitle }).first()
+  await expect(linkedFindingRow).toContainText(scopeIP)
+  await expect(linkedFindingRow).toContainText(batchName)
   const findingRow = page.locator('.security-panel .el-table__body-wrapper tbody tr').filter({ hasText: importFindingTitle }).first()
   await expect(findingRow).toContainText(batchName)
   await expect(findingRow).toContainText(organizationName)

@@ -16,6 +16,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/xuri/excelize/v2"
 
+	"netassets/internal/asset"
 	"netassets/internal/auth"
 	"netassets/internal/pagination"
 )
@@ -40,6 +41,7 @@ type FindingImportResult struct {
 	SuccessCount   int                  `json:"success_count"`
 	FailureCount   int                  `json:"failure_count"`
 	DuplicateCount int                  `json:"duplicate_count"`
+	PendingCount   int                  `json:"pending_count"`
 	Errors         []FindingImportError `json:"errors"`
 }
 
@@ -52,6 +54,7 @@ type FindingImportHistory struct {
 type findingImportRowError struct{ code, message string }
 
 type findingImportScope struct {
+	ScopeAssetID       string
 	AssetID            string
 	OrganizationID     string
 	BusinessSystemID   string
@@ -141,11 +144,16 @@ func (s *Service) ImportFindings(ctx context.Context, principal auth.Principal, 
 		}
 	}
 
+	scopes, err := s.loadFindingImportScopes(ctx, testBatchID)
+	if err != nil {
+		return FindingImportResult{}, err
+	}
 	result := FindingImportResult{
 		TestBatchID: testBatchID, TestBatchCode: batchCode, TestBatchName: batchName,
 		FileName: filepath.Base(fileName), FileType: fileType, TotalCount: len(rows) - 1,
 		Errors: make([]FindingImportError, 0),
 	}
+	pendingCandidates := make([]pendingFindingImportCandidate, 0)
 	for index, row := range rows[1:] {
 		rowNumber := index + 2
 		input, assetType, assetValue, rowErr := findingInputFromImportRow(row, headers, testBatchID)
@@ -154,15 +162,20 @@ func (s *Service) ImportFindings(ctx context.Context, principal auth.Principal, 
 			result.Errors = append(result.Errors, FindingImportError{Row: rowNumber, Code: rowErr.code, Message: rowErr.message})
 			continue
 		}
-		scope, err := s.findImportScope(ctx, testBatchID, assetType, assetValue)
-		if errors.Is(err, pgx.ErrNoRows) {
-			result.FailureCount++
-			result.Errors = append(result.Errors, FindingImportError{Row: rowNumber, Code: "asset_out_of_scope", Message: "资产不在所选测试批次的授权范围内，或当前资产已删除"})
+		normalizedValue := ""
+		if value, normalizeErr := asset.NormalizeValue(assetType, assetValue); normalizeErr == nil {
+			normalizedValue = value
+		}
+		matches := exactFindingImportScopes(scopes, assetType, assetValue, normalizedValue)
+		if len(matches) != 1 {
+			suggestion, matchMethod, confidence := suggestFindingImportScope(scopes, assetType, assetValue, normalizedValue)
+			pendingCandidates = append(pendingCandidates, newPendingFindingImportCandidate(
+				rowNumber, row, headers, input, assetType, assetValue, normalizedValue, suggestion, matchMethod, confidence,
+			))
+			result.PendingCount++
 			continue
 		}
-		if err != nil {
-			return FindingImportResult{}, err
-		}
+		scope := matches[0]
 		input.AssetID = scope.AssetID
 		input.AssigneeOrganizationID = scope.OrganizationID
 		input.BusinessSystemID = scope.BusinessSystemID
@@ -198,12 +211,12 @@ func (s *Service) ImportFindings(ctx context.Context, principal auth.Principal, 
 		}
 	}
 	result.Status = "completed"
-	if result.SuccessCount == 0 {
+	if result.SuccessCount == 0 && result.PendingCount == 0 {
 		result.Status = "failed"
-	} else if result.FailureCount+result.DuplicateCount > 0 {
+	} else if result.FailureCount+result.DuplicateCount+result.PendingCount > 0 {
 		result.Status = "partial"
 	}
-	id, err := s.saveFindingImportResult(ctx, principal, result, requestID, ipAddress)
+	id, err := s.saveFindingImportResult(ctx, principal, result, pendingCandidates, requestID, ipAddress)
 	if err != nil {
 		return FindingImportResult{}, err
 	}
@@ -211,28 +224,7 @@ func (s *Service) ImportFindings(ctx context.Context, principal auth.Principal, 
 	return result, nil
 }
 
-func (s *Service) findImportScope(ctx context.Context, batchID, assetType, assetValue string) (findingImportScope, error) {
-	var item findingImportScope
-	err := s.pool.QueryRow(ctx, `
-		SELECT scope.asset_id::text, scope.organization_id::text, COALESCE(scope.business_system_id::text, ''),
-		       scope.asset_type_snapshot, scope.asset_value_snapshot, scope.organization_name_snapshot,
-		       COALESCE(scope.business_system_name_snapshot, '')
-		FROM security_test_scope_assets scope
-		JOIN assets a ON a.id=scope.asset_id AND a.deleted_at IS NULL
-		JOIN organizations o ON o.id=scope.organization_id AND o.status='enabled'
-		JOIN asset_organizations ao ON ao.asset_id=a.id AND ao.organization_id=scope.organization_id
-		WHERE scope.batch_id::text=$1 AND lower(scope.asset_type_snapshot)=lower($2)
-		  AND lower(btrim(scope.asset_value_snapshot))=lower(btrim($3))
-		ORDER BY scope.created_at LIMIT 1`, batchID, assetType, assetValue).Scan(
-		&item.AssetID, &item.OrganizationID, &item.BusinessSystemID, &item.AssetTypeSnapshot,
-		&item.AssetValueSnapshot, &item.OrganizationName, &item.BusinessSystemName)
-	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
-		return findingImportScope{}, fmt.Errorf("match finding import scope: %w", err)
-	}
-	return item, err
-}
-
-func (s *Service) saveFindingImportResult(ctx context.Context, principal auth.Principal, result FindingImportResult, requestID, ipAddress string) (string, error) {
+func (s *Service) saveFindingImportResult(ctx context.Context, principal auth.Principal, result FindingImportResult, candidates []pendingFindingImportCandidate, requestID, ipAddress string) (string, error) {
 	errorsJSON, err := json.Marshal(result.Errors)
 	if err != nil {
 		return "", fmt.Errorf("encode finding import errors: %w", err)
@@ -245,19 +237,22 @@ func (s *Service) saveFindingImportResult(ctx context.Context, principal auth.Pr
 	var id string
 	if err := tx.QueryRow(ctx, `
 		INSERT INTO security_finding_imports
-		(test_batch_id, file_name, file_type, status, total_count, success_count, failure_count, duplicate_count, errors, created_by)
-		VALUES ($1::uuid,$2,$3,$4,$5,$6,$7,$8,$9::jsonb,$10::uuid) RETURNING id::text`,
+		(test_batch_id, file_name, file_type, status, total_count, success_count, failure_count, duplicate_count, pending_count, errors, created_by)
+		VALUES ($1::uuid,$2,$3,$4,$5,$6,$7,$8,$9,$10::jsonb,$11::uuid) RETURNING id::text`,
 		result.TestBatchID, result.FileName, result.FileType, result.Status, result.TotalCount, result.SuccessCount,
-		result.FailureCount, result.DuplicateCount, string(errorsJSON), principal.UserID).Scan(&id); err != nil {
+		result.FailureCount, result.DuplicateCount, result.PendingCount, string(errorsJSON), principal.UserID).Scan(&id); err != nil {
 		return "", fmt.Errorf("save finding import result: %w", err)
+	}
+	if err := insertFindingImportCandidates(ctx, tx, id, result.TestBatchID, candidates); err != nil {
+		return "", err
 	}
 	organizationID := principalOrganizationID(principal)
 	if _, err := tx.Exec(ctx, `
 		INSERT INTO audit_logs (user_id, organization_id, action, resource_type, resource_id, summary, details, request_ip, request_id)
 		VALUES ($1::uuid, NULLIF($2,'')::uuid, 'security_finding.import', 'security_finding_import', $3,
-		'批量导入安全发现', jsonb_build_object('test_batch_id',$4::text,'file_name',$5::text,'total',$6::int,'success',$7::int,'failure',$8::int,'duplicate',$9::int),
-		NULLIF($10,'')::inet, NULLIF($11,''))`, principal.UserID, organizationID, id, result.TestBatchID,
-		result.FileName, result.TotalCount, result.SuccessCount, result.FailureCount, result.DuplicateCount, ipAddress, requestID); err != nil {
+		'批量导入安全发现', jsonb_build_object('test_batch_id',$4::text,'file_name',$5::text,'total',$6::int,'success',$7::int,'failure',$8::int,'duplicate',$9::int,'pending',$10::int),
+		NULLIF($11,'')::inet, NULLIF($12,''))`, principal.UserID, organizationID, id, result.TestBatchID,
+		result.FileName, result.TotalCount, result.SuccessCount, result.FailureCount, result.DuplicateCount, result.PendingCount, ipAddress, requestID); err != nil {
 		return "", fmt.Errorf("write finding import audit: %w", err)
 	}
 	if err := tx.Commit(ctx); err != nil {
@@ -277,7 +272,7 @@ func (s *Service) SearchFindingImports(ctx context.Context, principal auth.Princ
 	}
 	rows, err := s.pool.Query(ctx, `
 		SELECT i.id::text, i.test_batch_id::text, b.batch_code, b.batch_name, i.file_name, i.file_type, i.status,
-		       i.total_count, i.success_count, i.failure_count, i.duplicate_count, i.errors::text,
+		       i.total_count, i.success_count, i.failure_count, i.duplicate_count, i.pending_count, i.errors::text,
 		       COALESCE(u.display_name,''), i.created_at, count(*) OVER ()
 		FROM security_finding_imports i
 		JOIN security_test_batches b ON b.id=i.test_batch_id
@@ -294,7 +289,7 @@ func (s *Service) SearchFindingImports(ctx context.Context, principal auth.Princ
 		var errorsText string
 		if err := rows.Scan(&item.ID, &item.TestBatchID, &item.TestBatchCode, &item.TestBatchName, &item.FileName,
 			&item.FileType, &item.Status, &item.TotalCount, &item.SuccessCount, &item.FailureCount,
-			&item.DuplicateCount, &errorsText, &item.CreatedByName, &item.CreatedAt, &total); err != nil {
+			&item.DuplicateCount, &item.PendingCount, &errorsText, &item.CreatedByName, &item.CreatedAt, &total); err != nil {
 			return pagination.Result[FindingImportHistory]{}, fmt.Errorf("scan finding import: %w", err)
 		}
 		item.Errors = make([]FindingImportError, 0)

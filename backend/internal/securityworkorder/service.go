@@ -345,15 +345,26 @@ func (s *Service) CreateFinding(ctx context.Context, principal auth.Principal, i
 			return Finding{}, err
 		}
 	}
-	code, err := newCode("F")
-	if err != nil {
-		return Finding{}, fmt.Errorf("generate finding code: %w", err)
-	}
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return Finding{}, fmt.Errorf("begin create finding: %w", err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
+	id, _, err := s.createFindingInTx(ctx, tx, principal, input, requestID, ipAddress)
+	if err != nil {
+		return Finding{}, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return Finding{}, fmt.Errorf("commit create finding: %w", err)
+	}
+	return s.getFinding(ctx, id)
+}
+
+func (s *Service) createFindingInTx(ctx context.Context, tx pgx.Tx, principal auth.Principal, input FindingInput, requestID, ipAddress string) (string, string, error) {
+	code, err := newCode("F")
+	if err != nil {
+		return "", "", fmt.Errorf("generate finding code: %w", err)
+	}
 	var id string
 	if err := tx.QueryRow(ctx, `
 		INSERT INTO security_findings (
@@ -364,11 +375,11 @@ func (s *Service) CreateFinding(ctx context.Context, principal auth.Principal, i
 		RETURNING id::text`, code, input.Title, input.Severity, input.Status, input.AssigneeOrganizationID,
 		input.AssetID, input.BusinessSystemID, input.TestBatchID, input.VulnerabilityType, input.Description, input.Evidence,
 		input.RemediationAdvice, input.Source, input.DiscoveredAt, principal.UserID).Scan(&id); err != nil {
-		return Finding{}, fmt.Errorf("insert security finding: %w", err)
+		return "", "", fmt.Errorf("insert security finding: %w", err)
 	}
 	if err := writeAudit(ctx, tx, principal, input.AssigneeOrganizationID, "security_finding.create", "security_finding", id,
 		"登记安全发现 "+code, map[string]any{"severity": input.Severity, "asset_id": input.AssetID, "business_system_id": input.BusinessSystemID, "test_batch_id": input.TestBatchID}, requestID, ipAddress); err != nil {
-		return Finding{}, err
+		return "", "", err
 	}
 	eventType := notification.EventFindingCreatedOnSystem
 	requiredPermission := "system.manage"
@@ -388,12 +399,9 @@ func (s *Service) CreateFinding(ctx context.Context, principal auth.Principal, i
 		ResourceType: "security_finding", ResourceID: id, ResourceLabel: code + "《" + input.Title + "》", BatchKey: requestID, Level: level,
 		Details: map[string]any{"severity": input.Severity, "asset_id": input.AssetID, "business_system_id": input.BusinessSystemID, "test_batch_id": input.TestBatchID},
 	}); err != nil {
-		return Finding{}, err
+		return "", "", err
 	}
-	if err := tx.Commit(ctx); err != nil {
-		return Finding{}, fmt.Errorf("commit create finding: %w", err)
-	}
-	return s.getFinding(ctx, id)
+	return id, code, nil
 }
 
 func (s *Service) UpdateFinding(ctx context.Context, principal auth.Principal, id string, input FindingInput, requestID, ipAddress string) (Finding, error) {
@@ -1348,7 +1356,7 @@ func writeAudit(ctx context.Context, tx pgx.Tx, principal auth.Principal, organi
 	}
 	if _, err := tx.Exec(ctx, `
 		INSERT INTO audit_logs (user_id, organization_id, action, resource_type, resource_id, summary, details, request_ip, request_id)
-		VALUES ($1::uuid, $2::uuid, $3, $4, $5, $6, $7::jsonb, NULLIF($8, '')::inet, NULLIF($9, ''))`,
+		VALUES ($1::uuid, NULLIF($2, '')::uuid, $3, $4, $5, $6, $7::jsonb, NULLIF($8, '')::inet, NULLIF($9, ''))`,
 		principal.UserID, organizationID, action, resourceType, resourceID, summary, payload, ipAddress, requestID); err != nil {
 		return fmt.Errorf("write security work order audit: %w", err)
 	}

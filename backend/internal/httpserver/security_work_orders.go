@@ -61,6 +61,57 @@ func registerSecurityWorkOrderRoutes(api *gin.RouterGroup, requireAuth gin.Handl
 		writeFindingImportResult(c, logger, result, err)
 	})
 
+	findings.GET("/import-candidates", func(c *gin.Context) {
+		page, err := parsePageQuery(c)
+		if err != nil {
+			writeAPIError(c, http.StatusBadRequest, "invalid_query", "分页参数不正确，page_size 最大为 100")
+			return
+		}
+		result, err := service.SearchFindingImportCandidates(c.Request.Context(), mustPrincipal(c), securityworkorder.FindingImportCandidateFilter{
+			TestBatchID: c.Query("test_batch_id"), Status: c.Query("status"), AssetType: c.Query("asset_type"),
+			Keyword: c.Query("keyword"), Page: page,
+		})
+		if err != nil {
+			writeFindingImportCandidateError(c, logger, "list finding import candidates", err)
+			return
+		}
+		c.JSON(http.StatusOK, result)
+	})
+	findings.GET("/import-candidates/:id/scope-assets", func(c *gin.Context) {
+		items, err := service.ListFindingImportScopeOptions(c.Request.Context(), mustPrincipal(c), c.Param("id"))
+		if err != nil {
+			writeFindingImportCandidateError(c, logger, "list finding import candidate scope assets", err)
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"items": items, "total": len(items), "page": 1, "page_size": 200})
+	})
+	findings.POST("/import-candidates/:id/link", func(c *gin.Context) {
+		var input securityworkorder.FindingImportCandidateLinkInput
+		if err := c.ShouldBindJSON(&input); err != nil {
+			writeAPIError(c, http.StatusBadRequest, "invalid_request", "请选择测试批次授权资产")
+			return
+		}
+		item, err := service.LinkFindingImportCandidate(c.Request.Context(), mustPrincipal(c), c.Param("id"), input, c.GetString("request_id"), c.ClientIP())
+		if err != nil {
+			writeFindingImportCandidateError(c, logger, "link finding import candidate", err)
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"item": item})
+	})
+	findings.POST("/import-candidates/:id/ignore", func(c *gin.Context) {
+		var input securityworkorder.FindingImportCandidateReviewInput
+		if err := c.ShouldBindJSON(&input); err != nil {
+			writeAPIError(c, http.StatusBadRequest, "invalid_request", "请填写忽略原因")
+			return
+		}
+		item, err := service.IgnoreFindingImportCandidate(c.Request.Context(), mustPrincipal(c), c.Param("id"), input, c.GetString("request_id"), c.ClientIP())
+		if err != nil {
+			writeFindingImportCandidateError(c, logger, "ignore finding import candidate", err)
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"item": item})
+	})
+
 	findings.GET("", func(c *gin.Context) {
 		page, err := parsePageQuery(c)
 		if err != nil {
@@ -334,6 +385,22 @@ func writeFindingRiskResult(c *gin.Context, logger *slog.Logger, operation strin
 		writeAPIError(c, http.StatusInternalServerError, "internal_error", "处理安全发现风险状态失败")
 	default:
 		c.JSON(http.StatusOK, gin.H{"item": item})
+	}
+}
+
+func writeFindingImportCandidateError(c *gin.Context, logger *slog.Logger, operation string, err error) {
+	switch {
+	case errors.Is(err, securityworkorder.ErrForbidden):
+		writeAPIError(c, http.StatusForbidden, "forbidden", "当前账号无漏洞导入待关联项处理权限")
+	case errors.Is(err, securityworkorder.ErrInvalid):
+		writeAPIError(c, http.StatusBadRequest, "invalid_candidate", "待关联项、筛选条件、授权资产或处理备注不正确")
+	case errors.Is(err, securityworkorder.ErrNotFound):
+		writeAPIError(c, http.StatusNotFound, "candidate_not_found", "待关联漏洞或测试批次授权资产不存在")
+	case errors.Is(err, securityworkorder.ErrState):
+		writeAPIError(c, http.StatusConflict, "invalid_candidate_state", "该待关联漏洞已处理，请刷新列表")
+	case err != nil:
+		logger.Error(operation, "error", err, "request_id", c.GetString("request_id"))
+		writeAPIError(c, http.StatusInternalServerError, "internal_error", "处理漏洞导入待关联项失败")
 	}
 }
 

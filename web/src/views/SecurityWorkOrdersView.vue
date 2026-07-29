@@ -31,8 +31,23 @@ interface SecurityTestBatch {
 interface FindingImportError { row: number; code: string; message: string }
 interface FindingImportResult {
   id: string; test_batch_id: string; test_batch_code?: string; test_batch_name?: string; file_name: string; file_type: string
-  status: string; total_count: number; success_count: number; failure_count: number; duplicate_count: number; errors: FindingImportError[]
+  status: string; total_count: number; success_count: number; failure_count: number; duplicate_count: number; pending_count: number; errors: FindingImportError[]
   created_by_name?: string; created_at?: string
+}
+interface FindingImportCandidate {
+  id: string; finding_import_id: string; test_batch_id: string; test_batch_code: string; test_batch_name: string
+  source_row_number: number; asset_type: string; asset_value: string; normalized_value?: string
+  title: string; severity: string; vulnerability_type?: string; description: string; evidence?: string; remediation_advice?: string
+  discovered_at: string; status: string; suggested_scope_asset_id?: string; suggested_asset_value?: string
+  suggested_organization_name?: string; matched_scope_asset_id?: string; matched_asset_value?: string
+  matched_organization_name?: string; match_method?: string; match_confidence?: number; review_note?: string
+  reviewed_by_name?: string; reviewed_at?: string; imported_finding_id?: string; imported_finding_code?: string
+  created_at: string; updated_at: string
+}
+interface FindingImportScopeOption {
+  id: string; asset_id: string; asset_type: string; asset_value: string; asset_name?: string
+  organization_id: string; organization_code: string; organization_name: string
+  business_system_id?: string; business_system_code?: string; business_system_name?: string; suggested: boolean
 }
 interface WorkOrderEvent {
   id: number; action: string; from_status?: string; to_status?: string; comment?: string
@@ -56,7 +71,7 @@ type ActionMode = 'issue' | 'accept' | 'progress' | 'submit' | 'return' | 'close
 
 const auth = useAuthStore()
 const route = useRoute()
-const activeTab = ref<'orders' | 'findings'>('orders')
+const activeTab = ref<'orders' | 'findings' | 'candidates'>('orders')
 const loading = ref(false)
 const submitting = ref(false)
 const organizations = ref<Organization[]>([])
@@ -93,6 +108,19 @@ const importFile = ref<File>()
 const importTestBatchID = ref('')
 const importResult = ref<FindingImportResult>()
 const findingImports = ref<FindingImportResult[]>([])
+const findingImportCandidates = ref<FindingImportCandidate[]>([])
+const candidatePage = ref(1)
+const candidateTotal = ref(0)
+const candidateStatusFilter = ref('pending')
+const candidateBatchFilter = ref('')
+const candidateAssetTypeFilter = ref('')
+const candidateKeyword = ref('')
+const candidateDialogVisible = ref(false)
+const candidateSubmitting = ref(false)
+const selectedCandidate = ref<FindingImportCandidate>()
+const candidateScopeOptions = ref<FindingImportScopeOption[]>([])
+const selectedCandidateScopeAssetID = ref('')
+const candidateReviewNote = ref('')
 
 const workOrderDialogVisible = ref(false)
 const workOrderFormRef = ref<FormInstance>()
@@ -146,6 +174,9 @@ const eventLabels: Record<string, string> = {
   create: '创建工单', issue: '集团下发', accept: '子公司接收', progress: '更新整改进度', submit: '提交复测', return: '复测退回', close: '复测通过并关闭', cancel: '取消工单', attachment_upload: '上传工单附件', attachment_delete: '删除工单附件',
 }
 const attachmentCategoryLabels: Record<string, string> = { remediation: '整改证明', verification: '复测材料', reference: '参考资料' }
+const candidateStatusLabels: Record<string, string> = { pending: '待关联', imported: '已导入', ignored: '已忽略', invalid: '数据无效', duplicate: '重复漏洞' }
+const assetTypeLabels: Record<string, string> = { domain: '域名', ip: 'IP 地址', url: 'URL', service: '服务', other: '其他' }
+const matchMethodLabels: Record<string, string> = { normalized_exact: '标准化精确匹配', endpoint_host: 'IP 与端口主机匹配', cidr_contains: '网段包含', same_host: '相同主机', cross_type_host: '跨类型主机匹配', wildcard_domain: '泛域名匹配' }
 
 const currentWorkOrderFilters = computed<Record<string, string>>(() => ({
   ...(organizationFilter.value ? { organization_id: organizationFilter.value } : {}),
@@ -170,8 +201,8 @@ const scopedAssets = computed(() => assets.value.filter(item => item.organizatio
 const scopedSystems = computed(() => systems.value.filter(item => item.organization_id === findingForm.assignee_organization_id && item.status !== 'archived'))
 const usableTestBatches = computed(() => testBatches.value.filter(item => ['authorized', 'in_progress', 'completed'].includes(item.status)))
 const orderFindings = computed(() => findingOptions.value.filter(item => item.assignee_organization_id === workOrderForm.assignee_organization_id && item.status === 'open'))
-const currentPage = computed(() => activeTab.value === 'orders' ? orderPage.value : findingPage.value)
-const currentTotal = computed(() => activeTab.value === 'orders' ? orderTotal.value : findingTotal.value)
+const currentPage = computed(() => activeTab.value === 'orders' ? orderPage.value : activeTab.value === 'findings' ? findingPage.value : candidatePage.value)
+const currentTotal = computed(() => activeTab.value === 'orders' ? orderTotal.value : activeTab.value === 'findings' ? findingTotal.value : candidateTotal.value)
 const activeOrderCount = computed(() => workOrders.value.filter(item => !['closed', 'cancelled'].includes(item.status)).length)
 const overdueCount = computed(() => workOrders.value.filter(item => item.overdue).length)
 const pendingVerificationCount = computed(() => workOrders.value.filter(item => item.status === 'pending_verification').length)
@@ -220,7 +251,7 @@ watch(() => findingForm.asset_id, (assetID) => {
 
 function applyRouteFilters() {
   const tab = typeof route.query.tab === 'string' ? route.query.tab : ''
-  if (tab === 'findings' || tab === 'orders') activeTab.value = tab
+  if (tab === 'findings' || tab === 'orders' || (tab === 'candidates' && auth.canManageSecurityFindings)) activeTab.value = tab
   organizationFilter.value = typeof route.query.organization_id === 'string' ? route.query.organization_id : ''
   statusFilter.value = typeof route.query.status === 'string' ? route.query.status : ''
   overdueOnly.value = route.query.overdue === '1'
@@ -288,6 +319,17 @@ async function loadFindingOptions() {
 async function loadActiveList() {
   loading.value = true
   try {
+    if (activeTab.value === 'candidates') {
+      const params: Record<string, string | number> = { page: candidatePage.value, page_size: pageSize.value }
+      if (candidateStatusFilter.value) params.status = candidateStatusFilter.value
+      if (candidateBatchFilter.value) params.test_batch_id = candidateBatchFilter.value
+      if (candidateAssetTypeFilter.value) params.asset_type = candidateAssetTypeFilter.value
+      if (candidateKeyword.value.trim()) params.keyword = candidateKeyword.value.trim()
+      const response = await apiClient.get<ListResponse<FindingImportCandidate>>('/security-findings/import-candidates', { params })
+      findingImportCandidates.value = response.data.items
+      candidateTotal.value = response.data.total
+      return
+    }
     const isOrders = activeTab.value === 'orders'
     const params: Record<string, string | number | boolean> = {
       page: isOrders ? orderPage.value : findingPage.value,
@@ -315,9 +357,9 @@ async function loadActiveList() {
 async function refreshAfterMutation() {
   await Promise.all([loadSupportingData(), loadFindingOptions()])
   await loadActiveList()
-  const items = activeTab.value === 'orders' ? workOrders.value : findings.value
-  const total = activeTab.value === 'orders' ? orderTotal.value : findingTotal.value
-  const page = activeTab.value === 'orders' ? orderPage : findingPage
+  const items = activeTab.value === 'orders' ? workOrders.value : activeTab.value === 'findings' ? findings.value : findingImportCandidates.value
+  const total = activeTab.value === 'orders' ? orderTotal.value : activeTab.value === 'findings' ? findingTotal.value : candidateTotal.value
+  const page = activeTab.value === 'orders' ? orderPage : activeTab.value === 'findings' ? findingPage : candidatePage
   if (items.length === 0 && total > 0 && page.value > 1) {
     page.value -= 1
     await loadActiveList()
@@ -326,27 +368,37 @@ async function refreshAfterMutation() {
 
 function applyFilter() {
   if (activeTab.value === 'orders') orderPage.value = 1
-  else findingPage.value = 1
+  else if (activeTab.value === 'findings') findingPage.value = 1
+  else candidatePage.value = 1
   void loadActiveList()
 }
 
 function resetFilters() {
-  organizationFilter.value = ''
-  statusFilter.value = ''
-  overdueOnly.value = false
+  if (activeTab.value === 'candidates') {
+    candidateStatusFilter.value = 'pending'
+    candidateBatchFilter.value = ''
+    candidateAssetTypeFilter.value = ''
+    candidateKeyword.value = ''
+  } else {
+    organizationFilter.value = ''
+    statusFilter.value = ''
+    overdueOnly.value = false
+  }
   applyFilter()
 }
 
 function handlePageChange(value: number) {
   if (activeTab.value === 'orders') orderPage.value = value
-  else findingPage.value = value
+  else if (activeTab.value === 'findings') findingPage.value = value
+  else candidatePage.value = value
   void loadActiveList()
 }
 
 function handlePageSizeChange(value: number) {
   pageSize.value = value
   if (activeTab.value === 'orders') orderPage.value = 1
-  else findingPage.value = 1
+  else if (activeTab.value === 'findings') findingPage.value = 1
+  else candidatePage.value = 1
   void loadActiveList()
 }
 
@@ -456,7 +508,7 @@ async function submitFindingImport() {
   try {
     const response = await apiClient.post<ItemResponse<FindingImportResult>>('/security-findings/import', formData, { headers: { 'Content-Type': 'multipart/form-data' }, timeout: 120_000 })
     importResult.value = response.data.item
-    ElMessage.success(`导入完成：成功 ${response.data.item.success_count} 条，失败 ${response.data.item.failure_count} 条，重复 ${response.data.item.duplicate_count} 条`)
+    ElMessage.success(`导入完成：成功 ${response.data.item.success_count} 条，待关联 ${response.data.item.pending_count} 条，失败 ${response.data.item.failure_count} 条，重复 ${response.data.item.duplicate_count} 条`)
     await refreshAfterMutation()
     importDialogVisible.value = true
   } catch (error) {
@@ -767,6 +819,73 @@ function formatFileSize(value: number) {
   return `${(value / 1024 / 1024).toFixed(1)} MB`
 }
 
+async function openFindingImportCandidate(item: FindingImportCandidate) {
+  selectedCandidate.value = item
+  selectedCandidateScopeAssetID.value = item.suggested_scope_asset_id ?? ''
+  candidateReviewNote.value = ''
+  candidateDialogVisible.value = true
+  try {
+    const response = await apiClient.get<ListResponse<FindingImportScopeOption>>(`/security-findings/import-candidates/${item.id}/scope-assets`)
+    candidateScopeOptions.value = response.data.items
+    if (!candidateScopeOptions.value.some(option => option.id === selectedCandidateScopeAssetID.value)) {
+      selectedCandidateScopeAssetID.value = candidateScopeOptions.value[0]?.id ?? ''
+    }
+  } catch (error) {
+    candidateScopeOptions.value = []
+    ElMessage.error(getAPIErrorMessage(error, '读取测试批次授权资产失败'))
+  }
+}
+
+async function submitFindingImportCandidate() {
+  if (!selectedCandidate.value || !selectedCandidateScopeAssetID.value) {
+    ElMessage.warning('请选择当前测试批次内的授权资产')
+    return
+  }
+  candidateSubmitting.value = true
+  try {
+    const response = await apiClient.post<ItemResponse<FindingImportCandidate>>(`/security-findings/import-candidates/${selectedCandidate.value.id}/link`, {
+      scope_asset_id: selectedCandidateScopeAssetID.value,
+      review_note: candidateReviewNote.value,
+    })
+    const item = response.data.item
+    ElMessage.success(item.status === 'duplicate' ? `已关联，漏洞与 ${item.imported_finding_code || '现有安全发现'} 重复` : `已生成安全发现 ${item.imported_finding_code}`)
+    candidateDialogVisible.value = false
+    await refreshAfterMutation()
+  } catch (error) {
+    ElMessage.error(getAPIErrorMessage(error, '关联漏洞导入项失败'))
+  } finally {
+    candidateSubmitting.value = false
+  }
+}
+
+async function ignoreFindingImportCandidate(item: FindingImportCandidate) {
+  try {
+    const result = await ElMessageBox.prompt(`忽略后不会生成安全发现：${item.title}`, '忽略待关联漏洞', {
+      confirmButtonText: '确认忽略', cancelButtonText: '取消', inputType: 'textarea',
+      inputPlaceholder: '请填写忽略原因', inputValidator: value => Boolean(value?.trim()) || '请填写忽略原因',
+    })
+    await apiClient.post(`/security-findings/import-candidates/${item.id}/ignore`, { review_note: result.value.trim() })
+    ElMessage.success('已忽略该漏洞导入项')
+    await refreshAfterMutation()
+  } catch (error) {
+    if (error === 'cancel' || error === 'close') return
+    ElMessage.error(getAPIErrorMessage(error, '忽略漏洞导入项失败'))
+  }
+}
+
+function showPendingCandidates(batchID?: string) {
+  activeTab.value = 'candidates'
+  candidateStatusFilter.value = 'pending'
+  candidateBatchFilter.value = batchID ?? ''
+  candidatePage.value = 1
+  importDialogVisible.value = false
+  void loadActiveList()
+}
+
+function candidateStatusTag(value: string) {
+  return value === 'imported' ? 'success' : value === 'ignored' || value === 'invalid' ? 'info' : value === 'duplicate' ? 'warning' : 'danger'
+}
+
 function actionTitle(mode: ActionMode) {
   return { issue: '下发安全工单', accept: '接收安全工单', progress: '更新整改进度', submit: '提交集团复测', return: '复测不通过并退回', close: '复测通过并关闭', cancel: '取消安全工单' }[mode]
 }
@@ -784,9 +903,13 @@ function riskAcceptanceLabel(item: Finding) {
   return item.risk_acceptance_expired ? '已到期，待复核' : '风险接受中'
 }
 async function onTabChange() {
-  organizationFilter.value = ''
-  statusFilter.value = ''
-  overdueOnly.value = false
+  if (activeTab.value === 'candidates') {
+    candidateStatusFilter.value ||= 'pending'
+  } else {
+    organizationFilter.value = ''
+    statusFilter.value = ''
+    overdueOnly.value = false
+  }
   if (activeTab.value === 'orders') await savedFilterViews.value?.loadViews()
   void loadActiveList()
 }
@@ -825,8 +948,25 @@ async function onTabChange() {
       <el-tabs v-model="activeTab" @tab-change="onTabChange">
         <el-tab-pane label="安全整改工单" name="orders" />
         <el-tab-pane label="漏洞与安全发现" name="findings" />
+        <el-tab-pane v-if="auth.canManageSecurityFindings" name="candidates">
+          <template #label>待关联漏洞<el-badge v-if="candidateStatusFilter === 'pending' && candidateTotal" :value="candidateTotal" :max="99" class="candidate-tab-badge" /></template>
+        </el-tab-pane>
       </el-tabs>
-      <div class="filter-bar">
+      <div v-if="activeTab === 'candidates'" class="filter-bar candidate-filter-bar">
+        <el-select v-model="candidateBatchFilter" clearable filterable placeholder="全部测试批次" style="width: 260px">
+          <el-option v-for="item in usableTestBatches" :key="item.id" :label="`${item.name}（${item.code}）`" :value="item.id" />
+        </el-select>
+        <el-select v-model="candidateStatusFilter" clearable placeholder="全部处理状态" style="width: 160px">
+          <el-option v-for="(label, value) in candidateStatusLabels" :key="value" :label="label" :value="value" />
+        </el-select>
+        <el-select v-model="candidateAssetTypeFilter" clearable placeholder="全部资产类型" style="width: 150px">
+          <el-option v-for="(label, value) in assetTypeLabels" :key="value" :label="label" :value="value" />
+        </el-select>
+        <el-input v-model="candidateKeyword" clearable placeholder="资产值或漏洞标题" style="width: 220px" @keyup.enter="applyFilter" />
+        <el-button type="primary" plain @click="applyFilter">筛选</el-button>
+        <el-button @click="resetFilters">重置</el-button>
+      </div>
+      <div v-else class="filter-bar">
         <el-select v-if="auth.hasGroupSecurityRole" v-model="organizationFilter" clearable filterable placeholder="全部责任组织" style="width: 220px">
           <el-option v-for="item in enabledOrganizations" :key="item.id" :label="`${item.name}（${item.code}）`" :value="item.id" />
         </el-select>
@@ -875,7 +1015,7 @@ async function onTabChange() {
         </el-table-column>
       </el-table>
 
-      <el-table v-else :data="findings" row-key="id" empty-text="暂无安全发现">
+      <el-table v-else-if="activeTab === 'findings'" :data="findings" row-key="id" empty-text="暂无安全发现">
         <el-table-column label="安全发现" min-width="250">
           <template #default="scope"><strong>{{ scope.row.title }}</strong><span class="table-secondary mono-text">{{ scope.row.code }} · {{ scope.row.vulnerability_type || '未分类' }}</span></template>
         </el-table-column>
@@ -894,6 +1034,31 @@ async function onTabChange() {
               <el-button v-if="auth.canManageSecurityFindings && ['open', 'resolved'].includes(scope.row.status)" link type="warning" @click="openRiskDialog(scope.row, 'accept')">接受风险</el-button>
               <el-button v-if="auth.canManageSecurityFindings && scope.row.status === 'accepted_risk'" link type="warning" @click="openRiskDialog(scope.row, 'review')">复核</el-button>
             </template>
+          </template>
+        </el-table-column>
+      </el-table>
+
+      <el-table v-else :data="findingImportCandidates" row-key="id" empty-text="暂无待关联漏洞">
+        <el-table-column label="导入行" width="90"><template #default="scope">第 {{ scope.row.source_row_number }} 行</template></el-table-column>
+        <el-table-column label="原始资产标识" min-width="230">
+          <template #default="scope"><strong class="mono-text">{{ scope.row.asset_value }}</strong><span class="table-secondary">{{ assetTypeLabels[scope.row.asset_type] || scope.row.asset_type }}</span></template>
+        </el-table-column>
+        <el-table-column label="漏洞信息" min-width="250">
+          <template #default="scope"><strong>{{ scope.row.title }}</strong><span class="table-secondary">{{ scope.row.vulnerability_type || '未分类' }} · {{ formatDate(scope.row.discovered_at) }}</span></template>
+        </el-table-column>
+        <el-table-column label="测试批次" min-width="190"><template #default="scope">{{ scope.row.test_batch_name }}<span class="table-secondary mono-text">{{ scope.row.test_batch_code }}</span></template></el-table-column>
+        <el-table-column label="系统建议" min-width="230">
+          <template #default="scope">
+            <span v-if="scope.row.suggested_scope_asset_id">{{ scope.row.suggested_asset_value }}<span class="table-secondary">{{ scope.row.suggested_organization_name }} · {{ matchMethodLabels[scope.row.match_method || ''] || '相似标识' }} {{ scope.row.match_confidence }}%</span></span>
+            <span v-else class="table-secondary">未找到唯一建议，请人工选择授权资产</span>
+          </template>
+        </el-table-column>
+        <el-table-column label="状态" width="105"><template #default="scope"><el-tag :type="candidateStatusTag(scope.row.status)" effect="plain">{{ candidateStatusLabels[scope.row.status] || scope.row.status }}</el-tag></template></el-table-column>
+        <el-table-column label="处理结果" min-width="180"><template #default="scope"><span v-if="scope.row.imported_finding_code" class="mono-text">{{ scope.row.imported_finding_code }}</span><span v-else-if="scope.row.review_note">{{ scope.row.review_note }}</span><span v-else>—</span></template></el-table-column>
+        <el-table-column label="操作" fixed="right" width="150">
+          <template #default="scope">
+            <template v-if="scope.row.status === 'pending'"><el-button link type="primary" @click="openFindingImportCandidate(scope.row)">关联资产</el-button><el-button link type="danger" @click="ignoreFindingImportCandidate(scope.row)">忽略</el-button></template>
+            <span v-else class="table-secondary">{{ scope.row.reviewed_by_name || '已处理' }}</span>
           </template>
         </el-table-column>
       </el-table>
@@ -990,12 +1155,14 @@ async function onTabChange() {
       </div>
       <div class="template-links">标准列：资产类型、资产值、漏洞标题、严重等级、漏洞类型、漏洞描述、验证证据、整改建议、发现时间。<el-button link type="primary" @click="downloadFindingTemplate('xlsx')">下载 XLSX 模板</el-button><el-button link type="primary" @click="downloadFindingTemplate('csv')">下载 CSV 模板</el-button></div>
       <div v-if="importResult" class="import-result">
-        <el-row :gutter="12">
-          <el-col :span="6"><el-statistic title="总行数" :value="importResult.total_count" /></el-col>
-          <el-col :span="6"><el-statistic title="成功" :value="importResult.success_count" /></el-col>
-          <el-col :span="6"><el-statistic title="重复" :value="importResult.duplicate_count" /></el-col>
-          <el-col :span="6"><el-statistic title="失败" :value="importResult.failure_count" /></el-col>
-        </el-row>
+        <div class="import-stat-grid">
+          <el-statistic title="总行数" :value="importResult.total_count" />
+          <el-statistic title="成功" :value="importResult.success_count" />
+          <el-statistic title="待关联" :value="importResult.pending_count" />
+          <el-statistic title="重复" :value="importResult.duplicate_count" />
+          <el-statistic title="失败" :value="importResult.failure_count" />
+        </div>
+        <el-button v-if="importResult.pending_count" type="warning" plain class="pending-candidate-entry" @click="showPendingCandidates(importResult.test_batch_id)">处理 {{ importResult.pending_count }} 条待关联漏洞</el-button>
         <el-table v-if="importResult.errors.length" :data="importResult.errors" size="small" max-height="220" class="import-errors">
           <el-table-column label="行号" prop="row" width="75" /><el-table-column label="错误代码" prop="code" width="170" /><el-table-column label="原因" prop="message" min-width="360" />
         </el-table>
@@ -1003,11 +1170,36 @@ async function onTabChange() {
       <div class="detail-block"><h3>最近导入历史</h3>
         <el-table :data="findingImports.slice(0, 10)" size="small" empty-text="暂无导入记录">
           <el-table-column label="文件" prop="file_name" min-width="160" /><el-table-column label="测试批次" min-width="190"><template #default="scope">{{ scope.row.test_batch_name }}<span class="table-secondary mono-text">{{ scope.row.test_batch_code }}</span></template></el-table-column>
-          <el-table-column label="结果" width="180"><template #default="scope">成功 {{ scope.row.success_count }} / 重复 {{ scope.row.duplicate_count }} / 失败 {{ scope.row.failure_count }}</template></el-table-column>
+          <el-table-column label="结果" min-width="230"><template #default="scope">成功 {{ scope.row.success_count }} / 待关联 {{ scope.row.pending_count }} / 重复 {{ scope.row.duplicate_count }} / 失败 {{ scope.row.failure_count }}</template></el-table-column>
           <el-table-column label="导入时间" width="165"><template #default="scope">{{ formatDate(scope.row.created_at) }}</template></el-table-column>
         </el-table>
       </div>
       <template #footer><el-button @click="importDialogVisible = false">关闭</el-button></template>
+    </el-dialog>
+
+    <el-dialog v-model="candidateDialogVisible" title="关联漏洞到测试范围资产" width="760px" destroy-on-close>
+      <template v-if="selectedCandidate">
+        <el-alert type="warning" :closable="false" show-icon title="系统只允许关联当前安全测试批次中的授权资产；相似匹配仅作为建议，不会自动入库。" />
+        <el-descriptions :column="2" border class="candidate-descriptions">
+          <el-descriptions-item label="测试批次">{{ selectedCandidate.test_batch_name }}（{{ selectedCandidate.test_batch_code }}）</el-descriptions-item>
+          <el-descriptions-item label="原文件行号">第 {{ selectedCandidate.source_row_number }} 行</el-descriptions-item>
+          <el-descriptions-item label="原始资产类型">{{ assetTypeLabels[selectedCandidate.asset_type] || selectedCandidate.asset_type }}</el-descriptions-item>
+          <el-descriptions-item label="原始资产值"><span class="mono-text">{{ selectedCandidate.asset_value }}</span></el-descriptions-item>
+          <el-descriptions-item label="漏洞标题" :span="2">{{ selectedCandidate.title }}</el-descriptions-item>
+          <el-descriptions-item label="漏洞描述" :span="2"><span class="candidate-description-text">{{ selectedCandidate.description }}</span></el-descriptions-item>
+        </el-descriptions>
+        <el-form label-position="top" class="candidate-link-form">
+          <el-form-item label="关联授权资产（必选）">
+            <el-select v-model="selectedCandidateScopeAssetID" filterable style="width:100%" placeholder="请选择当前批次授权资产">
+              <el-option v-for="item in candidateScopeOptions" :key="item.id" :value="item.id" :label="`${item.asset_value} · ${item.organization_name}${item.business_system_name ? ` · ${item.business_system_name}` : ''}`">
+                <div class="candidate-option"><span><el-tag v-if="item.suggested" size="small" type="warning">系统建议</el-tag>{{ item.asset_value }}</span><small>{{ item.organization_name }}{{ item.business_system_name ? ` · ${item.business_system_name}` : '' }}</small></div>
+              </el-option>
+            </el-select>
+          </el-form-item>
+          <el-form-item label="关联备注"><el-input v-model="candidateReviewNote" type="textarea" :rows="3" maxlength="2000" show-word-limit placeholder="可记录扫描器标识与台账资产的对应依据" /></el-form-item>
+        </el-form>
+      </template>
+      <template #footer><el-button @click="candidateDialogVisible = false">取消</el-button><el-button type="primary" :loading="candidateSubmitting" @click="submitFindingImportCandidate">确认关联并生成安全发现</el-button></template>
     </el-dialog>
 
     <el-dialog v-model="workOrderDialogVisible" title="新建安全整改工单" width="760px" destroy-on-close>
@@ -1102,6 +1294,15 @@ async function onTabChange() {
 .template-links { color: #64748b; font-size: 13px; line-height: 32px; }
 .import-result { margin-top: 16px; padding: 16px; border-radius: 10px; background: #f8fafc; }
 .import-errors { margin-top: 14px; }
+.import-stat-grid { display: grid; grid-template-columns: repeat(5, minmax(90px, 1fr)); gap: 12px; }
+.pending-candidate-entry { margin-top: 14px; }
+.candidate-tab-badge { margin-left: 8px; }
+.candidate-descriptions { margin-top: 18px; }
+.candidate-description-text { white-space: pre-wrap; }
+.candidate-link-form { margin-top: 18px; }
+.candidate-option { display: flex; align-items: center; justify-content: space-between; gap: 16px; }
+.candidate-option span { display: flex; align-items: center; gap: 6px; min-width: 0; }
+.candidate-option small { color: #94a3b8; }
 .mono-text { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
 .inline-tag { margin-left: 8px; }
 .overdue-text, .danger-number { color: var(--el-color-danger); font-weight: 700; }
@@ -1130,5 +1331,5 @@ async function onTabChange() {
 .review-comment { margin-top: 6px !important; color: #64748b !important; }
 .finding-detail-actions { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 24px; }
 .risk-form { margin-top: 18px; }
-@media (max-width: 900px) { .heading-actions { width: 100%; } .attachment-upload-box { grid-template-columns: 1fr; } }
+@media (max-width: 900px) { .import-stat-grid { grid-template-columns: repeat(2, 1fr); } .heading-actions { width: 100%; } .attachment-upload-box { grid-template-columns: 1fr; } }
 </style>
