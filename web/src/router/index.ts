@@ -1,22 +1,22 @@
 import { createRouter, createWebHistory } from 'vue-router'
-import AppLayout from '../layouts/AppLayout.vue'
-import LoginView from '../views/LoginView.vue'
-import DashboardView from '../views/DashboardView.vue'
-import OrganizationsView from '../views/OrganizationsView.vue'
-import UsersView from '../views/UsersView.vue'
-import ProfileView from '../views/ProfileView.vue'
-import BusinessSystemsView from '../views/BusinessSystemsView.vue'
-import AssetsView from '../views/AssetsView.vue'
-import AssetCandidatesView from '../views/AssetCandidatesView.vue'
-import DataGovernanceView from '../views/DataGovernanceView.vue'
-import DataQualityIssuesView from '../views/DataQualityIssuesView.vue'
-import InventoryTasksView from '../views/InventoryTasksView.vue'
-import AuditLogsView from '../views/AuditLogsView.vue'
-import SecurityWorkOrdersView from '../views/SecurityWorkOrdersView.vue'
-import SecurityTestBatchesView from '../views/SecurityTestBatchesView.vue'
-import NotificationsView from '../views/NotificationsView.vue'
-import RecycleBinView from '../views/RecycleBinView.vue'
-import BackupsView from '../views/BackupsView.vue'
+const AppLayout = () => import('../layouts/AppLayout.vue')
+const LoginView = () => import('../views/LoginView.vue')
+const DashboardView = () => import('../views/DashboardView.vue')
+const OrganizationsView = () => import('../views/OrganizationsView.vue')
+const UsersView = () => import('../views/UsersView.vue')
+const ProfileView = () => import('../views/ProfileView.vue')
+const BusinessSystemsView = () => import('../views/BusinessSystemsView.vue')
+const AssetsView = () => import('../views/AssetsView.vue')
+const AssetCandidatesView = () => import('../views/AssetCandidatesView.vue')
+const DataGovernanceView = () => import('../views/DataGovernanceView.vue')
+const DataQualityIssuesView = () => import('../views/DataQualityIssuesView.vue')
+const InventoryTasksView = () => import('../views/InventoryTasksView.vue')
+const AuditLogsView = () => import('../views/AuditLogsView.vue')
+const SecurityWorkOrdersView = () => import('../views/SecurityWorkOrdersView.vue')
+const SecurityTestBatchesView = () => import('../views/SecurityTestBatchesView.vue')
+const NotificationsView = () => import('../views/NotificationsView.vue')
+const RecycleBinView = () => import('../views/RecycleBinView.vue')
+const BackupsView = () => import('../views/BackupsView.vue')
 import { pinia } from '../stores'
 import { useAuthStore } from '../stores/auth'
 
