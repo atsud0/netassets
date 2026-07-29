@@ -66,6 +66,7 @@ test('集团创建子公司账号，子公司隔离登记业务系统和网络�
   const systemName = `客户数据系统_${suffix}`
   const domainAsset = `portal-${suffix}.example.com`
   const importedIP = `198.51.100.${Number(suffix.slice(-2)) % 250 + 1}`
+  const scopeExcludedIP = `10.250.${Number(suffix.slice(-4, -2)) % 250}.${Number(suffix.slice(-2)) % 250 + 1}`
   const importFileName = `assets-${suffix}.csv`
   const systemImportFileName = `business-systems-${suffix}.csv`
   const groupAsset = `group-pw-${suffix}.example.com`
@@ -128,10 +129,16 @@ test('集团创建子公司账号，子公司隔离登记业务系统和网络�
   dialog = page.getByRole('dialog', { name: '创建填报任务' })
   await dialog.getByPlaceholder('如：2026 年第三季度网络资产填报').fill(inventoryTaskName)
   await selectFormOption(page, dialog, '填报组织', `${organizationName}（${organizationCode}）`)
+  const publicScope = dialog.locator('.el-radio-button').filter({ hasText: '仅公网资产' })
+  await publicScope.click()
+  await expect(publicScope.locator('input')).toBeChecked()
   await dialog.getByPlaceholder('填写本次填报范围、口径和注意事项').fill('端到端测试填报任务')
   await dialog.getByRole('button', { name: '创建并下发' }).click()
   await expect(page.getByText('填报任务已创建并下发')).toBeVisible()
   await expect(page.getByText(inventoryTaskName, { exact: true })).toBeVisible()
+  const createdTaskRow = await ensureTaskExpanded(page, inventoryTaskName)
+  const createdTaskDetailRow = createdTaskRow.locator('xpath=following-sibling::tr[1]')
+  await expect(createdTaskDetailRow).toContainText('网络资产范围仅公网资产')
 
   await page.getByRole('button', { name: '用户和权限', exact: true }).click()
   await expect(page).toHaveURL(/\/users$/)
@@ -376,6 +383,32 @@ test('集团创建子公司账号，子公司隔离登记业务系统和网络�
   await expect(page.getByText('网络资产已删除')).toBeVisible()
   await expect(page.getByText(importedIP, { exact: true })).toHaveCount(0)
 
+  const excludedAssetStatus = await page.evaluate(async ({ organizationCode: code, value }) => {
+    const organizationResponse = await fetch('/api/v1/organizations?page=1&page_size=100')
+    if (!organizationResponse.ok) throw new Error(`organizations request failed: ${organizationResponse.status}`)
+    const organizations = await organizationResponse.json()
+    const organization = organizations.items.find((item: { code: string }) => item.code === code)
+    if (!organization) throw new Error(`organization not found: ${code}`)
+
+    const response = await fetch('/api/v1/assets', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        type: 'ip',
+        value,
+        name: '专项任务范围外内网资产',
+        organization_id: organization.id,
+        environment: 'production',
+        network_scope: 'private',
+        status: 'active',
+        importance: 'normal',
+        owner_name: '范围验证负责人',
+      }),
+    })
+    return response.status
+  }, { organizationCode, value: scopeExcludedIP })
+  expect(excludedAssetStatus).toBe(201)
+
   await page.getByRole('button', { name: '导入记录', exact: true }).click()
   dialog = page.getByRole('dialog', { name: '资产导入记录' })
   const historyRow = dialog.locator('.el-table__body-wrapper tbody tr').filter({ hasText: importFileName }).first()
@@ -421,6 +454,7 @@ test('集团创建子公司账号，子公司隔离登记业务系统和网络�
   await progressRow.getByRole('button', { name: '提交', exact: true }).click()
   dialog = page.getByRole('dialog', { name: '提交填报结果' })
   await expect(dialog.getByText('检查通过，可以提交')).toBeVisible()
+  await expect(dialog.getByText('1 个系统 / 1 项资产')).toBeVisible()
   await dialog.getByPlaceholder('可填写数据范围、统计口径或需要集团关注的事项').fill('首次提交，请集团审核')
   await dialog.getByRole('button', { name: '确认提交', exact: true }).click()
   await expect(page.getByText('填报结果已提交，等待集团审核')).toBeVisible()
