@@ -1009,6 +1009,110 @@ func customFieldTemplateHint(definition customfield.Definition) string {
 	return definition.Description
 }
 
+// PreviewImport validates an asset import without writing ledger rows, import history, or audit records.
+func (s *Service) PreviewImport(ctx context.Context, principal auth.Principal, organizationID, fileName string, reader io.Reader) (ImportResult, error) {
+	if !principal.HasPermission("asset.manage") {
+		return ImportResult{}, ErrForbidden
+	}
+	organizationID = strings.TrimSpace(organizationID)
+	allowed, err := access.CanOperateOrganization(ctx, s.pool, principal, organizationID, "asset.manage")
+	if err != nil {
+		return ImportResult{}, err
+	}
+	if !allowed {
+		return ImportResult{}, ErrForbidden
+	}
+	rows, fileType, err := readImportRows(fileName, reader)
+	if err != nil || len(rows) < 2 || len(rows)-1 > MaxImportRows {
+		return ImportResult{}, ErrInvalid
+	}
+	headers := mapHeaders(rows[0])
+	if headers["type"] < 0 || headers["value"] < 0 {
+		return ImportResult{}, ErrInvalid
+	}
+	customService := customfield.NewService(s.pool)
+	definitions, err := customService.ActiveDefinitionsForOrganization(ctx, principal, "asset", organizationID)
+	if err != nil {
+		return ImportResult{}, err
+	}
+
+	result := ImportResult{FileName: filepath.Base(fileName), FileType: fileType, Errors: make([]ImportError, 0), TotalCount: len(rows) - 1}
+	seen := make(map[string]struct{}, result.TotalCount)
+	for index, row := range rows[1:] {
+		rowNumber := index + 2
+		input := importInput(row, headers, organizationID)
+		if _, customErr := customfield.ImportValues(definitions, rows[0], row); customErr != nil {
+			result.FailureCount++
+			result.Errors = append(result.Errors, ImportError{Row: rowNumber, Code: "invalid_custom_field", Message: customErr.Error()})
+			continue
+		}
+		if input.BusinessSystemID != "" {
+			var systemID string
+			err := s.pool.QueryRow(ctx, `
+				SELECT id::text FROM business_systems
+				WHERE lower(system_code) = lower($1) AND owner_organization_id = $2::uuid AND deleted_at IS NULL
+			`, input.BusinessSystemID, organizationID).Scan(&systemID)
+			if errors.Is(err, pgx.ErrNoRows) {
+				result.FailureCount++
+				result.Errors = append(result.Errors, ImportError{Row: rowNumber, Code: "system_not_found", Message: "业务系统编码不存在或不属于当前组织"})
+				continue
+			}
+			if err != nil {
+				return ImportResult{}, fmt.Errorf("resolve preview business system: %w", err)
+			}
+			input.BusinessSystemID = systemID
+		}
+		if input.NetworkAreaID != "" {
+			var networkAreaID string
+			err := s.pool.QueryRow(ctx, `
+				SELECT id::text FROM asset_network_areas
+				WHERE organization_id = $1::uuid AND lower(area_name) = lower($2) AND status = 'enabled'
+			`, organizationID, input.NetworkAreaID).Scan(&networkAreaID)
+			if errors.Is(err, pgx.ErrNoRows) {
+				result.FailureCount++
+				result.Errors = append(result.Errors, ImportError{Row: rowNumber, Code: "network_area_not_found", Message: "网络区域不存在、未启用或不属于当前组织"})
+				continue
+			}
+			if err != nil {
+				return ImportResult{}, fmt.Errorf("resolve preview network area: %w", err)
+			}
+			input.NetworkAreaID = networkAreaID
+		}
+
+		normalizeInput(&input)
+		normalizedValue, normalizeErr := normalizeValue(input.Type, input.Value)
+		if normalizeErr != nil || !validInput(input) {
+			result.FailureCount++
+			result.Errors = append(result.Errors, ImportError{Row: rowNumber, Code: "invalid", Message: "资产字段格式不正确"})
+			continue
+		}
+		key := input.Type + "\x00" + normalizedValue
+		_, duplicateInFile := seen[key]
+		var duplicateInLedger bool
+		if !duplicateInFile {
+			if err := s.pool.QueryRow(ctx, `SELECT EXISTS (
+				SELECT 1 FROM assets WHERE asset_type = $1 AND normalized_value = $2 AND deleted_at IS NULL
+			)`, input.Type, normalizedValue).Scan(&duplicateInLedger); err != nil {
+				return ImportResult{}, fmt.Errorf("check preview asset duplicate: %w", err)
+			}
+		}
+		if duplicateInFile || duplicateInLedger {
+			result.DuplicateCount++
+			result.Errors = append(result.Errors, ImportError{Row: rowNumber, Code: "duplicate", Message: "资产类型和值已存在"})
+			continue
+		}
+		seen[key] = struct{}{}
+		result.SuccessCount++
+	}
+	result.Status = "ready"
+	if result.SuccessCount == 0 {
+		result.Status = "failed"
+	} else if result.FailureCount+result.DuplicateCount > 0 {
+		result.Status = "partial"
+	}
+	return result, nil
+}
+
 func (s *Service) Import(ctx context.Context, principal auth.Principal, organizationID, fileName string, reader io.Reader, requestID, ipAddress string) (ImportResult, error) {
 	if !principal.HasPermission("asset.manage") {
 		return ImportResult{}, ErrForbidden

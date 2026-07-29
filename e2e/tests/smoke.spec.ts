@@ -69,6 +69,8 @@ test('集团创建子公司账号，子公司隔离登记业务系统和网络�
   const scopeExcludedIP = `10.250.${Number(suffix.slice(-4, -2)) % 250}.${Number(suffix.slice(-2)) % 250 + 1}`
   const importFileName = `assets-${suffix}.csv`
   const systemImportFileName = `business-systems-${suffix}.csv`
+  const importedSystemCode = `IMP_${suffix}`
+  const importedSystemName = `导入业务系统_${suffix}`
   const groupAsset = `group-pw-${suffix}.example.com`
   const shanghaiOffice = `上海办事处_PW_${suffix}`
   const shenzhenOffice = `深圳办事处_PW_${suffix}`
@@ -243,26 +245,45 @@ test('集团创建子公司账号，子公司隔离登记业务系统和网络�
   dialog = page.getByRole('dialog', { name: '批量导入业务系统' })
   const systemCSV = [
     '系统编码,系统名称',
+    `${importedSystemCode},${importedSystemName}`,
     `${systemCode},重复业务系统`,
     ',缺少系统编码',
   ].join('\n')
   await dialog.locator('input[type=file]').setInputFiles({ name: systemImportFileName, mimeType: 'text/csv', buffer: Buffer.from(systemCSV) })
-  await dialog.getByRole('button', { name: '开始导入' }).click()
-  await expect(page.getByText('导入处理完成')).toBeVisible()
+  await dialog.getByRole('button', { name: '预检文件' }).click()
+  await expect(page.getByText('文件预检完成，尚未写入台账')).toBeVisible()
   const systemImportResult = dialog.getByTestId('business-system-import-result')
-  await expect(systemImportResult.getByText('成功').locator('..').getByText('0', { exact: true })).toBeVisible()
+  await expect(systemImportResult.getByText('可导入').locator('..').getByText('1', { exact: true })).toBeVisible()
   await expect(systemImportResult.getByText('重复').locator('..').getByText('1', { exact: true })).toBeVisible()
   await expect(systemImportResult.getByText('失败').locator('..').getByText('1', { exact: true })).toBeVisible()
   await expect(systemImportResult.getByText('系统编码已存在，未覆盖原记录')).toBeVisible()
   await expect(systemImportResult.getByText('系统编码不能为空', { exact: true })).toBeVisible()
+  const importedSystemBeforeConfirmation = await page.evaluate(async (code) => {
+    const response = await fetch(`/api/v1/business-systems?q=${encodeURIComponent(code)}&page=1&page_size=20`)
+    const data = await response.json()
+    return data.total
+  }, importedSystemCode)
+  expect(importedSystemBeforeConfirmation).toBe(0)
+  await dialog.getByRole('button', { name: '确认导入' }).click()
+  await expect(page.getByText('导入处理完成')).toBeVisible()
+  await expect(systemImportResult.getByText('成功').locator('..').getByText('1', { exact: true })).toBeVisible()
   await dialog.getByRole('button', { name: '关闭' }).click()
 
   await page.getByRole('button', { name: '导入记录', exact: true }).click()
   dialog = page.getByRole('dialog', { name: '业务系统导入记录' })
   const systemHistoryRow = dialog.locator('.el-table__body-wrapper tbody tr').filter({ hasText: systemImportFileName }).first()
   await expect(systemHistoryRow).toContainText(organizationName)
-  await expect(systemHistoryRow).toContainText('总数 2 · 成功 0 · 重复 1 · 失败 1')
+  await expect(systemHistoryRow).toContainText('总数 3 · 成功 1 · 重复 1 · 失败 1')
   await dialog.getByRole('button', { name: '关闭' }).click()
+  const importedSystemCleanupStatus = await page.evaluate(async (code) => {
+    const listResponse = await fetch(`/api/v1/business-systems?q=${encodeURIComponent(code)}&page=1&page_size=20`)
+    const data = await listResponse.json()
+    const imported = data.items.find((item: { code: string }) => item.code === code)
+    if (!imported) return 404
+    const deleteResponse = await fetch(`/api/v1/business-systems/${imported.id}`, { method: 'DELETE' })
+    return deleteResponse.status
+  }, importedSystemCode)
+  expect(importedSystemCleanupStatus).toBe(204)
 
   let systemRow = page.locator('.data-table-panel .el-table__body-wrapper tbody tr').filter({ hasText: systemCode }).first()
   await systemRow.getByRole('button', { name: systemName, exact: true }).click()
@@ -362,12 +383,21 @@ test('集团创建子公司账号，子公司隔离登记业务系统和网络�
     'url,ftp://invalid.example.com,非法URL,,生产,公网,一般,安全团队,非法行',
   ].join('\n')
   await dialog.locator('input[type=file]').setInputFiles({ name: importFileName, mimeType: 'text/csv', buffer: Buffer.from(csv) })
-  await dialog.getByRole('button', { name: '开始导入' }).click()
-  await expect(page.getByText('导入处理完成')).toBeVisible()
+  await dialog.getByRole('button', { name: '预检文件' }).click()
+  await expect(page.getByText('文件预检完成，尚未写入台账')).toBeVisible()
   const result = dialog.getByTestId('import-result')
-  await expect(result.getByText('成功').locator('..').getByText('1', { exact: true })).toBeVisible()
+  await expect(result.getByText('可导入').locator('..').getByText('1', { exact: true })).toBeVisible()
   await expect(result.getByText('重复').locator('..').getByText('1', { exact: true })).toBeVisible()
   await expect(result.getByText('失败').locator('..').getByText('1', { exact: true })).toBeVisible()
+  const importedAssetBeforeConfirmation = await page.evaluate(async (value) => {
+    const response = await fetch(`/api/v1/assets?q=${encodeURIComponent(value)}&page=1&page_size=20`)
+    const data = await response.json()
+    return data.total
+  }, importedIP)
+  expect(importedAssetBeforeConfirmation).toBe(0)
+  await dialog.getByRole('button', { name: '确认导入' }).click()
+  await expect(page.getByText('导入处理完成')).toBeVisible()
+  await expect(result.getByText('成功').locator('..').getByText('1', { exact: true })).toBeVisible()
   await dialog.getByRole('button', { name: '关闭' }).click()
   await expect(page.getByText(importedIP, { exact: true })).toBeVisible()
 

@@ -83,6 +83,7 @@ const importPageSize = ref(20)
 const importTotal = ref(0)
 const importFile = ref<File>()
 const importResult = ref<ImportResult>()
+const importResultMode = ref<'preview' | 'completed'>()
 const search = ref('')
 const typeFilter = ref('')
 const statusFilter = ref('')
@@ -396,30 +397,49 @@ async function removeAsset(item: Asset) {
     ElMessage.error(getAPIErrorMessage(error, '删除网络资产失败'))
   }
 }
+function resetImportPreview() {
+  importResult.value = undefined
+  importResultMode.value = undefined
+}
 function openImportDialog() {
   importForm.organization_id = defaultOrganizationID()
   importFile.value = undefined
-  importResult.value = undefined
+  resetImportPreview()
   importDialogVisible.value = true
 }
-function handleFileChange(uploadFile: UploadFile, _uploadFiles: UploadFiles) { importFile.value = uploadFile.raw }
-function handleFileRemove() { importFile.value = undefined }
-async function runImport() {
+function handleFileChange(uploadFile: UploadFile, _uploadFiles: UploadFiles) {
+  importFile.value = uploadFile.raw
+  resetImportPreview()
+}
+function handleFileRemove() {
+  importFile.value = undefined
+  resetImportPreview()
+}
+async function runImport(preview = false) {
   if (!importForm.organization_id) return ElMessage.warning('请选择所属组织')
   if (!importFile.value) return ElMessage.warning('请选择 CSV 或 XLSX 文件')
+  if (!preview && (importResultMode.value !== 'preview' || !importResult.value?.success_count)) {
+    return ElMessage.warning('请先完成预检，并确认至少有一行可以导入')
+  }
   importing.value = true
   try {
     const data = new FormData()
     data.append('organization_id', importForm.organization_id)
     data.append('file', importFile.value)
-    const response = await apiClient.post<{ result: ImportResult }>('/assets/import', data, {
+    const endpoint = preview ? '/assets/import/preview' : '/assets/import'
+    const response = await apiClient.post<{ result: ImportResult }>(endpoint, data, {
       headers: { 'Content-Type': 'multipart/form-data' }, timeout: 60_000,
     })
     importResult.value = response.data.result
-    ElMessage.success('导入处理完成')
-    await refreshAfterMutation()
+    importResultMode.value = preview ? 'preview' : 'completed'
+    if (preview) {
+      ElMessage.success('文件预检完成，尚未写入台账')
+    } else {
+      ElMessage.success('导入处理完成')
+      await refreshAfterMutation()
+    }
   } catch (error) {
-    ElMessage.error(getAPIErrorMessage(error, '批量导入失败'))
+    ElMessage.error(getAPIErrorMessage(error, preview ? '导入文件预检失败' : '批量导入失败'))
   } finally {
     importing.value = false
   }
@@ -746,14 +766,15 @@ onMounted(() => load(true))
       <el-alert title="单次最多导入 5000 行，资产类型和值在集团范围内去重；允许部分成功。请先选择所属组织再下载模板，模板会包含当前启用的集团自定义字段。网络区域按所属组织已配置的名称填写。" type="info" :closable="false" show-icon />
       <div class="import-toolbar"><el-button link type="primary" :loading="downloading" @click="downloadTemplate('xlsx')">下载 XLSX 模板</el-button><el-button link type="primary" :loading="downloading" @click="downloadTemplate('csv')">下载 CSV 模板</el-button></div>
       <el-form label-position="top">
-        <el-form-item label="导入到所属组织" required><el-select v-model="importForm.organization_id" filterable :disabled="!auth.isGroupAdmin" style="width: 100%"><el-option v-for="item in enabledOrganizations" :key="item.id" :label="`${item.name}（${item.code}）`" :value="item.id" /></el-select></el-form-item>
+        <el-form-item label="导入到所属组织" required><el-select v-model="importForm.organization_id" filterable :disabled="!auth.isGroupAdmin" @change="resetImportPreview" style="width: 100%"><el-option v-for="item in enabledOrganizations" :key="item.id" :label="`${item.name}（${item.code}）`" :value="item.id" /></el-select></el-form-item>
         <el-form-item label="CSV / XLSX 文件" required><el-upload drag :auto-upload="false" :limit="1" accept=".csv,.xlsx" :on-change="handleFileChange" :on-remove="handleFileRemove"><div class="el-upload__text">拖入文件，或<em>点击选择</em></div><template #tip><div class="el-upload__tip">文件不超过 10 MB；业务系统使用同组织内的系统编码匹配。</div></template></el-upload></el-form-item>
       </el-form>
       <div v-if="importResult" class="import-result" data-testid="import-result">
-        <div class="import-result-summary"><div><span>总行数</span><strong>{{ importResult.total_count }}</strong></div><div class="success"><span>成功</span><strong>{{ importResult.success_count }}</strong></div><div class="duplicate"><span>重复</span><strong>{{ importResult.duplicate_count }}</strong></div><div class="failure"><span>失败</span><strong>{{ importResult.failure_count }}</strong></div></div>
+        <el-alert :title="importResultMode === 'preview' ? '预检结果：尚未写入台账，请确认后执行正式导入' : '正式导入结果'" :type="importResultMode === 'preview' ? 'info' : 'success'" :closable="false" show-icon />
+        <div class="import-result-summary"><div><span>总行数</span><strong>{{ importResult.total_count }}</strong></div><div class="success"><span>{{ importResultMode === 'preview' ? '可导入' : '成功' }}</span><strong>{{ importResult.success_count }}</strong></div><div class="duplicate"><span>重复</span><strong>{{ importResult.duplicate_count }}</strong></div><div class="failure"><span>失败</span><strong>{{ importResult.failure_count }}</strong></div></div>
         <el-table v-if="importResult.errors.length" :data="importResult.errors" max-height="220" size="small"><el-table-column prop="row" label="行号" width="75" /><el-table-column prop="message" label="处理结果" /></el-table>
       </div>
-      <template #footer><el-button @click="importDialogVisible = false">关闭</el-button><el-button type="primary" :loading="importing" @click="runImport">开始导入</el-button></template>
+      <template #footer><el-button @click="importDialogVisible = false">关闭</el-button><el-button :loading="importing" @click="runImport(true)">预检文件</el-button><el-button type="primary" :loading="importing" :disabled="importResultMode !== 'preview' || !importResult?.success_count" @click="runImport(false)">确认导入</el-button></template>
     </el-dialog>
 
     <el-dialog v-model="historyDialogVisible" title="资产导入记录" width="980px">

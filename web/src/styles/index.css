@@ -107,6 +107,7 @@ button, input { font: inherit; }
 .muted-text { color: var(--muted); font-size: 13px; }
 .import-toolbar { display: flex; justify-content: flex-end; margin: 8px 0 4px; }
 .import-result { margin-top: 18px; padding: 16px; background: #f6f9fb; border: 1px solid var(--line); border-radius: 12px; }
+.import-result > .el-alert { margin-bottom: 14px; }
 .import-result-summary { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; margin-bottom: 14px; }
 .import-result-summary > div { display: flex; align-items: baseline; justify-content: space-between; padding: 11px 13px; background: white; border: 1px solid var(--line); border-radius: 9px; }
 .import-result-summary span { color: var(--muted); font-size: 12px; }

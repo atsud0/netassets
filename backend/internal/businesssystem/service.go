@@ -1016,6 +1016,74 @@ func customFieldTemplateHint(definition customfield.Definition) string {
 	return definition.Description
 }
 
+// PreviewImport validates a business-system import without writing ledger rows, import history, or audit records.
+func (s *Service) PreviewImport(ctx context.Context, principal auth.Principal, organizationID, fileName string, reader io.Reader) (ImportResult, error) {
+	if !principal.HasPermission("system.manage") {
+		return ImportResult{}, ErrForbidden
+	}
+	organizationID = strings.TrimSpace(organizationID)
+	allowed, err := access.CanOperateOrganization(ctx, s.pool, principal, organizationID, "system.manage")
+	if err != nil {
+		return ImportResult{}, err
+	}
+	if !allowed {
+		return ImportResult{}, ErrForbidden
+	}
+	rows, fileType, err := readImportRows(fileName, reader)
+	if err != nil || len(rows) < 2 || len(rows)-1 > MaxImportRows {
+		return ImportResult{}, ErrInvalid
+	}
+	headers := mapHeaders(rows[0])
+	if headers["code"] < 0 || headers["name"] < 0 {
+		return ImportResult{}, ErrInvalid
+	}
+	customService := customfield.NewService(s.pool)
+	definitions, err := customService.ActiveDefinitionsForOrganization(ctx, principal, "business_system", organizationID)
+	if err != nil {
+		return ImportResult{}, err
+	}
+	result := ImportResult{FileName: filepath.Base(fileName), FileType: fileType, Errors: make([]ImportError, 0), TotalCount: len(rows) - 1}
+	seen := make(map[string]struct{}, result.TotalCount)
+	for index, row := range rows[1:] {
+		rowNumber := index + 2
+		input, rowErr := importInput(row, headers, organizationID)
+		if rowErr != nil {
+			result.FailureCount++
+			result.Errors = append(result.Errors, ImportError{Row: rowNumber, Code: rowErr.code, Message: rowErr.message})
+			continue
+		}
+		if _, customErr := customfield.ImportValues(definitions, rows[0], row); customErr != nil {
+			result.FailureCount++
+			result.Errors = append(result.Errors, ImportError{Row: rowNumber, Code: "invalid_custom_field", Message: customErr.Error()})
+			continue
+		}
+		key := input.Code
+		_, duplicateInFile := seen[key]
+		var duplicateInLedger bool
+		if !duplicateInFile {
+			if err := s.pool.QueryRow(ctx, `SELECT EXISTS (
+				SELECT 1 FROM business_systems WHERE system_code = $1
+			)`, input.Code).Scan(&duplicateInLedger); err != nil {
+				return ImportResult{}, fmt.Errorf("check preview business system duplicate: %w", err)
+			}
+		}
+		if duplicateInFile || duplicateInLedger {
+			result.DuplicateCount++
+			result.Errors = append(result.Errors, ImportError{Row: rowNumber, Code: "duplicate", Message: "系统编码已存在，未覆盖原记录"})
+			continue
+		}
+		seen[key] = struct{}{}
+		result.SuccessCount++
+	}
+	result.Status = "ready"
+	if result.SuccessCount == 0 {
+		result.Status = "failed"
+	} else if result.FailureCount+result.DuplicateCount > 0 {
+		result.Status = "partial"
+	}
+	return result, nil
+}
+
 func (s *Service) Import(ctx context.Context, principal auth.Principal, organizationID, fileName string, reader io.Reader, requestID, ipAddress string) (ImportResult, error) {
 	if !principal.HasPermission("system.manage") {
 		return ImportResult{}, ErrForbidden

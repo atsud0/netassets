@@ -68,6 +68,37 @@ func registerBusinessSystemRoutes(api *gin.RouterGroup, requireAuth gin.HandlerF
 			c.Data(http.StatusOK, contentType, data)
 		}
 	})
+	group.POST("/import/preview", func(c *gin.Context) {
+		c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, maxAssetImportBytes)
+		organizationID := strings.TrimSpace(c.PostForm("organization_id"))
+		fileHeader, err := c.FormFile("file")
+		if err != nil || organizationID == "" {
+			writeAPIError(c, http.StatusBadRequest, "invalid_request", "请选择所属组织并上传 CSV 或 XLSX 文件")
+			return
+		}
+		if fileHeader.Size > maxAssetImportBytes {
+			writeAPIError(c, http.StatusRequestEntityTooLarge, "file_too_large", "导入文件不能超过 10 MB")
+			return
+		}
+		file, err := fileHeader.Open()
+		if err != nil {
+			writeAPIError(c, http.StatusBadRequest, "invalid_file", "无法读取导入文件")
+			return
+		}
+		defer file.Close()
+		result, err := service.PreviewImport(c.Request.Context(), mustPrincipal(c), organizationID, fileHeader.Filename, file)
+		switch {
+		case errors.Is(err, businesssystem.ErrForbidden):
+			writeAPIError(c, http.StatusForbidden, "forbidden", "当前账号无权预检该组织的业务系统导入文件")
+		case errors.Is(err, businesssystem.ErrInvalid):
+			writeAPIError(c, http.StatusBadRequest, "invalid_import", "文件格式、表头或数据行数不符合要求（最多 5000 行）")
+		case err != nil:
+			logger.Error("preview 业务系统 import", "error", err, "request_id", c.GetString("request_id"))
+			writeAPIError(c, http.StatusInternalServerError, "internal_error", "预检业务系统导入文件失败")
+		default:
+			c.JSON(http.StatusOK, gin.H{"result": result})
+		}
+	})
 	group.POST("/import", func(c *gin.Context) {
 		c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, maxAssetImportBytes)
 		organizationID := strings.TrimSpace(c.PostForm("organization_id"))
