@@ -24,8 +24,71 @@ func TestNormalizeCreateInput(t *testing.T) {
 	if err := normalizeCreateInput(&input); err != nil {
 		t.Fatal(err)
 	}
-	if input.Name != "季度填报" || len(input.OrganizationIDs) != 2 || len(input.RequiredFields) != 2 {
+	if input.Name != "季度填报" || len(input.OrganizationIDs) != 2 || len(input.RequiredFields) != 2 || input.AssetNetworkScope != "all" {
 		t.Fatalf("unexpected normalized input: %+v", input)
+	}
+}
+
+func TestNormalizeCreateInputAcceptsExplicitAssetNetworkScope(t *testing.T) {
+	start := time.Date(2026, 7, 22, 9, 0, 0, 0, time.UTC)
+	for _, scope := range []string{"public", "private"} {
+		t.Run(scope, func(t *testing.T) {
+			input := CreateInput{
+				Name: "专项填报", StartAt: start, DeadlineAt: start.Add(24 * time.Hour),
+				AssetNetworkScope: scope, OrganizationIDs: []string{"org-1"}, RequiredFields: []string{"network_assets"},
+			}
+			if err := normalizeCreateInput(&input); err != nil {
+				t.Fatal(err)
+			}
+			if input.AssetNetworkScope != scope {
+				t.Fatalf("asset scope = %q, want %q", input.AssetNetworkScope, scope)
+			}
+		})
+	}
+}
+
+func TestNormalizeCreateInputRejectsInvalidAssetNetworkScope(t *testing.T) {
+	start := time.Date(2026, 7, 22, 9, 0, 0, 0, time.UTC)
+	input := CreateInput{
+		Name: "无效范围", StartAt: start, DeadlineAt: start.Add(24 * time.Hour), AssetNetworkScope: "unknown",
+		OrganizationIDs: []string{"org-1"}, RequiredFields: []string{"network_assets"},
+	}
+	if err := normalizeCreateInput(&input); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("normalizeCreateInput() error = %v, want ErrInvalid", err)
+	}
+}
+
+func TestNormalizeCreateInputRejectsNoResourceType(t *testing.T) {
+	start := time.Date(2026, 7, 22, 9, 0, 0, 0, time.UTC)
+	input := CreateInput{
+		Name: "无资源任务", StartAt: start, DeadlineAt: start.Add(24 * time.Hour),
+		OrganizationIDs: []string{"org-1"}, RequiredFields: []string{"owner_contacts"},
+	}
+	if err := normalizeCreateInput(&input); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("normalizeCreateInput() error = %v, want ErrInvalid", err)
+	}
+}
+
+func TestSelectedResourceTypes(t *testing.T) {
+	tests := []struct {
+		name        string
+		fields      []string
+		wantSystems bool
+		wantAssets  bool
+	}{
+		{name: "business systems", fields: []string{"business_systems"}, wantSystems: true},
+		{name: "data security implies systems", fields: []string{"data_security"}, wantSystems: true},
+		{name: "network assets", fields: []string{"network_assets"}, wantAssets: true},
+		{name: "owner contacts alone", fields: []string{"owner_contacts"}},
+		{name: "both", fields: []string{"business_systems", "network_assets"}, wantSystems: true, wantAssets: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			gotSystems, gotAssets := selectedResourceTypes(tt.fields)
+			if gotSystems != tt.wantSystems || gotAssets != tt.wantAssets {
+				t.Fatalf("selectedResourceTypes(%v) = (%v, %v), want (%v, %v)", tt.fields, gotSystems, gotAssets, tt.wantSystems, tt.wantAssets)
+			}
+		})
 	}
 }
 
@@ -95,13 +158,31 @@ func TestBuildQualityCheckAllowsWarnings(t *testing.T) {
 	}
 }
 
+func TestBuildQualityCheckSkipsUnselectedResourceTypeOwners(t *testing.T) {
+	result := buildQualityCheck([]string{"business_systems", "owner_contacts"}, qualityCounts{
+		SystemCount:       1,
+		MissingAssetOwner: 8,
+	})
+	if !result.Passed || result.ErrorCount != 0 || result.WarningCount != 0 {
+		t.Fatalf("unselected asset issues must be ignored: %+v", result)
+	}
+
+	result = buildQualityCheck([]string{"network_assets", "owner_contacts"}, qualityCounts{
+		AssetCount:         1,
+		MissingSystemOwner: 5,
+	})
+	if !result.Passed || result.ErrorCount != 0 || result.WarningCount != 0 {
+		t.Fatalf("unselected system issues must be ignored: %+v", result)
+	}
+}
+
 func TestBuildInventoryTaskExportCSV(t *testing.T) {
 	startAt := time.Date(2026, time.July, 22, 9, 0, 0, 0, time.FixedZone("CST", 8*60*60))
 	submittedAt := startAt.Add(2 * time.Hour)
 	reviewedAt := submittedAt.Add(time.Hour)
 	task := Task{
 		Name: "第三季度/网络资产填报", Description: "集团统一口径", StartAt: startAt, DeadlineAt: startAt.Add(7 * 24 * time.Hour),
-		Status: "completed", RequireReview: true, AllowLateSubmission: false, TargetCount: 1, SubmittedCount: 1, ApprovedCount: 1,
+		Status: "completed", AssetNetworkScope: "public", RequireReview: true, AllowLateSubmission: false, TargetCount: 1, SubmittedCount: 1, ApprovedCount: 1,
 		CreatedByName: "集团管理员", CreatedAt: startAt.Add(-time.Hour),
 		Organizations: []OrganizationProgress{{
 			OrganizationCode: "SUB_A", OrganizationName: "甲公司", Status: "approved", StartedAt: &startAt,
@@ -120,19 +201,19 @@ func TestBuildInventoryTaskExportCSV(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(rows) != 2 || rows[1][1] != "已完成" || rows[1][5] != "是" || rows[1][6] != "否" || rows[1][12] != "已通过" {
+	if len(rows) != 2 || rows[1][1] != "已完成" || rows[1][3] != "仅公网资产" || rows[1][6] != "是" || rows[1][7] != "否" || rows[1][13] != "已通过" {
 		t.Fatalf("unexpected status fields: %#v", rows)
 	}
-	if rows[1][16] != "3" || rows[1][17] != "12" || rows[1][18] != "已完成填报" || rows[1][20] != "集团审核员" {
+	if rows[1][17] != "3" || rows[1][18] != "12" || rows[1][19] != "已完成填报" || rows[1][21] != "集团审核员" {
 		t.Fatalf("unexpected result fields: %#v", rows[1])
 	}
-	if rows[1][14] != "2026-07-22 11:00:00+08:00" || rows[1][19] != "2026-07-22 12:00:00+08:00" {
+	if rows[1][15] != "2026-07-22 11:00:00+08:00" || rows[1][20] != "2026-07-22 12:00:00+08:00" {
 		t.Fatalf("unexpected timestamps: %#v", rows[1])
 	}
 }
 
 func TestBuildInventoryTaskExportXLSXAndRejectInvalidFormat(t *testing.T) {
-	task := Task{Name: "测试任务", Status: "active", Organizations: []OrganizationProgress{{OrganizationCode: "SUB_A", OrganizationName: "甲公司", Status: "not_started"}}}
+	task := Task{Name: "测试任务", Status: "active", AssetNetworkScope: "all", Organizations: []OrganizationProgress{{OrganizationCode: "SUB_A", OrganizationName: "甲公司", Status: "not_started"}}}
 	data, contentType, fileName, err := buildExport(task, "xlsx")
 	if err != nil {
 		t.Fatal(err)
@@ -149,7 +230,7 @@ func TestBuildInventoryTaskExportXLSXAndRejectInvalidFormat(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(rows) != 2 || rows[0][0] != "任务名称" || rows[1][10] != "SUB_A" || rows[1][12] != "未开始" {
+	if len(rows) != 2 || rows[0][0] != "任务名称" || rows[1][3] != "全部网络资产" || rows[1][11] != "SUB_A" || rows[1][13] != "未开始" {
 		t.Fatalf("unexpected XLSX rows: %#v", rows)
 	}
 	if _, _, _, err := buildExport(task, "xls"); err != ErrInvalid {

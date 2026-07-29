@@ -51,6 +51,7 @@ type Task struct {
 	StartAt             time.Time              `json:"start_at"`
 	DeadlineAt          time.Time              `json:"deadline_at"`
 	Status              string                 `json:"status"`
+	AssetNetworkScope   string                 `json:"asset_network_scope"`
 	RequiredFields      []string               `json:"required_fields"`
 	QualityRules        []string               `json:"quality_rules"`
 	RequireReview       bool                   `json:"require_review"`
@@ -70,6 +71,7 @@ type CreateInput struct {
 	StartAt             time.Time `json:"start_at"`
 	DeadlineAt          time.Time `json:"deadline_at"`
 	Status              string    `json:"status"`
+	AssetNetworkScope   string    `json:"asset_network_scope"`
 	RequiredFields      []string  `json:"required_fields"`
 	QualityRules        []string  `json:"quality_rules"`
 	RequireReview       bool      `json:"require_review"`
@@ -132,7 +134,7 @@ func (s *Service) List(ctx context.Context, principal auth.Principal) ([]Task, e
 			  AND ur.data_scope IN ('organization', 'organization_and_descendants')
 			UNION SELECT id FROM descendants
 		)
-		SELECT t.id::text, t.task_name, COALESCE(t.description, ''), t.start_at, t.deadline_at, t.status,
+		SELECT t.id::text, t.task_name, COALESCE(t.description, ''), t.start_at, t.deadline_at, t.status, t.asset_network_scope,
 		       t.required_fields, t.quality_rules, t.require_review, t.allow_late_submission,
 		       (SELECT count(*) FROM inventory_task_organizations ito WHERE ito.task_id = t.id),
 		       (SELECT count(*) FROM inventory_task_organizations ito WHERE ito.task_id = t.id AND ito.status IN ('submitted', 'approved')),
@@ -157,7 +159,7 @@ func (s *Service) List(ctx context.Context, principal auth.Principal) ([]Task, e
 	for rows.Next() {
 		var item Task
 		var requiredFieldsJSON, qualityRulesJSON []byte
-		if err := rows.Scan(&item.ID, &item.Name, &item.Description, &item.StartAt, &item.DeadlineAt, &item.Status,
+		if err := rows.Scan(&item.ID, &item.Name, &item.Description, &item.StartAt, &item.DeadlineAt, &item.Status, &item.AssetNetworkScope,
 			&requiredFieldsJSON, &qualityRulesJSON, &item.RequireReview, &item.AllowLateSubmission,
 			&item.TargetCount, &item.SubmittedCount, &item.ApprovedCount, &item.CreatedByName,
 			&item.CreatedAt, &item.UpdatedAt); err != nil {
@@ -191,7 +193,7 @@ func (s *Service) Search(ctx context.Context, principal auth.Principal, query pa
 		), accessible(id) AS (
 			SELECT ur.organization_id FROM user_roles ur WHERE ur.user_id = $1::uuid AND ur.organization_id IS NOT NULL AND ur.data_scope IN ('organization', 'organization_and_descendants') UNION SELECT id FROM descendants
 		)
-		SELECT t.id::text, t.task_name, COALESCE(t.description, ''), t.start_at, t.deadline_at, t.status,
+		SELECT t.id::text, t.task_name, COALESCE(t.description, ''), t.start_at, t.deadline_at, t.status, t.asset_network_scope,
 		       t.required_fields, t.quality_rules, t.require_review, t.allow_late_submission,
 		       (SELECT count(*) FROM inventory_task_organizations ito WHERE ito.task_id = t.id),
 		       (SELECT count(*) FROM inventory_task_organizations ito WHERE ito.task_id = t.id AND ito.status IN ('submitted', 'approved')),
@@ -210,7 +212,7 @@ func (s *Service) Search(ctx context.Context, principal auth.Principal, query pa
 	for rows.Next() {
 		var item Task
 		var requiredFieldsJSON, qualityRulesJSON []byte
-		if err := rows.Scan(&item.ID, &item.Name, &item.Description, &item.StartAt, &item.DeadlineAt, &item.Status, &requiredFieldsJSON, &qualityRulesJSON, &item.RequireReview, &item.AllowLateSubmission, &item.TargetCount, &item.SubmittedCount, &item.ApprovedCount, &item.CreatedByName, &item.CreatedAt, &item.UpdatedAt, &total); err != nil {
+		if err := rows.Scan(&item.ID, &item.Name, &item.Description, &item.StartAt, &item.DeadlineAt, &item.Status, &item.AssetNetworkScope, &requiredFieldsJSON, &qualityRulesJSON, &item.RequireReview, &item.AllowLateSubmission, &item.TargetCount, &item.SubmittedCount, &item.ApprovedCount, &item.CreatedByName, &item.CreatedAt, &item.UpdatedAt, &total); err != nil {
 			return pagination.Result[Task]{}, fmt.Errorf("scan inventory task page: %w", err)
 		}
 		if err := json.Unmarshal(requiredFieldsJSON, &item.RequiredFields); err != nil {
@@ -262,7 +264,7 @@ func (s *Service) loadTaskForExport(ctx context.Context, principal auth.Principa
               AND ur.data_scope IN ('organization', 'organization_and_descendants')
             UNION SELECT id FROM descendants
         )
-        SELECT t.id::text, t.task_name, COALESCE(t.description, ''), t.start_at, t.deadline_at, t.status,
+	        SELECT t.id::text, t.task_name, COALESCE(t.description, ''), t.start_at, t.deadline_at, t.status, t.asset_network_scope,
                t.required_fields, t.quality_rules, t.require_review, t.allow_late_submission,
                (SELECT count(*) FROM inventory_task_organizations ito WHERE ito.task_id = t.id),
                (SELECT count(*) FROM inventory_task_organizations ito WHERE ito.task_id = t.id AND ito.status IN ('submitted', 'approved')),
@@ -275,7 +277,7 @@ func (s *Service) loadTaskForExport(ctx context.Context, principal auth.Principa
               WHERE ito.task_id = t.id AND ito.organization_id IN (SELECT id FROM accessible)
           )))
     `, principal.UserID, principal.HasRole("group_admin"), taskID).Scan(
-		&item.ID, &item.Name, &item.Description, &item.StartAt, &item.DeadlineAt, &item.Status,
+		&item.ID, &item.Name, &item.Description, &item.StartAt, &item.DeadlineAt, &item.Status, &item.AssetNetworkScope,
 		&requiredFieldsJSON, &qualityRulesJSON, &item.RequireReview, &item.AllowLateSubmission,
 		&item.TargetCount, &item.SubmittedCount, &item.ApprovedCount, &item.CreatedByName,
 		&item.CreatedAt, &item.UpdatedAt,
@@ -322,7 +324,7 @@ func (s *Service) Export(ctx context.Context, principal auth.Principal, taskID, 
 
 func buildExport(task Task, format string) ([]byte, string, string, error) {
 	headers := []string{
-		"任务名称", "任务状态", "任务说明", "开始时间", "截止时间", "需要集团审核", "允许逾期提交",
+		"任务名称", "任务状态", "任务说明", "网络资产核查范围", "开始时间", "截止时间", "需要集团审核", "允许逾期提交",
 		"目标组织数", "已提交组织数", "已通过组织数", "组织编码", "组织名称", "填报状态", "开始填报时间",
 		"提交时间", "提交人", "业务系统数量", "网络资产数量", "提交说明", "审核时间", "审核人", "退回原因",
 		"任务创建人", "任务创建时间",
@@ -330,7 +332,7 @@ func buildExport(task Task, format string) ([]byte, string, string, error) {
 	rows := make([][]string, 0, len(task.Organizations))
 	for _, progress := range task.Organizations {
 		rows = append(rows, []string{
-			task.Name, inventoryTaskExportLabel("task_status", task.Status), task.Description, formatExportTime(task.StartAt), formatExportTime(task.DeadlineAt),
+			task.Name, inventoryTaskExportLabel("task_status", task.Status), task.Description, inventoryTaskExportLabel("asset_network_scope", task.AssetNetworkScope), formatExportTime(task.StartAt), formatExportTime(task.DeadlineAt),
 			inventoryTaskExportLabel("bool", strconv.FormatBool(task.RequireReview)), inventoryTaskExportLabel("bool", strconv.FormatBool(task.AllowLateSubmission)),
 			strconv.FormatInt(task.TargetCount, 10), strconv.FormatInt(task.SubmittedCount, 10), strconv.FormatInt(task.ApprovedCount, 10),
 			progress.OrganizationCode, progress.OrganizationName, inventoryTaskExportLabel("progress_status", progress.Status), formatExportTimePointer(progress.StartedAt),
@@ -348,9 +350,10 @@ func buildExport(task Task, format string) ([]byte, string, string, error) {
 
 func inventoryTaskExportLabel(kind, value string) string {
 	labels := map[string]map[string]string{
-		"task_status":     {"draft": "草稿", "active": "进行中", "closed": "已关闭", "completed": "已完成", "archived": "已归档"},
-		"progress_status": {"not_started": "未开始", "in_progress": "填报中", "submitted": "待审核", "returned": "已退回", "approved": "已通过", "overdue": "已逾期"},
-		"bool":            {"true": "是", "false": "否"},
+		"task_status":         {"draft": "草稿", "active": "进行中", "closed": "已关闭", "completed": "已完成", "archived": "已归档"},
+		"progress_status":     {"not_started": "未开始", "in_progress": "填报中", "submitted": "待审核", "returned": "已退回", "approved": "已通过", "overdue": "已逾期"},
+		"asset_network_scope": {"all": "全部网络资产", "public": "仅公网资产", "private": "仅内网资产"},
+		"bool":                {"true": "是", "false": "否"},
 	}
 	if label, ok := labels[kind][value]; ok {
 		return label
@@ -429,14 +432,14 @@ func (s *Service) Create(ctx context.Context, principal auth.Principal, input Cr
 	var item Task
 	err = tx.QueryRow(ctx, `
 		INSERT INTO inventory_tasks (
-			task_name, description, start_at, deadline_at, status, required_fields, quality_rules,
+			task_name, description, start_at, deadline_at, status, asset_network_scope, required_fields, quality_rules,
 			require_review, allow_late_submission, created_by
-		) VALUES ($1, NULLIF($2, ''), $3, $4, $5, $6::jsonb, $7::jsonb, $8, $9, $10::uuid)
-		RETURNING id::text, task_name, COALESCE(description, ''), start_at, deadline_at, status,
+		) VALUES ($1, NULLIF($2, ''), $3, $4, $5, $6, $7::jsonb, $8::jsonb, $9, $10, $11::uuid)
+		RETURNING id::text, task_name, COALESCE(description, ''), start_at, deadline_at, status, asset_network_scope,
 		          required_fields, quality_rules, require_review, allow_late_submission, created_at, updated_at
-	`, input.Name, input.Description, input.StartAt, input.DeadlineAt, input.Status, requiredFieldsJSON, qualityRulesJSON,
+	`, input.Name, input.Description, input.StartAt, input.DeadlineAt, input.Status, input.AssetNetworkScope, requiredFieldsJSON, qualityRulesJSON,
 		input.RequireReview, input.AllowLateSubmission, principal.UserID).Scan(
-		&item.ID, &item.Name, &item.Description, &item.StartAt, &item.DeadlineAt, &item.Status,
+		&item.ID, &item.Name, &item.Description, &item.StartAt, &item.DeadlineAt, &item.Status, &item.AssetNetworkScope,
 		&requiredFieldsJSON, &qualityRulesJSON, &item.RequireReview, &item.AllowLateSubmission,
 		&item.CreatedAt, &item.UpdatedAt,
 	)
@@ -452,7 +455,7 @@ func (s *Service) Create(ctx context.Context, principal auth.Principal, input Cr
 		}
 	}
 	if err := writeAudit(ctx, tx, principal, principalOrganizationID(principal), "inventory_task.create", item.ID,
-		"创建填报任务", input.Name, input.Status, "", len(organizations), requestID, ipAddress); err != nil {
+		"创建填报任务", input.Name, input.Status, "", len(organizations), input.AssetNetworkScope, requestID, ipAddress); err != nil {
 		return Task{}, err
 	}
 	if err := tx.Commit(ctx); err != nil {
@@ -493,7 +496,7 @@ func (s *Service) Start(ctx context.Context, principal auth.Principal, taskID, o
 		return OrganizationProgress{}, ErrState
 	}
 	if err := writeAudit(ctx, tx, principal, organizationID, "inventory_task.start", taskID,
-		"开始填报任务", "", "in_progress", "", 0, requestID, ipAddress); err != nil {
+		"开始填报任务", "", "in_progress", "", 0, "", requestID, ipAddress); err != nil {
 		return OrganizationProgress{}, err
 	}
 	item, err := loadOrganizationProgress(ctx, tx, taskID, organizationID)
@@ -517,6 +520,7 @@ type qualityCheckQuerier interface {
 
 func loadQualityCheck(ctx context.Context, q qualityCheckQuerier, principal auth.Principal, taskID, organizationID string) (QualityCheck, error) {
 	var requiredFieldsJSON []byte
+	var assetNetworkScope string
 	var counts qualityCounts
 	err := q.QueryRow(ctx, `
 		WITH RECURSIVE descendant_roots(id) AS (
@@ -531,7 +535,7 @@ func loadQualityCheck(ctx context.Context, q qualityCheckQuerier, principal auth
 			  AND ur.data_scope IN ('organization', 'organization_and_descendants')
 			UNION SELECT id FROM descendants
 		), assignment AS (
-			SELECT t.required_fields
+			SELECT t.required_fields, t.asset_network_scope
 			FROM inventory_tasks t
 			JOIN inventory_task_organizations ito ON ito.task_id = t.id
 			WHERE t.id::text = $2 AND ito.organization_id::text = $3
@@ -541,15 +545,20 @@ func loadQualityCheck(ctx context.Context, q qualityCheckQuerier, principal auth
 			       p.contains_personal_information, p.contains_sensitive_personal_information,
 			       p.data_volume_over_100k, p.contains_important_data, p.contains_core_data
 			FROM business_systems bs
+			CROSS JOIN assignment task_scope
 			LEFT JOIN business_system_data_security_profiles p ON p.business_system_id = bs.id
 			WHERE bs.owner_organization_id::text = $3 AND bs.deleted_at IS NULL
+			  AND (task_scope.required_fields ? 'business_systems' OR task_scope.required_fields ? 'data_security')
 		), org_assets AS (
 			SELECT a.id, a.network_scope, a.importance, ao.owner_name
 			FROM assets a
 			JOIN asset_organizations ao ON ao.asset_id = a.id AND ao.is_primary
+			CROSS JOIN assignment task_scope
 			WHERE ao.organization_id::text = $3 AND a.deleted_at IS NULL
+			  AND task_scope.required_fields ? 'network_assets'
+			  AND (task_scope.asset_network_scope = 'all' OR a.network_scope = task_scope.asset_network_scope)
 		)
-		SELECT a.required_fields,
+		SELECT a.required_fields, a.asset_network_scope,
 		       (SELECT count(*) FROM org_systems),
 		       (SELECT count(*) FROM org_assets),
 		       (SELECT count(*) FROM org_systems WHERE btrim(COALESCE(owner_name, '')) = '' OR btrim(COALESCE(owner_contact, '')) = ''),
@@ -567,7 +576,7 @@ func loadQualityCheck(ctx context.Context, q qualityCheckQuerier, principal auth
 		       (SELECT count(*) FROM org_assets WHERE importance IN ('important', 'core') AND btrim(COALESCE(owner_name, '')) = '')
 		FROM assignment a
 	`, principal.UserID, taskID, organizationID, principal.HasRole("group_admin")).Scan(
-		&requiredFieldsJSON, &counts.SystemCount, &counts.AssetCount, &counts.MissingSystemOwner,
+		&requiredFieldsJSON, &assetNetworkScope, &counts.SystemCount, &counts.AssetCount, &counts.MissingSystemOwner,
 		&counts.MissingAssetOwner, &counts.UnknownDataSecurity, &counts.UnlinkedPublicAssets,
 		&counts.MissingPrioritySystemOwner, &counts.MissingPriorityAssetOwner,
 	)
@@ -582,7 +591,7 @@ func loadQualityCheck(ctx context.Context, q qualityCheckQuerier, principal auth
 		return QualityCheck{}, fmt.Errorf("decode inventory quality fields: %w", err)
 	}
 	result := buildQualityCheck(requiredFields, counts)
-	if err := appendConfiguredQualityRules(ctx, q, organizationID, &result); err != nil {
+	if err := appendConfiguredQualityRules(ctx, q, organizationID, requiredFields, assetNetworkScope, &result); err != nil {
 		return QualityCheck{}, err
 	}
 	result.Passed = result.ErrorCount == 0
@@ -617,8 +626,7 @@ func buildQualityCheck(requiredFields []string, counts qualityCounts) QualityChe
 			result.WarningCount++
 		}
 	}
-	needsSystems := required["business_systems"] || required["data_security"] || required["owner_contacts"]
-	needsAssets := required["network_assets"] || required["owner_contacts"]
+	needsSystems, needsAssets := selectedResourceTypes(requiredFields)
 	if needsSystems && counts.SystemCount == 0 {
 		add("missing_business_system", "error", "尚未录入业务系统", 1)
 	}
@@ -626,11 +634,19 @@ func buildQualityCheck(requiredFields []string, counts qualityCounts) QualityChe
 		add("missing_network_asset", "error", "尚未录入网络资产", 1)
 	}
 	if required["owner_contacts"] {
-		add("missing_system_owner", "error", "业务系统负责人或联系方式未填写完整", counts.MissingSystemOwner)
-		add("missing_asset_owner", "error", "网络资产负责人未填写", counts.MissingAssetOwner)
+		if needsSystems {
+			add("missing_system_owner", "error", "业务系统负责人或联系方式未填写完整", counts.MissingSystemOwner)
+		}
+		if needsAssets {
+			add("missing_asset_owner", "error", "网络资产负责人未填写", counts.MissingAssetOwner)
+		}
 	} else {
-		add("missing_priority_system_owner", "warning", "核心或重要业务系统负责人信息未填写完整", counts.MissingPrioritySystemOwner)
-		add("missing_priority_asset_owner", "warning", "核心或重要网络资产负责人未填写", counts.MissingPriorityAssetOwner)
+		if needsSystems {
+			add("missing_priority_system_owner", "warning", "核心或重要业务系统负责人信息未填写完整", counts.MissingPrioritySystemOwner)
+		}
+		if needsAssets {
+			add("missing_priority_asset_owner", "warning", "核心或重要网络资产负责人未填写", counts.MissingPriorityAssetOwner)
+		}
 	}
 	if required["data_security"] {
 		add("unknown_data_security", "error", "业务系统的数据安全属性仍有未确认项", counts.UnknownDataSecurity)
@@ -642,7 +658,8 @@ func buildQualityCheck(requiredFields []string, counts qualityCounts) QualityChe
 	return result
 }
 
-func appendConfiguredQualityRules(ctx context.Context, q qualityCheckQuerier, organizationID string, result *QualityCheck) error {
+func appendConfiguredQualityRules(ctx context.Context, q qualityCheckQuerier, organizationID string, requiredFields []string, assetNetworkScope string, result *QualityCheck) error {
+	includeSystems, includeAssets := selectedResourceTypes(requiredFields)
 	rows, err := q.Query(ctx, `SELECT id::text,rule_name,resource_type,target_field,severity,conditions FROM data_quality_rules WHERE is_enabled AND rule_type='required' ORDER BY sort_order,created_at`)
 	if err != nil {
 		return fmt.Errorf("load configured quality rules: %w", err)
@@ -655,10 +672,13 @@ func appendConfiguredQualityRules(ctx context.Context, q qualityCheckQuerier, or
 			return err
 		}
 		rule.RuleType = "required"
+		if (rule.ResourceType == "asset" && !includeAssets) || (rule.ResourceType == "business_system" && !includeSystems) {
+			continue
+		}
 		if err := json.Unmarshal(rawConditions, &rule.Conditions); err != nil {
 			return fmt.Errorf("decode configured quality rule conditions: %w", err)
 		}
-		missing, err := configuredMissingCount(ctx, q, rule, organizationID)
+		missing, err := configuredMissingCount(ctx, q, rule, organizationID, assetNetworkScope)
 		if err != nil {
 			return err
 		}
@@ -676,10 +696,14 @@ func appendConfiguredQualityRules(ctx context.Context, q qualityCheckQuerier, or
 	return rows.Err()
 }
 
-func configuredMissingCount(ctx context.Context, q qualityCheckQuerier, rule dataquality.Rule, organizationID string) (int64, error) {
+func configuredMissingCount(ctx context.Context, q qualityCheckQuerier, rule dataquality.Rule, organizationID, assetNetworkScope string) (int64, error) {
 	query, args, err := dataquality.BuildRuleIssueCountQuery(rule, organizationID)
 	if err != nil {
 		return 0, fmt.Errorf("build configured quality rule %s: %w", rule.ID, err)
+	}
+	if rule.ResourceType == "asset" && assetNetworkScope != "all" {
+		args = append(args, assetNetworkScope)
+		query += fmt.Sprintf(" AND a.network_scope=$%d", len(args))
 	}
 	var count int64
 	if err := q.QueryRow(ctx, query, args...).Scan(&count); err != nil {
@@ -714,16 +738,19 @@ func (s *Service) Submit(ctx context.Context, principal auth.Principal, taskID, 
 		UPDATE inventory_task_organizations ito
 		SET status = CASE WHEN t.require_review THEN 'submitted' ELSE 'approved' END,
 		    started_at = COALESCE(ito.started_at, now()), submitted_by = $1::uuid, submitted_at = now(),
-		    submission_note = NULLIF($4, ''),
-		    submitted_system_count = (
-				SELECT count(*) FROM business_systems bs
-				WHERE bs.owner_organization_id = ito.organization_id AND bs.deleted_at IS NULL
-			),
-		    submitted_asset_count = (
-				SELECT count(*) FROM assets a
-				JOIN asset_organizations ao ON ao.asset_id = a.id AND ao.is_primary
-				WHERE ao.organization_id = ito.organization_id AND a.deleted_at IS NULL
-			),
+			    submission_note = NULLIF($4, ''),
+			    submitted_system_count = (
+					SELECT count(*) FROM business_systems bs
+					WHERE bs.owner_organization_id = ito.organization_id AND bs.deleted_at IS NULL
+					  AND (t.required_fields ? 'business_systems' OR t.required_fields ? 'data_security')
+				),
+			    submitted_asset_count = (
+					SELECT count(*) FROM assets a
+					JOIN asset_organizations ao ON ao.asset_id = a.id AND ao.is_primary
+					WHERE ao.organization_id = ito.organization_id AND a.deleted_at IS NULL
+					  AND t.required_fields ? 'network_assets'
+					  AND (t.asset_network_scope = 'all' OR a.network_scope = t.asset_network_scope)
+				),
 		    reviewed_by = NULL,
 		    reviewed_at = CASE WHEN t.require_review THEN NULL ELSE now() END,
 		    return_reason = NULL,
@@ -813,7 +840,7 @@ func (s *Service) Review(ctx context.Context, principal auth.Principal, taskID, 
 		}
 	}
 	if err := writeAudit(ctx, tx, principal, organizationID, "inventory_task.review", taskID,
-		summary, "", input.Decision, input.ReturnReason, 0, requestID, ipAddress); err != nil {
+		summary, "", input.Decision, input.ReturnReason, 0, "", requestID, ipAddress); err != nil {
 		return OrganizationProgress{}, err
 	}
 	if input.Decision == "approved" {
@@ -860,7 +887,7 @@ func (s *Service) UpdateStatus(ctx context.Context, principal auth.Principal, ta
 		return ErrState
 	}
 	if err := writeAudit(ctx, tx, principal, principalOrganizationID(principal), "inventory_task.status_update", taskID,
-		"更新填报任务状态", "", input.Status, "", 0, requestID, ipAddress); err != nil {
+		"更新填报任务状态", "", input.Status, "", 0, "", requestID, ipAddress); err != nil {
 		return err
 	}
 	if err := tx.Commit(ctx); err != nil {
@@ -1072,13 +1099,14 @@ func completeIfApproved(ctx context.Context, tx pgx.Tx, taskID string) error {
 	return nil
 }
 
-func writeAudit(ctx context.Context, tx pgx.Tx, principal auth.Principal, organizationID, action, resourceID, summary, note, status, reason string, targetCount int, requestID, ipAddress string) error {
+func writeAudit(ctx context.Context, tx pgx.Tx, principal auth.Principal, organizationID, action, resourceID, summary, note, status, reason string, targetCount int, assetNetworkScope, requestID, ipAddress string) error {
 	if _, err := tx.Exec(ctx, `
 		INSERT INTO audit_logs (user_id, organization_id, action, resource_type, resource_id, summary, details, request_ip, request_id)
 		VALUES ($1::uuid, NULLIF($2, '')::uuid, $3, 'inventory_task', $4, $5,
-		        jsonb_build_object('note', $6::text, 'status', $7::text, 'return_reason', $8::text, 'target_count', $9::int),
-		        NULLIF($10, '')::inet, NULLIF($11, ''))
-	`, principal.UserID, organizationID, action, resourceID, summary, note, status, reason, targetCount, ipAddress, requestID); err != nil {
+		        jsonb_build_object('note', $6::text, 'status', $7::text, 'return_reason', $8::text, 'target_count', $9::int,
+		                           'asset_network_scope', NULLIF($10::text, '')),
+		        NULLIF($11, '')::inet, NULLIF($12, ''))
+	`, principal.UserID, organizationID, action, resourceID, summary, note, status, reason, targetCount, assetNetworkScope, ipAddress, requestID); err != nil {
 		return fmt.Errorf("write inventory task audit: %w", err)
 	}
 	return nil
@@ -1088,21 +1116,57 @@ func normalizeCreateInput(input *CreateInput) error {
 	input.Name = strings.TrimSpace(input.Name)
 	input.Description = strings.TrimSpace(input.Description)
 	input.Status = strings.TrimSpace(input.Status)
+	input.AssetNetworkScope = strings.TrimSpace(input.AssetNetworkScope)
 	if input.Status == "" {
 		input.Status = "draft"
 	}
+	if input.AssetNetworkScope == "" {
+		input.AssetNetworkScope = "all"
+	}
 	if input.Name == "" || len(input.Name) > 255 || len(input.Description) > 5000 || input.StartAt.IsZero() ||
 		input.DeadlineAt.IsZero() || !input.DeadlineAt.After(input.StartAt) ||
-		(input.Status != "draft" && input.Status != "active") {
+		(input.Status != "draft" && input.Status != "active") || !validAssetNetworkScope(input.AssetNetworkScope) {
 		return ErrInvalid
 	}
 	input.OrganizationIDs = uniqueNonEmpty(input.OrganizationIDs)
 	input.RequiredFields = uniqueNonEmpty(input.RequiredFields)
 	input.QualityRules = uniqueNonEmpty(input.QualityRules)
-	if len(input.OrganizationIDs) == 0 || len(input.OrganizationIDs) > 1000 || len(input.RequiredFields) > 100 || len(input.QualityRules) > 100 {
+	if len(input.OrganizationIDs) == 0 || len(input.OrganizationIDs) > 1000 || len(input.RequiredFields) > 100 || len(input.QualityRules) > 100 || !validRequiredFields(input.RequiredFields) {
 		return ErrInvalid
 	}
 	return nil
+}
+
+func validAssetNetworkScope(value string) bool {
+	return value == "all" || value == "public" || value == "private"
+}
+
+func validRequiredFields(fields []string) bool {
+	allowed := map[string]bool{
+		"business_systems": true,
+		"data_security":    true,
+		"network_assets":   true,
+		"owner_contacts":   true,
+	}
+	for _, field := range fields {
+		if !allowed[field] {
+			return false
+		}
+	}
+	includeSystems, includeAssets := selectedResourceTypes(fields)
+	return includeSystems || includeAssets
+}
+
+func selectedResourceTypes(requiredFields []string) (includeSystems, includeAssets bool) {
+	for _, field := range requiredFields {
+		switch field {
+		case "business_systems", "data_security":
+			includeSystems = true
+		case "network_assets":
+			includeAssets = true
+		}
+	}
+	return includeSystems, includeAssets
 }
 
 func normalizeReviewInput(input *ReviewInput) error {

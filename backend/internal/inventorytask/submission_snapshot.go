@@ -620,12 +620,18 @@ func sortResourceChanges(items []SubmissionResourceChange) {
 func createSubmissionSnapshot(ctx context.Context, tx pgx.Tx, principal auth.Principal, taskID, organizationID, note string) (SubmissionMetadata, error) {
 	var previousID *string
 	err := tx.QueryRow(ctx, `
-		SELECT id::text
-		FROM inventory_submissions
-		WHERE organization_id = $1::uuid
-		ORDER BY submitted_at DESC, id DESC
+		SELECT submission.id::text
+		FROM inventory_submissions submission
+		JOIN inventory_tasks previous_task ON previous_task.id = submission.task_id
+		JOIN inventory_tasks current_task ON current_task.id = $2::uuid
+		WHERE submission.organization_id = $1::uuid
+		  AND ((previous_task.required_fields ? 'business_systems' OR previous_task.required_fields ? 'data_security') =
+		       (current_task.required_fields ? 'business_systems' OR current_task.required_fields ? 'data_security'))
+		  AND ((previous_task.required_fields ? 'network_assets') = (current_task.required_fields ? 'network_assets'))
+		  AND (NOT (current_task.required_fields ? 'network_assets') OR previous_task.asset_network_scope = current_task.asset_network_scope)
+		ORDER BY submission.submitted_at DESC, submission.id DESC
 		LIMIT 1
-	`, organizationID).Scan(&previousID)
+	`, organizationID, taskID).Scan(&previousID)
 	if errors.Is(err, pgx.ErrNoRows) {
 		previousID = nil
 	} else if err != nil {
@@ -692,7 +698,12 @@ func createSubmissionSnapshot(ctx context.Context, tx pgx.Tx, principal auth.Pri
 		FROM business_systems system
 		LEFT JOIN business_system_data_security_profiles profile ON profile.business_system_id = system.id
 		WHERE system.owner_organization_id = $2::uuid AND system.deleted_at IS NULL
-	`, item.ID, organizationID)
+		  AND EXISTS (
+		      SELECT 1 FROM inventory_tasks task
+		      WHERE task.id = $3::uuid
+		        AND (task.required_fields ? 'business_systems' OR task.required_fields ? 'data_security')
+		  )
+	`, item.ID, organizationID, taskID)
 	if err != nil {
 		return SubmissionMetadata{}, fmt.Errorf("snapshot business systems: %w", err)
 	}
@@ -737,7 +748,13 @@ func createSubmissionSnapshot(ctx context.Context, tx pgx.Tx, principal auth.Pri
 		JOIN asset_organizations owner ON owner.asset_id = asset.id AND owner.is_primary
 		LEFT JOIN asset_network_areas area ON area.id = asset.network_area_id
 		WHERE owner.organization_id = $2::uuid AND asset.deleted_at IS NULL
-	`, item.ID, organizationID)
+		  AND EXISTS (
+		      SELECT 1 FROM inventory_tasks task
+		      WHERE task.id = $3::uuid
+		        AND task.required_fields ? 'network_assets'
+		        AND (task.asset_network_scope = 'all' OR asset.network_scope = task.asset_network_scope)
+		  )
+	`, item.ID, organizationID, taskID)
 	if err != nil {
 		return SubmissionMetadata{}, fmt.Errorf("snapshot network assets: %w", err)
 	}

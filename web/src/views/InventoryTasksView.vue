@@ -36,6 +36,7 @@ interface InventoryTask {
   start_at: string
   deadline_at: string
   status: string
+  asset_network_scope: 'all' | 'public' | 'private'
   required_fields: string[]
   quality_rules: string[]
   require_review: boolean
@@ -214,6 +215,7 @@ const form = reactive({
   start_at: defaultStart,
   deadline_at: initialDeadline(defaultStart),
   status: 'active',
+  asset_network_scope: 'all' as 'all' | 'public' | 'private',
   organization_ids: [] as string[],
   required_fields: ['business_systems', 'network_assets'] as string[],
   require_review: true,
@@ -236,6 +238,9 @@ const progressStatusLabels: Record<string, string> = {
 }
 const requiredFieldLabels: Record<string, string> = {
   business_systems: '业务系统信息', data_security: '数据安全属性', network_assets: '网络资产信息', owner_contacts: '负责人及联系方式',
+}
+const assetNetworkScopeLabels: Record<string, string> = {
+  all: '全部网络资产', public: '仅公网资产', private: '仅内网资产',
 }
 const snapshotValueLabels: Record<string, string> = {
   yes: '是', no: '否', unknown: '未知', partial: '部分', pending: '待确认',
@@ -359,20 +364,28 @@ function openCreateDialog() {
   const start = initialStart()
   Object.assign(form, {
     name: '', description: '', start_at: start, deadline_at: initialDeadline(start), status: 'active',
-    organization_ids: [], required_fields: ['business_systems', 'network_assets'], require_review: true, allow_late_submission: false,
+    asset_network_scope: 'all', organization_ids: [], required_fields: ['business_systems', 'network_assets'], require_review: true, allow_late_submission: false,
   })
   createDialogVisible.value = true
 }
 
 async function createTask() {
   if (!formRef.value || !(await formRef.value.validate())) return
+  if (!form.required_fields.some((field) => ['business_systems', 'data_security', 'network_assets'].includes(field))) {
+    ElMessage.warning('请至少选择业务系统、数据安全属性或网络资产中的一项填报内容')
+    return
+  }
   if (!(form.deadline_at > form.start_at)) {
     ElMessage.warning('截止时间必须晚于开始时间')
     return
   }
   submitting.value = true
   try {
-    await apiClient.post('/inventory-tasks', { ...form, quality_rules: [] })
+    await apiClient.post('/inventory-tasks', {
+      ...form,
+      asset_network_scope: form.required_fields.includes('network_assets') ? form.asset_network_scope : 'all',
+      quality_rules: [],
+    })
     createDialogVisible.value = false
     ElMessage.success(form.status === 'active' ? '填报任务已创建并下发' : '填报任务草稿已保存')
     page.value = 1
@@ -823,6 +836,7 @@ onMounted(async () => {
             <div class="task-detail">
               <div class="task-detail-description"><strong>任务说明</strong><span>{{ scope.row.description || '未填写' }}</span></div>
               <div><strong>必填范围</strong><span>{{ scope.row.required_fields.map((item: string) => requiredFieldLabels[item] || item).join('、') || '未指定' }}</span></div>
+              <div><strong>网络资产范围</strong><span>{{ scope.row.required_fields.includes('network_assets') ? (assetNetworkScopeLabels[scope.row.asset_network_scope] || scope.row.asset_network_scope) : '本任务不核查网络资产' }}</span></div>
               <div><strong>审核要求</strong><span>{{ scope.row.require_review ? '需要集团审核' : '提交后直接完成' }}</span></div>
               <div><strong>逾期提交</strong><span>{{ scope.row.allow_late_submission ? '允许' : '不允许' }}</span></div>
               <el-table v-loading="taskOrganizationState(scope.row).loading" :data="taskOrganizationState(scope.row).items" size="small" class="task-organization-table" empty-text="暂无组织" max-height="420">
@@ -1000,7 +1014,7 @@ onMounted(async () => {
     </el-drawer>
 
     <el-dialog v-model="createDialogVisible" title="创建填报任务" width="760px" destroy-on-close>
-      <el-alert title="任务创建后将关联到所选组织；选择“立即下发”后，子公司登录即可看到该任务。" type="info" :closable="false" show-icon />
+      <el-alert title="任务创建后将关联到所选组织；网络资产核查范围会同步作用于质量检查、提交数量和快照。" type="info" :closable="false" show-icon />
       <el-form ref="formRef" :model="form" :rules="rules" label-position="top" class="dialog-form-with-alert">
         <div class="form-grid two-columns">
           <el-form-item label="任务名称" prop="name" class="full-span"><el-input v-model="form.name" maxlength="255" placeholder="如：2026 年第三季度网络资产填报" /></el-form-item>
@@ -1009,6 +1023,14 @@ onMounted(async () => {
           <el-form-item label="任务状态"><el-select v-model="form.status" style="width:100%"><el-option label="立即下发" value="active" /><el-option label="保存草稿" value="draft" /></el-select></el-form-item>
           <el-form-item label="填报组织" prop="organization_ids"><el-select v-model="form.organization_ids" multiple filterable collapse-tags collapse-tags-tooltip placeholder="请选择子公司或部门" style="width:100%"><el-option v-for="item in eligibleOrganizations" :key="item.id" :label="`${item.name}（${item.code}）`" :value="item.id" /></el-select></el-form-item>
           <el-form-item label="填报内容" class="full-span"><el-checkbox-group v-model="form.required_fields"><el-checkbox label="business_systems">业务系统信息</el-checkbox><el-checkbox label="data_security">数据安全属性</el-checkbox><el-checkbox label="network_assets">网络资产信息</el-checkbox><el-checkbox label="owner_contacts">负责人及联系方式</el-checkbox></el-checkbox-group></el-form-item>
+          <el-form-item label="网络资产核查范围" class="full-span">
+            <el-radio-group v-model="form.asset_network_scope" :disabled="!form.required_fields.includes('network_assets')">
+              <el-radio-button value="all">全部网络资产</el-radio-button>
+              <el-radio-button value="public">仅公网资产</el-radio-button>
+              <el-radio-button value="private">仅内网资产</el-radio-button>
+            </el-radio-group>
+            <div class="form-help">选择“仅公网”或“仅内网”时，范围为“未知”的资产不会进入本次质量检查和提交快照。</div>
+          </el-form-item>
           <el-form-item label="任务说明" class="full-span"><el-input v-model="form.description" type="textarea" :rows="3" maxlength="5000" show-word-limit placeholder="填写本次填报范围、口径和注意事项" /></el-form-item>
           <el-form-item label="需要集团审核"><el-switch v-model="form.require_review" /></el-form-item>
           <el-form-item label="允许逾期提交"><el-switch v-model="form.allow_late_submission" /></el-form-item>
@@ -1018,7 +1040,7 @@ onMounted(async () => {
     </el-dialog>
 
     <el-dialog v-model="submissionDialogVisible" title="提交填报结果" width="640px" destroy-on-close>
-      <el-alert title="系统会先检查必填数据，再记录本组织的业务系统和网络资产数量快照。" type="info" :closable="false" show-icon />
+      <el-alert :title="`系统会按照任务范围检查必填数据，并记录${selectedTask?.required_fields.includes('network_assets') ? `“${assetNetworkScopeLabels[selectedTask.asset_network_scope] || selectedTask.asset_network_scope}”` : ''}提交快照。`" type="info" :closable="false" show-icon />
       <div class="quality-check" v-loading="qualityLoading">
         <div class="quality-check-header">
           <div><strong>提交前质量检查</strong><span v-if="qualityCheck">{{ qualityCheck.system_count }} 个系统 / {{ qualityCheck.asset_count }} 项资产</span></div>
@@ -1096,6 +1118,7 @@ onMounted(async () => {
 </template>
 
 <style scoped>
+.form-help { width:100%; margin-top:8px; color:var(--muted); font-size:12px; line-height:1.6; }
 .table-pagination { display:flex; justify-content:flex-end; margin-top:18px; }
 .dialog-pagination { overflow-x:auto; padding-bottom:2px; }
 .task-organization-pagination { grid-column: span 3; flex-direction: row !important; }
