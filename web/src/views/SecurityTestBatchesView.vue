@@ -12,13 +12,42 @@ interface Asset {
   name?: string
   organization_id: string
   organization_name: string
+  business_system_id?: string
   business_system_name?: string
   network_scope: string
+  network_area_id?: string
   network_area_name?: string
   environment: string
   importance: string
   status: string
 }
+
+interface OrganizationReference {
+  id: string
+  code: string
+  name: string
+  type: string
+  status: string
+}
+interface BusinessSystemReference {
+  id: string
+  code: string
+  name: string
+  organization_id: string
+  organization_name: string
+  status: string
+}
+interface NetworkAreaReference {
+  id: string
+  code?: string
+  name: string
+  organization_id: string
+  organization_name: string
+  status: string
+}
+type ScopePickerMode = 'asset' | 'organization' | 'business_system' | 'network_area'
+type ScopeReference = OrganizationReference | BusinessSystemReference | NetworkAreaReference
+interface AssetSelectionResponse { items: Asset[]; total: number }
 interface ScopeAsset {
   id: string
   asset_id?: string
@@ -84,7 +113,18 @@ const loading = ref(false)
 const submitting = ref(false)
 const actionLoading = ref(false)
 const batches = ref<SecurityTestBatch[]>([])
-const assets = ref<Asset[]>([])
+const selectedAssetMap = ref<Record<string, Asset>>({})
+const scopePickerVisible = ref(false)
+const scopePickerMode = ref<ScopePickerMode>('asset')
+const scopePickerLoading = ref(false)
+const scopePickerApplying = ref(false)
+const scopePickerAssets = ref<Asset[]>([])
+const scopePickerReferences = ref<ScopeReference[]>([])
+const scopePickerSelectedIDs = ref<string[]>([])
+const scopePickerKeyword = ref('')
+const scopePickerPage = ref(1)
+const scopePickerPageSize = ref(20)
+const scopePickerTotal = ref(0)
 const statusFilter = ref('')
 const page = ref(1)
 const pageSize = ref(20)
@@ -137,12 +177,17 @@ const eventLabels: Record<string, string> = {
 }
 const attachmentCategoryLabels: Record<string, string> = { test_report: '测试报告', reference: '参考材料' }
 
-const publicAssets = computed(() => assets.value.filter(item => item.network_scope === 'public' && item.status !== 'archived'))
-const selectedAssets = computed(() => publicAssets.value.filter(item => form.asset_ids.includes(item.id)))
+const selectedAssets = computed(() => form.asset_ids.map(id => selectedAssetMap.value[id]).filter((item): item is Asset => Boolean(item)))
 const selectedOrganizationCount = computed(() => new Set(selectedAssets.value.map(item => item.organization_id)).size)
 const draftCount = computed(() => batches.value.filter(item => item.status === 'draft').length)
 const authorizedCount = computed(() => batches.value.filter(item => item.status === 'authorized').length)
 const activeCount = computed(() => batches.value.filter(item => item.status === 'in_progress').length)
+const scopePickerTitles: Record<ScopePickerMode, string> = {
+  asset: '逐项添加公网资产', organization: '按组织纳入公网资产', business_system: '按业务系统纳入公网资产', network_area: '按网络区域纳入公网资产',
+}
+const scopePickerTitle = computed(() => scopePickerTitles[scopePickerMode.value])
+const scopePickerDimensionLabels: Record<ScopePickerMode, string> = { asset: '资产', organization: '组织', business_system: '业务系统', network_area: '网络区域' }
+const scopePickerDimensionLabel = computed(() => scopePickerDimensionLabels[scopePickerMode.value])
 const scopeByOrganization = computed(() => {
   const groups = new Map<string, number>()
   for (const item of currentBatch.value?.scope_assets ?? []) {
@@ -161,19 +206,7 @@ const rules: FormRules = {
   asset_ids: [{ required: true, type: 'array', min: 1, max: 200, message: '请选择 1 至 200 项公网资产', trigger: 'change' }],
 }
 
-onMounted(async () => {
-  await loadAssets()
-  await load()
-})
-
-async function loadAssets() {
-  try {
-    const response = await apiClient.get<ListResponse<Asset>>('/security-reference/assets', { params: { page: 1, page_size: 100, public_only: true } })
-    assets.value = response.data.items
-  } catch (error) {
-    ElMessage.error(getAPIErrorMessage(error, '读取公网资产候选失败'))
-  }
-}
+onMounted(load)
 
 async function load() {
   loading.value = true
@@ -227,6 +260,7 @@ function defaultTimeRange() {
 function openCreate() {
   const range = defaultTimeRange()
   editingID.value = ''
+  selectedAssetMap.value = {}
   Object.assign(form, {
     batch_name: '', test_type: 'penetration', provider: '集团安全团队', authorization_note: '',
     start_at: range.start, end_at: range.end, notes: '禁止破坏性测试；不得超出授权资产范围。', asset_ids: [],
@@ -238,12 +272,180 @@ async function openEdit(item: SecurityTestBatch) {
   const detail = await fetchDetail(item.id)
   if (!detail) return
   editingID.value = detail.id
+  const scopeAssets = (detail.scope_assets ?? []).filter(asset => asset.asset_id)
+  selectedAssetMap.value = Object.fromEntries(scopeAssets.map(asset => [asset.asset_id as string, {
+    id: asset.asset_id as string,
+    type: asset.asset_type,
+    value: asset.asset_value,
+    name: asset.asset_name,
+    organization_id: asset.organization_id ?? '',
+    organization_name: asset.organization_name,
+    business_system_name: asset.business_system_name,
+    network_scope: asset.network_scope,
+    network_area_name: asset.network_area_name,
+    environment: asset.environment,
+    importance: asset.importance,
+    status: 'active',
+  } satisfies Asset]))
   Object.assign(form, {
     batch_name: detail.name, test_type: detail.test_type, provider: detail.provider,
     authorization_note: detail.authorization_note, start_at: new Date(detail.start_at), end_at: new Date(detail.end_at),
-    notes: detail.notes ?? '', asset_ids: (detail.scope_assets ?? []).map(asset => asset.asset_id).filter(Boolean),
+    notes: detail.notes ?? '', asset_ids: scopeAssets.map(asset => asset.asset_id as string),
   })
   dialogVisible.value = true
+}
+
+function scopeReferenceTitle(item: ScopeReference) {
+  if (scopePickerMode.value === 'organization') {
+    const organization = item as OrganizationReference
+    return `${organization.code} · ${organization.name}`
+  }
+  if (scopePickerMode.value === 'business_system') {
+    const system = item as BusinessSystemReference
+    return `${system.code} · ${system.name}`
+  }
+  const area = item as NetworkAreaReference
+  return `${area.code ? `${area.code} · ` : ''}${area.name}`
+}
+
+function scopeReferenceSubtitle(item: ScopeReference) {
+  if (scopePickerMode.value === 'organization') return (item as OrganizationReference).type === 'group' ? '集团总部' : '下级组织'
+  return (item as BusinessSystemReference | NetworkAreaReference).organization_name
+}
+
+function isAssetSelected(id: string) {
+  return form.asset_ids.includes(id)
+}
+
+function addAsset(item: Asset) {
+  if (isAssetSelected(item.id)) return
+  if (form.asset_ids.length >= 200) {
+    ElMessage.warning('测试范围最多只能包含 200 项资产')
+    return
+  }
+  selectedAssetMap.value = { ...selectedAssetMap.value, [item.id]: item }
+  form.asset_ids.push(item.id)
+  formRef.value?.clearValidate('asset_ids')
+}
+
+function removeAsset(id: string) {
+  form.asset_ids = form.asset_ids.filter(item => item !== id)
+  const next = { ...selectedAssetMap.value }
+  delete next[id]
+  selectedAssetMap.value = next
+}
+
+function toggleScopeReference(id: string, checked: unknown) {
+  if (Boolean(checked)) {
+    if (scopePickerSelectedIDs.value.length >= 100) {
+      ElMessage.warning('单次最多选择 100 个圈选条件')
+      return
+    }
+    if (!scopePickerSelectedIDs.value.includes(id)) scopePickerSelectedIDs.value.push(id)
+    return
+  }
+  scopePickerSelectedIDs.value = scopePickerSelectedIDs.value.filter(item => item !== id)
+}
+
+async function openScopePicker(mode: ScopePickerMode) {
+  scopePickerMode.value = mode
+  scopePickerKeyword.value = ''
+  scopePickerPage.value = 1
+  scopePickerPageSize.value = 20
+  scopePickerSelectedIDs.value = []
+  scopePickerAssets.value = []
+  scopePickerReferences.value = []
+  scopePickerVisible.value = true
+  await loadScopePicker()
+}
+
+async function loadScopePicker() {
+  scopePickerLoading.value = true
+  try {
+    const params: Record<string, string | number | boolean> = {
+      page: scopePickerPage.value,
+      page_size: scopePickerPageSize.value,
+    }
+    if (scopePickerKeyword.value.trim()) params.q = scopePickerKeyword.value.trim()
+    if (scopePickerMode.value === 'asset') params.public_only = true
+    const endpoint = {
+      asset: '/security-reference/assets',
+      organization: '/security-reference/organizations',
+      business_system: '/security-reference/business-systems',
+      network_area: '/security-reference/network-areas',
+    }[scopePickerMode.value]
+    const response = await apiClient.get<ListResponse<Asset | ScopeReference>>(endpoint, { params })
+    scopePickerTotal.value = response.data.total
+    if (scopePickerMode.value === 'asset') {
+      scopePickerAssets.value = response.data.items as Asset[]
+      scopePickerReferences.value = []
+    } else {
+      scopePickerReferences.value = response.data.items as ScopeReference[]
+      scopePickerAssets.value = []
+    }
+  } catch (error) {
+    ElMessage.error(getAPIErrorMessage(error, '读取测试范围候选失败'))
+  } finally {
+    scopePickerLoading.value = false
+  }
+}
+
+function searchScopePicker() {
+  scopePickerPage.value = 1
+  void loadScopePicker()
+}
+
+function handleScopePickerPageChange(value: number) {
+  scopePickerPage.value = value
+  void loadScopePicker()
+}
+
+function handleScopePickerPageSizeChange(value: number) {
+  scopePickerPageSize.value = value
+  scopePickerPage.value = 1
+  void loadScopePicker()
+}
+
+async function applyBulkScope() {
+  if (scopePickerMode.value === 'asset') return
+  if (scopePickerSelectedIDs.value.length === 0) {
+    ElMessage.warning(`请至少选择一个${scopePickerDimensionLabel.value}`)
+    return
+  }
+  scopePickerApplying.value = true
+  try {
+    const response = await apiClient.post<AssetSelectionResponse>('/security-reference/assets/resolve', {
+      dimension: scopePickerMode.value,
+      ids: scopePickerSelectedIDs.value,
+    })
+    if (response.data.total === 0) {
+      ElMessage.warning(`所选${scopePickerDimensionLabel.value}没有可纳入的未归档公网资产`)
+      return
+    }
+    if (response.data.total > 200) {
+      ElMessage.warning(`共匹配 ${response.data.total} 项公网资产，超过 200 项上限，请缩小圈选范围`)
+      return
+    }
+    const existing = new Set(form.asset_ids)
+    const additions = response.data.items.filter(item => !existing.has(item.id))
+    const mergedCount = form.asset_ids.length + additions.length
+    if (mergedCount > 200) {
+      ElMessage.warning(`合并后将达到 ${mergedCount} 项，超过 200 项上限；请先移除部分资产或缩小圈选范围`)
+      return
+    }
+    const nextMap = { ...selectedAssetMap.value }
+    for (const item of response.data.items) nextMap[item.id] = item
+    selectedAssetMap.value = nextMap
+    form.asset_ids.push(...additions.map(item => item.id))
+    formRef.value?.clearValidate('asset_ids')
+    const duplicateCount = response.data.items.length - additions.length
+    ElMessage.success(`已纳入 ${additions.length} 项公网资产${duplicateCount ? `，跳过 ${duplicateCount} 项重复资产` : ''}`)
+    scopePickerVisible.value = false
+  } catch (error) {
+    ElMessage.error(getAPIErrorMessage(error, '批量纳入公网资产失败'))
+  } finally {
+    scopePickerApplying.value = false
+  }
 }
 
 async function save() {
@@ -523,7 +725,7 @@ function formatTime(value?: string) {
       </div>
     </div>
 
-    <el-dialog v-model="dialogVisible" :title="editingID ? '编辑安全测试批次' : '新建安全测试批次'" width="860px" destroy-on-close>
+    <el-dialog v-model="dialogVisible" :title="editingID ? '编辑安全测试批次' : '新建安全测试批次'" width="980px" destroy-on-close>
       <el-form ref="formRef" :model="form" :rules="rules" label-width="120px">
         <div class="form-grid-two">
           <el-form-item label="批次名称" prop="batch_name"><el-input v-model="form.batch_name" maxlength="255" placeholder="如：2026年第三季度互联网资产渗透测试" /></el-form-item>
@@ -537,14 +739,49 @@ function formatTime(value?: string) {
         <el-form-item label="测试约束"><el-input v-model="form.notes" type="textarea" :rows="2" maxlength="20000" placeholder="如：禁止破坏性测试，不得进行拒绝服务测试" /></el-form-item>
         <el-form-item label="公网资产范围" prop="asset_ids">
           <div class="scope-picker">
-            <el-select v-model="form.asset_ids" multiple filterable collapse-tags collapse-tags-tooltip :max-collapse-tags="3" placeholder="选择需要测试的公网 URL、IP 或域名" style="width:100%">
-              <el-option v-for="item in publicAssets" :key="item.id" :value="item.id" :label="`[${assetTypeLabels[item.type] ?? item.type}] ${item.value} · ${item.organization_name}${item.business_system_name ? ` · ${item.business_system_name}` : ''}`" />
-            </el-select>
-            <div class="scope-summary">已选 <strong>{{ form.asset_ids.length }}</strong> 项资产，覆盖 <strong>{{ selectedOrganizationCount }}</strong> 家组织。授权后将固化为历史快照。</div>
+            <div class="scope-picker-actions">
+              <el-button type="primary" plain data-testid="scope-add-asset" @click="openScopePicker('asset')">逐项添加资产</el-button>
+              <el-button data-testid="scope-add-organization" @click="openScopePicker('organization')">按组织纳入</el-button>
+              <el-button data-testid="scope-add-business-system" @click="openScopePicker('business_system')">按业务系统纳入</el-button>
+              <el-button data-testid="scope-add-network-area" @click="openScopePicker('network_area')">按网络区域纳入</el-button>
+            </div>
+            <el-table v-if="selectedAssets.length" :data="selectedAssets" border max-height="260" class="selected-scope-table" data-testid="selected-security-test-assets">
+              <el-table-column label="资产" min-width="260"><template #default="{ row }"><strong>[{{ assetTypeLabels[row.type] ?? row.type }}] {{ row.value }}</strong><div class="scope-row-secondary">{{ row.name || '-' }}</div></template></el-table-column>
+              <el-table-column prop="organization_name" label="责任组织" min-width="150" />
+              <el-table-column label="业务系统 / 网络区域" min-width="180"><template #default="{ row }">{{ row.business_system_name || '-' }}<div class="scope-row-secondary">{{ row.network_area_name || '-' }}</div></template></el-table-column>
+              <el-table-column label="操作" width="72" fixed="right"><template #default="{ row }"><el-button link type="danger" @click="removeAsset(row.id)">移除</el-button></template></el-table-column>
+            </el-table>
+            <el-empty v-else description="尚未选择测试资产，可逐项添加或按组织、业务系统、网络区域批量纳入" :image-size="54" class="scope-empty" />
+            <div class="scope-summary">已选 <strong>{{ form.asset_ids.length }}</strong> / 200 项资产，覆盖 <strong>{{ selectedOrganizationCount }}</strong> 家组织。批量纳入会自动去重，授权后将固化为历史快照。</div>
           </div>
         </el-form-item>
       </el-form>
       <template #footer><el-button @click="dialogVisible = false">取消</el-button><el-button type="primary" :loading="submitting" data-testid="save-security-test-batch" @click="save">保存草稿</el-button></template>
+    </el-dialog>
+
+    <el-dialog v-model="scopePickerVisible" :title="scopePickerTitle" width="820px" append-to-body destroy-on-close>
+      <el-alert v-if="scopePickerMode !== 'asset'" type="info" :closable="false" show-icon class="scope-picker-alert">
+        <template #title>只纳入匹配的未归档公网资产；最终仍执行 1～200 项范围校验，授权后冻结范围快照。</template>
+      </el-alert>
+      <div class="scope-search-bar">
+        <el-input v-model="scopePickerKeyword" clearable :placeholder="scopePickerMode === 'asset' ? '搜索资产值、名称、组织、业务系统或网络区域' : `搜索${scopePickerDimensionLabel}`" @keyup.enter="searchScopePicker" @clear="searchScopePicker" />
+        <el-button type="primary" @click="searchScopePicker">搜索</el-button>
+      </div>
+      <el-table v-if="scopePickerMode === 'asset'" v-loading="scopePickerLoading" :data="scopePickerAssets" border height="390" data-testid="security-test-asset-picker">
+        <el-table-column label="公网资产" min-width="280"><template #default="{ row }"><strong>[{{ assetTypeLabels[row.type] ?? row.type }}] {{ row.value }}</strong><div class="scope-row-secondary">{{ row.name || '-' }}</div></template></el-table-column>
+        <el-table-column prop="organization_name" label="责任组织" min-width="150" />
+        <el-table-column label="业务系统 / 网络区域" min-width="170"><template #default="{ row }">{{ row.business_system_name || '-' }}<div class="scope-row-secondary">{{ row.network_area_name || '-' }}</div></template></el-table-column>
+        <el-table-column label="操作" width="84" fixed="right"><template #default="{ row }"><el-button v-if="!isAssetSelected(row.id)" link type="primary" @click="addAsset(row)">加入</el-button><el-button v-else link type="danger" @click="removeAsset(row.id)">移除</el-button></template></el-table-column>
+      </el-table>
+      <el-table v-else v-loading="scopePickerLoading" :data="scopePickerReferences" border height="390" data-testid="security-test-bulk-scope-picker">
+        <el-table-column label="选择" width="70" align="center"><template #default="{ row }"><el-checkbox :model-value="scopePickerSelectedIDs.includes(row.id)" @change="toggleScopeReference(row.id, $event)" /></template></el-table-column>
+        <el-table-column :label="scopePickerDimensionLabel" min-width="300"><template #default="{ row }"><strong>{{ scopeReferenceTitle(row) }}</strong><div class="scope-row-secondary">{{ scopeReferenceSubtitle(row) }}</div></template></el-table-column>
+      </el-table>
+      <div class="scope-picker-pagination">
+        <span v-if="scopePickerMode !== 'asset'">已选择 {{ scopePickerSelectedIDs.length }} 个{{ scopePickerDimensionLabel }}</span>
+        <el-pagination background small layout="total, sizes, prev, pager, next" :total="scopePickerTotal" :current-page="scopePickerPage" :page-size="scopePickerPageSize" :page-sizes="[20, 50, 100]" @current-change="handleScopePickerPageChange" @size-change="handleScopePickerPageSizeChange" />
+      </div>
+      <template #footer><el-button @click="scopePickerVisible = false">关闭</el-button><el-button v-if="scopePickerMode !== 'asset'" type="primary" :loading="scopePickerApplying" data-testid="apply-bulk-security-test-scope" @click="applyBulkScope">纳入所选{{ scopePickerDimensionLabel }}</el-button></template>
     </el-dialog>
 
     <el-drawer v-model="detailVisible" title="安全测试批次详情" size="78%">
@@ -636,7 +873,15 @@ function formatTime(value?: string) {
 .date-range-inline { display:flex; align-items:center; gap:8px; width:100%; }
 .date-range-inline :deep(.el-date-editor) { flex:1; min-width:0; }
 .scope-picker { width:100%; }
+.scope-picker-actions { display:flex; flex-wrap:wrap; gap:10px; margin-bottom:12px; }
+.scope-picker-actions :deep(.el-button + .el-button) { margin-left:0; }
+.selected-scope-table { width:100%; }
+.scope-row-secondary { margin-top:4px; color:var(--muted); font-size:12px; font-weight:400; }
+.scope-empty { padding:18px 0; border:1px dashed var(--line); border-radius:10px; }
 .scope-summary { margin-top:10px; color:var(--muted); font-size:13px; }
+.scope-picker-alert { margin-bottom:14px; }
+.scope-search-bar { display:flex; gap:10px; margin-bottom:14px; }
+.scope-picker-pagination { display:flex; justify-content:space-between; align-items:center; gap:16px; margin-top:16px; color:var(--muted); font-size:13px; }
 .detail-heading, .section-heading { display:flex; justify-content:space-between; align-items:flex-start; gap:20px; }
 .detail-heading { margin-bottom:22px; }
 .detail-heading h2, .section-heading h3 { margin:0; }
@@ -648,5 +893,5 @@ function formatTime(value?: string) {
 .selected-file-name { flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; color:var(--muted); font-size:13px; }
 .attachment-heading { margin-bottom:14px; }
 .scope-chips { display:flex; flex-wrap:wrap; justify-content:flex-end; gap:8px; }
-@media (max-width: 900px) { .security-test-filter-panel { align-items:flex-start; flex-wrap:wrap; } .security-test-filter-count { width:100%; margin-left:0; } .form-grid-two { grid-template-columns:1fr; } .date-range-inline { flex-direction:column; align-items:stretch; } .attachment-upload-row { flex-wrap:wrap; } .selected-file-name { flex-basis:100%; order:3; } }
+@media (max-width: 900px) { .security-test-filter-panel { align-items:flex-start; flex-wrap:wrap; } .security-test-filter-count { width:100%; margin-left:0; } .form-grid-two { grid-template-columns:1fr; } .date-range-inline { flex-direction:column; align-items:stretch; } .attachment-upload-row { flex-wrap:wrap; } .selected-file-name { flex-basis:100%; order:3; } .scope-picker-pagination { align-items:flex-start; flex-direction:column; } }
 </style>

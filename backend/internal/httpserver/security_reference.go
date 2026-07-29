@@ -30,6 +30,15 @@ func registerSecurityReferenceRoutes(api *gin.RouterGroup, requireAuth gin.Handl
 		result, err := service.SearchAssets(c.Request.Context(), mustPrincipal(c), filter)
 		writeSecurityReferenceResult(c, logger, "list security reference assets", result, err)
 	})
+	group.POST("/assets/resolve", func(c *gin.Context) {
+		var input securityreference.AssetSelectionInput
+		if err := c.ShouldBindJSON(&input); err != nil {
+			writeAPIError(c, http.StatusBadRequest, "invalid_request", "请检查批量圈选条件")
+			return
+		}
+		result, err := service.ResolvePublicAssets(c.Request.Context(), mustPrincipal(c), input)
+		writeSecurityReferenceResult(c, logger, "resolve security reference assets", result, err)
+	})
 	group.GET("/business-systems", func(c *gin.Context) {
 		filter, ok := securityReferenceFilter(c)
 		if !ok {
@@ -37,6 +46,14 @@ func registerSecurityReferenceRoutes(api *gin.RouterGroup, requireAuth gin.Handl
 		}
 		result, err := service.SearchBusinessSystems(c.Request.Context(), mustPrincipal(c), filter)
 		writeSecurityReferenceResult(c, logger, "list security reference business systems", result, err)
+	})
+	group.GET("/network-areas", func(c *gin.Context) {
+		filter, ok := securityReferenceFilter(c)
+		if !ok {
+			return
+		}
+		result, err := service.SearchNetworkAreas(c.Request.Context(), mustPrincipal(c), filter)
+		writeSecurityReferenceResult(c, logger, "list security reference network areas", result, err)
 	})
 }
 
@@ -56,7 +73,7 @@ func writeSecurityReferenceResult[T any](c *gin.Context, logger *slog.Logger, op
 	case errors.Is(err, securityreference.ErrForbidden):
 		writeAPIError(c, http.StatusForbidden, "forbidden", "当前账号无集团安全运营参考数据权限")
 	case errors.Is(err, securityreference.ErrInvalid):
-		writeAPIError(c, http.StatusBadRequest, "invalid_query", "请检查组织编号或搜索条件")
+		writeAPIError(c, http.StatusBadRequest, "invalid_query", "请检查组织编号、搜索条件或批量圈选范围")
 	case err != nil:
 		logger.Error(operation, "error", err, "request_id", c.GetString("request_id"))
 		writeAPIError(c, http.StatusInternalServerError, "internal_error", "读取安全运营参考数据失败")

@@ -26,3 +26,37 @@ func TestValidateFilter(t *testing.T) {
 		t.Fatal("oversized keyword should be rejected")
 	}
 }
+
+func TestNormalizeAndValidateAssetSelection(t *testing.T) {
+	input := AssetSelectionInput{
+		Dimension: " organization ",
+		IDs: []string{
+			"11111111-1111-1111-1111-111111111111",
+			"11111111-1111-1111-1111-111111111111",
+			" ",
+		},
+	}
+	normalizeAssetSelection(&input)
+	if input.Dimension != "organization" || len(input.IDs) != 1 {
+		t.Fatalf("selection was not normalized: %+v", input)
+	}
+	if !validAssetSelection(input) {
+		t.Fatal("normalized organization selection should be valid")
+	}
+	input.Dimension = "asset"
+	if validAssetSelection(input) {
+		t.Fatal("asset is not a supported bulk selection dimension")
+	}
+}
+
+func TestRejectsInvalidAssetSelectionIDs(t *testing.T) {
+	for _, input := range []AssetSelectionInput{
+		{Dimension: "organization"},
+		{Dimension: "business_system", IDs: []string{"not-a-uuid"}},
+		{Dimension: "network_area", IDs: make([]string, maxSelectionIDs+1)},
+	} {
+		if validAssetSelection(input) {
+			t.Fatalf("selection should be invalid: %+v", input)
+		}
+	}
+}

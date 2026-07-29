@@ -791,15 +791,15 @@ test('集团创建安全测试批次并批量导入授权范围内漏洞', async
     if (!organizationResponse.ok) throw new Error(`create scope organization failed: ${organizationResponse.status}`)
     const organization = (await organizationResponse.json()).item
     for (const asset of [
-      { type: 'domain', value, name: `授权范围测试域名_${Date.now()}` },
-      { type: 'ip', value: scopeIP, name: `授权范围测试主机_${Date.now()}` },
-      { type: 'domain', value: outOfScopeValue, name: `批次外测试资产_${Date.now()}` },
+      { type: 'domain', value, name: `授权范围测试域名_${Date.now()}`, organization_id: organization.id },
+      { type: 'ip', value: scopeIP, name: `授权范围测试主机_${Date.now()}`, organization_id: organization.id },
+      { type: 'domain', value: outOfScopeValue, name: `批次外测试资产_${Date.now()}`, organization_id: group.id },
     ]) {
       const response = await fetch('/api/v1/assets', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          ...asset, organization_id: organization.id,
+          ...asset,
           environment: 'production', network_scope: 'public', status: 'active', importance: 'important',
         }),
       })
@@ -812,12 +812,19 @@ test('集团创建安全测试批次并批量导入授权范围内漏洞', async
   const dialog = page.getByRole('dialog', { name: '新建安全测试批次' })
   await dialog.getByPlaceholder('如：2026年第三季度互联网资产渗透测试').fill(batchName)
   await dialog.getByPlaceholder('说明授权人、授权依据、允许的测试方式与边界').fill('经集团信息安全负责人授权，仅对本批次资产执行非破坏性渗透测试。')
-  const scopeItem = dialog.locator('.el-form-item').filter({ hasText: '公网资产范围' })
-  await scopeItem.locator('.el-select').click()
-  await page.locator('.el-select-dropdown:visible').getByText(`[域名] ${assetValue} · ${organizationName}`, { exact: true }).click()
-  await scopeItem.locator('.el-select').click()
-  await page.locator('.el-select-dropdown:visible').getByText(`[IP] ${scopeIP} · ${organizationName}`, { exact: true }).click()
-  await page.keyboard.press('Escape')
+  await dialog.getByTestId('scope-add-organization').click()
+  const scopePicker = page.getByRole('dialog', { name: '按组织纳入公网资产' })
+  await scopePicker.getByPlaceholder('搜索组织').fill(organizationName)
+  await scopePicker.getByRole('button', { name: '搜索', exact: true }).click()
+  const organizationRow = scopePicker.locator('.el-table__body-wrapper tbody tr').filter({ hasText: organizationName }).first()
+  await expect(organizationRow).toBeVisible()
+  await organizationRow.locator('label.el-checkbox').click()
+  await scopePicker.getByTestId('apply-bulk-security-test-scope').click()
+  await expect(page.getByText('已纳入 2 项公网资产', { exact: false })).toBeVisible()
+  const selectedScope = dialog.getByTestId('selected-security-test-assets')
+  await expect(selectedScope).toContainText(assetValue)
+  await expect(selectedScope).toContainText(scopeIP)
+  await expect(selectedScope).not.toContainText(outOfScopeValue)
   await dialog.getByTestId('save-security-test-batch').click()
   await expect(page.getByText('安全测试批次已创建')).toBeVisible()
 
