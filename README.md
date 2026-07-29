@@ -25,6 +25,7 @@
 - 资产按所属组织和关联业务系统管理，集团可统管、子公司仅可维护本组织数据
 - 集团管理员创建填报任务、选择目标组织并立即下发或保存草稿
 - 填报任务支持“全部网络资产、仅公网资产、仅内网资产”核查范围；范围同步作用于提交前质量检查、提交数量、不可变快照、审核明细、提交差异及结果导出，未选择的资源类型不检查、不统计、不进入快照
+- 集团创建填报任务时，可按目标组织、填报资源类型和网络资产核查范围预览当前台账规模，逐组织查看业务系统数与网络资产数并识别空范围组织；预览不固化数据，实际提交仍按届时最新台账重新计算
 - 子公司提交前自动检查必填台账、负责人、数据安全属性和公网资产关联情况；错误阻止提交、提醒项允许提交
 - 集团管理员可统一维护网络资产/业务系统自定义字段，并配置“字段必填”与“长期未更新”数据质量规则
 - 数据质量规则支持最多 10 个白名单生效条件，多个条件按 AND 组合，可按组织、网络区域、资产类型、网络范围、环境、重要程度、业务系统状态、数据属性及自定义字段限定适用范围；必填规则在主动巡检与填报提交前复用同一判定语义
@@ -201,6 +202,7 @@ POST   /api/v1/data-quality-issues/:id/exempt
 POST   /api/v1/data-quality-issues/:id/reopen
 GET    /api/v1/data-quality-scan-batches?page=&page_size=
 GET    /api/v1/inventory-tasks?page=&page_size=
+POST   /api/v1/inventory-tasks/scope-preview
 POST   /api/v1/inventory-tasks
 GET    /api/v1/inventory-tasks/:taskID/export?format=csv|xlsx
 GET    /api/v1/inventory-tasks/:taskID/organizations?page=&page_size=

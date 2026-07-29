@@ -2,6 +2,7 @@ package inventorytask
 
 import (
 	"bytes"
+	"context"
 	"encoding/csv"
 	"errors"
 	"strings"
@@ -9,6 +10,8 @@ import (
 	"time"
 
 	"github.com/xuri/excelize/v2"
+
+	"netassets/internal/auth"
 )
 
 func TestNormalizeCreateInput(t *testing.T) {
@@ -26,6 +29,45 @@ func TestNormalizeCreateInput(t *testing.T) {
 	}
 	if input.Name != "季度填报" || len(input.OrganizationIDs) != 2 || len(input.RequiredFields) != 2 || input.AssetNetworkScope != "all" {
 		t.Fatalf("unexpected normalized input: %+v", input)
+	}
+}
+
+func TestPreviewScopeRejectsNonGroupAdmin(t *testing.T) {
+	service := &Service{}
+	_, err := service.PreviewScope(context.Background(), auth.Principal{Roles: []string{"organization_admin"}}, ScopePreviewInput{
+		OrganizationIDs: []string{"org-1"}, RequiredFields: []string{"network_assets"},
+	})
+	if !errors.Is(err, ErrForbidden) {
+		t.Fatalf("PreviewScope() error = %v, want ErrForbidden", err)
+	}
+}
+
+func TestNormalizeScopePreviewInput(t *testing.T) {
+	input := ScopePreviewInput{
+		OrganizationIDs: []string{" org-1 ", "org-1", "org-2"},
+		RequiredFields:  []string{"network_assets", "network_assets", "data_security"},
+	}
+	if err := normalizeScopePreviewInput(&input); err != nil {
+		t.Fatal(err)
+	}
+	if len(input.OrganizationIDs) != 2 || len(input.RequiredFields) != 2 || input.AssetNetworkScope != "all" {
+		t.Fatalf("unexpected normalized preview input: %+v", input)
+	}
+}
+
+func TestNormalizeScopePreviewInputRejectsInvalidScope(t *testing.T) {
+	input := ScopePreviewInput{
+		OrganizationIDs: []string{"org-1"}, RequiredFields: []string{"network_assets"}, AssetNetworkScope: "unknown",
+	}
+	if err := normalizeScopePreviewInput(&input); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("normalizeScopePreviewInput() error = %v, want ErrInvalid", err)
+	}
+}
+
+func TestNormalizeScopePreviewInputRejectsNoResourceType(t *testing.T) {
+	input := ScopePreviewInput{OrganizationIDs: []string{"org-1"}, RequiredFields: []string{"owner_contacts"}}
+	if err := normalizeScopePreviewInput(&input); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("normalizeScopePreviewInput() error = %v, want ErrInvalid", err)
 	}
 }
 

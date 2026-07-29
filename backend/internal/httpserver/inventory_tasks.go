@@ -66,6 +66,27 @@ func registerInventoryTaskRoutes(api *gin.RouterGroup, requireAuth gin.HandlerFu
 			c.Data(http.StatusOK, contentType, data)
 		}
 	})
+	group.POST("/scope-preview", func(c *gin.Context) {
+		var input inventorytask.ScopePreviewInput
+		if err := c.ShouldBindJSON(&input); err != nil {
+			writeAPIError(c, http.StatusBadRequest, "invalid_request", "任务范围信息格式不正确")
+			return
+		}
+		result, err := service.PreviewScope(c.Request.Context(), mustPrincipal(c), input)
+		switch {
+		case errors.Is(err, inventorytask.ErrForbidden):
+			writeAPIError(c, http.StatusForbidden, "forbidden", "仅集团管理员可以预览填报任务范围")
+		case errors.Is(err, inventorytask.ErrInvalid):
+			writeAPIError(c, http.StatusBadRequest, "invalid_inventory_task_scope", "请检查填报组织、填报内容和网络资产核查范围")
+		case errors.Is(err, inventorytask.ErrNotFound):
+			writeAPIError(c, http.StatusNotFound, "organization_not_found", "部分填报组织不存在、已停用或不是下级组织")
+		case err != nil:
+			logger.Error("preview inventory task scope", "error", err, "request_id", c.GetString("request_id"))
+			writeAPIError(c, http.StatusInternalServerError, "internal_error", "预览填报任务范围失败")
+		default:
+			c.JSON(http.StatusOK, gin.H{"scope_preview": result})
+		}
+	})
 	group.POST("", func(c *gin.Context) {
 		var input inventorytask.CreateInput
 		if err := c.ShouldBindJSON(&input); err != nil {

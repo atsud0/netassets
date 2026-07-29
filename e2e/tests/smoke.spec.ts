@@ -132,6 +132,11 @@ test('集团创建子公司账号，子公司隔离登记业务系统和网络�
   const publicScope = dialog.locator('.el-radio-button').filter({ hasText: '仅公网资产' })
   await publicScope.click()
   await expect(publicScope.locator('input')).toBeChecked()
+  const scopePreview = dialog.getByTestId('scope-preview')
+  await expect(scopePreview.getByTestId('scope-preview-summary')).toContainText('1 家组织')
+  await expect(scopePreview.getByTestId('scope-preview-summary')).toContainText('0 个业务系统')
+  await expect(scopePreview.getByTestId('scope-preview-summary')).toContainText('0 项网络资产')
+  await expect(scopePreview).toContainText('1 家组织在当前核查范围内暂无资源')
   await dialog.getByPlaceholder('填写本次填报范围、口径和注意事项').fill('端到端测试填报任务')
   await dialog.getByRole('button', { name: '创建并下发' }).click()
   await expect(page.getByText('填报任务已创建并下发')).toBeVisible()
@@ -461,6 +466,30 @@ test('集团创建子公司账号，子公司隔离登记业务系统和网络�
 
   await page.getByRole('button', { name: '退出', exact: true }).click()
   await login(page, adminUsername, adminPassword!)
+  const populatedScopePreview = await page.evaluate(async ({ code }) => {
+    const organizationsResponse = await fetch('/api/v1/organizations?page=1&page_size=100')
+    const organizations = await organizationsResponse.json()
+    const organization = organizations.items.find((item: { code: string }) => item.code === code)
+    if (!organization) throw new Error(`organization not found: ${code}`)
+    const response = await fetch('/api/v1/inventory-tasks/scope-preview', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        organization_ids: [organization.id],
+        required_fields: ['business_systems', 'network_assets'],
+        asset_network_scope: 'public',
+      }),
+    })
+    return { status: response.status, body: await response.json() }
+  }, { code: organizationCode })
+  expect(populatedScopePreview.status).toBe(200)
+  expect(populatedScopePreview.body.scope_preview).toMatchObject({
+    organization_count: 1, system_count: 1, asset_count: 1, empty_organization_count: 0,
+  })
+  expect(populatedScopePreview.body.scope_preview.items).toHaveLength(1)
+  expect(populatedScopePreview.body.scope_preview.items[0]).toMatchObject({
+    organization_code: organizationCode, system_count: 1, asset_count: 1,
+  })
   await page.getByRole('button', { name: '填报任务', exact: true }).click()
   taskRow = await ensureTaskExpanded(page, inventoryTaskName)
   progressRow = page.locator('.task-organization-table .el-table__body-wrapper tbody tr').filter({ hasText: organizationName }).first()

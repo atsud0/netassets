@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, reactive, ref } from 'vue'
+import { computed, onMounted, reactive, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox, type FormInstance, type FormRules } from 'element-plus'
 import { apiClient, getAPIErrorMessage } from '../api/client'
@@ -62,6 +62,21 @@ interface QualityCheck {
   issues: QualityIssue[]
 }
 interface QualityCheckResponse { quality_check: QualityCheck }
+interface ScopePreviewItem {
+  organization_id: string
+  organization_code: string
+  organization_name: string
+  system_count: number
+  asset_count: number
+}
+interface ScopePreview {
+  items: ScopePreviewItem[]
+  organization_count: number
+  system_count: number
+  asset_count: number
+  empty_organization_count: number
+}
+interface ScopePreviewResponse { scope_preview: ScopePreview }
 interface SubmissionMetadata {
   id: string
   task_id: string
@@ -147,6 +162,11 @@ const submitting = ref(false)
 const actionLoading = ref('')
 const exportLoading = ref('')
 const createDialogVisible = ref(false)
+const scopePreviewLoading = ref(false)
+const scopePreview = ref<ScopePreview | null>(null)
+const scopePreviewError = ref('')
+let scopePreviewTimer: ReturnType<typeof setTimeout> | undefined
+let scopePreviewRequestID = 0
 const submissionDialogVisible = ref(false)
 const returnDialogVisible = ref(false)
 const qualityLoading = ref(false)
@@ -229,6 +249,8 @@ const rules: FormRules = {
 }
 
 const eligibleOrganizations = computed(() => organizations.value.filter((item) => item.status === 'enabled' && item.type !== 'group'))
+const scopePreviewHasResourceType = computed(() => form.required_fields.some((field) => ['business_systems', 'data_security', 'network_assets'].includes(field)))
+const scopePreviewReady = computed(() => form.organization_ids.length > 0 && scopePreviewHasResourceType.value)
 const activeCount = computed(() => tasks.value.filter((item) => item.status === 'active').length)
 const draftCount = computed(() => tasks.value.filter((item) => item.status === 'draft').length)
 const overdueCount = computed(() => tasks.value.filter((item) => item.status === 'active' && new Date(item.deadline_at).getTime() < Date.now()).length)
@@ -360,14 +382,67 @@ function handlePageSizeChange(value: number) {
   void load()
 }
 
+function resetScopePreview() {
+  if (scopePreviewTimer) clearTimeout(scopePreviewTimer)
+  scopePreviewTimer = undefined
+  scopePreviewRequestID += 1
+  scopePreviewLoading.value = false
+  scopePreview.value = null
+  scopePreviewError.value = ''
+}
+
+function scheduleScopePreview() {
+  if (scopePreviewTimer) clearTimeout(scopePreviewTimer)
+  scopePreviewTimer = undefined
+  scopePreviewRequestID += 1
+  scopePreviewLoading.value = false
+  scopePreview.value = null
+  scopePreviewError.value = ''
+  if (!createDialogVisible.value || !scopePreviewReady.value) return
+  scopePreviewTimer = setTimeout(() => { void loadScopePreview() }, 300)
+}
+
+async function loadScopePreview() {
+  if (!scopePreviewReady.value) {
+    scheduleScopePreview()
+    return
+  }
+  if (scopePreviewTimer) clearTimeout(scopePreviewTimer)
+  scopePreviewTimer = undefined
+  const requestID = ++scopePreviewRequestID
+  scopePreviewLoading.value = true
+  scopePreviewError.value = ''
+  try {
+    const response = await apiClient.post<ScopePreviewResponse>('/inventory-tasks/scope-preview', {
+      organization_ids: form.organization_ids,
+      required_fields: form.required_fields,
+      asset_network_scope: form.required_fields.includes('network_assets') ? form.asset_network_scope : 'all',
+    })
+    if (requestID === scopePreviewRequestID) scopePreview.value = response.data.scope_preview
+  } catch (error) {
+    if (requestID === scopePreviewRequestID) {
+      scopePreview.value = null
+      scopePreviewError.value = getAPIErrorMessage(error, '读取任务范围预览失败')
+    }
+  } finally {
+    if (requestID === scopePreviewRequestID) scopePreviewLoading.value = false
+  }
+}
+
 function openCreateDialog() {
   const start = initialStart()
+  resetScopePreview()
   Object.assign(form, {
     name: '', description: '', start_at: start, deadline_at: initialDeadline(start), status: 'active',
     asset_network_scope: 'all', organization_ids: [], required_fields: ['business_systems', 'network_assets'], require_review: true, allow_late_submission: false,
   })
   createDialogVisible.value = true
 }
+
+watch(
+  [() => form.organization_ids.slice(), () => form.required_fields.slice(), () => form.asset_network_scope],
+  scheduleScopePreview,
+)
 
 async function createTask() {
   if (!formRef.value || !(await formRef.value.validate())) return
@@ -387,6 +462,7 @@ async function createTask() {
       quality_rules: [],
     })
     createDialogVisible.value = false
+    resetScopePreview()
     ElMessage.success(form.status === 'active' ? '填报任务已创建并下发' : '填报任务草稿已保存')
     page.value = 1
     await load()
@@ -1013,7 +1089,7 @@ onMounted(async () => {
       </div>
     </el-drawer>
 
-    <el-dialog v-model="createDialogVisible" title="创建填报任务" width="760px" destroy-on-close>
+    <el-dialog v-model="createDialogVisible" title="创建填报任务" width="860px" class="inventory-task-create-dialog" destroy-on-close @closed="resetScopePreview">
       <el-alert title="任务创建后将关联到所选组织；网络资产核查范围会同步作用于质量检查、提交数量和快照。" type="info" :closable="false" show-icon />
       <el-form ref="formRef" :model="form" :rules="rules" label-position="top" class="dialog-form-with-alert">
         <div class="form-grid two-columns">
@@ -1030,6 +1106,31 @@ onMounted(async () => {
               <el-radio-button value="private">仅内网资产</el-radio-button>
             </el-radio-group>
             <div class="form-help">选择“仅公网”或“仅内网”时，范围为“未知”的资产不会进入本次质量检查和提交快照。</div>
+          </el-form-item>
+          <el-form-item label="范围影响预览" class="full-span">
+            <div class="scope-preview-card" data-testid="scope-preview" v-loading="scopePreviewLoading">
+              <div class="scope-preview-header">
+                <div><strong>当前台账预计纳入范围</strong><span>仅用于下发前确认，子公司提交时会按届时最新台账重新计算。</span></div>
+                <el-button size="small" :loading="scopePreviewLoading" :disabled="!scopePreviewReady" @click="loadScopePreview">刷新预览</el-button>
+              </div>
+              <el-empty v-if="form.organization_ids.length === 0" :image-size="48" description="选择填报组织后显示范围预览" />
+              <el-alert v-else-if="!scopePreviewHasResourceType" title="请至少选择一种业务系统或网络资产填报内容" type="warning" :closable="false" show-icon />
+              <el-alert v-else-if="scopePreviewError" :title="scopePreviewError" type="error" :closable="false" show-icon />
+              <template v-else-if="scopePreview">
+                <div class="scope-preview-summary" data-testid="scope-preview-summary">
+                  <span><strong>{{ scopePreview.organization_count }}</strong> 家组织</span>
+                  <span><strong>{{ scopePreview.system_count }}</strong> 个业务系统</span>
+                  <span><strong>{{ scopePreview.asset_count }}</strong> 项网络资产</span>
+                </div>
+                <el-alert v-if="scopePreview.empty_organization_count > 0" :title="`${scopePreview.empty_organization_count} 家组织在当前核查范围内暂无资源，请确认是否仍需下发。`" type="warning" :closable="false" show-icon />
+                <el-table :data="scopePreview.items" size="small" max-height="220" empty-text="暂无预览数据">
+                  <el-table-column label="填报组织" min-width="240"><template #default="scope"><div class="organization-name-cell"><strong>{{ scope.row.organization_name }}</strong><span>{{ scope.row.organization_code }}</span></div></template></el-table-column>
+                  <el-table-column label="业务系统" prop="system_count" width="120" align="right" />
+                  <el-table-column label="网络资产" prop="asset_count" width="120" align="right" />
+                  <el-table-column label="范围状态" width="120"><template #default="scope"><el-tag :type="scope.row.system_count + scope.row.asset_count > 0 ? 'success' : 'warning'" effect="plain">{{ scope.row.system_count + scope.row.asset_count > 0 ? '有数据' : '暂无资源' }}</el-tag></template></el-table-column>
+                </el-table>
+              </template>
+            </div>
           </el-form-item>
           <el-form-item label="任务说明" class="full-span"><el-input v-model="form.description" type="textarea" :rows="3" maxlength="5000" show-word-limit placeholder="填写本次填报范围、口径和注意事项" /></el-form-item>
           <el-form-item label="需要集团审核"><el-switch v-model="form.require_review" /></el-form-item>
@@ -1119,6 +1220,16 @@ onMounted(async () => {
 
 <style scoped>
 .form-help { width:100%; margin-top:8px; color:var(--muted); font-size:12px; line-height:1.6; }
+.scope-preview-card { width:100%; min-height:118px; padding:16px; border:1px solid var(--line); border-radius:12px; background:#f7f9fb; box-sizing:border-box; }
+.scope-preview-header { display:flex; align-items:flex-start; justify-content:space-between; gap:16px; margin-bottom:14px; }
+.scope-preview-header > div { display:flex; flex-direction:column; gap:4px; }
+.scope-preview-header span { color:var(--muted); font-size:12px; line-height:1.5; }
+.scope-preview-summary { display:flex; flex-wrap:wrap; gap:10px; margin-bottom:12px; }
+.scope-preview-summary span { min-width:130px; padding:10px 12px; border:1px solid var(--line); border-radius:10px; background:var(--surface); color:var(--muted); }
+.scope-preview-summary strong { margin-right:4px; color:var(--ink); font-size:18px; }
+.scope-preview-card :deep(.el-alert) { margin-bottom:12px; }
+.scope-preview-card :deep(.el-empty) { padding:8px 0 2px; }
+:global(.inventory-task-create-dialog .el-dialog__body) { max-height:calc(100vh - 190px); overflow-y:auto; }
 .table-pagination { display:flex; justify-content:flex-end; margin-top:18px; }
 .dialog-pagination { overflow-x:auto; padding-bottom:2px; }
 .task-organization-pagination { grid-column: span 3; flex-direction: row !important; }
