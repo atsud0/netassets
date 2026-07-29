@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, onMounted, reactive, ref, watch } from 'vue'
-import { useRouter } from 'vue-router'
+import { useRoute, useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox, type FormInstance, type FormRules } from 'element-plus'
 import { apiClient, getAPIErrorMessage } from '../api/client'
 import { useAuthStore } from '../stores/auth'
@@ -156,6 +156,7 @@ interface TaskOrganizationState {
 }
 
 const auth = useAuthStore()
+const route = useRoute()
 const router = useRouter()
 const loading = ref(false)
 const submitting = ref(false)
@@ -212,6 +213,7 @@ const returnResourceIndex = reactive<Record<string, ReviewResource>>({})
 const formRef = ref<FormInstance>()
 const tasks = ref<InventoryTask[]>([])
 const taskOrganizationStates = reactive<Record<string, TaskOrganizationState>>({})
+const expandedTaskIDs = ref<string[]>([])
 const organizations = ref<Organization[]>([])
 const page = ref(1)
 const pageSize = ref(20)
@@ -284,6 +286,10 @@ const diffGroups = computed(() => {
   ]
 })
 
+const focusedTaskID = computed(() => typeof route.query.task_id === 'string' ? route.query.task_id.trim() : '')
+const focusedOrganizationID = computed(() => typeof route.query.organization_id === 'string' ? route.query.organization_id.trim() : '')
+const hasMessageFocus = computed(() => focusedTaskID.value !== '')
+
 async function loadOrganizations() {
   if (!auth.isGroupAdmin) {
     organizations.value = []
@@ -310,8 +316,13 @@ async function loadTaskOrganizations(task: InventoryTask) {
   const state = taskOrganizationState(task)
   state.loading = true
   try {
+    const organizationID = task.id === focusedTaskID.value ? focusedOrganizationID.value : ''
     const response = await apiClient.get<ListResponse<OrganizationProgress>>(`/inventory-tasks/${task.id}/organizations`, {
-      params: { page: state.page, page_size: state.pageSize },
+      params: {
+        page: state.page,
+        page_size: state.pageSize,
+        organization_id: organizationID || undefined,
+      },
     })
     state.items = response.data.items
     state.total = response.data.total
@@ -326,6 +337,7 @@ async function loadTaskOrganizations(task: InventoryTask) {
 }
 
 async function handleTaskExpand(task: InventoryTask, expandedRows: InventoryTask[]) {
+  expandedTaskIDs.value = expandedRows.map((item) => item.id)
   if (!expandedRows.some((item) => item.id === task.id)) return
   try { await loadTaskOrganizations(task) }
   catch (error) { ElMessage.error(getAPIErrorMessage(error, '读取填报组织进度失败')) }
@@ -349,15 +361,46 @@ async function load() {
   loading.value = true
   try {
     const response = await apiClient.get<ListResponse<InventoryTask>>('/inventory-tasks', {
-      params: { page: page.value, page_size: pageSize.value },
+      params: {
+        page: page.value,
+        page_size: pageSize.value,
+        task_id: focusedTaskID.value || undefined,
+      },
     })
     tasks.value = response.data.items
     total.value = response.data.total
+    if (focusedTaskID.value) {
+      const focusedTask = tasks.value.find((item) => item.id === focusedTaskID.value)
+      if (focusedTask) {
+        expandedTaskIDs.value = [focusedTask.id]
+        const state = taskOrganizationState(focusedTask)
+        state.page = 1
+        await loadTaskOrganizations(focusedTask)
+      }
+    }
   } catch (error) {
     ElMessage.error(getAPIErrorMessage(error, '读取填报任务失败'))
   } finally {
     loading.value = false
   }
+}
+
+function resetTaskOrganizationStates() {
+  Object.keys(taskOrganizationStates).forEach((taskID) => { delete taskOrganizationStates[taskID] })
+}
+
+async function clearMessageFocus() {
+  const query = { ...route.query }
+  delete query.task_id
+  delete query.organization_id
+  await router.replace({ query })
+}
+
+async function applyRouteFocus() {
+  page.value = 1
+  expandedTaskIDs.value = []
+  resetTaskOrganizationStates()
+  await load()
 }
 
 async function refreshAfterMutation() {
@@ -871,6 +914,11 @@ function progressStatusTag(value: string) {
   return value === 'approved' ? 'success' : value === 'submitted' ? 'primary' : value === 'returned' || value === 'overdue' ? 'danger' : value === 'in_progress' ? 'warning' : 'info'
 }
 
+watch(
+  () => [route.query.task_id, route.query.organization_id],
+  () => { void applyRouteFocus() },
+)
+
 onMounted(async () => {
   await Promise.all([load(), loadOrganizations()])
 })
@@ -886,6 +934,11 @@ onMounted(async () => {
       </div>
       <el-button v-if="auth.isGroupAdmin" type="primary" :disabled="eligibleOrganizations.length === 0" @click="openCreateDialog">创建任务</el-button>
     </div>
+
+    <el-alert v-if="hasMessageFocus" type="info" :closable="false" show-icon class="page-alert">
+      <template #title>当前正在查看消息关联的填报任务{{ focusedOrganizationID ? '及目标组织' : '' }}</template>
+      <el-button type="primary" link @click="clearMessageFocus">查看全部任务</el-button>
+    </el-alert>
 
     <el-alert v-if="auth.isGroupAdmin && eligibleOrganizations.length === 0" title="请先在“组织机构”中新增并启用至少一个子公司或部门，之后才能创建填报任务。" type="warning" :closable="false" show-icon class="page-alert" />
     <el-alert v-if="!auth.isGroupAdmin" title="填报任务以系统中当前的业务系统和网络资产为准。请先维护数据，再回到本页面提交。" type="info" :closable="false" show-icon class="page-alert">
@@ -906,7 +959,7 @@ onMounted(async () => {
     </div>
 
     <div class="panel data-table-panel" v-loading="loading">
-      <el-table :data="tasks" row-key="id" empty-text="暂无填报任务" @expand-change="handleTaskExpand">
+      <el-table :data="tasks" row-key="id" :expand-row-keys="expandedTaskIDs" empty-text="暂无填报任务" @expand-change="handleTaskExpand">
         <el-table-column type="expand">
           <template #default="scope">
             <div class="task-detail">

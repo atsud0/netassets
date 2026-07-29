@@ -11,9 +11,14 @@ import (
 )
 
 const (
-	CategoryAssetChange          = "asset_change"
-	CategoryBusinessSystemChange = "business_system_change"
-	CategoryFindingReceived      = "finding_received"
+	CategoryAssetChange           = "asset_change"
+	CategoryBusinessSystemChange  = "business_system_change"
+	CategoryFindingReceived       = "finding_received"
+	CategoryInventoryTaskReview   = "inventory_task_review"
+	CategoryInventoryTaskReceived = "inventory_task_received"
+	CategoryInventoryTaskReturned = "inventory_task_returned"
+	CategoryInventoryTaskDueSoon  = "inventory_task_due_soon"
+	CategoryInventoryTaskOverdue  = "inventory_task_overdue"
 
 	EventAssetStatusChanged      = "asset.status_changed"
 	EventAssetNetworkAreaChanged = "asset.network_area_changed"

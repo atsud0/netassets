@@ -205,6 +205,111 @@ WITH RECURSIVE descendant_roots(id) AS (
 		WHERE visible.permission_key=ne.required_permission AND visible.id=ne.target_organization_id
 	  ))
 
+
+	UNION ALL
+
+	SELECT
+		'inventory_task:pending_review:' || t.id::text || ':' || ito.organization_id::text || ':' || extract(epoch FROM COALESCE(ito.submitted_at,ito.updated_at))::bigint::text AS notification_key,
+		'inventory_task_review'::text AS category,
+		'填报任务待审核'::text AS title,
+		o.organization_name || '已提交填报任务《' || t.task_name || '》，等待集团审核。'::text AS message,
+		'warning'::text AS level,
+		'inventory_task'::text AS resource_type,
+		t.id::text AS resource_id,
+		'/inventory-tasks?task_id=' || t.id::text || '&organization_id=' || ito.organization_id::text AS action_path,
+		COALESCE(ito.submitted_at,ito.updated_at) AS occurred_at,
+		t.deadline_at AS due_at
+	FROM inventory_task_organizations ito
+	JOIN inventory_tasks t ON t.id=ito.task_id
+	JOIN organizations o ON o.id=ito.organization_id
+	WHERE $2::boolean AND t.status='active' AND t.require_review AND ito.status='submitted'
+
+	UNION ALL
+
+	SELECT
+		'inventory_task:received:' || t.id::text || ':' || ito.organization_id::text || ':' || extract(epoch FROM t.updated_at)::bigint::text,
+		'inventory_task_received',
+		'收到新的填报任务',
+		'集团已下发填报任务《' || t.task_name || '》，请在截止时间前完成核查和提交。',
+		'info',
+		'inventory_task',
+		t.id::text,
+		'/inventory-tasks?task_id=' || t.id::text || '&organization_id=' || ito.organization_id::text,
+		t.updated_at,
+		t.deadline_at
+	FROM inventory_task_organizations ito
+	JOIN inventory_tasks t ON t.id=ito.task_id
+	WHERE NOT $2::boolean AND t.status='active' AND ito.status='not_started'
+	  AND EXISTS (
+		SELECT 1 FROM event_permission_accessible visible
+		WHERE visible.permission_key='inventory.manage' AND visible.id=ito.organization_id
+	  )
+
+	UNION ALL
+
+	SELECT
+		'inventory_task:returned:' || t.id::text || ':' || ito.organization_id::text || ':' || extract(epoch FROM ito.updated_at)::bigint::text,
+		'inventory_task_returned',
+		'填报任务已退回',
+		'填报任务《' || t.task_name || '》审核未通过，请根据退回原因和逐条意见完成整改后重新提交。',
+		'warning',
+		'inventory_task',
+		t.id::text,
+		'/inventory-tasks?task_id=' || t.id::text || '&organization_id=' || ito.organization_id::text,
+		ito.updated_at,
+		t.deadline_at
+	FROM inventory_task_organizations ito
+	JOIN inventory_tasks t ON t.id=ito.task_id
+	WHERE NOT $2::boolean AND t.status='active' AND ito.status='returned'
+	  AND EXISTS (
+		SELECT 1 FROM event_permission_accessible visible
+		WHERE visible.permission_key='inventory.manage' AND visible.id=ito.organization_id
+	  )
+
+	UNION ALL
+
+	SELECT
+		'inventory_task:overdue:' || t.id::text || ':' || ito.organization_id::text || ':' || extract(epoch FROM t.deadline_at)::bigint::text,
+		'inventory_task_overdue',
+		'填报任务已逾期',
+		'填报任务《' || t.task_name || '》已超过截止时间，请尽快处理并与集团确认。',
+		'danger',
+		'inventory_task',
+		t.id::text,
+		'/inventory-tasks?task_id=' || t.id::text || '&organization_id=' || ito.organization_id::text,
+		t.deadline_at,
+		t.deadline_at
+	FROM inventory_task_organizations ito
+	JOIN inventory_tasks t ON t.id=ito.task_id
+	WHERE NOT $2::boolean AND t.status='active' AND ito.status IN ('not_started','in_progress','returned','overdue')
+	  AND t.deadline_at < now()
+	  AND EXISTS (
+		SELECT 1 FROM event_permission_accessible visible
+		WHERE visible.permission_key='inventory.manage' AND visible.id=ito.organization_id
+	  )
+
+	UNION ALL
+
+	SELECT
+		'inventory_task:due_soon:' || t.id::text || ':' || ito.organization_id::text || ':' || extract(epoch FROM t.deadline_at)::bigint::text,
+		'inventory_task_due_soon',
+		'填报任务即将截止',
+		'填报任务《' || t.task_name || '》将在 3 天内截止，请及时完成核查和提交。',
+		'warning',
+		'inventory_task',
+		t.id::text,
+		'/inventory-tasks?task_id=' || t.id::text || '&organization_id=' || ito.organization_id::text,
+		now(),
+		t.deadline_at
+	FROM inventory_task_organizations ito
+	JOIN inventory_tasks t ON t.id=ito.task_id
+	WHERE NOT $2::boolean AND t.status='active' AND ito.status IN ('not_started','in_progress','returned','overdue')
+	  AND t.deadline_at >= now() AND t.deadline_at < now()+interval '3 days'
+	  AND EXISTS (
+		SELECT 1 FROM event_permission_accessible visible
+		WHERE visible.permission_key='inventory.manage' AND visible.id=ito.organization_id
+	  )
+
 	UNION ALL
 
 	SELECT
@@ -539,7 +644,7 @@ func ValidateCategory(category string) bool {
 		return true
 	}
 	switch strings.TrimSpace(category) {
-	case "work_order_review", "work_order_received", "work_order_returned", "work_order_overdue", "work_order_due_soon", "risk_review", "quality_review", "quality_received", "quality_returned", "quality_exemption", CategoryAssetChange, CategoryBusinessSystemChange, CategoryFindingReceived:
+	case "work_order_review", "work_order_received", "work_order_returned", "work_order_overdue", "work_order_due_soon", "risk_review", "quality_review", "quality_received", "quality_returned", "quality_exemption", CategoryAssetChange, CategoryBusinessSystemChange, CategoryFindingReceived, CategoryInventoryTaskReview, CategoryInventoryTaskReceived, CategoryInventoryTaskReturned, CategoryInventoryTaskDueSoon, CategoryInventoryTaskOverdue:
 		return true
 	default:
 		return false

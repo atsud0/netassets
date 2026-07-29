@@ -25,6 +25,11 @@ const categoryOptions = [
   { value: 'asset_change', label: '资产变更' },
   { value: 'business_system_change', label: '系统变更' },
   { value: 'finding_received', label: '安全发现' },
+  { value: 'inventory_task_review', label: '填报审核' },
+  { value: 'inventory_task_received', label: '填报任务' },
+  { value: 'inventory_task_returned', label: '填报退回' },
+  { value: 'inventory_task_due_soon', label: '填报临期' },
+  { value: 'inventory_task_overdue', label: '填报逾期' },
   { value: 'work_order_review', label: '待集团复测' },
   { value: 'work_order_received', label: '新工单' },
   { value: 'work_order_returned', label: '退回整改' },
@@ -121,7 +126,7 @@ onMounted(load)
       <div>
         <p class="eyebrow">IN-APP NOTIFICATIONS</p>
         <h1>消息中心</h1>
-        <p>集中查看台账变更、安全发现、安全工单和数据质量整改等组织协作消息。当前仅提供站内提醒，不发送外部通知。</p>
+        <p>集中查看填报任务、台账变更、安全发现、安全工单和数据质量整改等组织协作消息。当前仅提供站内提醒，不发送外部通知。</p>
       </div>
       <div class="page-heading-actions">
         <el-button :loading="markingAll" :disabled="!summary.unread_count" @click="markAllRead">全部标记已读</el-button>

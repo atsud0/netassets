@@ -182,6 +182,17 @@ test('集团创建子公司账号，子公司隔离登记业务系统和网络�
   await expect(page.getByRole('button', { name: '用户管理', exact: true })).toBeVisible()
   await expect(page.getByRole('button', { name: '网络区域配置' })).toHaveCount(0)
 
+  await page.goto('/notifications')
+  let inventoryNotificationCard = page.locator('.notification-card').filter({ hasText: inventoryTaskName }).first()
+  await expect(inventoryNotificationCard).toContainText('收到新的填报任务')
+  await inventoryNotificationCard.getByRole('button', { name: '查看处理', exact: true }).click()
+  await expect(page).toHaveURL(/\/inventory-tasks\?task_id=[^&]+&organization_id=[^&]+$/)
+  await expect(page.getByText('当前正在查看消息关联的填报任务及目标组织')).toBeVisible()
+  await expect(page.getByText(inventoryTaskName, { exact: true })).toBeVisible()
+  await expect(page.locator('.task-organization-table .el-table__body-wrapper tbody tr').filter({ hasText: organizationName }).first()).toBeVisible()
+  await page.getByRole('button', { name: '查看全部任务', exact: true }).click()
+  await expect(page).toHaveURL(/\/inventory-tasks$/)
+
   await page.getByRole('button', { name: '填报任务', exact: true }).click()
   await expect(page.getByRole('button', { name: '创建任务', exact: true })).toHaveCount(0)
   await expect(page.getByText(inventoryTaskName, { exact: true })).toBeVisible()
@@ -466,6 +477,17 @@ test('集团创建子公司账号，子公司隔离登记业务系统和网络�
 
   await page.getByRole('button', { name: '退出', exact: true }).click()
   await login(page, adminUsername, adminPassword!)
+
+  await page.goto('/notifications')
+  inventoryNotificationCard = page.locator('.notification-card').filter({ hasText: inventoryTaskName }).first()
+  await expect(inventoryNotificationCard).toContainText('填报任务待审核')
+  await expect(inventoryNotificationCard).toContainText(organizationName)
+  await inventoryNotificationCard.getByRole('button', { name: '查看处理', exact: true }).click()
+  await expect(page).toHaveURL(/\/inventory-tasks\?task_id=[^&]+&organization_id=[^&]+$/)
+  await expect(page.getByText('当前正在查看消息关联的填报任务及目标组织')).toBeVisible()
+  await expect(page.locator('.task-organization-table .el-table__body-wrapper tbody tr').filter({ hasText: organizationName }).first()).toContainText('待审核')
+  await page.getByRole('button', { name: '查看全部任务', exact: true }).click()
+
   const populatedScopePreview = await page.evaluate(async ({ code }) => {
     const organizationsResponse = await fetch('/api/v1/organizations?page=1&page_size=100')
     const organizations = await organizationsResponse.json()
@@ -511,7 +533,11 @@ test('集团创建子公司账号，子公司隔离登记业务系统和网络�
 
   await page.getByRole('button', { name: '退出', exact: true }).click()
   await login(page, subsidiaryUsername, formalPassword)
-  await page.getByRole('button', { name: '填报任务', exact: true }).click()
+  await page.goto('/notifications')
+  inventoryNotificationCard = page.locator('.notification-card').filter({ hasText: inventoryTaskName }).first()
+  await expect(inventoryNotificationCard).toContainText('填报任务已退回')
+  await inventoryNotificationCard.getByRole('button', { name: '查看处理', exact: true }).click()
+  await expect(page.getByText('当前正在查看消息关联的填报任务及目标组织')).toBeVisible()
   taskRow = await ensureTaskExpanded(page, inventoryTaskName)
   progressRow = page.locator('.task-organization-table .el-table__body-wrapper tbody tr').filter({ hasText: organizationName }).first()
   await expect(progressRow.getByText('退回：请补充统计口径说明')).toBeVisible()

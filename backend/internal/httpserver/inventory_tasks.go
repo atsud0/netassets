@@ -21,7 +21,7 @@ func registerInventoryTaskRoutes(api *gin.RouterGroup, requireAuth gin.HandlerFu
 			writeAPIError(c, http.StatusBadRequest, "invalid_query", "分页参数不正确，page_size 最大为 100")
 			return
 		}
-		result, err := service.Search(c.Request.Context(), mustPrincipal(c), page)
+		result, err := service.Search(c.Request.Context(), mustPrincipal(c), strings.TrimSpace(c.Query("task_id")), page)
 		if err != nil {
 			logger.Error("list inventory tasks", "error", err, "request_id", c.GetString("request_id"))
 			writeAPIError(c, http.StatusInternalServerError, "internal_error", "读取填报任务失败")
@@ -35,7 +35,7 @@ func registerInventoryTaskRoutes(api *gin.RouterGroup, requireAuth gin.HandlerFu
 			writeAPIError(c, http.StatusBadRequest, "invalid_query", "分页参数不正确，page_size 最大为 100")
 			return
 		}
-		result, err := service.SearchOrganizations(c.Request.Context(), mustPrincipal(c), c.Param("taskID"), page)
+		result, err := service.SearchOrganizations(c.Request.Context(), mustPrincipal(c), c.Param("taskID"), strings.TrimSpace(c.Query("organization_id")), page)
 		switch {
 		case errors.Is(err, inventorytask.ErrInvalid):
 			writeAPIError(c, http.StatusBadRequest, "invalid_inventory_task_id", "填报任务编号不正确")

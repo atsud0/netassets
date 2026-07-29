@@ -184,7 +184,8 @@ func (s *Service) List(ctx context.Context, principal auth.Principal) ([]Task, e
 	return items, nil
 }
 
-func (s *Service) Search(ctx context.Context, principal auth.Principal, query pagination.Query) (pagination.Result[Task], error) {
+func (s *Service) Search(ctx context.Context, principal auth.Principal, taskID string, query pagination.Query) (pagination.Result[Task], error) {
+	taskID = strings.TrimSpace(taskID)
 	rows, err := s.pool.Query(ctx, `
 		WITH RECURSIVE descendant_roots(id) AS (
 			SELECT ur.organization_id FROM user_roles ur WHERE ur.user_id = $1::uuid AND ur.organization_id IS NOT NULL AND ur.data_scope = 'organization_and_descendants'
@@ -200,9 +201,10 @@ func (s *Service) Search(ctx context.Context, principal auth.Principal, query pa
 		       (SELECT count(*) FROM inventory_task_organizations ito WHERE ito.task_id = t.id AND ito.status = 'approved'),
 		       COALESCE(u.display_name, ''), t.created_at, t.updated_at, count(*) OVER ()
 		FROM inventory_tasks t LEFT JOIN users u ON u.id = t.created_by
-		WHERE $2::boolean OR (t.status <> 'draft' AND EXISTS (SELECT 1 FROM inventory_task_organizations ito WHERE ito.task_id = t.id AND ito.organization_id IN (SELECT id FROM accessible)))
+		WHERE ($2::boolean OR (t.status <> 'draft' AND EXISTS (SELECT 1 FROM inventory_task_organizations ito WHERE ito.task_id = t.id AND ito.organization_id IN (SELECT id FROM accessible))))
+		  AND ($5 = '' OR t.id::text = $5)
 		ORDER BY t.created_at DESC LIMIT $3 OFFSET $4
-	`, principal.UserID, principal.HasRole("group_admin"), query.PageSize, query.Offset())
+	`, principal.UserID, principal.HasRole("group_admin"), query.PageSize, query.Offset(), taskID)
 	if err != nil {
 		return pagination.Result[Task]{}, fmt.Errorf("search inventory tasks: %w", err)
 	}
@@ -236,8 +238,9 @@ func (s *Service) Search(ctx context.Context, principal auth.Principal, query pa
                 SELECT ur.organization_id FROM user_roles ur WHERE ur.user_id = $1::uuid AND ur.organization_id IS NOT NULL AND ur.data_scope IN ('organization', 'organization_and_descendants') UNION SELECT id FROM descendants
             )
             SELECT count(*) FROM inventory_tasks t
-            WHERE $2::boolean OR (t.status <> 'draft' AND EXISTS (SELECT 1 FROM inventory_task_organizations ito WHERE ito.task_id = t.id AND ito.organization_id IN (SELECT id FROM accessible)))
-        `, principal.UserID, principal.HasRole("group_admin")).Scan(&total); err != nil {
+            WHERE ($2::boolean OR (t.status <> 'draft' AND EXISTS (SELECT 1 FROM inventory_task_organizations ito WHERE ito.task_id = t.id AND ito.organization_id IN (SELECT id FROM accessible))))
+              AND ($3 = '' OR t.id::text = $3)
+        `, principal.UserID, principal.HasRole("group_admin"), taskID).Scan(&total); err != nil {
 			return pagination.Result[Task]{}, fmt.Errorf("count inventory tasks: %w", err)
 		}
 	}
@@ -899,8 +902,9 @@ func (s *Service) UpdateStatus(ctx context.Context, principal auth.Principal, ta
 // SearchOrganizations returns one bounded page of organization progress for a
 // task. Non-group users only receive progress rows within their organization
 // data scope; draft tasks remain visible only to group administrators.
-func (s *Service) SearchOrganizations(ctx context.Context, principal auth.Principal, taskID string, page pagination.Query) (pagination.Result[OrganizationProgress], error) {
+func (s *Service) SearchOrganizations(ctx context.Context, principal auth.Principal, taskID, organizationID string, page pagination.Query) (pagination.Result[OrganizationProgress], error) {
 	taskID = strings.TrimSpace(taskID)
+	organizationID = strings.TrimSpace(organizationID)
 	if taskID == "" {
 		return pagination.Result[OrganizationProgress]{}, ErrInvalid
 	}
@@ -921,6 +925,7 @@ func (s *Service) SearchOrganizations(ctx context.Context, principal auth.Princi
 	where := `
 		WHERE ito.task_id::text = $2
 		  AND ($3::boolean OR (t.status <> 'draft' AND o.id IN (SELECT id FROM accessible)))
+		  AND ($4 = '' OR ito.organization_id::text = $4)
 	`
 	var visible bool
 	var total int
@@ -944,7 +949,7 @@ func (s *Service) SearchOrganizations(ctx context.Context, principal auth.Princi
 				JOIN organizations o ON o.id = ito.organization_id
 		`+where+`
 			)
-	`, principal.UserID, taskID, principal.HasRole("group_admin")).Scan(&visible, &total); err != nil {
+	`, principal.UserID, taskID, principal.HasRole("group_admin"), organizationID).Scan(&visible, &total); err != nil {
 		return pagination.Result[OrganizationProgress]{}, fmt.Errorf("count inventory task organizations: %w", err)
 	}
 	if !visible {
@@ -965,8 +970,8 @@ func (s *Service) SearchOrganizations(ctx context.Context, principal auth.Princi
 		LEFT JOIN inventory_submissions submission ON submission.id = ito.latest_submission_id
 	`+where+`
 		ORDER BY o.organization_code, o.id
-		LIMIT $4 OFFSET $5
-	`, principal.UserID, taskID, principal.HasRole("group_admin"), page.PageSize, page.Offset())
+		LIMIT $5 OFFSET $6
+	`, principal.UserID, taskID, principal.HasRole("group_admin"), organizationID, page.PageSize, page.Offset())
 	if err != nil {
 		return pagination.Result[OrganizationProgress]{}, fmt.Errorf("search inventory task organizations: %w", err)
 	}
