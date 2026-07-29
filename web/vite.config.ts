@@ -8,7 +8,7 @@ export default defineConfig({
     vue(),
     Components({
       dts: false,
-      resolvers: [ElementPlusResolver({ importStyle: false })],
+      resolvers: [ElementPlusResolver({ importStyle: 'css' })],
     }),
   ],
   build: {
@@ -40,5 +40,10 @@ export default defineConfig({
   },
   test: {
     environment: 'jsdom',
+    server: {
+      deps: {
+        inline: [/element-plus/],
+      },
+    },
   },
 })
