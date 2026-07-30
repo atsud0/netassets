@@ -191,3 +191,37 @@ test('治理页面内容卡片与台账页面保持相同圆角和间距', async
   const qualityIssuesAndBatches = await measureCards('.quality-issue-panel', '.quality-scan-batch-panel')
   expect(qualityIssuesAndBatches).toEqual(ledgerBaseline)
 })
+
+test('质量整改在窄内容区保持自适应，宽表格仅在卡片内部滚动', async ({ page }) => {
+  test.skip(!adminPassword, 'E2E_PASSWORD/BOOTSTRAP_ADMIN_PASSWORD 未配置')
+
+  await page.setViewportSize({ width: 1280, height: 900 })
+  await page.goto('/data-quality-issues')
+  await login(page, adminUsername, adminPassword!)
+  await expect(page.getByRole('heading', { name: '质量整改', exact: true })).toBeVisible()
+
+  const layout = await page.evaluate(() => {
+    const content = document.querySelector<HTMLElement>('.page-content')
+    const stack = document.querySelector<HTMLElement>('.page-stack')
+    const filters = document.querySelector<HTMLElement>('.quality-workflow-filters')
+    const panel = document.querySelector<HTMLElement>('.quality-issue-panel')
+    const tableScroll = document.querySelector<HTMLElement>('.quality-issue-table-scroll')
+    if (!content || !stack || !filters || !panel || !tableScroll) throw new Error('质量整改自适应布局节点不存在')
+    const rect = (element: HTMLElement) => element.getBoundingClientRect()
+    const panelRect = rect(panel)
+    const tableRect = rect(tableScroll)
+    return {
+      contentScrollOverflow: content.scrollWidth - content.clientWidth,
+      stackScrollOverflow: stack.scrollWidth - stack.clientWidth,
+      filtersOverflow: filters.scrollWidth - filters.clientWidth,
+      panelOverflow: panel.scrollWidth - panel.clientWidth,
+      tableWithinPanel: tableRect.right <= panelRect.right + 1,
+    }
+  })
+
+  expect(layout.contentScrollOverflow).toBeLessThanOrEqual(1)
+  expect(layout.stackScrollOverflow).toBeLessThanOrEqual(1)
+  expect(layout.filtersOverflow).toBeLessThanOrEqual(1)
+  expect(layout.panelOverflow).toBeLessThanOrEqual(1)
+  expect(layout.tableWithinPanel).toBe(true)
+})

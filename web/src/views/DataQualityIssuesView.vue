@@ -445,8 +445,9 @@ onMounted(async () => {
         <div><strong>批量整改</strong><span>已选择 {{ selectedIssues.length }} 个问题，单次最多 200 个；指派负责人和开始整改要求属于同一责任组织</span></div>
         <div class="button-row"><el-button :disabled="selectedIssues.length === 0" :loading="bulkLoading" @click="openBulkAction('assign')">批量指派</el-button><el-button type="primary" plain :disabled="selectedIssues.length === 0" :loading="bulkLoading" @click="openBulkAction('start')">批量开始整改</el-button><el-button type="success" plain :disabled="selectedIssues.length === 0" :loading="bulkLoading" @click="openBulkAction('submit')">批量提交复核</el-button></div>
       </div>
-      <el-table ref="issueTableRef" v-loading="loading" :data="items" row-key="id" stripe max-height="560" empty-text="当前范围暂无数据质量问题" @selection-change="handleSelectionChange">
-        <el-table-column type="selection" width="46" :reserve-selection="true" />
+      <div class="quality-issue-table-scroll">
+        <el-table ref="issueTableRef" v-loading="loading" :data="items" row-key="id" stripe max-height="560" empty-text="当前范围暂无数据质量问题" @selection-change="handleSelectionChange">
+          <el-table-column type="selection" width="46" :reserve-selection="true" />
         <el-table-column label="问题" min-width="230"><template #default="scope"><el-button class="table-link" link type="primary" @click="openDetail(scope.row)">{{ scope.row.rule_name }}</el-button><div class="muted-text">检查项：{{ targetLabel(scope.row.target_field, scope.row) }}</div></template></el-table-column>
         <el-table-column label="资源" min-width="190"><template #default="scope"><strong>{{ scope.row.resource_name }}</strong><div class="muted-text">{{ resourceTypeLabel(scope.row.resource_type) }}</div></template></el-table-column>
         <el-table-column label="责任组织" min-width="170"><template #default="scope"><strong>{{ scope.row.organization_name }}</strong><div class="muted-text">{{ scope.row.organization_code }}</div></template></el-table-column>
@@ -462,8 +463,9 @@ onMounted(async () => {
           <el-button v-if="isGroupAdmin && scope.row.status === 'pending_review'" link type="warning" @click="openAction('return', scope.row)">退回</el-button>
           <el-button v-if="isGroupAdmin && ['pending','in_progress','pending_review'].includes(scope.row.status)" link type="warning" @click="openAction('exempt', scope.row)">豁免</el-button>
           <el-button v-if="isGroupAdmin && ['closed','exempted'].includes(scope.row.status)" link type="primary" @click="openAction('reopen', scope.row)">重新打开</el-button>
-        </div></template></el-table-column>
-      </el-table>
+          </div></template></el-table-column>
+        </el-table>
+      </div>
       <div class="table-pagination">
         <el-pagination background layout="total, sizes, prev, pager, next" :total="issueTotal" :current-page="issuePage" :page-size="issuePageSize" :page-sizes="[20, 50, 100]" @current-change="handleIssuePageChange" @size-change="handleIssuePageSizeChange" />
       </div>
@@ -552,20 +554,22 @@ onMounted(async () => {
 </template>
 
 <style scoped>
-.quality-workflow-content { display:grid; gap:16px; }
-.quality-workflow-summary { display:grid; grid-template-columns:repeat(6,minmax(0,1fr)); gap:12px; }
-.quality-workflow-card { padding:16px 18px; border:1px solid var(--line); border-left:4px solid #5b8def; border-radius:10px; background:#fff; }
+.quality-workflow-content { display:grid; min-width:0; gap:16px; }
+.quality-workflow-content > * { min-width:0; max-width:100%; }
+.quality-workflow-summary { display:grid; grid-template-columns:repeat(auto-fit,minmax(min(100%,150px),1fr)); gap:12px; }
+.quality-workflow-card { min-width:0; padding:16px 18px; border:1px solid var(--line); border-left:4px solid #5b8def; border-radius:10px; background:#fff; }
 .quality-workflow-card span { display:block; margin-bottom:8px; color:var(--muted); font-size:12px; }
 .quality-workflow-card strong { color:var(--navy); font-size:26px; }
 .quality-workflow-card.tone-danger { border-left-color:#f56c6c; }.quality-workflow-card.tone-warning { border-left-color:#e6a23c; }.quality-workflow-card.tone-success { border-left-color:#67c23a; }.quality-workflow-card.tone-info { border-left-color:#909399; }.quality-workflow-card.tone-total { border-left-color:var(--cyan); }
-.quality-workflow-filters { display:grid; grid-template-columns:repeat(5,minmax(150px,1fr)) auto; gap:12px; align-items:center; }
-.quality-saved-views { grid-column:1 / -1; padding-top:4px; border-top:1px dashed var(--line); }
-.quality-workflow-filter-actions { display:flex; gap:8px; }.table-pagination { display:flex; justify-content:flex-end; margin-top:18px; }.quality-workflow-table-panel { padding-top:14px; }.row-actions { display:flex; flex-wrap:wrap; gap:2px 8px; }
-.quality-batch-toolbar { margin:14px 0; }.quality-batch-form { margin-top:18px; }
+.quality-workflow-filters { display:grid; grid-template-columns:repeat(auto-fit,minmax(min(100%,160px),1fr)); min-width:0; gap:12px; align-items:center; }
+.quality-workflow-filters :deep(.el-select) { min-width:0; width:100%; }
+.quality-saved-views { grid-column:1 / -1; min-width:0; padding-top:4px; border-top:1px dashed var(--line); }
+.quality-workflow-filter-actions { display:flex; flex-wrap:wrap; gap:8px; }.table-pagination { display:flex; justify-content:flex-end; margin-top:18px; }.quality-workflow-table-panel { min-width:0; padding-top:14px; }.row-actions { display:flex; flex-wrap:wrap; gap:2px 8px; }
+.quality-issue-panel .table-panel-heading { flex-wrap:wrap; gap:8px 12px; }.quality-issue-table-scroll { width:100%; min-width:0; overflow-x:auto; overscroll-behavior-x:contain; }.quality-issue-table-scroll :deep(.el-table) { min-width:100%; }
+.quality-batch-toolbar { flex-wrap:wrap; margin:14px 0; }.quality-batch-toolbar .button-row { flex-wrap:wrap; margin-left:auto; justify-content:flex-end; }.quality-batch-form { margin-top:18px; }
 .quality-note { margin:14px 0; padding:14px 16px; background:#f8fafc; border-radius:9px; }.quality-note span { color:var(--muted); font-size:12px; }.quality-note p { margin:7px 0; white-space:pre-wrap; line-height:1.65; }.quality-note small { color:var(--muted); }
 .assignee-field { width:100%; }.assignee-field small { display:block; margin-top:7px; color:#e6a23c; line-height:1.5; }
 .quality-event-list { min-height:120px; max-height:420px; overflow:auto; padding:4px 10px 0 2px; }
 .quality-event-actor { margin-left:10px; color:var(--muted); font-size:12px; }.el-timeline-item p { margin:6px 0 0; color:var(--muted); white-space:pre-wrap; }
-@media (max-width:1300px) { .quality-workflow-summary { grid-template-columns:repeat(3,minmax(0,1fr)); }.quality-workflow-filters { grid-template-columns:repeat(3,minmax(0,1fr)); } }
-@media (max-width:760px) { .quality-workflow-summary,.quality-workflow-filters { grid-template-columns:1fr; } }
+@media (max-width:760px) { .quality-workflow-filter-actions { width:100%; }.quality-workflow-filter-actions .el-button { flex:1; }.quality-batch-toolbar .button-row { width:100%; margin-left:0; justify-content:flex-start; }.table-pagination { justify-content:flex-start; overflow-x:auto; padding-bottom:2px; } }
 </style>
