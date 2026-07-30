@@ -225,3 +225,22 @@ test('质量整改在窄内容区保持自适应，宽表格仅在卡片内部�
   expect(layout.panelOverflow).toBeLessThanOrEqual(1)
   expect(layout.tableWithinPanel).toBe(true)
 })
+
+
+test('网络资产和业务系统的分页区使用统一表格间距', async ({ page }) => {
+  test.skip(!adminPassword, 'E2E_PASSWORD/BOOTSTRAP_ADMIN_PASSWORD 未配置')
+
+  await page.goto('/assets')
+  await login(page, adminUsername, adminPassword!)
+  await expect(page.getByRole('heading', { name: '网络资产', exact: true })).toBeVisible()
+
+  const readPaginationStyle = () => page.locator('.data-table-panel > .table-pagination').evaluate((element) => {
+    const style = getComputedStyle(element)
+    return { marginTop: style.marginTop, justifyContent: style.justifyContent }
+  })
+  expect(await readPaginationStyle()).toEqual({ marginTop: '18px', justifyContent: 'flex-end' })
+
+  await page.goto('/systems')
+  await expect(page.getByRole('heading', { name: '业务系统', exact: true })).toBeVisible()
+  expect(await readPaginationStyle()).toEqual({ marginTop: '18px', justifyContent: 'flex-end' })
+})
