@@ -244,3 +244,46 @@ test('网络资产和业务系统的分页区使用统一表格间距', async ({
   await expect(page.getByRole('heading', { name: '业务系统', exact: true })).toBeVisible()
   expect(await readPaginationStyle()).toEqual({ marginTop: '18px', justifyContent: 'flex-end' })
 })
+
+test('管理页面在常用窄内容宽度下不出现整体横向溢出，安全工单换行操作保持右对齐', async ({ page }) => {
+  test.skip(!adminPassword, 'E2E_PASSWORD/BOOTSTRAP_ADMIN_PASSWORD 未配置')
+
+  await page.setViewportSize({ width: 1280, height: 900 })
+  await page.goto('/dashboard')
+  await login(page, adminUsername, adminPassword!)
+
+  const routes = [
+    '/dashboard', '/assets', '/systems', '/asset-candidates', '/data-governance', '/data-quality-issues',
+    '/inventory-tasks', '/security-test-batches', '/security-work-orders', '/notifications', '/organizations',
+    '/users', '/recycle-bin', '/audit-logs', '/backups', '/export-jobs', '/profile',
+  ]
+
+  for (const route of routes) {
+    await page.goto(route)
+    await expect(page.locator('h1')).toBeVisible()
+    const overflow = await page.evaluate(() => {
+      const content = document.querySelector<HTMLElement>('.page-content')
+      return {
+        document: document.documentElement.scrollWidth - document.documentElement.clientWidth,
+        content: content ? content.scrollWidth - content.clientWidth : 0,
+      }
+    })
+    expect(overflow.document, `${route} 页面出现整体横向溢出`).toBeLessThanOrEqual(1)
+    expect(overflow.content, `${route} 内容区出现横向溢出`).toBeLessThanOrEqual(1)
+  }
+
+  await page.goto('/security-work-orders')
+  await expect(page.getByRole('heading', { name: '安全工单', exact: true })).toBeVisible()
+  const actionLayout = await page.locator('.heading-actions').evaluate((element) => {
+    const group = element.getBoundingClientRect()
+    const buttons = Array.from(element.querySelectorAll<HTMLElement>('.el-button')).map((button) => button.getBoundingClientRect())
+    const wrappedButtons = buttons.filter((button) => button.top > buttons[0].top + 1)
+    return {
+      groupRight: group.right,
+      hasWrappedButton: wrappedButtons.length > 0,
+      wrappedRight: wrappedButtons[0]?.right ?? group.right,
+    }
+  })
+  expect(actionLayout.hasWrappedButton).toBe(true)
+  expect(actionLayout.wrappedRight).toBeCloseTo(actionLayout.groupRight, 0)
+})

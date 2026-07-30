@@ -1288,7 +1288,7 @@ async function onTabChange() {
 .filter-bar { display: flex; flex-wrap: wrap; gap: 10px; margin: 4px 0 18px; }
 .table-pagination { display: flex; justify-content: flex-end; margin-top: 18px; }
 .detail-pagination { overflow-x: auto; padding-bottom: 2px; }
-.heading-actions { display: flex; flex-wrap: wrap; gap: 10px; }
+.heading-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 10px; }
 .import-toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; margin: 18px 0 10px; }
 .import-toolbar input { max-width: 270px; }
 .template-links { color: #64748b; font-size: 13px; line-height: 32px; }
