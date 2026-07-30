@@ -372,6 +372,50 @@ func (s *Service) StreamCSVExport(ctx context.Context, principal auth.Principal,
 	return written, nil
 }
 
+func (s *Service) ExportRowCount(ctx context.Context, principal auth.Principal, taskID string) (int, error) {
+	selected, err := s.loadTaskForExport(ctx, principal, taskID)
+	if err != nil {
+		return 0, err
+	}
+	return len(selected.Organizations), nil
+}
+
+func (s *Service) WriteXLSXExport(ctx context.Context, principal auth.Principal, taskID, outputPath string, progress exportfile.ProgressFunc) (exportfile.Metadata, error) {
+	selected, err := s.loadTaskForExport(ctx, principal, taskID)
+	if err != nil {
+		return exportfile.Metadata{}, err
+	}
+	stream, err := exportfile.NewXLSXStream(outputPath, "填报结果", inventoryTaskExportHeaders())
+	if err != nil {
+		return exportfile.Metadata{}, fmt.Errorf("start inventory task xlsx export: %w", err)
+	}
+	defer stream.Abort()
+	total := len(selected.Organizations)
+	if progress != nil {
+		if err := progress(total, 0); err != nil {
+			return exportfile.Metadata{}, err
+		}
+	}
+	for index, item := range selected.Organizations {
+		if err := stream.Write(inventoryTaskExportRow(*selected, item)); err != nil {
+			return exportfile.Metadata{}, fmt.Errorf("write inventory task xlsx row: %w", err)
+		}
+		if progress != nil && ((index+1)%100 == 0 || index+1 == total) {
+			if err := progress(total, index+1); err != nil {
+				return exportfile.Metadata{}, err
+			}
+		}
+	}
+	if err := stream.Close(); err != nil {
+		return exportfile.Metadata{}, fmt.Errorf("finish inventory task xlsx export: %w", err)
+	}
+	return exportfile.Metadata{
+		ContentType: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+		FileName:    "填报任务结果-" + sanitizeExportName(selected.Name) + ".xlsx",
+		Count:       total,
+	}, nil
+}
+
 func buildExport(task Task, format string) ([]byte, string, string, error) {
 	rows := make([][]string, 0, len(task.Organizations))
 	for _, progress := range task.Organizations {

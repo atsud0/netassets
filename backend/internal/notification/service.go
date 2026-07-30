@@ -508,6 +508,25 @@ WITH RECURSIVE descendant_roots(id) AS (
 		i.exemption_expires_at
 	FROM data_quality_issues i
 	WHERE $2::boolean AND i.status='exempted' AND i.exemption_expires_at>=now() AND i.exemption_expires_at<now()+interval '3 days'
+
+	UNION ALL
+
+	SELECT
+		'export_job:' || ej.id::text || ':' || ej.status || ':' || extract(epoch FROM ej.updated_at)::bigint::text,
+		'export_job',
+		CASE ej.status WHEN 'completed' THEN '后台导出文件已生成' ELSE '后台导出任务生成失败' END,
+		CASE ej.status
+			WHEN 'completed' THEN format('%s 已生成，共 %s 条数据，请在到期前下载。', ej.file_name, ej.processed_rows)
+			ELSE format('%s后台导出任务执行失败，请打开导出任务查看并重试。', CASE ej.resource_type WHEN 'asset' THEN '网络资产' WHEN 'business_system' THEN '业务系统' ELSE '填报任务' END)
+		END,
+		CASE ej.status WHEN 'completed' THEN 'info' ELSE 'warning' END,
+		'export_job',
+		ej.id::text,
+		'/export-jobs?job_id=' || ej.id::text,
+		COALESCE(ej.completed_at, ej.updated_at),
+		CASE WHEN ej.status='completed' THEN ej.expires_at ELSE NULL::timestamptz END
+	FROM export_jobs ej
+	WHERE ej.requested_by=$1::uuid AND ej.status IN ('completed','failed')
 )
 `
 
@@ -644,7 +663,7 @@ func ValidateCategory(category string) bool {
 		return true
 	}
 	switch strings.TrimSpace(category) {
-	case "work_order_review", "work_order_received", "work_order_returned", "work_order_overdue", "work_order_due_soon", "risk_review", "quality_review", "quality_received", "quality_returned", "quality_exemption", CategoryAssetChange, CategoryBusinessSystemChange, CategoryFindingReceived, CategoryInventoryTaskReview, CategoryInventoryTaskReceived, CategoryInventoryTaskReturned, CategoryInventoryTaskDueSoon, CategoryInventoryTaskOverdue:
+	case "export_job", "work_order_review", "work_order_received", "work_order_returned", "work_order_overdue", "work_order_due_soon", "risk_review", "quality_review", "quality_received", "quality_returned", "quality_exemption", CategoryAssetChange, CategoryBusinessSystemChange, CategoryFindingReceived, CategoryInventoryTaskReview, CategoryInventoryTaskReceived, CategoryInventoryTaskReturned, CategoryInventoryTaskDueSoon, CategoryInventoryTaskOverdue:
 		return true
 	default:
 		return false

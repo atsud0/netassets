@@ -1,7 +1,8 @@
 <script setup lang="ts">
 import { computed, onMounted, reactive, ref, watch } from 'vue'
 import { ElMessage, ElMessageBox, type FormInstance, type FormRules, type UploadFile, type UploadFiles } from 'element-plus'
-import { apiClient, getAPIErrorMessage, getDownloadAPIErrorMessage } from '../api/client'
+import { apiClient, getAPIErrorMessage, getDownloadAPIError } from '../api/client'
+import { createExportJob } from '../api/export-jobs'
 import { useAuthStore } from '../stores/auth'
 import SavedFilterViews from '../components/SavedFilterViews.vue'
 
@@ -567,10 +568,29 @@ async function exportLedger(format: 'csv' | 'xlsx') {
     const count = response.headers['x-export-count'] ?? total.value
     ElMessage.success(`已生成并开始下载 ${count} 条网络资产`)
   } catch (error) {
-    ElMessage.error(await getDownloadAPIErrorMessage(error, '导出网络资产台账失败'))
+    const detail = await getDownloadAPIError(error, '导出网络资产台账失败')
+    if (format === 'xlsx' && detail.code === 'synchronous_xlsx_limit_exceeded') {
+      try {
+        await queueXLSXExport()
+      } catch (queueError) {
+        ElMessage.error(getAPIErrorMessage(queueError, '创建后台导出任务失败'))
+      }
+    } else {
+      ElMessage.error(detail.message)
+    }
   } finally {
     exporting.value = false
   }
+}
+
+async function queueXLSXExport() {
+  await createExportJob('asset', {
+    q: search.value.trim() || undefined,
+    type: typeFilter.value || undefined,
+    status: statusFilter.value || undefined,
+    organization_id: organizationFilter.value || undefined,
+  })
+  ElMessage.success('后台 XLSX 导出任务已创建，可在“导出任务”中查看进度和下载')
 }
 
 async function downloadTemplate(format: 'csv' | 'xlsx') {
@@ -631,7 +651,7 @@ onMounted(() => load(true))
       <div class="button-row ledger-page-actions asset-page-actions">
         <el-dropdown>
           <el-button :loading="exporting">导出台账</el-button>
-          <template #dropdown><el-dropdown-menu><el-dropdown-item @click="exportLedger('xlsx')">导出 XLSX</el-dropdown-item><el-dropdown-item @click="exportLedger('csv')">导出 CSV</el-dropdown-item></el-dropdown-menu></template>
+          <template #dropdown><el-dropdown-menu><el-dropdown-item @click="exportLedger('xlsx')">导出 XLSX</el-dropdown-item><el-dropdown-item @click="exportLedger('csv')">导出 CSV</el-dropdown-item><el-dropdown-item divided @click="queueXLSXExport">后台生成 XLSX</el-dropdown-item></el-dropdown-menu></template>
         </el-dropdown>
         <el-button v-if="auth.isGroupAdmin" @click="openAreaManagement">网络区域配置</el-button>
         <el-button @click="openImportHistory">导入记录</el-button>

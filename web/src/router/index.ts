@@ -11,6 +11,7 @@ const AssetCandidatesView = () => import('../views/AssetCandidatesView.vue')
 const DataGovernanceView = () => import('../views/DataGovernanceView.vue')
 const DataQualityIssuesView = () => import('../views/DataQualityIssuesView.vue')
 const InventoryTasksView = () => import('../views/InventoryTasksView.vue')
+const ExportJobsView = () => import('../views/ExportJobsView.vue')
 const AuditLogsView = () => import('../views/AuditLogsView.vue')
 const SecurityWorkOrdersView = () => import('../views/SecurityWorkOrdersView.vue')
 const SecurityTestBatchesView = () => import('../views/SecurityTestBatchesView.vue')
@@ -40,6 +41,7 @@ const router = createRouter({
         { path: 'data-governance', name: 'data-governance', component: DataGovernanceView, meta: { groupAdminOnly: true } },
         { path: 'data-quality-issues', name: 'data-quality-issues', component: DataQualityIssuesView, meta: { permission: 'data_quality.manage' } },
         { path: 'inventory-tasks', name: 'inventory-tasks', component: InventoryTasksView, meta: { permission: 'inventory.manage' } },
+        { path: 'export-jobs', name: 'export-jobs', component: ExportJobsView },
         { path: 'security-test-batches', name: 'security-test-batches', component: SecurityTestBatchesView, meta: { permission: 'security_test.manage', groupSecurityOnly: true } },
         { path: 'security-work-orders', name: 'security-work-orders', component: SecurityWorkOrdersView },
         { path: 'audit-logs', name: 'audit-logs', component: AuditLogsView, meta: { groupAdminOnly: true } },

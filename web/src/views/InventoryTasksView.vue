@@ -2,7 +2,8 @@
 import { computed, onMounted, reactive, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox, type FormInstance, type FormRules } from 'element-plus'
-import { apiClient, getAPIErrorMessage, getDownloadAPIErrorMessage } from '../api/client'
+import { apiClient, getAPIErrorMessage, getDownloadAPIError } from '../api/client'
+import { createExportJob } from '../api/export-jobs'
 import { useAuthStore } from '../stores/auth'
 
 interface Organization {
@@ -893,14 +894,25 @@ async function exportTask(task: InventoryTask, format: 'csv' | 'xlsx') {
     const count = response.headers['x-export-count'] ?? task.target_count
     ElMessage.success(`已生成并开始下载 ${count} 个组织的填报结果`)
   } catch (error) {
-    ElMessage.error(await getDownloadAPIErrorMessage(error, '导出填报任务结果失败'))
+    const detail = await getDownloadAPIError(error, '导出填报任务结果失败')
+    if (format === 'xlsx' && detail.code === 'synchronous_xlsx_limit_exceeded') {
+      try { await queueTaskExport(task) } catch (queueError) { ElMessage.error(getAPIErrorMessage(queueError, '创建后台导出任务失败')) }
+    } else {
+      ElMessage.error(detail.message)
+    }
   } finally {
     exportLoading.value = ''
   }
 }
 
+async function queueTaskExport(task: InventoryTask) {
+  await createExportJob('inventory_task', { task_id: task.id })
+  ElMessage.success('后台 XLSX 导出任务已创建，可在“导出任务”中查看进度和下载')
+}
+
 function handleExportCommand(task: InventoryTask, command: unknown) {
   if (command === 'csv' || command === 'xlsx') void exportTask(task, command)
+  if (command === 'background_xlsx') void queueTaskExport(task)
 }
 
 function formatDate(value?: string) {
@@ -1039,6 +1051,7 @@ onMounted(async () => {
                 <el-dropdown-menu>
                   <el-dropdown-item command="xlsx">导出 XLSX</el-dropdown-item>
                   <el-dropdown-item command="csv">导出 CSV</el-dropdown-item>
+                  <el-dropdown-item command="background_xlsx" divided>后台生成 XLSX</el-dropdown-item>
                 </el-dropdown-menu>
               </template>
             </el-dropdown>

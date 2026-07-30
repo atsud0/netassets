@@ -33,9 +33,14 @@ func registerBusinessSystemRoutes(api *gin.RouterGroup, requireAuth gin.HandlerF
 	})
 	group.GET("/export", func(c *gin.Context) {
 		format := c.DefaultQuery("format", "xlsx")
+		filter := businesssystem.SearchFilter{
+			OrganizationID: strings.TrimSpace(c.Query("organization_id")),
+			Status:         strings.TrimSpace(c.Query("status")),
+			Keyword:        strings.TrimSpace(c.Query("q")),
+		}
 		extendExportWriteDeadline(c, logger)
 		if isCSVExport(format) {
-			_, err := service.StreamCSVExport(c.Request.Context(), mustPrincipal(c), c.Writer, func(meta exportfile.Metadata) {
+			_, err := service.StreamCSVExport(c.Request.Context(), mustPrincipal(c), filter, c.Writer, func(meta exportfile.Metadata) {
 				setStreamingExportHeaders(c, "business-systems-ledger.csv", meta)
 			}, c.GetString("request_id"), c.ClientIP())
 			if err == nil {
@@ -56,7 +61,7 @@ func registerBusinessSystemRoutes(api *gin.RouterGroup, requireAuth gin.HandlerF
 			return
 		}
 
-		data, contentType, fileName, count, err := service.Export(c.Request.Context(), mustPrincipal(c), format, c.GetString("request_id"), c.ClientIP())
+		data, contentType, fileName, count, err := service.Export(c.Request.Context(), mustPrincipal(c), filter, format, c.GetString("request_id"), c.ClientIP())
 		if errors.Is(err, businesssystem.ErrExportTooLarge) {
 			writeAPIError(c, http.StatusUnprocessableEntity, "synchronous_xlsx_limit_exceeded", "同步 XLSX 导出最多支持 5000 条数据，请改用 CSV 格式导出")
 			return

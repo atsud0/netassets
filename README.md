@@ -20,8 +20,10 @@
 - 集团管理员回收站：统一查看已删除网络资产和业务系统；恢复资产时防止与在用台账重复，恢复业务系统后保持“已归档”并记录统一审计
 - 网络暴露范围固定为公网、内网、未知；集团管理员可按组织维护网络区域，子公司可选择本组织已启用的办事处、园区、云 VPC 或网络分区
 - 业务系统与网络资产 CSV/XLSX 批量导入、标准模板、集团级重复检测、逐行错误反馈、部分成功和导入历史
-- 业务系统与网络资产台账 CSV/XLSX 导出；网络资产导出支持当前组织、类型、状态和关键字筛选，子公司导出范围受服务端数据权限约束
+- 业务系统与网络资产台账 CSV/XLSX 导出；两类台账导出均沿用当前组织、状态和关键字等筛选条件，子公司导出范围受服务端数据权限约束
 - 填报任务结果 CSV/XLSX 导出；一行对应一个目标组织，包含任务进度、提交数量快照、审核结果和填报说明
+- 大型 XLSX 支持后台导出任务：网络资产、业务系统和填报任务均按数据库分页、Excelize 流式写盘生成；任务创建时冻结筛选与授权快照，仅申请人可查看、下载和删除，完成/失败产生个人站内消息，文件保留 7 天并自动过期清理
+- 同步 XLSX 最多导出 5000 行，超限时前端自动转为后台任务；CSV 继续直接流式下载，并使用独立的有限导出写入超时
 - 资产按所属组织和关联业务系统管理，集团可统管、子公司仅可维护本组织数据
 - 集团管理员创建填报任务、选择目标组织并立即下发或保存草稿
 - 填报任务支持“全部网络资产、仅公网资产、仅内网资产”核查范围；范围同步作用于提交前质量检查、提交数量、不可变快照、审核明细、提交差异及结果导出，未选择的资源类型不检查、不统计、不进入快照
@@ -160,7 +162,7 @@ GET  /api/v1/users
 POST /api/v1/users
 GET    /api/v1/business-systems
 POST   /api/v1/business-systems
-GET    /api/v1/business-systems/export?format=csv|xlsx
+GET    /api/v1/business-systems/export?format=csv|xlsx&organization_id=&status=&q=
 GET    /api/v1/business-systems/imports
 GET    /api/v1/business-systems/:id/change-history
 GET    /api/v1/business-systems/import-template
@@ -208,6 +210,11 @@ GET    /api/v1/inventory-tasks?page=&page_size=
 POST   /api/v1/inventory-tasks/scope-preview
 POST   /api/v1/inventory-tasks
 GET    /api/v1/inventory-tasks/:taskID/export?format=csv|xlsx
+GET    /api/v1/export-jobs?page=&page_size=&status=&resource_type=
+POST   /api/v1/export-jobs
+GET    /api/v1/export-jobs/:id
+GET    /api/v1/export-jobs/:id/download
+DELETE /api/v1/export-jobs/:id
 GET    /api/v1/inventory-tasks/:taskID/organizations?page=&page_size=
 GET    /api/v1/inventory-tasks/:taskID/organizations/:organizationID/quality-check
 GET    /api/v1/inventory-tasks/:taskID/organizations/:organizationID/submission-diff

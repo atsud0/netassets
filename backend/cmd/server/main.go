@@ -26,7 +26,8 @@ func main() {
 	logger := newLogger(cfg.Environment)
 	slog.SetDefault(logger)
 
-	ctx := context.Background()
+	ctx, cancelWorkers := context.WithCancel(context.Background())
+	defer cancelWorkers()
 	pool, err := database.Open(ctx, cfg.DatabaseURL)
 	if err != nil {
 		logger.Error("connect database", "error", err)
@@ -39,7 +40,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	handler := httpserver.New(cfg, pool, logger)
+	handler := httpserver.NewWithContext(ctx, cfg, pool, logger)
 	server := &http.Server{
 		Addr:              cfg.Address,
 		Handler:           handler,
@@ -68,6 +69,7 @@ func main() {
 		}
 	}
 
+	cancelWorkers()
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 	if err := server.Shutdown(shutdownCtx); err != nil {

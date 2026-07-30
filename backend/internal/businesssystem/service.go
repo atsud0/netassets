@@ -301,16 +301,27 @@ func (s *Service) SearchWithFilter(ctx context.Context, principal auth.Principal
 	return pagination.NewResult(items, total, query), nil
 }
 
-func (s *Service) Export(ctx context.Context, principal auth.Principal, format, requestID, ipAddress string) ([]byte, string, string, int, error) {
-	items, err := s.List(ctx, principal)
+func (s *Service) Export(ctx context.Context, principal auth.Principal, filter SearchFilter, format, requestID, ipAddress string) ([]byte, string, string, int, error) {
+	filter.Page = pagination.Query{Page: 1, PageSize: pagination.MaxPageSize}
+	first, err := s.SearchWithFilter(ctx, principal, filter)
 	if err != nil {
 		return nil, "", "", 0, err
 	}
-	if err := exportfile.ValidateSynchronousExport(format, len(items)); err != nil {
+	if err := exportfile.ValidateSynchronousExport(format, first.Total); err != nil {
 		if errors.Is(err, exportfile.ErrSynchronousXLSXTooLarge) {
 			return nil, "", "", 0, ErrExportTooLarge
 		}
 		return nil, "", "", 0, ErrInvalid
+	}
+	items := append([]BusinessSystem(nil), first.Items...)
+	for len(items) < first.Total && len(first.Items) == filter.Page.PageSize {
+		filter.Page.Page++
+		page, err := s.SearchWithFilter(ctx, principal, filter)
+		if err != nil {
+			return nil, "", "", 0, err
+		}
+		items = append(items, page.Items...)
+		first = page
 	}
 	customService := customfield.NewService(s.pool)
 	definitions, err := customService.EnabledDefinitions(ctx, "business_system")
@@ -343,16 +354,16 @@ func (s *Service) Export(ctx context.Context, principal auth.Principal, format, 
 	return data, contentType, fileName, len(items), nil
 }
 
-// StreamCSVExport writes the scoped business-system ledger in bounded pages.
-func (s *Service) StreamCSVExport(ctx context.Context, principal auth.Principal, output io.Writer, ready exportfile.ReadyFunc, requestID, ipAddress string) (int, error) {
+// StreamCSVExport writes the filtered, scoped business-system ledger in bounded pages.
+func (s *Service) StreamCSVExport(ctx context.Context, principal auth.Principal, filter SearchFilter, output io.Writer, ready exportfile.ReadyFunc, requestID, ipAddress string) (int, error) {
 	customService := customfield.NewService(s.pool)
 	definitions, err := customService.EnabledDefinitions(ctx, "business_system")
 	if err != nil {
 		return 0, fmt.Errorf("load business system custom field definitions: %w", err)
 	}
 
-	page := pagination.Query{Page: 1, PageSize: pagination.MaxPageSize}
-	result, err := s.SearchWithFilter(ctx, principal, SearchFilter{Page: page})
+	filter.Page = pagination.Query{Page: 1, PageSize: pagination.MaxPageSize}
+	result, err := s.SearchWithFilter(ctx, principal, filter)
 	if err != nil {
 		return 0, err
 	}
@@ -386,11 +397,11 @@ func (s *Service) StreamCSVExport(ctx context.Context, principal auth.Principal,
 		if err := stream.Flush(); err != nil {
 			return written, fmt.Errorf("flush business system csv export: %w", err)
 		}
-		if written >= result.Total || len(result.Items) < page.PageSize {
+		if written >= result.Total || len(result.Items) < filter.Page.PageSize {
 			break
 		}
-		page.Page++
-		result, err = s.SearchWithFilter(ctx, principal, SearchFilter{Page: page})
+		filter.Page.Page++
+		result, err = s.SearchWithFilter(ctx, principal, filter)
 		if err != nil {
 			return written, err
 		}
@@ -402,12 +413,83 @@ func (s *Service) StreamCSVExport(ctx context.Context, principal auth.Principal,
 	}
 	if _, err := s.pool.Exec(ctx, `
 		INSERT INTO audit_logs (user_id, organization_id, action, resource_type, summary, details, request_ip, request_id)
-		VALUES ($1::uuid, NULLIF($2, '')::uuid, 'business_system.export', 'business_system', '生成业务系统导出文件',
+		VALUES ($1::uuid, NULLIF($2, '')::uuid, 'business_system.export', 'business_system', '流式导出业务系统台账',
 		        jsonb_build_object('format', 'csv', 'count', $3::int, 'result', 'generated', 'delivery_state', 'response_written_unconfirmed'), NULLIF($4, '')::inet, NULLIF($5, ''))
 	`, principal.UserID, organizationID, written, ipAddress, requestID); err != nil {
 		return written, fmt.Errorf("write business system export audit: %w", err)
 	}
 	return written, nil
+}
+
+// ExportRowCount validates the frozen authorization and filter scope for a background job.
+func (s *Service) ExportRowCount(ctx context.Context, principal auth.Principal, filter SearchFilter) (int, error) {
+	filter.Page = pagination.Query{Page: 1, PageSize: 1}
+	result, err := s.SearchWithFilter(ctx, principal, filter)
+	if err != nil {
+		return 0, err
+	}
+	return result.Total, nil
+}
+
+// WriteXLSXExport generates the filtered, scoped business-system ledger page by page.
+func (s *Service) WriteXLSXExport(ctx context.Context, principal auth.Principal, filter SearchFilter, outputPath string, progress exportfile.ProgressFunc) (exportfile.Metadata, error) {
+	customService := customfield.NewService(s.pool)
+	definitions, err := customService.EnabledDefinitions(ctx, "business_system")
+	if err != nil {
+		return exportfile.Metadata{}, fmt.Errorf("load business system custom field definitions: %w", err)
+	}
+	filter.Page = pagination.Query{Page: 1, PageSize: pagination.MaxPageSize}
+	result, err := s.SearchWithFilter(ctx, principal, filter)
+	if err != nil {
+		return exportfile.Metadata{}, err
+	}
+	stream, err := exportfile.NewXLSXStream(outputPath, "业务系统", businessSystemExportHeaders(definitions))
+	if err != nil {
+		return exportfile.Metadata{}, fmt.Errorf("start business system xlsx export: %w", err)
+	}
+	defer stream.Abort()
+	written := 0
+	if progress != nil {
+		if err := progress(result.Total, written); err != nil {
+			return exportfile.Metadata{}, err
+		}
+	}
+	for {
+		ids := make([]string, 0, len(result.Items))
+		for _, item := range result.Items {
+			ids = append(ids, item.ID)
+		}
+		values, err := customService.ValuesForResources(ctx, "business_system", ids)
+		if err != nil {
+			return exportfile.Metadata{}, fmt.Errorf("load business system custom field values: %w", err)
+		}
+		for _, item := range result.Items {
+			if written >= result.Total {
+				break
+			}
+			if err := stream.Write(businessSystemExportRow(item, definitions, values)); err != nil {
+				return exportfile.Metadata{}, fmt.Errorf("write business system xlsx row: %w", err)
+			}
+			written++
+		}
+		if progress != nil {
+			if err := progress(result.Total, written); err != nil {
+				return exportfile.Metadata{}, err
+			}
+		}
+		if written >= result.Total || len(result.Items) < filter.Page.PageSize {
+			break
+		}
+		filter.Page.Page++
+		result, err = s.SearchWithFilter(ctx, principal, filter)
+		if err != nil {
+			return exportfile.Metadata{}, err
+		}
+	}
+	if err := stream.Close(); err != nil {
+		return exportfile.Metadata{}, fmt.Errorf("finish business system xlsx export: %w", err)
+	}
+	return exportfile.Metadata{ContentType: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", FileName: "业务系统台账.xlsx", Count: written}, nil
 }
 
 func buildExport(items []BusinessSystem, format string) ([]byte, string, string, error) {

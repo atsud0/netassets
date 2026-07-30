@@ -24,6 +24,7 @@ import (
 	"netassets/internal/customfield"
 	"netassets/internal/dashboard"
 	"netassets/internal/dataquality"
+	"netassets/internal/exportjob"
 	"netassets/internal/inventorytask"
 	"netassets/internal/networkarea"
 	"netassets/internal/notification"
@@ -38,6 +39,10 @@ import (
 )
 
 func New(cfg config.Config, pool *pgxpool.Pool, logger *slog.Logger) http.Handler {
+	return NewWithContext(context.Background(), cfg, pool, logger)
+}
+
+func NewWithContext(ctx context.Context, cfg config.Config, pool *pgxpool.Pool, logger *slog.Logger) http.Handler {
 	if cfg.Environment == "production" {
 		gin.SetMode(gin.ReleaseMode)
 	}
@@ -76,7 +81,11 @@ func New(cfg config.Config, pool *pgxpool.Pool, logger *slog.Logger) http.Handle
 		registerNetworkAreaRoutes(api, requireAuth, networkarea.NewService(pool), logger)
 		registerCustomFieldRoutes(api, requireAuth, customFieldService, logger)
 		registerDataQualityRuleRoutes(api, requireAuth, dataquality.NewService(pool), logger)
-		registerInventoryTaskRoutes(api, requireAuth, inventorytask.NewService(pool), logger)
+		inventoryTaskService := inventorytask.NewService(pool)
+		registerInventoryTaskRoutes(api, requireAuth, inventoryTaskService, logger)
+		exportJobService := exportjob.NewService(pool, cfg.DataDir, assetService, businessSystemService, inventoryTaskService, logger)
+		registerExportJobRoutes(api, requireAuth, exportJobService, logger)
+		exportJobService.Start(ctx)
 		registerDashboardRoutes(api, requireAuth, dashboard.NewService(pool), logger)
 		registerAuditLogRoutes(api, requireAuth, auditlog.NewService(pool), logger)
 		registerChangeHistoryRoutes(api, requireAuth, changehistory.NewService(pool), logger)

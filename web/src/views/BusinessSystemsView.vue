@@ -2,7 +2,8 @@
 import { computed, onMounted, reactive, ref, watch } from 'vue'
 import { ElMessage, ElMessageBox, type FormInstance, type FormRules, type UploadFile, type UploadFiles } from 'element-plus'
 import { UploadFilled } from '@element-plus/icons-vue'
-import { apiClient, getAPIErrorMessage, getDownloadAPIErrorMessage } from '../api/client'
+import { apiClient, getAPIErrorMessage, getDownloadAPIError } from '../api/client'
+import { createExportJob } from '../api/export-jobs'
 import { useAuthStore } from '../stores/auth'
 
 interface Organization { id: string; code: string; name: string; type: string; status: string }
@@ -404,7 +405,16 @@ async function runImport(preview = false) {
 async function exportLedger(format: 'csv' | 'xlsx') {
   exporting.value = true
   try {
-    const response = await apiClient.get(`/business-systems/export?format=${format}`, { responseType: 'blob', timeout: 60_000 })
+    const response = await apiClient.get('/business-systems/export', {
+      params: {
+        format,
+        q: search.value.trim() || undefined,
+        status: statusFilter.value || undefined,
+        organization_id: organizationFilter.value || undefined,
+      },
+      responseType: 'blob',
+      timeout: 60_000,
+    })
     const href = URL.createObjectURL(response.data)
     const link = document.createElement('a')
     link.href = href
@@ -414,10 +424,24 @@ async function exportLedger(format: 'csv' | 'xlsx') {
     const count = response.headers['x-export-count'] ?? systems.value.length
     ElMessage.success(`已生成并开始下载 ${count} 个业务系统`)
   } catch (error) {
-    ElMessage.error(await getDownloadAPIErrorMessage(error, '导出业务系统台账失败'))
+    const detail = await getDownloadAPIError(error, '导出业务系统台账失败')
+    if (format === 'xlsx' && detail.code === 'synchronous_xlsx_limit_exceeded') {
+      try { await queueXLSXExport() } catch (queueError) { ElMessage.error(getAPIErrorMessage(queueError, '创建后台导出任务失败')) }
+    } else {
+      ElMessage.error(detail.message)
+    }
   } finally {
     exporting.value = false
   }
+}
+
+async function queueXLSXExport() {
+  await createExportJob('business_system', {
+    q: search.value.trim() || undefined,
+    status: statusFilter.value || undefined,
+    organization_id: organizationFilter.value || undefined,
+  })
+  ElMessage.success('后台 XLSX 导出任务已创建，可在“导出任务”中查看进度和下载')
 }
 
 async function downloadTemplate(format: 'csv' | 'xlsx') {
@@ -513,7 +537,7 @@ onMounted(load)
   <section>
     <div class="page-heading">
       <div><span class="eyebrow">BUSINESS SYSTEMS</span><h1>业务系统</h1><p>登记子公司的业务系统、负责人、系统等级以及个人信息和重要数据属性。</p></div>
-      <div class="button-row ledger-page-actions business-system-page-actions"><el-dropdown><el-button :loading="exporting">导出台账</el-button><template #dropdown><el-dropdown-menu><el-dropdown-item @click="exportLedger('xlsx')">导出 XLSX</el-dropdown-item><el-dropdown-item @click="exportLedger('csv')">导出 CSV</el-dropdown-item></el-dropdown-menu></template></el-dropdown><el-button @click="openImportHistory">导入记录</el-button><el-button @click="openImportDialog">批量导入</el-button><el-button type="primary" :disabled="eligibleOrganizations.length === 0" @click="openCreateDialog">新增业务系统</el-button></div>
+      <div class="button-row ledger-page-actions business-system-page-actions"><el-dropdown><el-button :loading="exporting">导出台账</el-button><template #dropdown><el-dropdown-menu><el-dropdown-item @click="exportLedger('xlsx')">导出 XLSX</el-dropdown-item><el-dropdown-item @click="exportLedger('csv')">导出 CSV</el-dropdown-item><el-dropdown-item divided @click="queueXLSXExport">后台生成 XLSX</el-dropdown-item></el-dropdown-menu></template></el-dropdown><el-button @click="openImportHistory">导入记录</el-button><el-button @click="openImportDialog">批量导入</el-button><el-button type="primary" :disabled="eligibleOrganizations.length === 0" @click="openCreateDialog">新增业务系统</el-button></div>
     </div>
     <div class="organization-summary">
       <div><span>符合条件系统</span><strong>{{ total }}</strong></div>

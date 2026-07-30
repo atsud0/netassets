@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/csv"
 	"errors"
+	"os"
 	"strings"
 	"testing"
 
@@ -116,5 +117,54 @@ func TestCSVStreamReturnsDestinationWriteError(t *testing.T) {
 	want := errors.New("connection closed")
 	if _, err := NewCSVStream(failingWriter{err: want}, []string{"资产"}); !errors.Is(err, want) {
 		t.Fatalf("NewCSVStream error = %v, want %v", err, want)
+	}
+}
+
+func TestXLSXStreamWritesWorkbookToDisk(t *testing.T) {
+	path := t.TempDir() + "/ledger.xlsx"
+	stream, err := NewXLSXStream(path, "网络资产", []string{"组织", "资产"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := stream.Write([]string{"集团总部", "https://portal.example.com"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := stream.Write([]string{"第一子公司", "192.0.2.10"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := stream.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	file, err := excelize.OpenFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer file.Close()
+	rows, err := file.GetRows("网络资产")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 3 || rows[0][0] != "组织" || rows[1][1] != "https://portal.example.com" || rows[2][1] != "192.0.2.10" {
+		t.Fatalf("unexpected streamed XLSX rows: %#v", rows)
+	}
+	styleID, err := file.GetCellStyle("网络资产", "A1")
+	if err != nil || styleID == 0 {
+		t.Fatalf("header style was not applied: style=%d err=%v", styleID, err)
+	}
+}
+
+func TestXLSXStreamAbortRemovesOutput(t *testing.T) {
+	path := t.TempDir() + "/aborted.xlsx"
+	stream, err := NewXLSXStream(path, "台账", []string{"资产"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := stream.Write([]string{"portal.example.com"}); err != nil {
+		t.Fatal(err)
+	}
+	stream.Abort()
+	if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("aborted XLSX path still exists or stat failed unexpectedly: %v", err)
 	}
 }

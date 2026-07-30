@@ -23,20 +23,25 @@ export function getAPIErrorMessage(error: unknown, fallback = '操作失败，�
 
 // Download endpoints use responseType: 'blob', including when the server returns
 // a JSON error body. Decode that body so export limits remain actionable in the UI.
-export async function getDownloadAPIErrorMessage(error: unknown, fallback = '操作失败，请稍后重试') {
-  if (!axios.isAxiosError<APIErrorPayload | Blob>(error)) return fallback
+export async function getDownloadAPIError(error: unknown, fallback = '操作失败，请稍后重试') {
+  if (!axios.isAxiosError<APIErrorPayload | Blob>(error)) return { message: fallback }
 
   const body = error.response?.data
   if (typeof Blob !== 'undefined' && body instanceof Blob) {
     try {
       const text = typeof body.text === 'function' ? await body.text() : await readBlobWithFileReader(body)
       const decoded = JSON.parse(text) as APIErrorPayload
-      return decoded.error?.message ?? fallback
+      return { code: decoded.error?.code, message: decoded.error?.message ?? fallback }
     } catch {
-      return fallback
+      return { message: fallback }
     }
   }
-  return (body as APIErrorPayload | undefined)?.error?.message ?? fallback
+  const decoded = body as APIErrorPayload | undefined
+  return { code: decoded?.error?.code, message: decoded?.error?.message ?? fallback }
+}
+
+export async function getDownloadAPIErrorMessage(error: unknown, fallback = '操作失败，请稍后重试') {
+  return (await getDownloadAPIError(error, fallback)).message
 }
 
 function readBlobWithFileReader(blob: Blob) {

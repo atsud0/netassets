@@ -441,6 +441,95 @@ func (s *Service) StreamCSVExport(ctx context.Context, principal auth.Principal,
 	return written, nil
 }
 
+// ExportRowCount validates the frozen authorization/filter scope and returns the
+// number of rows a background spreadsheet job will generate.
+func (s *Service) ExportRowCount(ctx context.Context, principal auth.Principal, filter ExportFilter) (int, error) {
+	result, err := s.SearchWithFilter(ctx, principal, SearchFilter{
+		OrganizationID: filter.OrganizationID,
+		Type:           filter.Type,
+		Status:         filter.Status,
+		Keyword:        filter.Keyword,
+		Page:           pagination.Query{Page: 1, PageSize: 1},
+	})
+	if err != nil {
+		return 0, err
+	}
+	return result.Total, nil
+}
+
+// WriteXLSXExport generates an authorization-scoped workbook page by page.
+func (s *Service) WriteXLSXExport(ctx context.Context, principal auth.Principal, filter ExportFilter, outputPath string, progress exportfile.ProgressFunc) (exportfile.Metadata, error) {
+	customService := customfield.NewService(s.pool)
+	definitions, err := customService.EnabledDefinitions(ctx, "asset")
+	if err != nil {
+		return exportfile.Metadata{}, fmt.Errorf("load asset custom field definitions: %w", err)
+	}
+	page := pagination.Query{Page: 1, PageSize: pagination.MaxPageSize}
+	result, err := s.SearchWithFilter(ctx, principal, SearchFilter{
+		OrganizationID: filter.OrganizationID,
+		Type:           filter.Type,
+		Status:         filter.Status,
+		Keyword:        filter.Keyword,
+		Page:           page,
+	})
+	if err != nil {
+		return exportfile.Metadata{}, err
+	}
+	stream, err := exportfile.NewXLSXStream(outputPath, "网络资产", assetExportHeaders(definitions))
+	if err != nil {
+		return exportfile.Metadata{}, fmt.Errorf("start asset xlsx export: %w", err)
+	}
+	defer stream.Abort()
+	written := 0
+	if progress != nil {
+		if err := progress(result.Total, written); err != nil {
+			return exportfile.Metadata{}, err
+		}
+	}
+	for {
+		ids := make([]string, 0, len(result.Items))
+		for _, item := range result.Items {
+			ids = append(ids, item.ID)
+		}
+		values, err := customService.ValuesForResources(ctx, "asset", ids)
+		if err != nil {
+			return exportfile.Metadata{}, fmt.Errorf("load asset custom field values: %w", err)
+		}
+		for _, item := range result.Items {
+			if written >= result.Total {
+				break
+			}
+			if err := stream.Write(assetExportRow(item, definitions, values)); err != nil {
+				return exportfile.Metadata{}, fmt.Errorf("write asset xlsx row: %w", err)
+			}
+			written++
+		}
+		if progress != nil {
+			if err := progress(result.Total, written); err != nil {
+				return exportfile.Metadata{}, err
+			}
+		}
+		if written >= result.Total || len(result.Items) < page.PageSize {
+			break
+		}
+		page.Page++
+		result, err = s.SearchWithFilter(ctx, principal, SearchFilter{
+			OrganizationID: filter.OrganizationID,
+			Type:           filter.Type,
+			Status:         filter.Status,
+			Keyword:        filter.Keyword,
+			Page:           page,
+		})
+		if err != nil {
+			return exportfile.Metadata{}, err
+		}
+	}
+	if err := stream.Close(); err != nil {
+		return exportfile.Metadata{}, fmt.Errorf("finish asset xlsx export: %w", err)
+	}
+	return exportfile.Metadata{ContentType: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", FileName: "网络资产台账.xlsx", Count: written}, nil
+}
+
 func filterExportAssets(items []Asset, filter ExportFilter) []Asset {
 	keyword := strings.ToLower(strings.TrimSpace(filter.Keyword))
 	result := make([]Asset, 0, len(items))
