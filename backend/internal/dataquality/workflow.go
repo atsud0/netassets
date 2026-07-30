@@ -126,6 +126,8 @@ type ScanBatch struct {
 	ErrorCount       int64     `json:"error_count"`
 	WarningCount     int64     `json:"warning_count"`
 	AutoClosedCount  int64     `json:"auto_closed_count"`
+	TriggerType      string    `json:"trigger_type"`
+	ScheduledFor     string    `json:"scheduled_for,omitempty"`
 	CreatedByName    string    `json:"created_by_name,omitempty"`
 	CreatedAt        time.Time `json:"created_at"`
 }
@@ -588,7 +590,7 @@ func (s *Service) SearchScanBatches(ctx context.Context, p auth.Principal, page 
 	if !p.HasRole("group_admin") {
 		return pagination.Result[ScanBatch]{}, ErrForbidden
 	}
-	rows, err := s.pool.Query(ctx, `SELECT b.id::text,COALESCE(b.organization_id::text,''),COALESCE(o.organization_name,''),COALESCE(b.resource_type,''),COALESCE(b.severity,''),b.asset_count,b.system_count,b.enabled_rule_count,b.total_issue_count,b.error_count,b.warning_count,b.auto_closed_count,COALESCE(u.display_name,''),b.created_at,count(*) OVER () FROM data_quality_scan_batches b LEFT JOIN organizations o ON o.id=b.organization_id LEFT JOIN users u ON u.id=b.created_by ORDER BY b.created_at DESC LIMIT $1 OFFSET $2`, page.PageSize, page.Offset())
+	rows, err := s.pool.Query(ctx, `SELECT b.id::text,COALESCE(b.organization_id::text,''),COALESCE(o.organization_name,''),COALESCE(b.resource_type,''),COALESCE(b.severity,''),b.asset_count,b.system_count,b.enabled_rule_count,b.total_issue_count,b.error_count,b.warning_count,b.auto_closed_count,b.trigger_type,COALESCE(to_char(b.scheduled_for,'YYYY-MM-DD'),''),COALESCE(u.display_name,''),b.created_at,count(*) OVER () FROM data_quality_scan_batches b LEFT JOIN organizations o ON o.id=b.organization_id LEFT JOIN users u ON u.id=b.created_by ORDER BY b.created_at DESC LIMIT $1 OFFSET $2`, page.PageSize, page.Offset())
 	if err != nil {
 		return pagination.Result[ScanBatch]{}, err
 	}
@@ -597,7 +599,7 @@ func (s *Service) SearchScanBatches(ctx context.Context, p auth.Principal, page 
 	total := 0
 	for rows.Next() {
 		var item ScanBatch
-		if err := rows.Scan(&item.ID, &item.OrganizationID, &item.OrganizationName, &item.ResourceType, &item.Severity, &item.AssetCount, &item.SystemCount, &item.RuleCount, &item.IssueCount, &item.ErrorCount, &item.WarningCount, &item.AutoClosedCount, &item.CreatedByName, &item.CreatedAt, &total); err != nil {
+		if err := rows.Scan(&item.ID, &item.OrganizationID, &item.OrganizationName, &item.ResourceType, &item.Severity, &item.AssetCount, &item.SystemCount, &item.RuleCount, &item.IssueCount, &item.ErrorCount, &item.WarningCount, &item.AutoClosedCount, &item.TriggerType, &item.ScheduledFor, &item.CreatedByName, &item.CreatedAt, &total); err != nil {
 			return pagination.Result[ScanBatch]{}, err
 		}
 		items = append(items, item)

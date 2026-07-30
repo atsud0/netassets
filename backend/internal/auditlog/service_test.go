@@ -64,6 +64,12 @@ func TestAuditLabels(t *testing.T) {
 	if got := ResourceTypeLabel("business_system"); got != "业务系统" {
 		t.Fatalf("ResourceTypeLabel = %q", got)
 	}
+	if got := ActionLabel("data_quality.scan.scheduled"); got != "系统自动数据质量巡检" {
+		t.Fatalf("scheduled scan ActionLabel = %q", got)
+	}
+	if got := ResourceTypeLabel("data_quality_scan_batch"); got != "数据质量巡检批次" {
+		t.Fatalf("scheduled scan ResourceTypeLabel = %q", got)
+	}
 	if got := ResultLabel("failure"); got != "失败" {
 		t.Fatalf("ResultLabel = %q", got)
 	}

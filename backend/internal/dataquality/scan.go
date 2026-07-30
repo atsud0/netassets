@@ -21,6 +21,16 @@ type ScanFilter struct {
 	Severity       string
 }
 
+const (
+	scanTriggerManual    = "manual"
+	scanTriggerScheduled = "scheduled"
+)
+
+type scanTrigger struct {
+	Type         string
+	ScheduledFor string
+}
+
 type ScanIssue struct {
 	IssueID           string `json:"issue_id,omitempty"`
 	Status            string `json:"status,omitempty"`
@@ -61,6 +71,10 @@ func (s *Service) Scan(ctx context.Context, p auth.Principal, filter ScanFilter,
 	if err := isAdmin(p); err != nil {
 		return ScanResult{}, err
 	}
+	return s.scan(ctx, p.UserID, filter, scanTrigger{Type: scanTriggerManual}, requestID, ipAddress)
+}
+
+func (s *Service) scan(ctx context.Context, actorUserID string, filter ScanFilter, trigger scanTrigger, requestID, ipAddress string) (ScanResult, error) {
 	filter.OrganizationID = strings.TrimSpace(filter.OrganizationID)
 	filter.ResourceType = strings.TrimSpace(filter.ResourceType)
 	filter.Severity = strings.TrimSpace(filter.Severity)
@@ -78,12 +92,40 @@ func (s *Service) Scan(ctx context.Context, p auth.Principal, filter ScanFilter,
 			return ScanResult{}, ErrInvalid
 		}
 	}
+	if trigger.Type == "" {
+		trigger.Type = scanTriggerManual
+	}
+	if (trigger.Type != scanTriggerManual && trigger.Type != scanTriggerScheduled) ||
+		(trigger.Type == scanTriggerManual && trigger.ScheduledFor != "") ||
+		(trigger.Type == scanTriggerScheduled && trigger.ScheduledFor == "") {
+		return ScanResult{}, ErrInvalid
+	}
+	var actorID any
+	if actorUserID != "" {
+		actorID = actorUserID
+	}
 
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return ScanResult{}, fmt.Errorf("begin data quality scan: %w", err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
+	if trigger.Type == scanTriggerScheduled {
+		var locked bool
+		if err := tx.QueryRow(ctx, `SELECT pg_try_advisory_xact_lock($1)`, autoScanAdvisoryLockKey).Scan(&locked); err != nil {
+			return ScanResult{}, fmt.Errorf("lock scheduled data quality scan: %w", err)
+		}
+		if !locked {
+			return ScanResult{}, errScheduledScanLocked
+		}
+		var completed bool
+		if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM data_quality_scan_batches WHERE trigger_type='scheduled' AND scheduled_for=$1::date)`, trigger.ScheduledFor).Scan(&completed); err != nil {
+			return ScanResult{}, fmt.Errorf("check scheduled data quality scan: %w", err)
+		}
+		if completed {
+			return ScanResult{}, errScheduledScanCompleted
+		}
+	}
 
 	result := ScanResult{Issues: make([]ScanIssue, 0)}
 	if filter.ResourceType == "" || filter.ResourceType == "asset" {
@@ -104,10 +146,10 @@ func (s *Service) Scan(ctx context.Context, p auth.Principal, filter ScanFilter,
 	result.Summary.EnabledRuleCount = len(rules)
 	if err := tx.QueryRow(ctx, `
 		INSERT INTO data_quality_scan_batches(
-			organization_id,resource_type,severity,asset_count,system_count,enabled_rule_count,created_by
-		) VALUES(NULLIF($1,'')::uuid,NULLIF($2,''),NULLIF($3,''),$4,$5,$6,$7::uuid)
+			organization_id,resource_type,severity,asset_count,system_count,enabled_rule_count,created_by,trigger_type,scheduled_for
+		) VALUES(NULLIF($1,'')::uuid,NULLIF($2,''),NULLIF($3,''),$4,$5,$6,$7::uuid,$8,NULLIF($9,'')::date)
 		RETURNING id::text
-	`, filter.OrganizationID, filter.ResourceType, filter.Severity, result.Summary.AssetCount, result.Summary.SystemCount, result.Summary.EnabledRuleCount, p.UserID).Scan(&result.BatchID); err != nil {
+	`, filter.OrganizationID, filter.ResourceType, filter.Severity, result.Summary.AssetCount, result.Summary.SystemCount, result.Summary.EnabledRuleCount, actorID, trigger.Type, trigger.ScheduledFor).Scan(&result.BatchID); err != nil {
 		return ScanResult{}, fmt.Errorf("create data quality scan batch: %w", err)
 	}
 
@@ -139,7 +181,7 @@ func (s *Service) Scan(ctx context.Context, p auth.Principal, filter ScanFilter,
 					closed_at=CASE WHEN data_quality_issues.status='closed' THEN NULL ELSE data_quality_issues.closed_at END,
 					updated_by=EXCLUDED.updated_by,updated_at=now()
 				RETURNING id::text
-			`, rule.ID, issue.ResourceType, issue.ResourceID, issue.ResourceName, issue.OrganizationID, issue.OrganizationCode, issue.OrganizationName, rule.RuleName, rule.TargetField, rule.Severity, result.BatchID, p.UserID).Scan(&issueID)
+			`, rule.ID, issue.ResourceType, issue.ResourceID, issue.ResourceName, issue.OrganizationID, issue.OrganizationCode, issue.OrganizationName, rule.RuleName, rule.TargetField, rule.Severity, result.BatchID, actorID).Scan(&issueID)
 			if err != nil {
 				return ScanResult{}, fmt.Errorf("persist data quality issue: %w", err)
 			}
@@ -174,7 +216,7 @@ func (s *Service) Scan(ctx context.Context, p auth.Principal, filter ScanFilter,
 			RETURNING 1
 		)
 		SELECT count(*) FROM events
-	`, result.BatchID, filter.OrganizationID, filter.ResourceType, filter.Severity, p.UserID).Scan(&result.Summary.AutoClosedCount); err != nil {
+	`, result.BatchID, filter.OrganizationID, filter.ResourceType, filter.Severity, actorID).Scan(&result.Summary.AutoClosedCount); err != nil {
 		return ScanResult{}, fmt.Errorf("auto close data quality issues: %w", err)
 	}
 
@@ -211,7 +253,21 @@ func (s *Service) Scan(ctx context.Context, p auth.Principal, filter ScanFilter,
 	result.Summary.ReturnedCount = len(result.Issues)
 	result.Summary.Truncated = int64(len(result.Issues)) < result.Summary.TotalIssueCount
 
-	if _, err := tx.Exec(ctx, `INSERT INTO audit_logs(user_id,organization_id,action,resource_type,resource_id,summary,details,request_ip,request_id) VALUES($1::uuid,NULLIF($2,'')::uuid,'data_quality.scan','data_quality_scan_batch',$3,'执行当前台账数据质量检测',jsonb_build_object('resource_type',$4::text,'severity',$5::text,'rule_count',$6::int,'issue_count',$7::bigint,'auto_closed_count',$8::bigint),NULLIF($9,'')::inet,NULLIF($10,''))`, p.UserID, filter.OrganizationID, result.BatchID, filter.ResourceType, filter.Severity, result.Summary.EnabledRuleCount, result.Summary.TotalIssueCount, result.Summary.AutoClosedCount, ipAddress, requestID); err != nil {
+	auditAction := "data_quality.scan"
+	auditSummary := "执行当前台账数据质量检测"
+	if trigger.Type == scanTriggerScheduled {
+		auditAction = "data_quality.scan.scheduled"
+		auditSummary = "系统自动执行全集团数据质量检测"
+	}
+	if _, err := tx.Exec(ctx, `
+		INSERT INTO audit_logs(user_id,organization_id,action,resource_type,resource_id,summary,details,request_ip,request_id)
+		VALUES($1::uuid,NULLIF($2,'')::uuid,$3,'data_quality_scan_batch',$4,$5,
+		       jsonb_build_object('trigger_type',$6::text,'scheduled_for',NULLIF($7,'')::date,'resource_type',$8::text,
+		                          'severity',$9::text,'rule_count',$10::int,'issue_count',$11::bigint,'auto_closed_count',$12::bigint),
+		       NULLIF($13,'')::inet,NULLIF($14,''))
+	`, actorID, filter.OrganizationID, auditAction, result.BatchID, auditSummary, trigger.Type, trigger.ScheduledFor,
+		filter.ResourceType, filter.Severity, result.Summary.EnabledRuleCount, result.Summary.TotalIssueCount,
+		result.Summary.AutoClosedCount, ipAddress, requestID); err != nil {
 		return ScanResult{}, fmt.Errorf("write data quality scan audit: %w", err)
 	}
 	if err := tx.Commit(ctx); err != nil {

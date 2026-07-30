@@ -299,6 +299,7 @@ func ActionLabel(value string) string {
 		"asset.create": "新增网络资产", "asset.update": "更新网络资产", "asset.delete": "删除网络资产", "asset.restore": "恢复网络资产", "asset.import": "导入网络资产", "asset.export": "导出网络资产",
 		"auth.login": "登录", "auth.logout": "退出登录", "business_system.create": "新增业务系统", "business_system.update": "更新业务系统", "business_system.delete": "删除业务系统", "business_system.archive": "归档业务系统", "business_system.restore": "恢复业务系统", "business_system.import": "导入业务系统", "business_system.export": "导出业务系统",
 		"inventory_task.create": "创建填报任务", "inventory_task.start": "开始填报", "inventory_task.submit": "提交填报", "inventory_task.review": "审核填报", "inventory_task.status_update": "更新填报任务状态", "inventory_task.export": "导出填报结果",
+		"data_quality.scan": "执行数据质量巡检", "data_quality.scan.scheduled": "系统自动数据质量巡检",
 		"organization.create": "新增组织", "organization.update": "更新组织", "user.create": "新增用户",
 		"security_finding.create": "登记安全发现", "security_finding.update": "更新安全发现", "security_finding.import": "导入安全发现", "security_finding.accept_risk": "接受安全发现风险", "security_finding.revoke_risk": "撤销风险接受", "security_finding.review_risk": "复核风险接受",
 		"security_work_order.create": "创建安全工单", "security_work_order.issue": "下发安全工单", "security_work_order.accept": "接收安全工单", "security_work_order.progress": "更新整改进度", "security_work_order.submit": "提交复测", "security_work_order.return": "退回安全工单", "security_work_order.close": "关闭安全工单", "security_work_order.cancel": "取消安全工单",
@@ -310,7 +311,7 @@ func ActionLabel(value string) string {
 }
 
 func ResourceTypeLabel(value string) string {
-	labels := map[string]string{"asset": "网络资产", "asset_import": "网络资产导入", "business_system": "业务系统", "business_system_import": "业务系统导入", "inventory_task": "填报任务", "organization": "组织机构", "user": "用户", "security_finding": "安全发现", "security_work_order": "安全工单"}
+	labels := map[string]string{"asset": "网络资产", "asset_import": "网络资产导入", "business_system": "业务系统", "business_system_import": "业务系统导入", "inventory_task": "填报任务", "data_quality_scan_batch": "数据质量巡检批次", "organization": "组织机构", "user": "用户", "security_finding": "安全发现", "security_work_order": "安全工单"}
 	if label, ok := labels[value]; ok {
 		return label
 	}

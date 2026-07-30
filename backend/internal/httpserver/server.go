@@ -80,7 +80,19 @@ func NewWithContext(ctx context.Context, cfg config.Config, pool *pgxpool.Pool, 
 		registerAssetCandidateRoutes(api, requireAuth, assetcandidate.NewService(pool, assetService), logger)
 		registerNetworkAreaRoutes(api, requireAuth, networkarea.NewService(pool), logger)
 		registerCustomFieldRoutes(api, requireAuth, customFieldService, logger)
-		registerDataQualityRuleRoutes(api, requireAuth, dataquality.NewService(pool), logger)
+		dataQualityService := dataquality.NewService(pool)
+		registerDataQualityRuleRoutes(api, requireAuth, dataQualityService, logger)
+		autoScanSchedule, err := dataquality.NewAutoScanSchedule(
+			cfg.DataQualityAutoScanEnabled,
+			cfg.DataQualityAutoScanHour,
+			cfg.DataQualityAutoScanMinute,
+			cfg.DataQualityAutoScanTimezone,
+		)
+		if err != nil {
+			logger.Error("configure automatic data quality scan", "error", err)
+		} else {
+			dataQualityService.StartAutoScan(ctx, autoScanSchedule, backupService.WriteGate(), logger)
+		}
 		inventoryTaskService := inventorytask.NewService(pool)
 		registerInventoryTaskRoutes(api, requireAuth, inventoryTaskService, logger)
 		exportJobService := exportjob.NewService(pool, cfg.DataDir, assetService, businessSystemService, inventoryTaskService, logger)

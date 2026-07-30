@@ -13,7 +13,7 @@ import (
 // response while the short backup window is active.
 func writeMaintenanceMiddleware(gate *backup.WriteGate) gin.HandlerFunc {
 	return func(c *gin.Context) {
-		if !isMutatingRequest(c.Request.Method) || isBackupCreationRequest(c.Request) {
+		if (!isMutatingRequest(c.Request.Method) && !isDataQualityScanRequest(c.Request)) || isBackupCreationRequest(c.Request) {
 			c.Next()
 			return
 		}
@@ -38,4 +38,8 @@ func isMutatingRequest(method string) bool {
 
 func isBackupCreationRequest(request *http.Request) bool {
 	return request.Method == http.MethodPost && request.URL.Path == "/api/v1/backups"
+}
+
+func isDataQualityScanRequest(request *http.Request) bool {
+	return request.Method == http.MethodGet && request.URL.Path == "/api/v1/data-quality-rules/scan"
 }

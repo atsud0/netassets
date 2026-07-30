@@ -8,20 +8,24 @@ import (
 )
 
 type Config struct {
-	Environment               string
-	Address                   string
-	DatabaseURL               string
-	StaticDir                 string
-	DataDir                   string
-	SessionCookieName         string
-	SessionTTL                time.Duration
-	SessionCookieSecure       bool
-	BootstrapGroupCode        string
-	BootstrapGroupName        string
-	BootstrapGroupShortName   string
-	BootstrapAdminUsername    string
-	BootstrapAdminPassword    string
-	BootstrapAdminDisplayName string
+	Environment                 string
+	Address                     string
+	DatabaseURL                 string
+	StaticDir                   string
+	DataDir                     string
+	SessionCookieName           string
+	SessionTTL                  time.Duration
+	SessionCookieSecure         bool
+	BootstrapGroupCode          string
+	BootstrapGroupName          string
+	BootstrapGroupShortName     string
+	BootstrapAdminUsername      string
+	BootstrapAdminPassword      string
+	BootstrapAdminDisplayName   string
+	DataQualityAutoScanEnabled  bool
+	DataQualityAutoScanHour     int
+	DataQualityAutoScanMinute   int
+	DataQualityAutoScanTimezone string
 }
 
 func Load() (Config, error) {
@@ -34,22 +38,38 @@ func Load() (Config, error) {
 	if err != nil {
 		return Config{}, fmt.Errorf("parse SESSION_COOKIE_SECURE: %w", err)
 	}
+	autoScanEnabled, err := strconv.ParseBool(getenv("DATA_QUALITY_AUTO_SCAN_ENABLED", "true"))
+	if err != nil {
+		return Config{}, fmt.Errorf("parse DATA_QUALITY_AUTO_SCAN_ENABLED: %w", err)
+	}
+	autoScanHour, autoScanMinute, err := parseClock(getenv("DATA_QUALITY_AUTO_SCAN_TIME", "02:00"))
+	if err != nil {
+		return Config{}, fmt.Errorf("parse DATA_QUALITY_AUTO_SCAN_TIME: %w", err)
+	}
+	autoScanTimezone := getenv("DATA_QUALITY_AUTO_SCAN_TIMEZONE", "Asia/Shanghai")
+	if _, err := time.LoadLocation(autoScanTimezone); err != nil {
+		return Config{}, fmt.Errorf("parse DATA_QUALITY_AUTO_SCAN_TIMEZONE: %w", err)
+	}
 
 	cfg := Config{
-		Environment:               getenv("APP_ENV", "development"),
-		Address:                   getenv("APP_ADDR", ":8080"),
-		DatabaseURL:               getenv("DATABASE_URL", "postgres://netassets:netassets@localhost:5432/netassets?sslmode=disable"),
-		StaticDir:                 getenv("STATIC_DIR", "../web/dist"),
-		DataDir:                   getenv("DATA_DIR", "../data"),
-		SessionCookieName:         getenv("SESSION_COOKIE_NAME", "netassets_session"),
-		SessionTTL:                sessionTTL,
-		SessionCookieSecure:       sessionCookieSecure,
-		BootstrapGroupCode:        getenv("BOOTSTRAP_GROUP_CODE", "GROUP"),
-		BootstrapGroupName:        getenv("BOOTSTRAP_GROUP_NAME", "示例集团"),
-		BootstrapGroupShortName:   getenv("BOOTSTRAP_GROUP_SHORT_NAME", "集团总部"),
-		BootstrapAdminUsername:    getenv("BOOTSTRAP_ADMIN_USERNAME", "admin"),
-		BootstrapAdminPassword:    getenv("BOOTSTRAP_ADMIN_PASSWORD", ""),
-		BootstrapAdminDisplayName: getenv("BOOTSTRAP_ADMIN_DISPLAY_NAME", "集团管理员"),
+		Environment:                 getenv("APP_ENV", "development"),
+		Address:                     getenv("APP_ADDR", ":8080"),
+		DatabaseURL:                 getenv("DATABASE_URL", "postgres://netassets:netassets@localhost:5432/netassets?sslmode=disable"),
+		StaticDir:                   getenv("STATIC_DIR", "../web/dist"),
+		DataDir:                     getenv("DATA_DIR", "../data"),
+		SessionCookieName:           getenv("SESSION_COOKIE_NAME", "netassets_session"),
+		SessionTTL:                  sessionTTL,
+		SessionCookieSecure:         sessionCookieSecure,
+		BootstrapGroupCode:          getenv("BOOTSTRAP_GROUP_CODE", "GROUP"),
+		BootstrapGroupName:          getenv("BOOTSTRAP_GROUP_NAME", "示例集团"),
+		BootstrapGroupShortName:     getenv("BOOTSTRAP_GROUP_SHORT_NAME", "集团总部"),
+		BootstrapAdminUsername:      getenv("BOOTSTRAP_ADMIN_USERNAME", "admin"),
+		BootstrapAdminPassword:      getenv("BOOTSTRAP_ADMIN_PASSWORD", ""),
+		BootstrapAdminDisplayName:   getenv("BOOTSTRAP_ADMIN_DISPLAY_NAME", "集团管理员"),
+		DataQualityAutoScanEnabled:  autoScanEnabled,
+		DataQualityAutoScanHour:     autoScanHour,
+		DataQualityAutoScanMinute:   autoScanMinute,
+		DataQualityAutoScanTimezone: autoScanTimezone,
 	}
 
 	if cfg.Address == "" {
@@ -75,4 +95,12 @@ func getenv(key, fallback string) string {
 		return value
 	}
 	return fallback
+}
+
+func parseClock(value string) (int, int, error) {
+	parsed, err := time.Parse("15:04", value)
+	if err != nil {
+		return 0, 0, fmt.Errorf("must use HH:MM in 24-hour format: %w", err)
+	}
+	return parsed.Hour(), parsed.Minute(), nil
 }
