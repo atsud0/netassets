@@ -2,7 +2,7 @@
 import { computed, onMounted, reactive, ref, watch } from 'vue'
 import { ElMessage, ElMessageBox, type FormInstance, type FormRules, type UploadFile, type UploadFiles } from 'element-plus'
 import { UploadFilled } from '@element-plus/icons-vue'
-import { apiClient, getAPIErrorMessage } from '../api/client'
+import { apiClient, getAPIErrorMessage, getDownloadAPIErrorMessage } from '../api/client'
 import { useAuthStore } from '../stores/auth'
 
 interface Organization { id: string; code: string; name: string; type: string; status: string }
@@ -412,9 +412,9 @@ async function exportLedger(format: 'csv' | 'xlsx') {
     link.click()
     URL.revokeObjectURL(href)
     const count = response.headers['x-export-count'] ?? systems.value.length
-    ElMessage.success(`已导出 ${count} 个业务系统`)
+    ElMessage.success(`已生成并开始下载 ${count} 个业务系统`)
   } catch (error) {
-    ElMessage.error(getAPIErrorMessage(error, '导出业务系统台账失败'))
+    ElMessage.error(await getDownloadAPIErrorMessage(error, '导出业务系统台账失败'))
   } finally {
     exporting.value = false
   }

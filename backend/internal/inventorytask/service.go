@@ -19,11 +19,12 @@ import (
 )
 
 var (
-	ErrForbidden = errors.New("forbidden")
-	ErrNotFound  = errors.New("not found")
-	ErrInvalid   = errors.New("invalid input")
-	ErrState     = errors.New("invalid state")
-	ErrQuality   = errors.New("quality check failed")
+	ErrForbidden      = errors.New("forbidden")
+	ErrNotFound       = errors.New("not found")
+	ErrInvalid        = errors.New("invalid input")
+	ErrExportTooLarge = errors.New("synchronous xlsx export too large")
+	ErrState          = errors.New("invalid state")
+	ErrQuality        = errors.New("quality check failed")
 )
 
 type OrganizationProgress struct {
@@ -309,6 +310,12 @@ func (s *Service) Export(ctx context.Context, principal auth.Principal, taskID, 
 	if err != nil {
 		return nil, "", "", 0, err
 	}
+	if err := exportfile.ValidateSynchronousExport(format, len(selected.Organizations)); err != nil {
+		if errors.Is(err, exportfile.ErrSynchronousXLSXTooLarge) {
+			return nil, "", "", 0, ErrExportTooLarge
+		}
+		return nil, "", "", 0, ErrInvalid
+	}
 	data, contentType, fileName, err := buildExport(*selected, format)
 	if err != nil {
 		return nil, "", "", 0, err
@@ -316,8 +323,8 @@ func (s *Service) Export(ctx context.Context, principal auth.Principal, taskID, 
 	organizationID := principalOrganizationID(principal)
 	if _, err := s.pool.Exec(ctx, `
 		INSERT INTO audit_logs (user_id, organization_id, action, resource_type, resource_id, summary, details, request_ip, request_id)
-		VALUES ($1::uuid, NULLIF($2, '')::uuid, 'inventory_task.export', 'inventory_task', $3, '导出填报任务结果',
-		        jsonb_build_object('format', $4::text, 'count', $5::int, 'task_name', $6::text),
+		VALUES ($1::uuid, NULLIF($2, '')::uuid, 'inventory_task.export', 'inventory_task', $3, '生成填报任务导出文件',
+		        jsonb_build_object('format', $4::text, 'count', $5::int, 'task_name', $6::text, 'result', 'generated', 'delivery_state', 'unconfirmed'),
 		        NULLIF($7, '')::inet, NULLIF($8, ''))
 	`, principal.UserID, organizationID, selected.ID, strings.ToLower(strings.TrimPrefix(format, ".")), len(selected.Organizations), selected.Name, ipAddress, requestID); err != nil {
 		return nil, "", "", 0, fmt.Errorf("write inventory task export audit: %w", err)
@@ -347,6 +354,9 @@ func buildExport(task Task, format string) ([]byte, string, string, error) {
 	data, contentType, fileName, err := exportfile.Build(format, "填报任务结果-"+sanitizeExportName(task.Name), headers, rows)
 	if errors.Is(err, exportfile.ErrInvalidFormat) {
 		return nil, "", "", ErrInvalid
+	}
+	if errors.Is(err, exportfile.ErrSynchronousXLSXTooLarge) {
+		return nil, "", "", ErrExportTooLarge
 	}
 	return data, contentType, fileName, err
 }

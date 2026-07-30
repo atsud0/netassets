@@ -2,7 +2,7 @@
 import { computed, onMounted, reactive, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox, type FormInstance, type FormRules } from 'element-plus'
-import { apiClient, getAPIErrorMessage } from '../api/client'
+import { apiClient, getAPIErrorMessage, getDownloadAPIErrorMessage } from '../api/client'
 import { useAuthStore } from '../stores/auth'
 
 interface Organization {
@@ -891,9 +891,9 @@ async function exportTask(task: InventoryTask, format: 'csv' | 'xlsx') {
     link.click()
     URL.revokeObjectURL(href)
     const count = response.headers['x-export-count'] ?? task.target_count
-    ElMessage.success(`已导出 ${count} 个组织的填报结果`)
+    ElMessage.success(`已生成并开始下载 ${count} 个组织的填报结果`)
   } catch (error) {
-    ElMessage.error(getAPIErrorMessage(error, '导出填报任务结果失败'))
+    ElMessage.error(await getDownloadAPIErrorMessage(error, '导出填报任务结果失败'))
   } finally {
     exportLoading.value = ''
   }

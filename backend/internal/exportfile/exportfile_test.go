@@ -62,3 +62,17 @@ func TestBuildRejectsUnknownFormat(t *testing.T) {
 		t.Fatalf("Build(xls) error = %v", err)
 	}
 }
+
+func TestBuildRejectsOversizedSynchronousXLSX(t *testing.T) {
+	rows := make([][]string, MaxSynchronousXLSXRows+1)
+	for index := range rows {
+		rows[index] = []string{"asset"}
+	}
+	_, _, _, err := Build("xlsx", "测试台账", []string{"资产"}, rows)
+	if !errors.Is(err, ErrSynchronousXLSXTooLarge) {
+		t.Fatalf("Build oversized xlsx error = %v, want ErrSynchronousXLSXTooLarge", err)
+	}
+	if err := ValidateSynchronousExport("csv", len(rows)); err != nil {
+		t.Fatalf("CSV should remain available for %d rows: %v", len(rows), err)
+	}
+}

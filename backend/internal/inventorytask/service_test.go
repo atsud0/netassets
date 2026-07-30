@@ -12,6 +12,7 @@ import (
 	"github.com/xuri/excelize/v2"
 
 	"netassets/internal/auth"
+	"netassets/internal/exportfile"
 )
 
 func TestNormalizeCreateInput(t *testing.T) {
@@ -449,5 +450,12 @@ func TestBuildSubmissionDiffUsesHistoricalCustomFieldLabelWhenCurrentSnapshotDoe
 	)
 	if len(changes) != 1 || changes[0].Label != "自定义字段：业务归口人" {
 		t.Fatalf("expected historical custom label, got %+v", changes)
+	}
+}
+
+func TestBuildInventoryTaskExportRejectsOversizedSynchronousXLSX(t *testing.T) {
+	task := Task{Organizations: make([]OrganizationProgress, exportfile.MaxSynchronousXLSXRows+1)}
+	if _, _, _, err := buildExport(task, "xlsx"); !errors.Is(err, ErrExportTooLarge) {
+		t.Fatalf("buildExport oversized xlsx error = %v, want ErrExportTooLarge", err)
 	}
 }

@@ -51,6 +51,10 @@ func registerAssetRoutes(api *gin.RouterGroup, requireAuth gin.HandlerFunc, serv
 			Status:         strings.TrimSpace(c.Query("status")),
 			Keyword:        strings.TrimSpace(c.Query("q")),
 		}, format, c.GetString("request_id"), c.ClientIP())
+		if errors.Is(err, asset.ErrExportTooLarge) {
+			writeAPIError(c, http.StatusUnprocessableEntity, "synchronous_xlsx_limit_exceeded", "同步 XLSX 导出最多支持 5000 条数据，请改用 CSV 格式导出")
+			return
+		}
 		if errors.Is(err, asset.ErrInvalid) {
 			writeAPIError(c, http.StatusBadRequest, "invalid_format", "导出格式仅支持 csv 或 xlsx")
 			return

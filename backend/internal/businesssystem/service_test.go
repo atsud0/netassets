@@ -3,11 +3,14 @@ package businesssystem
 import (
 	"bytes"
 	"encoding/csv"
+	"errors"
 	"fmt"
 	"testing"
 	"time"
 
 	"github.com/xuri/excelize/v2"
+
+	"netassets/internal/exportfile"
 )
 
 func validBusinessSystemInput() CreateInput {
@@ -236,5 +239,12 @@ func TestBusinessSystemBatchErrorMessages(t *testing.T) {
 	code, message = businessSystemBatchError(ErrNotFound, "恢复")
 	if code != "not_found" || message != "业务系统不存在" {
 		t.Fatalf("unexpected not found result: %q %q", code, message)
+	}
+}
+
+func TestBuildBusinessSystemExportRejectsOversizedSynchronousXLSX(t *testing.T) {
+	items := make([]BusinessSystem, exportfile.MaxSynchronousXLSXRows+1)
+	if _, _, _, err := buildExport(items, "xlsx"); !errors.Is(err, ErrExportTooLarge) {
+		t.Fatalf("buildExport oversized xlsx error = %v, want ErrExportTooLarge", err)
 	}
 }

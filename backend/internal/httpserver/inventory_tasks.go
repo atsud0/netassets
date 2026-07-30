@@ -52,6 +52,8 @@ func registerInventoryTaskRoutes(api *gin.RouterGroup, requireAuth gin.HandlerFu
 		format := c.DefaultQuery("format", "xlsx")
 		data, contentType, fileName, count, err := service.Export(c.Request.Context(), mustPrincipal(c), c.Param("taskID"), format, c.GetString("request_id"), c.ClientIP())
 		switch {
+		case errors.Is(err, inventorytask.ErrExportTooLarge):
+			writeAPIError(c, http.StatusUnprocessableEntity, "synchronous_xlsx_limit_exceeded", "同步 XLSX 导出最多支持 5000 条数据，请改用 CSV 格式导出")
 		case errors.Is(err, inventorytask.ErrInvalid):
 			writeAPIError(c, http.StatusBadRequest, "invalid_format", "导出格式仅支持 csv 或 xlsx")
 		case errors.Is(err, inventorytask.ErrNotFound):

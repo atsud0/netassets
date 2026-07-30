@@ -29,10 +29,11 @@ import (
 )
 
 var (
-	ErrForbidden = errors.New("forbidden")
-	ErrNotFound  = errors.New("not found")
-	ErrConflict  = errors.New("conflict")
-	ErrInvalid   = errors.New("invalid input")
+	ErrForbidden      = errors.New("forbidden")
+	ErrNotFound       = errors.New("not found")
+	ErrConflict       = errors.New("conflict")
+	ErrInvalid        = errors.New("invalid input")
+	ErrExportTooLarge = errors.New("synchronous xlsx export too large")
 )
 
 const MaxImportRows = 5000
@@ -321,6 +322,12 @@ func (s *Service) Export(ctx context.Context, principal auth.Principal, filter E
 		return nil, "", "", 0, err
 	}
 	items = filterExportAssets(items, filter)
+	if err := exportfile.ValidateSynchronousExport(format, len(items)); err != nil {
+		if errors.Is(err, exportfile.ErrSynchronousXLSXTooLarge) {
+			return nil, "", "", 0, ErrExportTooLarge
+		}
+		return nil, "", "", 0, ErrInvalid
+	}
 	customService := customfield.NewService(s.pool)
 	definitions, err := customService.EnabledDefinitions(ctx, "asset")
 	if err != nil {
@@ -344,8 +351,8 @@ func (s *Service) Export(ctx context.Context, principal auth.Principal, filter E
 	}
 	if _, err := s.pool.Exec(ctx, `
 		INSERT INTO audit_logs (user_id, organization_id, action, resource_type, summary, details, request_ip, request_id)
-		VALUES ($1::uuid, NULLIF($2, '')::uuid, 'asset.export', 'asset', '导出网络资产台账',
-		        jsonb_build_object('format', $3::text, 'count', $4::int, 'organization_id', $5::text, 'type', $6::text, 'status', $7::text, 'keyword', $8::text),
+		VALUES ($1::uuid, NULLIF($2, '')::uuid, 'asset.export', 'asset', '生成网络资产导出文件',
+		        jsonb_build_object('format', $3::text, 'count', $4::int, 'organization_id', $5::text, 'type', $6::text, 'status', $7::text, 'keyword', $8::text, 'result', 'generated', 'delivery_state', 'unconfirmed'),
 		        NULLIF($9, '')::inet, NULLIF($10, ''))
 	`, principal.UserID, organizationID, strings.ToLower(strings.TrimPrefix(format, ".")), len(items), filter.OrganizationID, filter.Type, filter.Status, filter.Keyword, ipAddress, requestID); err != nil {
 		return nil, "", "", 0, fmt.Errorf("write asset export audit: %w", err)
@@ -409,6 +416,9 @@ func buildExportWithCustomFields(items []Asset, definitions []customfield.Defini
 	data, contentType, fileName, err := exportfile.Build(format, "网络资产台账", headers, rows)
 	if errors.Is(err, exportfile.ErrInvalidFormat) {
 		return nil, "", "", ErrInvalid
+	}
+	if errors.Is(err, exportfile.ErrSynchronousXLSXTooLarge) {
+		return nil, "", "", ErrExportTooLarge
 	}
 	return data, contentType, fileName, err
 }

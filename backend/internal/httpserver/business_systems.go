@@ -33,6 +33,10 @@ func registerBusinessSystemRoutes(api *gin.RouterGroup, requireAuth gin.HandlerF
 	group.GET("/export", func(c *gin.Context) {
 		format := c.DefaultQuery("format", "xlsx")
 		data, contentType, fileName, count, err := service.Export(c.Request.Context(), mustPrincipal(c), format, c.GetString("request_id"), c.ClientIP())
+		if errors.Is(err, businesssystem.ErrExportTooLarge) {
+			writeAPIError(c, http.StatusUnprocessableEntity, "synchronous_xlsx_limit_exceeded", "同步 XLSX 导出最多支持 5000 条数据，请改用 CSV 格式导出")
+			return
+		}
 		if errors.Is(err, businesssystem.ErrInvalid) {
 			writeAPIError(c, http.StatusBadRequest, "invalid_format", "导出格式仅支持 csv 或 xlsx")
 			return

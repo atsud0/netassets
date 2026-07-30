@@ -10,11 +10,41 @@ import (
 	"github.com/xuri/excelize/v2"
 )
 
-var ErrInvalidFormat = errors.New("invalid export format")
+var (
+	ErrInvalidFormat           = errors.New("invalid export format")
+	ErrSynchronousXLSXTooLarge = errors.New("synchronous xlsx export exceeds row limit")
+)
+
+// MaxSynchronousXLSXRows keeps synchronous spreadsheet generation bounded.
+// Larger ledgers must use CSV until the asynchronous export-job capability is enabled.
+const MaxSynchronousXLSXRows = 5000
+
+// ValidateSynchronousExport verifies the requested format and bounds memory-heavy
+// spreadsheet exports performed in the HTTP request path.
+func ValidateSynchronousExport(format string, rowCount int) error {
+	switch normalizeFormat(format) {
+	case "csv":
+		return nil
+	case "xlsx", "":
+		if rowCount > MaxSynchronousXLSXRows {
+			return ErrSynchronousXLSXTooLarge
+		}
+		return nil
+	default:
+		return ErrInvalidFormat
+	}
+}
+
+func normalizeFormat(format string) string {
+	return strings.TrimPrefix(strings.ToLower(strings.TrimSpace(format)), ".")
+}
 
 // Build creates a UTF-8 CSV or XLSX workbook from ledger rows.
 func Build(format, baseName string, headers []string, rows [][]string) ([]byte, string, string, error) {
-	format = strings.TrimPrefix(strings.ToLower(strings.TrimSpace(format)), ".")
+	format = normalizeFormat(format)
+	if err := ValidateSynchronousExport(format, len(rows)); err != nil {
+		return nil, "", "", err
+	}
 	switch format {
 	case "csv":
 		var buffer bytes.Buffer

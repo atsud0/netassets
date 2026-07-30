@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, onMounted, reactive, ref, watch } from 'vue'
 import { ElMessage, ElMessageBox, type FormInstance, type FormRules, type UploadFile, type UploadFiles } from 'element-plus'
-import { apiClient, getAPIErrorMessage } from '../api/client'
+import { apiClient, getAPIErrorMessage, getDownloadAPIErrorMessage } from '../api/client'
 import { useAuthStore } from '../stores/auth'
 import SavedFilterViews from '../components/SavedFilterViews.vue'
 
@@ -565,9 +565,9 @@ async function exportLedger(format: 'csv' | 'xlsx') {
     link.click()
     URL.revokeObjectURL(href)
     const count = response.headers['x-export-count'] ?? total.value
-    ElMessage.success(`已导出 ${count} 条网络资产`)
+    ElMessage.success(`已生成并开始下载 ${count} 条网络资产`)
   } catch (error) {
-    ElMessage.error(getAPIErrorMessage(error, '导出网络资产台账失败'))
+    ElMessage.error(await getDownloadAPIErrorMessage(error, '导出网络资产台账失败'))
   } finally {
     exporting.value = false
   }

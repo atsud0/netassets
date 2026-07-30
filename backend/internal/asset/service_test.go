@@ -3,11 +3,14 @@ package asset
 import (
 	"bytes"
 	"encoding/csv"
+	"errors"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/xuri/excelize/v2"
+
+	"netassets/internal/exportfile"
 )
 
 func TestNormalizeValue(t *testing.T) {
@@ -282,3 +285,10 @@ func TestParseImportExpiry(t *testing.T) {
 }
 
 func timePtr(value time.Time) *time.Time { return &value }
+
+func TestBuildAssetExportRejectsOversizedSynchronousXLSX(t *testing.T) {
+	items := make([]Asset, exportfile.MaxSynchronousXLSXRows+1)
+	if _, _, _, err := buildExport(items, "xlsx"); !errors.Is(err, ErrExportTooLarge) {
+		t.Fatalf("buildExport oversized xlsx error = %v, want ErrExportTooLarge", err)
+	}
+}
