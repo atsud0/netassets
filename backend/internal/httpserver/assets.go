@@ -12,6 +12,7 @@ import (
 
 	"netassets/internal/asset"
 	"netassets/internal/customfield"
+	"netassets/internal/exportfile"
 )
 
 const maxAssetImportBytes = 10 << 20
@@ -45,12 +46,36 @@ func registerAssetRoutes(api *gin.RouterGroup, requireAuth gin.HandlerFunc, serv
 
 	group.GET("/export", func(c *gin.Context) {
 		format := c.DefaultQuery("format", "xlsx")
-		data, contentType, fileName, count, err := service.Export(c.Request.Context(), mustPrincipal(c), asset.ExportFilter{
+		filter := asset.ExportFilter{
 			OrganizationID: strings.TrimSpace(c.Query("organization_id")),
 			Type:           strings.TrimSpace(c.Query("type")),
 			Status:         strings.TrimSpace(c.Query("status")),
 			Keyword:        strings.TrimSpace(c.Query("q")),
-		}, format, c.GetString("request_id"), c.ClientIP())
+		}
+		extendExportWriteDeadline(c, logger)
+		if isCSVExport(format) {
+			_, err := service.StreamCSVExport(c.Request.Context(), mustPrincipal(c), filter, c.Writer, func(meta exportfile.Metadata) {
+				setStreamingExportHeaders(c, "network-assets-ledger.csv", meta)
+			}, c.GetString("request_id"), c.ClientIP())
+			if err == nil {
+				return
+			}
+			if c.Writer.Written() {
+				logger.Error("stream assets csv", "error", err, "written_bytes", c.Writer.Size(), "request_id", c.GetString("request_id"))
+				c.Abort()
+				return
+			}
+			clearStreamingExportHeaders(c)
+			if errors.Is(err, asset.ErrForbidden) {
+				writeAPIError(c, http.StatusForbidden, "forbidden", "当前账号无权导出网络资产")
+				return
+			}
+			logger.Error("export assets csv", "error", err, "request_id", c.GetString("request_id"))
+			writeAPIError(c, http.StatusInternalServerError, "internal_error", "导出网络资产台账失败")
+			return
+		}
+
+		data, contentType, fileName, count, err := service.Export(c.Request.Context(), mustPrincipal(c), filter, format, c.GetString("request_id"), c.ClientIP())
 		if errors.Is(err, asset.ErrExportTooLarge) {
 			writeAPIError(c, http.StatusUnprocessableEntity, "synchronous_xlsx_limit_exceeded", "同步 XLSX 导出最多支持 5000 条数据，请改用 CSV 格式导出")
 			return

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/csv"
 	"errors"
+	"io"
 	"strings"
 	"unicode/utf8"
 
@@ -17,7 +18,61 @@ var (
 
 // MaxSynchronousXLSXRows keeps synchronous spreadsheet generation bounded.
 // Larger ledgers must use CSV until the asynchronous export-job capability is enabled.
-const MaxSynchronousXLSXRows = 5000
+const (
+	MaxSynchronousXLSXRows = 5000
+	CSVContentType         = "text/csv; charset=utf-8"
+)
+
+// CSVStream writes a UTF-8 BOM CSV directly to its destination. Call Flush
+// after each bounded result page so HTTP clients receive data progressively and
+// the process never needs to retain the complete export in memory.
+type Metadata struct {
+	ContentType string
+	FileName    string
+	Count       int
+}
+
+type ReadyFunc func(Metadata)
+
+type CSVStream struct {
+	writer  *csv.Writer
+	flusher interface{ Flush() }
+}
+
+func NewCSVStream(output io.Writer, headers []string) (*CSVStream, error) {
+	if _, err := io.WriteString(output, "\xEF\xBB\xBF"); err != nil {
+		return nil, err
+	}
+	stream := &CSVStream{writer: csv.NewWriter(output)}
+	if flusher, ok := output.(interface{ Flush() }); ok {
+		stream.flusher = flusher
+	}
+	if err := stream.Write(headers); err != nil {
+		return nil, err
+	}
+	if err := stream.Flush(); err != nil {
+		return nil, err
+	}
+	return stream, nil
+}
+
+func (s *CSVStream) Write(row []string) error {
+	if err := s.writer.Write(row); err != nil {
+		return err
+	}
+	return s.writer.Error()
+}
+
+func (s *CSVStream) Flush() error {
+	s.writer.Flush()
+	if err := s.writer.Error(); err != nil {
+		return err
+	}
+	if s.flusher != nil {
+		s.flusher.Flush()
+	}
+	return nil
+}
 
 // ValidateSynchronousExport verifies the requested format and bounds memory-heavy
 // spreadsheet exports performed in the HTTP request path.
@@ -48,16 +103,19 @@ func Build(format, baseName string, headers []string, rows [][]string) ([]byte, 
 	switch format {
 	case "csv":
 		var buffer bytes.Buffer
-		buffer.WriteString("\xEF\xBB\xBF")
-		writer := csv.NewWriter(&buffer)
-		if err := writer.Write(headers); err != nil {
+		stream, err := NewCSVStream(&buffer, headers)
+		if err != nil {
 			return nil, "", "", err
 		}
-		writer.WriteAll(rows)
-		if err := writer.Error(); err != nil {
+		for _, row := range rows {
+			if err := stream.Write(row); err != nil {
+				return nil, "", "", err
+			}
+		}
+		if err := stream.Flush(); err != nil {
 			return nil, "", "", err
 		}
-		return buffer.Bytes(), "text/csv; charset=utf-8", baseName + ".csv", nil
+		return buffer.Bytes(), CSVContentType, baseName + ".csv", nil
 	case "xlsx", "":
 		file := excelize.NewFile()
 		defer file.Close()

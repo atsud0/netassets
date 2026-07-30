@@ -12,6 +12,7 @@ import (
 
 	"netassets/internal/businesssystem"
 	"netassets/internal/customfield"
+	"netassets/internal/exportfile"
 )
 
 func registerBusinessSystemRoutes(api *gin.RouterGroup, requireAuth gin.HandlerFunc, service *businesssystem.Service, customFields *customfield.Service, logger *slog.Logger) {
@@ -32,6 +33,29 @@ func registerBusinessSystemRoutes(api *gin.RouterGroup, requireAuth gin.HandlerF
 	})
 	group.GET("/export", func(c *gin.Context) {
 		format := c.DefaultQuery("format", "xlsx")
+		extendExportWriteDeadline(c, logger)
+		if isCSVExport(format) {
+			_, err := service.StreamCSVExport(c.Request.Context(), mustPrincipal(c), c.Writer, func(meta exportfile.Metadata) {
+				setStreamingExportHeaders(c, "business-systems-ledger.csv", meta)
+			}, c.GetString("request_id"), c.ClientIP())
+			if err == nil {
+				return
+			}
+			if c.Writer.Written() {
+				logger.Error("stream business systems csv", "error", err, "written_bytes", c.Writer.Size(), "request_id", c.GetString("request_id"))
+				c.Abort()
+				return
+			}
+			clearStreamingExportHeaders(c)
+			if errors.Is(err, businesssystem.ErrForbidden) {
+				writeAPIError(c, http.StatusForbidden, "forbidden", "当前账号无权导出业务系统")
+				return
+			}
+			logger.Error("export business systems csv", "error", err, "request_id", c.GetString("request_id"))
+			writeAPIError(c, http.StatusInternalServerError, "internal_error", "导出业务系统台账失败")
+			return
+		}
+
 		data, contentType, fileName, count, err := service.Export(c.Request.Context(), mustPrincipal(c), format, c.GetString("request_id"), c.ClientIP())
 		if errors.Is(err, businesssystem.ErrExportTooLarge) {
 			writeAPIError(c, http.StatusUnprocessableEntity, "synchronous_xlsx_limit_exceeded", "同步 XLSX 导出最多支持 5000 条数据，请改用 CSV 格式导出")

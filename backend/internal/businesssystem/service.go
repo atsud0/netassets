@@ -343,36 +343,83 @@ func (s *Service) Export(ctx context.Context, principal auth.Principal, format, 
 	return data, contentType, fileName, len(items), nil
 }
 
+// StreamCSVExport writes the scoped business-system ledger in bounded pages.
+func (s *Service) StreamCSVExport(ctx context.Context, principal auth.Principal, output io.Writer, ready exportfile.ReadyFunc, requestID, ipAddress string) (int, error) {
+	customService := customfield.NewService(s.pool)
+	definitions, err := customService.EnabledDefinitions(ctx, "business_system")
+	if err != nil {
+		return 0, fmt.Errorf("load business system custom field definitions: %w", err)
+	}
+
+	page := pagination.Query{Page: 1, PageSize: pagination.MaxPageSize}
+	result, err := s.SearchWithFilter(ctx, principal, SearchFilter{Page: page})
+	if err != nil {
+		return 0, err
+	}
+	if ready != nil {
+		ready(exportfile.Metadata{ContentType: exportfile.CSVContentType, FileName: "业务系统台账.csv", Count: result.Total})
+	}
+	stream, err := exportfile.NewCSVStream(output, businessSystemExportHeaders(definitions))
+	if err != nil {
+		return 0, fmt.Errorf("start business system csv export: %w", err)
+	}
+
+	written := 0
+	for {
+		ids := make([]string, 0, len(result.Items))
+		for _, item := range result.Items {
+			ids = append(ids, item.ID)
+		}
+		customValues, err := customService.ValuesForResources(ctx, "business_system", ids)
+		if err != nil {
+			return written, fmt.Errorf("load business system custom field values: %w", err)
+		}
+		for _, item := range result.Items {
+			if written >= result.Total {
+				break
+			}
+			if err := stream.Write(businessSystemExportRow(item, definitions, customValues)); err != nil {
+				return written, fmt.Errorf("write business system csv row: %w", err)
+			}
+			written++
+		}
+		if err := stream.Flush(); err != nil {
+			return written, fmt.Errorf("flush business system csv export: %w", err)
+		}
+		if written >= result.Total || len(result.Items) < page.PageSize {
+			break
+		}
+		page.Page++
+		result, err = s.SearchWithFilter(ctx, principal, SearchFilter{Page: page})
+		if err != nil {
+			return written, err
+		}
+	}
+
+	organizationID := ""
+	if principal.Organization != nil {
+		organizationID = principal.Organization.ID
+	}
+	if _, err := s.pool.Exec(ctx, `
+		INSERT INTO audit_logs (user_id, organization_id, action, resource_type, summary, details, request_ip, request_id)
+		VALUES ($1::uuid, NULLIF($2, '')::uuid, 'business_system.export', 'business_system', '生成业务系统导出文件',
+		        jsonb_build_object('format', 'csv', 'count', $3::int, 'result', 'generated', 'delivery_state', 'response_written_unconfirmed'), NULLIF($4, '')::inet, NULLIF($5, ''))
+	`, principal.UserID, organizationID, written, ipAddress, requestID); err != nil {
+		return written, fmt.Errorf("write business system export audit: %w", err)
+	}
+	return written, nil
+}
+
 func buildExport(items []BusinessSystem, format string) ([]byte, string, string, error) {
 	return buildExportWithCustomFields(items, nil, nil, format)
 }
 
 func buildExportWithCustomFields(items []BusinessSystem, definitions []customfield.Definition, values map[string]map[string]any, format string) ([]byte, string, string, error) {
-	headers := []string{"所属组织编码", "所属组织名称", "系统编码", "系统名称", "系统简称", "运行状态", "系统等级", "负责人", "联系方式", "互联网暴露情况", "部署方式", "系统说明", "是否包含个人信息", "是否包含敏感个人信息", "个人信息记录数", "数据量是否超过10万条", "是否包含重要数据", "是否包含核心数据", "数据存储位置", "数据安全备注", "创建时间", "更新时间"}
-	for _, definition := range definitions {
-		headers = append(headers, "自定义："+definition.FieldName)
-	}
 	rows := make([][]string, 0, len(items))
 	for _, item := range items {
-		recordCount := ""
-		if item.PersonalInformationRecordCount != nil {
-			recordCount = strconv.FormatInt(*item.PersonalInformationRecordCount, 10)
-		}
-		row := []string{
-			item.OrganizationCode, item.OrganizationName, item.Code, item.Name, item.ShortName,
-			businessSystemExportLabel("status", item.Status), businessSystemExportLabel("level", item.Level), item.OwnerName, item.OwnerContact,
-			businessSystemExportLabel("yes_no", item.InternetExposure), item.DeploymentType, item.Description,
-			businessSystemExportLabel("yes_no", item.ContainsPersonalInformation), businessSystemExportLabel("yes_no", item.ContainsSensitivePersonalInformation),
-			recordCount, businessSystemExportLabel("yes_no", item.DataVolumeOver100K), businessSystemExportLabel("classification", item.ContainsImportantData),
-			businessSystemExportLabel("classification", item.ContainsCoreData), item.DataStorageLocation, item.SecurityNotes,
-			formatExportTime(item.CreatedAt), formatExportTime(item.UpdatedAt),
-		}
-		for _, definition := range definitions {
-			row = append(row, customfield.ExportValue(definition, values[item.ID][definition.FieldKey]))
-		}
-		rows = append(rows, row)
+		rows = append(rows, businessSystemExportRow(item, definitions, values))
 	}
-	data, contentType, fileName, err := exportfile.Build(format, "业务系统台账", headers, rows)
+	data, contentType, fileName, err := exportfile.Build(format, "业务系统台账", businessSystemExportHeaders(definitions), rows)
 	if errors.Is(err, exportfile.ErrInvalidFormat) {
 		return nil, "", "", ErrInvalid
 	}
@@ -380,6 +427,34 @@ func buildExportWithCustomFields(items []BusinessSystem, definitions []customfie
 		return nil, "", "", ErrExportTooLarge
 	}
 	return data, contentType, fileName, err
+}
+
+func businessSystemExportHeaders(definitions []customfield.Definition) []string {
+	headers := []string{"所属组织编码", "所属组织名称", "系统编码", "系统名称", "系统简称", "运行状态", "系统等级", "负责人", "联系方式", "互联网暴露情况", "部署方式", "系统说明", "是否包含个人信息", "是否包含敏感个人信息", "个人信息记录数", "数据量是否超过10万条", "是否包含重要数据", "是否包含核心数据", "数据存储位置", "数据安全备注", "创建时间", "更新时间"}
+	for _, definition := range definitions {
+		headers = append(headers, "自定义："+definition.FieldName)
+	}
+	return headers
+}
+
+func businessSystemExportRow(item BusinessSystem, definitions []customfield.Definition, values map[string]map[string]any) []string {
+	recordCount := ""
+	if item.PersonalInformationRecordCount != nil {
+		recordCount = strconv.FormatInt(*item.PersonalInformationRecordCount, 10)
+	}
+	row := []string{
+		item.OrganizationCode, item.OrganizationName, item.Code, item.Name, item.ShortName,
+		businessSystemExportLabel("status", item.Status), businessSystemExportLabel("level", item.Level), item.OwnerName, item.OwnerContact,
+		businessSystemExportLabel("yes_no", item.InternetExposure), item.DeploymentType, item.Description,
+		businessSystemExportLabel("yes_no", item.ContainsPersonalInformation), businessSystemExportLabel("yes_no", item.ContainsSensitivePersonalInformation),
+		recordCount, businessSystemExportLabel("yes_no", item.DataVolumeOver100K), businessSystemExportLabel("classification", item.ContainsImportantData),
+		businessSystemExportLabel("classification", item.ContainsCoreData), item.DataStorageLocation, item.SecurityNotes,
+		formatExportTime(item.CreatedAt), formatExportTime(item.UpdatedAt),
+	}
+	for _, definition := range definitions {
+		row = append(row, customfield.ExportValue(definition, values[item.ID][definition.FieldKey]))
+	}
+	return row
 }
 
 func businessSystemExportLabel(kind, value string) string {

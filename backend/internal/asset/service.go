@@ -360,6 +360,87 @@ func (s *Service) Export(ctx context.Context, principal auth.Principal, filter E
 	return data, contentType, fileName, len(items), nil
 }
 
+// StreamCSVExport writes the scoped asset ledger page by page. Only one bounded
+// database page and its custom-field values are retained at a time.
+func (s *Service) StreamCSVExport(ctx context.Context, principal auth.Principal, filter ExportFilter, output io.Writer, ready exportfile.ReadyFunc, requestID, ipAddress string) (int, error) {
+	customService := customfield.NewService(s.pool)
+	definitions, err := customService.EnabledDefinitions(ctx, "asset")
+	if err != nil {
+		return 0, fmt.Errorf("load asset custom field definitions: %w", err)
+	}
+
+	page := pagination.Query{Page: 1, PageSize: pagination.MaxPageSize}
+	result, err := s.SearchWithFilter(ctx, principal, SearchFilter{
+		OrganizationID: filter.OrganizationID,
+		Type:           filter.Type,
+		Status:         filter.Status,
+		Keyword:        filter.Keyword,
+		Page:           page,
+	})
+	if err != nil {
+		return 0, err
+	}
+	if ready != nil {
+		ready(exportfile.Metadata{ContentType: exportfile.CSVContentType, FileName: "网络资产台账.csv", Count: result.Total})
+	}
+	stream, err := exportfile.NewCSVStream(output, assetExportHeaders(definitions))
+	if err != nil {
+		return 0, fmt.Errorf("start asset csv export: %w", err)
+	}
+
+	written := 0
+	for {
+		ids := make([]string, 0, len(result.Items))
+		for _, item := range result.Items {
+			ids = append(ids, item.ID)
+		}
+		customValues, err := customService.ValuesForResources(ctx, "asset", ids)
+		if err != nil {
+			return written, fmt.Errorf("load asset custom field values: %w", err)
+		}
+		for _, item := range result.Items {
+			if written >= result.Total {
+				break
+			}
+			if err := stream.Write(assetExportRow(item, definitions, customValues)); err != nil {
+				return written, fmt.Errorf("write asset csv row: %w", err)
+			}
+			written++
+		}
+		if err := stream.Flush(); err != nil {
+			return written, fmt.Errorf("flush asset csv export: %w", err)
+		}
+		if written >= result.Total || len(result.Items) < page.PageSize {
+			break
+		}
+		page.Page++
+		result, err = s.SearchWithFilter(ctx, principal, SearchFilter{
+			OrganizationID: filter.OrganizationID,
+			Type:           filter.Type,
+			Status:         filter.Status,
+			Keyword:        filter.Keyword,
+			Page:           page,
+		})
+		if err != nil {
+			return written, err
+		}
+	}
+
+	organizationID := ""
+	if principal.Organization != nil {
+		organizationID = principal.Organization.ID
+	}
+	if _, err := s.pool.Exec(ctx, `
+		INSERT INTO audit_logs (user_id, organization_id, action, resource_type, summary, details, request_ip, request_id)
+		VALUES ($1::uuid, NULLIF($2, '')::uuid, 'asset.export', 'asset', '生成网络资产导出文件',
+		        jsonb_build_object('format', 'csv', 'count', $3::int, 'organization_id', $4::text, 'type', $5::text, 'status', $6::text, 'keyword', $7::text, 'result', 'generated', 'delivery_state', 'response_written_unconfirmed'),
+		        NULLIF($8, '')::inet, NULLIF($9, ''))
+	`, principal.UserID, organizationID, written, filter.OrganizationID, filter.Type, filter.Status, filter.Keyword, ipAddress, requestID); err != nil {
+		return written, fmt.Errorf("write asset export audit: %w", err)
+	}
+	return written, nil
+}
+
 func filterExportAssets(items []Asset, filter ExportFilter) []Asset {
 	keyword := strings.ToLower(strings.TrimSpace(filter.Keyword))
 	result := make([]Asset, 0, len(items))
@@ -396,24 +477,11 @@ func buildExport(items []Asset, format string) ([]byte, string, string, error) {
 }
 
 func buildExportWithCustomFields(items []Asset, definitions []customfield.Definition, values map[string]map[string]any, format string) ([]byte, string, string, error) {
-	headers := []string{"所属组织编码", "所属组织名称", "资产类型", "资产值", "资产名称", "业务系统编码", "业务系统名称", "环境", "网络暴露范围", "网络区域", "状态", "重要程度", "来源", "负责人", "备注", "有效期至", "创建时间", "更新时间"}
-	for _, definition := range definitions {
-		headers = append(headers, "自定义："+definition.FieldName)
-	}
 	rows := make([][]string, 0, len(items))
 	for _, item := range items {
-		row := []string{
-			item.OrganizationCode, item.OrganizationName, assetExportLabel("type", item.Type), item.Value, item.Name,
-			item.BusinessSystemCode, item.BusinessSystemName, assetExportLabel("environment", item.Environment), assetExportLabel("scope", item.NetworkScope), item.NetworkAreaName,
-			assetExportLabel("status", item.Status), assetExportLabel("importance", item.Importance), assetExportLabel("source", item.Source),
-			item.OwnerName, item.Notes, formatOptionalExportTime(item.ExpiresAt), formatExportTime(item.CreatedAt), formatExportTime(item.UpdatedAt),
-		}
-		for _, definition := range definitions {
-			row = append(row, customfield.ExportValue(definition, values[item.ID][definition.FieldKey]))
-		}
-		rows = append(rows, row)
+		rows = append(rows, assetExportRow(item, definitions, values))
 	}
-	data, contentType, fileName, err := exportfile.Build(format, "网络资产台账", headers, rows)
+	data, contentType, fileName, err := exportfile.Build(format, "网络资产台账", assetExportHeaders(definitions), rows)
 	if errors.Is(err, exportfile.ErrInvalidFormat) {
 		return nil, "", "", ErrInvalid
 	}
@@ -421,6 +489,27 @@ func buildExportWithCustomFields(items []Asset, definitions []customfield.Defini
 		return nil, "", "", ErrExportTooLarge
 	}
 	return data, contentType, fileName, err
+}
+
+func assetExportHeaders(definitions []customfield.Definition) []string {
+	headers := []string{"所属组织编码", "所属组织名称", "资产类型", "资产值", "资产名称", "业务系统编码", "业务系统名称", "环境", "网络暴露范围", "网络区域", "状态", "重要程度", "来源", "负责人", "备注", "有效期至", "创建时间", "更新时间"}
+	for _, definition := range definitions {
+		headers = append(headers, "自定义："+definition.FieldName)
+	}
+	return headers
+}
+
+func assetExportRow(item Asset, definitions []customfield.Definition, values map[string]map[string]any) []string {
+	row := []string{
+		item.OrganizationCode, item.OrganizationName, assetExportLabel("type", item.Type), item.Value, item.Name,
+		item.BusinessSystemCode, item.BusinessSystemName, assetExportLabel("environment", item.Environment), assetExportLabel("scope", item.NetworkScope), item.NetworkAreaName,
+		assetExportLabel("status", item.Status), assetExportLabel("importance", item.Importance), assetExportLabel("source", item.Source),
+		item.OwnerName, item.Notes, formatOptionalExportTime(item.ExpiresAt), formatExportTime(item.CreatedAt), formatExportTime(item.UpdatedAt),
+	}
+	for _, definition := range definitions {
+		row = append(row, customfield.ExportValue(definition, values[item.ID][definition.FieldKey]))
+	}
+	return row
 }
 
 func assetExportLabel(kind, value string) string {

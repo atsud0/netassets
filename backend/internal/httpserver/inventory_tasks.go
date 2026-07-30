@@ -10,6 +10,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 
+	"netassets/internal/exportfile"
 	"netassets/internal/inventorytask"
 )
 
@@ -50,6 +51,32 @@ func registerInventoryTaskRoutes(api *gin.RouterGroup, requireAuth gin.HandlerFu
 	})
 	group.GET("/:taskID/export", func(c *gin.Context) {
 		format := c.DefaultQuery("format", "xlsx")
+		extendExportWriteDeadline(c, logger)
+		if isCSVExport(format) {
+			_, err := service.StreamCSVExport(c.Request.Context(), mustPrincipal(c), c.Param("taskID"), c.Writer, func(meta exportfile.Metadata) {
+				setStreamingExportHeaders(c, "inventory-task-results.csv", meta)
+			}, c.GetString("request_id"), c.ClientIP())
+			if err == nil {
+				return
+			}
+			if c.Writer.Written() {
+				logger.Error("stream inventory task csv", "error", err, "written_bytes", c.Writer.Size(), "request_id", c.GetString("request_id"))
+				c.Abort()
+				return
+			}
+			clearStreamingExportHeaders(c)
+			switch {
+			case errors.Is(err, inventorytask.ErrNotFound):
+				writeAPIError(c, http.StatusNotFound, "inventory_task_not_found", "填报任务不存在或当前账号无权导出")
+			case errors.Is(err, inventorytask.ErrForbidden):
+				writeAPIError(c, http.StatusForbidden, "forbidden", "当前账号无权导出填报任务")
+			default:
+				logger.Error("export inventory task csv", "error", err, "request_id", c.GetString("request_id"))
+				writeAPIError(c, http.StatusInternalServerError, "internal_error", "导出填报任务结果失败")
+			}
+			return
+		}
+
 		data, contentType, fileName, count, err := service.Export(c.Request.Context(), mustPrincipal(c), c.Param("taskID"), format, c.GetString("request_id"), c.ClientIP())
 		switch {
 		case errors.Is(err, inventorytask.ErrExportTooLarge):
@@ -68,6 +95,7 @@ func registerInventoryTaskRoutes(api *gin.RouterGroup, requireAuth gin.HandlerFu
 			c.Data(http.StatusOK, contentType, data)
 		}
 	})
+
 	group.POST("/scope-preview", func(c *gin.Context) {
 		var input inventorytask.ScopePreviewInput
 		if err := c.ShouldBindJSON(&input); err != nil {

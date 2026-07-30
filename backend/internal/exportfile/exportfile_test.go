@@ -76,3 +76,45 @@ func TestBuildRejectsOversizedSynchronousXLSX(t *testing.T) {
 		t.Fatalf("CSV should remain available for %d rows: %v", len(rows), err)
 	}
 }
+
+type flushingBuffer struct {
+	bytes.Buffer
+	flushCount int
+}
+
+func (b *flushingBuffer) Flush() { b.flushCount++ }
+
+type failingWriter struct{ err error }
+
+func (w failingWriter) Write([]byte) (int, error) { return 0, w.err }
+
+func TestCSVStreamWritesProgressivelyAndFlushes(t *testing.T) {
+	output := &flushingBuffer{}
+	stream, err := NewCSVStream(output, []string{"资产", "备注"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := stream.Write([]string{"portal.example.com", "包含,逗号"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := stream.Flush(); err != nil {
+		t.Fatal(err)
+	}
+	if output.flushCount != 2 {
+		t.Fatalf("flush count = %d, want 2", output.flushCount)
+	}
+	rows, err := csv.NewReader(bytes.NewReader(bytes.TrimPrefix(output.Bytes(), []byte("\xEF\xBB\xBF")))).ReadAll()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 2 || rows[0][0] != "资产" || rows[1][0] != "portal.example.com" || rows[1][1] != "包含,逗号" {
+		t.Fatalf("unexpected streamed CSV rows: %#v", rows)
+	}
+}
+
+func TestCSVStreamReturnsDestinationWriteError(t *testing.T) {
+	want := errors.New("connection closed")
+	if _, err := NewCSVStream(failingWriter{err: want}, []string{"资产"}); !errors.Is(err, want) {
+		t.Fatalf("NewCSVStream error = %v, want %v", err, want)
+	}
+}

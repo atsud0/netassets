@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"strconv"
 	"strings"
 	"time"
@@ -332,26 +333,51 @@ func (s *Service) Export(ctx context.Context, principal auth.Principal, taskID, 
 	return data, contentType, fileName, len(selected.Organizations), nil
 }
 
-func buildExport(task Task, format string) ([]byte, string, string, error) {
-	headers := []string{
-		"任务名称", "任务状态", "任务说明", "网络资产核查范围", "开始时间", "截止时间", "需要集团审核", "允许逾期提交",
-		"目标组织数", "已提交组织数", "已通过组织数", "组织编码", "组织名称", "填报状态", "开始填报时间",
-		"提交时间", "提交人", "业务系统数量", "网络资产数量", "提交说明", "审核时间", "审核人", "退回原因",
-		"任务创建人", "任务创建时间",
+// StreamCSVExport writes task progress rows directly to the response. Task
+// progress is already loaded as one authorization-scoped aggregate, but CSV
+// serialization no longer creates an additional full byte buffer.
+func (s *Service) StreamCSVExport(ctx context.Context, principal auth.Principal, taskID string, output io.Writer, ready exportfile.ReadyFunc, requestID, ipAddress string) (int, error) {
+	selected, err := s.loadTaskForExport(ctx, principal, taskID)
+	if err != nil {
+		return 0, err
 	}
+	fileName := "填报任务结果-" + sanitizeExportName(selected.Name) + ".csv"
+	if ready != nil {
+		ready(exportfile.Metadata{ContentType: exportfile.CSVContentType, FileName: fileName, Count: len(selected.Organizations)})
+	}
+	stream, err := exportfile.NewCSVStream(output, inventoryTaskExportHeaders())
+	if err != nil {
+		return 0, fmt.Errorf("start inventory task csv export: %w", err)
+	}
+	written := 0
+	for _, progress := range selected.Organizations {
+		if err := stream.Write(inventoryTaskExportRow(*selected, progress)); err != nil {
+			return written, fmt.Errorf("write inventory task csv row: %w", err)
+		}
+		written++
+	}
+	if err := stream.Flush(); err != nil {
+		return written, fmt.Errorf("flush inventory task csv export: %w", err)
+	}
+
+	organizationID := principalOrganizationID(principal)
+	if _, err := s.pool.Exec(ctx, `
+		INSERT INTO audit_logs (user_id, organization_id, action, resource_type, resource_id, summary, details, request_ip, request_id)
+		VALUES ($1::uuid, NULLIF($2, '')::uuid, 'inventory_task.export', 'inventory_task', $3, '生成填报任务导出文件',
+		        jsonb_build_object('format', 'csv', 'count', $4::int, 'task_name', $5::text, 'result', 'generated', 'delivery_state', 'response_written_unconfirmed'),
+		        NULLIF($6, '')::inet, NULLIF($7, ''))
+	`, principal.UserID, organizationID, selected.ID, written, selected.Name, ipAddress, requestID); err != nil {
+		return written, fmt.Errorf("write inventory task export audit: %w", err)
+	}
+	return written, nil
+}
+
+func buildExport(task Task, format string) ([]byte, string, string, error) {
 	rows := make([][]string, 0, len(task.Organizations))
 	for _, progress := range task.Organizations {
-		rows = append(rows, []string{
-			task.Name, inventoryTaskExportLabel("task_status", task.Status), task.Description, inventoryTaskExportLabel("asset_network_scope", task.AssetNetworkScope), formatExportTime(task.StartAt), formatExportTime(task.DeadlineAt),
-			inventoryTaskExportLabel("bool", strconv.FormatBool(task.RequireReview)), inventoryTaskExportLabel("bool", strconv.FormatBool(task.AllowLateSubmission)),
-			strconv.FormatInt(task.TargetCount, 10), strconv.FormatInt(task.SubmittedCount, 10), strconv.FormatInt(task.ApprovedCount, 10),
-			progress.OrganizationCode, progress.OrganizationName, inventoryTaskExportLabel("progress_status", progress.Status), formatExportTimePointer(progress.StartedAt),
-			formatExportTimePointer(progress.SubmittedAt), progress.SubmittedByName, strconv.FormatInt(progress.SubmittedSystemCount, 10), strconv.FormatInt(progress.SubmittedAssetCount, 10),
-			progress.SubmissionNote, formatExportTimePointer(progress.ReviewedAt), progress.ReviewedByName, progress.ReturnReason,
-			task.CreatedByName, formatExportTime(task.CreatedAt),
-		})
+		rows = append(rows, inventoryTaskExportRow(task, progress))
 	}
-	data, contentType, fileName, err := exportfile.Build(format, "填报任务结果-"+sanitizeExportName(task.Name), headers, rows)
+	data, contentType, fileName, err := exportfile.Build(format, "填报任务结果-"+sanitizeExportName(task.Name), inventoryTaskExportHeaders(), rows)
 	if errors.Is(err, exportfile.ErrInvalidFormat) {
 		return nil, "", "", ErrInvalid
 	}
@@ -359,6 +385,27 @@ func buildExport(task Task, format string) ([]byte, string, string, error) {
 		return nil, "", "", ErrExportTooLarge
 	}
 	return data, contentType, fileName, err
+}
+
+func inventoryTaskExportHeaders() []string {
+	return []string{
+		"任务名称", "任务状态", "任务说明", "网络资产核查范围", "开始时间", "截止时间", "需要集团审核", "允许逾期提交",
+		"目标组织数", "已提交组织数", "已通过组织数", "组织编码", "组织名称", "填报状态", "开始填报时间",
+		"提交时间", "提交人", "业务系统数量", "网络资产数量", "提交说明", "审核时间", "审核人", "退回原因",
+		"任务创建人", "任务创建时间",
+	}
+}
+
+func inventoryTaskExportRow(task Task, progress OrganizationProgress) []string {
+	return []string{
+		task.Name, inventoryTaskExportLabel("task_status", task.Status), task.Description, inventoryTaskExportLabel("asset_network_scope", task.AssetNetworkScope), formatExportTime(task.StartAt), formatExportTime(task.DeadlineAt),
+		inventoryTaskExportLabel("bool", strconv.FormatBool(task.RequireReview)), inventoryTaskExportLabel("bool", strconv.FormatBool(task.AllowLateSubmission)),
+		strconv.FormatInt(task.TargetCount, 10), strconv.FormatInt(task.SubmittedCount, 10), strconv.FormatInt(task.ApprovedCount, 10),
+		progress.OrganizationCode, progress.OrganizationName, inventoryTaskExportLabel("progress_status", progress.Status), formatExportTimePointer(progress.StartedAt),
+		formatExportTimePointer(progress.SubmittedAt), progress.SubmittedByName, strconv.FormatInt(progress.SubmittedSystemCount, 10), strconv.FormatInt(progress.SubmittedAssetCount, 10),
+		progress.SubmissionNote, formatExportTimePointer(progress.ReviewedAt), progress.ReviewedByName, progress.ReturnReason,
+		task.CreatedByName, formatExportTime(task.CreatedAt),
+	}
 }
 
 func inventoryTaskExportLabel(kind, value string) string {
