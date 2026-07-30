@@ -130,15 +130,15 @@ func (s *Service) RestoreAsset(ctx context.Context, principal auth.Principal, as
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 
-	var organizationID, assetType, normalizedValue, value string
+	var organizationID, assetType, normalizedValue, value, ownerUserID string
 	err = tx.QueryRow(ctx, `
-		SELECT o.id::text, a.asset_type, a.normalized_value, a.asset_value
+		SELECT o.id::text, a.asset_type, a.normalized_value, a.asset_value, COALESCE(ao.owner_user_id::text, '')
 		FROM assets a
 		JOIN asset_organizations ao ON ao.asset_id = a.id AND ao.is_primary
 		JOIN organizations o ON o.id = ao.organization_id
 		WHERE a.id = $1::uuid AND a.deleted_at IS NOT NULL
 		FOR UPDATE OF a
-	`, assetID).Scan(&organizationID, &assetType, &normalizedValue, &value)
+	`, assetID).Scan(&organizationID, &assetType, &normalizedValue, &value, &ownerUserID)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return ErrNotFound
 	}
@@ -183,7 +183,7 @@ func (s *Service) RestoreAsset(ctx context.Context, principal auth.Principal, as
 	}
 	if err := notification.WriteEvent(ctx, tx, notification.EventInput{
 		EventType: notification.EventAssetRestored, Category: notification.CategoryAssetChange,
-		TargetOrganizationID: organizationID, ActorUserID: principal.UserID, RequiredPermission: "asset.manage",
+		TargetOrganizationID: organizationID, TargetUserID: ownerUserID, ActorUserID: principal.UserID, RequiredPermission: "asset.manage",
 		ResourceType: "asset", ResourceID: assetID, ResourceLabel: value, BatchKey: requestID, Level: "info",
 		Details: map[string]any{"asset_type": assetType, "asset_value": value},
 	}); err != nil {

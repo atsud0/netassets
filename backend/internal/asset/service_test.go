@@ -51,15 +51,15 @@ func TestNormalizeValue(t *testing.T) {
 }
 
 func TestImportHeaderAndChineseEnums(t *testing.T) {
-	headers := mapHeaders([]string{"\ufeff资产类型", "资产值", "资产名称", "业务系统编码", "环境", "网络暴露范围", "网络区域", "重要程度", "负责人", "备注"})
-	input, err := importInput([]string{"域名", "Portal.Example.com", "门户", "SYS_001", "生产", "公网", "上海办事处", "核心", "张三", "测试资产"}, headers, "org-id")
+	headers := mapHeaders([]string{"\ufeff资产类型", "资产值", "资产名称", "业务系统编码", "环境", "网络暴露范围", "网络区域", "重要程度", "责任人账号", "负责人", "备注"})
+	input, err := importInput([]string{"域名", "Portal.Example.com", "门户", "SYS_001", "生产", "公网", "上海办事处", "核心", "zhangsan", "张三", "测试资产"}, headers, "org-id")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if input.Type != "domain" || input.Environment != "production" || input.NetworkScope != "public" || input.Importance != "core" {
 		t.Fatalf("unexpected translated input: %+v", input)
 	}
-	if input.BusinessSystemID != "SYS_001" || input.NetworkAreaID != "上海办事处" || input.OrganizationID != "org-id" {
+	if input.BusinessSystemID != "SYS_001" || input.NetworkAreaID != "上海办事处" || input.OrganizationID != "org-id" || input.OwnerUserID != "zhangsan" {
 		t.Fatalf("unexpected references: %+v", input)
 	}
 }
@@ -77,7 +77,7 @@ func TestTemplateCSV(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(rows) != 2 || rows[0][0] != "资产类型" || rows[0][1] != "资产值" || rows[0][9] != "有效期至" || rows[1][9] != "2027-12-31" {
+	if len(rows) != 2 || rows[0][0] != "资产类型" || rows[0][1] != "资产值" || rows[0][8] != "责任人账号" || rows[1][8] != "zhangsan" || rows[0][10] != "有效期至" || rows[1][10] != "2027-12-31" {
 		t.Fatalf("unexpected CSV template: %#v", rows)
 	}
 }
@@ -99,7 +99,7 @@ func TestTemplateXLSX(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(rows) != 2 || rows[0][0] != "资产类型" || rows[0][1] != "资产值" || rows[0][9] != "有效期至" || rows[1][9] != "2027-12-31" {
+	if len(rows) != 2 || rows[0][0] != "资产类型" || rows[0][1] != "资产值" || rows[0][8] != "责任人账号" || rows[1][8] != "zhangsan" || rows[0][10] != "有效期至" || rows[1][10] != "2027-12-31" {
 		t.Fatalf("unexpected XLSX template: %#v", rows)
 	}
 }
@@ -140,7 +140,7 @@ func TestBuildAssetExportCSV(t *testing.T) {
 	if len(rows) != 2 || rows[1][2] != "域名" || rows[1][7] != "生产" || rows[1][8] != "公网" || rows[1][9] != "上海办事处" || rows[1][10] != "启用" || rows[1][11] != "核心" || rows[1][12] != "导入" {
 		t.Fatalf("unexpected export row: %#v", rows)
 	}
-	if rows[0][15] != "有效期至" || rows[1][15] != "2027-12-31 23:59:59+08:00" || rows[1][16] != "2026-07-22 10:30:00+08:00" {
+	if rows[0][13] != "责任人账号" || rows[0][16] != "有效期至" || rows[1][16] != "2027-12-31 23:59:59+08:00" || rows[1][17] != "2026-07-22 10:30:00+08:00" {
 		t.Fatalf("unexpected exported expiry/times: %#v", rows[1])
 	}
 }
@@ -180,7 +180,7 @@ func TestAssetFieldChangesUsesReadableValues(t *testing.T) {
 		Type: "url", Value: "https://portal.example.com", Name: "新门户", OrganizationID: "org-b", BusinessSystemID: "system-b",
 		OwnerName: "李四", Environment: "testing", NetworkScope: "private", NetworkAreaID: "area-b", Status: "archived", Importance: "critical", Notes: "",
 	}
-	changes := assetFieldChanges(current, input, "乙公司", "新门户系统", "上海办事处")
+	changes := assetFieldChanges(current, input, "乙公司", "新门户系统", "上海办事处", "", "")
 	if len(changes) != 12 {
 		t.Fatalf("changes count = %d, want 12: %#v", len(changes), changes)
 	}
@@ -195,10 +195,29 @@ func TestAssetFieldChangesUsesReadableValues(t *testing.T) {
 	}
 }
 
+func TestAssetFieldChangesIncludesAccountableUser(t *testing.T) {
+	current := Asset{
+		Type: "domain", Value: "portal.example.com", OrganizationName: "甲公司",
+		Environment: "production", NetworkScope: "public", Status: "active", Importance: "normal",
+		OwnerUserID: "user-a", OwnerUsername: "zhangsan", OwnerUserDisplayName: "张三",
+	}
+	input := CreateInput{
+		Type: "domain", Value: "portal.example.com", Environment: "production", NetworkScope: "public",
+		Status: "active", Importance: "normal", OwnerUserID: "user-b",
+	}
+	changes := assetFieldChanges(current, input, "甲公司", "", "", "lisi", "李四")
+	if len(changes) != 1 {
+		t.Fatalf("changes = %#v, want one accountable-user change", changes)
+	}
+	if changes[0].Field != "owner_user_id" || changes[0].Before != "张三（zhangsan）" || changes[0].After != "李四（lisi）" {
+		t.Fatalf("owner change = %#v", changes[0])
+	}
+}
+
 func TestAssetFieldChangesSkipsUnchangedFields(t *testing.T) {
 	current := Asset{Type: "domain", Value: "portal.example.com", OrganizationName: "甲公司", Environment: "production", NetworkScope: "public", Status: "active", Importance: "normal"}
 	input := CreateInput{Type: "domain", Value: "portal.example.com", Environment: "production", NetworkScope: "public", Status: "active", Importance: "normal"}
-	if changes := assetFieldChanges(current, input, "甲公司", "", ""); len(changes) != 0 {
+	if changes := assetFieldChanges(current, input, "甲公司", "", "", "", ""); len(changes) != 0 {
 		t.Fatalf("changes = %#v, want empty", changes)
 	}
 }
@@ -237,10 +256,10 @@ func TestCreateInputFromAssetPreservesEditableFields(t *testing.T) {
 	item := Asset{
 		Type: "url", Value: "https://portal.example.com", Name: "门户", OrganizationID: "org-a",
 		BusinessSystemID: "system-a", Environment: "production", NetworkScope: "public", NetworkAreaID: "area-a",
-		Status: "active", Importance: "core", OwnerName: "张三", Notes: "备注", ExpiresAt: timePtr(time.Date(2027, 12, 31, 15, 59, 59, 0, time.UTC)),
+		Status: "active", Importance: "core", OwnerUserID: "user-a", OwnerName: "张三", Notes: "备注", ExpiresAt: timePtr(time.Date(2027, 12, 31, 15, 59, 59, 0, time.UTC)),
 	}
 	input := createInputFromAsset(item)
-	if input.Type != item.Type || input.Value != item.Value || input.OrganizationID != item.OrganizationID || input.NetworkAreaID != item.NetworkAreaID || input.Status != item.Status || input.Notes != item.Notes || input.ExpiresAt != item.ExpiresAt {
+	if input.Type != item.Type || input.Value != item.Value || input.OrganizationID != item.OrganizationID || input.NetworkAreaID != item.NetworkAreaID || input.Status != item.Status || input.OwnerUserID != item.OwnerUserID || input.Notes != item.Notes || input.ExpiresAt != item.ExpiresAt {
 		t.Fatalf("unexpected input: %#v", input)
 	}
 }

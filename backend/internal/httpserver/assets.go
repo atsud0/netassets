@@ -127,6 +127,26 @@ func registerAssetRoutes(api *gin.RouterGroup, requireAuth gin.HandlerFunc, serv
 		}
 	})
 
+	group.GET("/owner-options", func(c *gin.Context) {
+		page, err := parsePageQuery(c)
+		if err != nil {
+			writeAPIError(c, http.StatusBadRequest, "invalid_query", "分页参数不正确，page_size 最大为 100")
+			return
+		}
+		result, err := service.SearchOwnerOptions(c.Request.Context(), mustPrincipal(c), strings.TrimSpace(c.Query("organization_id")), strings.TrimSpace(c.Query("q")), page)
+		switch {
+		case errors.Is(err, asset.ErrInvalid):
+			writeAPIError(c, http.StatusBadRequest, "invalid_organization", "请选择责任人所属组织")
+		case errors.Is(err, asset.ErrForbidden):
+			writeAPIError(c, http.StatusForbidden, "forbidden", "当前账号无权查看该组织的责任人候选")
+		case err != nil:
+			logger.Error("list asset owner options", "error", err, "request_id", c.GetString("request_id"))
+			writeAPIError(c, http.StatusInternalServerError, "internal_error", "读取责任人候选失败")
+		default:
+			c.JSON(http.StatusOK, result)
+		}
+	})
+
 	group.GET("/:id/custom-fields", func(c *gin.Context) {
 		items, err := customFields.ActiveDefinitions(c.Request.Context(), mustPrincipal(c), "asset", c.Param("id"))
 		if err != nil {

@@ -383,9 +383,17 @@ func (s *Service) createFindingInTx(ctx context.Context, tx pgx.Tx, principal au
 	}
 	eventType := notification.EventFindingCreatedOnSystem
 	requiredPermission := "system.manage"
+	targetUserID := ""
 	if input.AssetID != "" {
 		eventType = notification.EventFindingCreatedOnAsset
 		requiredPermission = "asset.manage"
+		if err := tx.QueryRow(ctx, `
+			SELECT COALESCE(owner_user_id::text, '')
+			FROM asset_organizations
+			WHERE asset_id = $1::uuid AND is_primary
+		`, input.AssetID).Scan(&targetUserID); err != nil {
+			return "", "", fmt.Errorf("load finding asset owner: %w", err)
+		}
 	}
 	level := "info"
 	if input.Severity == "medium" {
@@ -395,7 +403,7 @@ func (s *Service) createFindingInTx(ctx context.Context, tx pgx.Tx, principal au
 	}
 	if err := notification.WriteEvent(ctx, tx, notification.EventInput{
 		EventType: eventType, Category: notification.CategoryFindingReceived,
-		TargetOrganizationID: input.AssigneeOrganizationID, ActorUserID: principal.UserID, RequiredPermission: requiredPermission,
+		TargetOrganizationID: input.AssigneeOrganizationID, TargetUserID: targetUserID, ActorUserID: principal.UserID, RequiredPermission: requiredPermission,
 		ResourceType: "security_finding", ResourceID: id, ResourceLabel: code + "《" + input.Title + "》", BatchKey: requestID, Level: level,
 		Details: map[string]any{"severity": input.Severity, "asset_id": input.AssetID, "business_system_id": input.BusinessSystemID, "test_batch_id": input.TestBatchID},
 	}); err != nil {

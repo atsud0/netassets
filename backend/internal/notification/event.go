@@ -42,6 +42,7 @@ type EventInput struct {
 	EventType            string
 	Category             string
 	TargetOrganizationID string
+	TargetUserID         string
 	ActorUserID          string
 	RequiredPermission   string
 	ResourceType         string
@@ -59,6 +60,7 @@ func WriteEvent(ctx context.Context, execer eventExecer, input EventInput) error
 	input.EventType = strings.TrimSpace(input.EventType)
 	input.Category = strings.TrimSpace(input.Category)
 	input.TargetOrganizationID = strings.TrimSpace(input.TargetOrganizationID)
+	input.TargetUserID = strings.TrimSpace(input.TargetUserID)
 	input.ActorUserID = strings.TrimSpace(input.ActorUserID)
 	input.RequiredPermission = strings.TrimSpace(input.RequiredPermission)
 	input.ResourceType = strings.TrimSpace(input.ResourceType)
@@ -82,17 +84,17 @@ func WriteEvent(ctx context.Context, execer eventExecer, input EventInput) error
 	}
 	_, err = execer.Exec(ctx, `
 		INSERT INTO notification_events (
-			event_type, category, target_organization_id, actor_user_id, required_permission,
+			event_type, category, target_organization_id, target_user_id, actor_user_id, required_permission,
 			resource_type, resource_id, resource_label, batch_key, level, details
-		) VALUES ($1, $2, $3::uuid, $4::uuid, $5, $6, NULLIF($7, ''), $8, $9, $10, $11::jsonb)
-		ON CONFLICT (event_type, target_organization_id, batch_key) DO UPDATE SET
+		) VALUES ($1, $2, $3::uuid, NULLIF($4, '')::uuid, $5::uuid, $6, $7, NULLIF($8, ''), $9, $10, $11, $12::jsonb)
+		ON CONFLICT (event_type, target_organization_id, target_user_id, batch_key) DO UPDATE SET
 			item_count = notification_events.item_count + 1,
 			resource_id = NULL,
 			resource_label = '',
 			level = EXCLUDED.level,
 			details = notification_events.details || EXCLUDED.details,
 			updated_at = now()
-	`, input.EventType, input.Category, input.TargetOrganizationID, input.ActorUserID, input.RequiredPermission,
+	`, input.EventType, input.Category, input.TargetOrganizationID, input.TargetUserID, input.ActorUserID, input.RequiredPermission,
 		input.ResourceType, input.ResourceID, input.ResourceLabel, input.BatchKey, input.Level, details)
 	if err != nil {
 		return fmt.Errorf("write notification event: %w", err)

@@ -172,6 +172,18 @@ func TestLedgerEventNotificationScopeAndAggregation(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("write child organization event: %v", err)
 	}
+	for _, resourceID := range []string{
+		"cccccccc-cccc-cccc-cccc-ccccccccccc1",
+		"cccccccc-cccc-cccc-cccc-ccccccccccc2",
+	} {
+		if err := WriteEvent(ctx, pool, EventInput{
+			EventType: EventAssetNetworkAreaChanged, Category: CategoryAssetChange,
+			TargetOrganizationID: organizationID, TargetUserID: recipientID, ActorUserID: actorID, RequiredPermission: "asset.manage",
+			ResourceType: "asset", ResourceID: resourceID, ResourceLabel: "责任人资产", BatchKey: "ledger-targeted-1", Level: "info",
+		}); err != nil {
+			t.Fatalf("write targeted asset event: %v", err)
+		}
+	}
 
 	page, _ := pagination.Normalize(1, 20)
 	service := NewService(pool)
@@ -180,14 +192,16 @@ func TestLedgerEventNotificationScopeAndAggregation(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Search(recipient) error = %v", err)
 	}
-	if result.Total != 1 || len(result.Items) != 1 {
-		t.Fatalf("recipient notifications = total %d items %d, want one organization event", result.Total, len(result.Items))
+	if result.Total != 2 || len(result.Items) != 2 {
+		t.Fatalf("recipient notifications = total %d items %d, want organization and targeted events", result.Total, len(result.Items))
 	}
-	if !strings.Contains(result.Items[0].Title, "批量") || !strings.Contains(result.Items[0].Message, "2") {
-		t.Fatalf("aggregated notification = title %q message %q, want batch count", result.Items[0].Title, result.Items[0].Message)
+	for _, item := range result.Items {
+		if !strings.Contains(item.Title, "批量") || !strings.Contains(item.Message, "2") {
+			t.Fatalf("aggregated notification = title %q message %q, want batch count", item.Title, item.Message)
+		}
 	}
-	if summary.UnreadCount != 1 {
-		t.Fatalf("recipient unread count = %d, want 1", summary.UnreadCount)
+	if summary.UnreadCount != 2 {
+		t.Fatalf("recipient unread count = %d, want 2", summary.UnreadCount)
 	}
 	if err := service.MarkRead(ctx, recipient, result.Items[0].Key); err != nil {
 		t.Fatalf("MarkRead(recipient) error = %v", err)
@@ -196,8 +210,8 @@ func TestLedgerEventNotificationScopeAndAggregation(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Summary(recipient) error = %v", err)
 	}
-	if readSummary.UnreadCount != 0 {
-		t.Fatalf("recipient unread count after mark read = %d, want 0", readSummary.UnreadCount)
+	if readSummary.UnreadCount != 1 {
+		t.Fatalf("recipient unread count after marking one message = %d, want 1", readSummary.UnreadCount)
 	}
 
 	actor := auth.Principal{UserID: actorID, Permissions: []string{"asset.manage"}}
@@ -229,7 +243,7 @@ func TestLedgerEventNotificationScopeAndAggregation(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Search(group admin) error = %v", err)
 	}
-	if groupResult.Total != 2 {
-		t.Fatalf("group administrator notifications = %d, want all organization events", groupResult.Total)
+	if groupResult.Total != 3 {
+		t.Fatalf("group administrator notifications = %d, want organization and targeted events", groupResult.Total)
 	}
 }

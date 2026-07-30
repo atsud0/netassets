@@ -39,29 +39,32 @@ var (
 const MaxImportRows = 5000
 
 type Asset struct {
-	ID                 string     `json:"id"`
-	Type               string     `json:"type"`
-	Value              string     `json:"value"`
-	NormalizedValue    string     `json:"normalized_value"`
-	Name               string     `json:"name,omitempty"`
-	OrganizationID     string     `json:"organization_id"`
-	OrganizationCode   string     `json:"organization_code"`
-	OrganizationName   string     `json:"organization_name"`
-	BusinessSystemID   string     `json:"business_system_id,omitempty"`
-	BusinessSystemCode string     `json:"business_system_code,omitempty"`
-	BusinessSystemName string     `json:"business_system_name,omitempty"`
-	Environment        string     `json:"environment"`
-	NetworkScope       string     `json:"network_scope"`
-	NetworkAreaID      string     `json:"network_area_id,omitempty"`
-	NetworkAreaName    string     `json:"network_area_name,omitempty"`
-	Status             string     `json:"status"`
-	Importance         string     `json:"importance"`
-	Source             string     `json:"source"`
-	OwnerName          string     `json:"owner_name,omitempty"`
-	Notes              string     `json:"notes,omitempty"`
-	ExpiresAt          *time.Time `json:"expires_at,omitempty"`
-	CreatedAt          time.Time  `json:"created_at"`
-	UpdatedAt          time.Time  `json:"updated_at"`
+	ID                   string     `json:"id"`
+	Type                 string     `json:"type"`
+	Value                string     `json:"value"`
+	NormalizedValue      string     `json:"normalized_value"`
+	Name                 string     `json:"name,omitempty"`
+	OrganizationID       string     `json:"organization_id"`
+	OrganizationCode     string     `json:"organization_code"`
+	OrganizationName     string     `json:"organization_name"`
+	BusinessSystemID     string     `json:"business_system_id,omitempty"`
+	BusinessSystemCode   string     `json:"business_system_code,omitempty"`
+	BusinessSystemName   string     `json:"business_system_name,omitempty"`
+	Environment          string     `json:"environment"`
+	NetworkScope         string     `json:"network_scope"`
+	NetworkAreaID        string     `json:"network_area_id,omitempty"`
+	NetworkAreaName      string     `json:"network_area_name,omitempty"`
+	Status               string     `json:"status"`
+	Importance           string     `json:"importance"`
+	Source               string     `json:"source"`
+	OwnerUserID          string     `json:"owner_user_id,omitempty"`
+	OwnerUsername        string     `json:"owner_username,omitempty"`
+	OwnerUserDisplayName string     `json:"owner_user_display_name,omitempty"`
+	OwnerName            string     `json:"owner_name,omitempty"`
+	Notes                string     `json:"notes,omitempty"`
+	ExpiresAt            *time.Time `json:"expires_at,omitempty"`
+	CreatedAt            time.Time  `json:"created_at"`
+	UpdatedAt            time.Time  `json:"updated_at"`
 }
 
 type CreateInput struct {
@@ -75,6 +78,7 @@ type CreateInput struct {
 	NetworkAreaID    string     `json:"network_area_id"`
 	Status           string     `json:"status"`
 	Importance       string     `json:"importance"`
+	OwnerUserID      string     `json:"owner_user_id"`
 	OwnerName        string     `json:"owner_name"`
 	Notes            string     `json:"notes"`
 	ExpiresAt        *time.Time `json:"expires_at"`
@@ -125,6 +129,14 @@ type SearchFilter struct {
 	Page           pagination.Query
 }
 
+type OwnerOption struct {
+	ID          string `json:"id"`
+	Username    string `json:"username"`
+	DisplayName string `json:"display_name"`
+	Email       string `json:"email,omitempty"`
+	MobilePhone string `json:"mobile_phone,omitempty"`
+}
+
 type Service struct{ pool *pgxpool.Pool }
 
 type fieldChange struct {
@@ -162,10 +174,12 @@ func (s *Service) List(ctx context.Context, principal auth.Principal) ([]Asset, 
 		       COALESCE(bs.id::text, ''), COALESCE(bs.system_code, ''), COALESCE(bs.system_name, ''),
 		       a.environment, a.network_scope, COALESCE(na.id::text, ''), COALESCE(na.area_name, ''),
 		       a.status, a.importance, a.source,
+		       COALESCE(ao.owner_user_id::text, ''), COALESCE(owner_user.username, ''), COALESCE(owner_user.display_name, ''),
 		       COALESCE(ao.owner_name, ''), COALESCE(a.notes, ''), a.expires_at, a.created_at, a.updated_at
 		FROM assets a
 		LEFT JOIN asset_network_areas na ON na.id = a.network_area_id
 		JOIN asset_organizations ao ON ao.asset_id = a.id AND ao.is_primary
+		LEFT JOIN users owner_user ON owner_user.id = ao.owner_user_id
 		JOIN organizations o ON o.id = ao.organization_id
 		LEFT JOIN LATERAL (
 			SELECT system.id, system.system_code, system.system_name
@@ -187,7 +201,8 @@ func (s *Service) List(ctx context.Context, principal auth.Principal) ([]Asset, 
 			&item.OrganizationID, &item.OrganizationCode, &item.OrganizationName,
 			&item.BusinessSystemID, &item.BusinessSystemCode, &item.BusinessSystemName,
 			&item.Environment, &item.NetworkScope, &item.NetworkAreaID, &item.NetworkAreaName,
-			&item.Status, &item.Importance, &item.Source, &item.OwnerName, &item.Notes, &item.ExpiresAt, &item.CreatedAt, &item.UpdatedAt); err != nil {
+			&item.Status, &item.Importance, &item.Source, &item.OwnerUserID, &item.OwnerUsername, &item.OwnerUserDisplayName,
+			&item.OwnerName, &item.Notes, &item.ExpiresAt, &item.CreatedAt, &item.UpdatedAt); err != nil {
 			return nil, fmt.Errorf("scan asset: %w", err)
 		}
 		items = append(items, item)
@@ -203,6 +218,67 @@ func (s *Service) List(ctx context.Context, principal auth.Principal) ([]Asset, 
 // materializing the complete asset inventory in the application process.
 func (s *Service) Search(ctx context.Context, principal auth.Principal, query pagination.Query) (pagination.Result[Asset], error) {
 	return s.SearchWithFilter(ctx, principal, SearchFilter{Page: query})
+}
+
+// SearchOwnerOptions returns enabled users appointed to the selected asset
+// organization. It intentionally lives in the asset domain so asset editors do
+// not need the broader user.manage permission just to bind an accountable user.
+func (s *Service) SearchOwnerOptions(ctx context.Context, principal auth.Principal, organizationID, keyword string, query pagination.Query) (pagination.Result[OwnerOption], error) {
+	if !principal.HasPermission("asset.manage") {
+		return pagination.Result[OwnerOption]{}, ErrForbidden
+	}
+	organizationID = strings.TrimSpace(organizationID)
+	if organizationID == "" {
+		return pagination.Result[OwnerOption]{}, ErrInvalid
+	}
+	allowed, err := access.CanOperateOrganization(ctx, s.pool, principal, organizationID, "asset.manage")
+	if err != nil {
+		return pagination.Result[OwnerOption]{}, err
+	}
+	if !allowed {
+		return pagination.Result[OwnerOption]{}, ErrForbidden
+	}
+	rows, err := s.pool.Query(ctx, `
+		SELECT u.id::text, u.username, u.display_name, COALESCE(u.email, ''), COALESCE(u.mobile_phone, ''), count(*) OVER ()
+		FROM users u
+		JOIN user_organizations uo ON uo.user_id = u.id
+		WHERE uo.organization_id = $1::uuid
+		  AND u.status = 'enabled'
+		  AND u.deleted_at IS NULL
+		  AND ($2 = '' OR concat_ws(' ', u.username, u.display_name, u.email, u.mobile_phone) ILIKE '%' || $2 || '%')
+		ORDER BY u.display_name, u.username
+		LIMIT $3 OFFSET $4
+	`, organizationID, strings.TrimSpace(keyword), query.PageSize, query.Offset())
+	if err != nil {
+		return pagination.Result[OwnerOption]{}, fmt.Errorf("search asset owner options: %w", err)
+	}
+	defer rows.Close()
+	items := make([]OwnerOption, 0, query.PageSize)
+	total := 0
+	for rows.Next() {
+		var item OwnerOption
+		if err := rows.Scan(&item.ID, &item.Username, &item.DisplayName, &item.Email, &item.MobilePhone, &total); err != nil {
+			return pagination.Result[OwnerOption]{}, fmt.Errorf("scan asset owner option: %w", err)
+		}
+		items = append(items, item)
+	}
+	if err := rows.Err(); err != nil {
+		return pagination.Result[OwnerOption]{}, fmt.Errorf("iterate asset owner options: %w", err)
+	}
+	if pagination.NeedsTotalFallback(len(items), query) {
+		if err := s.pool.QueryRow(ctx, `
+			SELECT count(*)
+			FROM users u
+			JOIN user_organizations uo ON uo.user_id = u.id
+			WHERE uo.organization_id = $1::uuid
+			  AND u.status = 'enabled'
+			  AND u.deleted_at IS NULL
+			  AND ($2 = '' OR concat_ws(' ', u.username, u.display_name, u.email, u.mobile_phone) ILIKE '%' || $2 || '%')
+		`, organizationID, strings.TrimSpace(keyword)).Scan(&total); err != nil {
+			return pagination.Result[OwnerOption]{}, fmt.Errorf("count asset owner options: %w", err)
+		}
+	}
+	return pagination.NewResult(items, total, query), nil
 }
 
 // SearchWithFilter returns a bounded database page of assets. Filtering is
@@ -235,11 +311,13 @@ func (s *Service) SearchWithFilter(ctx context.Context, principal auth.Principal
 		       COALESCE(bs.id::text, ''), COALESCE(bs.system_code, ''), COALESCE(bs.system_name, ''),
 		       a.environment, a.network_scope, COALESCE(na.id::text, ''), COALESCE(na.area_name, ''),
 		       a.status, a.importance, a.source,
+		       COALESCE(ao.owner_user_id::text, ''), COALESCE(owner_user.username, ''), COALESCE(owner_user.display_name, ''),
 		       COALESCE(ao.owner_name, ''), COALESCE(a.notes, ''), a.expires_at, a.created_at, a.updated_at,
 		       count(*) OVER ()
 		FROM assets a
 		LEFT JOIN asset_network_areas na ON na.id = a.network_area_id
 		JOIN asset_organizations ao ON ao.asset_id = a.id AND ao.is_primary
+		LEFT JOIN users owner_user ON owner_user.id = ao.owner_user_id
 		JOIN organizations o ON o.id = ao.organization_id
 		LEFT JOIN LATERAL (
 			SELECT system.id, system.system_code, system.system_name
@@ -251,7 +329,7 @@ func (s *Service) SearchWithFilter(ctx context.Context, principal auth.Principal
 		  AND ($3 = '' OR a.asset_type = $3)
 		  AND ($4 = '' OR a.status = $4)
 		  AND ($5 = '' OR o.id::text = $5)
-		  AND ($6 = '' OR concat_ws(' ', a.asset_value, a.asset_name, o.organization_name, bs.system_name, bs.system_code, na.area_name, ao.owner_name) ILIKE '%' || $6 || '%')
+		  AND ($6 = '' OR concat_ws(' ', a.asset_value, a.asset_name, o.organization_name, bs.system_name, bs.system_code, na.area_name, ao.owner_name, owner_user.username, owner_user.display_name) ILIKE '%' || $6 || '%')
 		ORDER BY o.organization_code, a.asset_type, a.normalized_value
 		LIMIT $7 OFFSET $8
 	`, principal.UserID, principal.HasRole("group_admin"), strings.TrimSpace(filter.Type), strings.TrimSpace(filter.Status), strings.TrimSpace(filter.OrganizationID), strings.TrimSpace(filter.Keyword), query.PageSize, query.Offset())
@@ -267,7 +345,8 @@ func (s *Service) SearchWithFilter(ctx context.Context, principal auth.Principal
 			&item.OrganizationID, &item.OrganizationCode, &item.OrganizationName,
 			&item.BusinessSystemID, &item.BusinessSystemCode, &item.BusinessSystemName,
 			&item.Environment, &item.NetworkScope, &item.NetworkAreaID, &item.NetworkAreaName,
-			&item.Status, &item.Importance, &item.Source, &item.OwnerName, &item.Notes, &item.ExpiresAt, &item.CreatedAt, &item.UpdatedAt, &total); err != nil {
+			&item.Status, &item.Importance, &item.Source, &item.OwnerUserID, &item.OwnerUsername, &item.OwnerUserDisplayName,
+			&item.OwnerName, &item.Notes, &item.ExpiresAt, &item.CreatedAt, &item.UpdatedAt, &total); err != nil {
 			return pagination.Result[Asset]{}, fmt.Errorf("scan asset page: %w", err)
 		}
 		items = append(items, item)
@@ -297,6 +376,7 @@ func (s *Service) SearchWithFilter(ctx context.Context, principal auth.Principal
             FROM assets a
             LEFT JOIN asset_network_areas na ON na.id = a.network_area_id
             JOIN asset_organizations ao ON ao.asset_id = a.id AND ao.is_primary
+			LEFT JOIN users owner_user ON owner_user.id = ao.owner_user_id
             JOIN organizations o ON o.id = ao.organization_id
             LEFT JOIN LATERAL (
                 SELECT system.id, system.system_code, system.system_name
@@ -308,7 +388,7 @@ func (s *Service) SearchWithFilter(ctx context.Context, principal auth.Principal
               AND ($3 = '' OR a.asset_type = $3)
               AND ($4 = '' OR a.status = $4)
               AND ($5 = '' OR o.id::text = $5)
-              AND ($6 = '' OR concat_ws(' ', a.asset_value, a.asset_name, o.organization_name, bs.system_name, bs.system_code, na.area_name, ao.owner_name) ILIKE '%' || $6 || '%')
+              AND ($6 = '' OR concat_ws(' ', a.asset_value, a.asset_name, o.organization_name, bs.system_name, bs.system_code, na.area_name, ao.owner_name, owner_user.username, owner_user.display_name) ILIKE '%' || $6 || '%')
         `, principal.UserID, principal.HasRole("group_admin"), strings.TrimSpace(filter.Type), strings.TrimSpace(filter.Status), strings.TrimSpace(filter.OrganizationID), strings.TrimSpace(filter.Keyword)).Scan(&total); err != nil {
 			return pagination.Result[Asset]{}, fmt.Errorf("count assets: %w", err)
 		}
@@ -581,7 +661,7 @@ func buildExportWithCustomFields(items []Asset, definitions []customfield.Defini
 }
 
 func assetExportHeaders(definitions []customfield.Definition) []string {
-	headers := []string{"所属组织编码", "所属组织名称", "资产类型", "资产值", "资产名称", "业务系统编码", "业务系统名称", "环境", "网络暴露范围", "网络区域", "状态", "重要程度", "来源", "负责人", "备注", "有效期至", "创建时间", "更新时间"}
+	headers := []string{"所属组织编码", "所属组织名称", "资产类型", "资产值", "资产名称", "业务系统编码", "业务系统名称", "环境", "网络暴露范围", "网络区域", "状态", "重要程度", "来源", "责任人账号", "负责人", "备注", "有效期至", "创建时间", "更新时间"}
 	for _, definition := range definitions {
 		headers = append(headers, "自定义："+definition.FieldName)
 	}
@@ -593,7 +673,7 @@ func assetExportRow(item Asset, definitions []customfield.Definition, values map
 		item.OrganizationCode, item.OrganizationName, assetExportLabel("type", item.Type), item.Value, item.Name,
 		item.BusinessSystemCode, item.BusinessSystemName, assetExportLabel("environment", item.Environment), assetExportLabel("scope", item.NetworkScope), item.NetworkAreaName,
 		assetExportLabel("status", item.Status), assetExportLabel("importance", item.Importance), assetExportLabel("source", item.Source),
-		item.OwnerName, item.Notes, formatOptionalExportTime(item.ExpiresAt), formatExportTime(item.CreatedAt), formatExportTime(item.UpdatedAt),
+		item.OwnerUsername, item.OwnerName, item.Notes, formatOptionalExportTime(item.ExpiresAt), formatExportTime(item.CreatedAt), formatExportTime(item.UpdatedAt),
 	}
 	for _, definition := range definitions {
 		row = append(row, customfield.ExportValue(definition, values[item.ID][definition.FieldKey]))
@@ -694,6 +774,10 @@ func createInTx(ctx context.Context, tx pgx.Tx, principal auth.Principal, input 
 	if err != nil {
 		return Asset{}, err
 	}
+	ownerUsername, ownerDisplayName, err := validateOwnerUser(ctx, tx, input.OwnerUserID, input.OrganizationID)
+	if err != nil {
+		return Asset{}, err
+	}
 
 	var systemCode, systemName string
 	if input.BusinessSystemID != "" {
@@ -725,9 +809,9 @@ func createInTx(ctx context.Context, tx pgx.Tx, principal auth.Principal, input 
 		return Asset{}, fmt.Errorf("insert asset: %w", err)
 	}
 	if _, err := tx.Exec(ctx, `
-		INSERT INTO asset_organizations (asset_id, organization_id, relationship_type, is_primary, owner_name)
-		VALUES ($1::uuid, $2::uuid, 'owner', true, NULLIF($3, ''))
-	`, item.ID, input.OrganizationID, input.OwnerName); err != nil {
+		INSERT INTO asset_organizations (asset_id, organization_id, relationship_type, is_primary, owner_user_id, owner_name)
+		VALUES ($1::uuid, $2::uuid, 'owner', true, NULLIF($3, '')::uuid, NULLIF($4, ''))
+	`, item.ID, input.OrganizationID, input.OwnerUserID, input.OwnerName); err != nil {
 		return Asset{}, fmt.Errorf("attach asset organization: %w", err)
 	}
 	if input.BusinessSystemID != "" {
@@ -743,6 +827,7 @@ func createInTx(ctx context.Context, tx pgx.Tx, principal auth.Principal, input 
 	item.BusinessSystemID, item.BusinessSystemCode, item.BusinessSystemName = input.BusinessSystemID, systemCode, systemName
 	item.Environment, item.NetworkScope, item.NetworkAreaID, item.NetworkAreaName = input.Environment, input.NetworkScope, input.NetworkAreaID, networkAreaName
 	item.Status, item.Importance = input.Status, input.Importance
+	item.OwnerUserID, item.OwnerUsername, item.OwnerUserDisplayName = input.OwnerUserID, ownerUsername, ownerDisplayName
 	item.Source, item.OwnerName, item.Notes, item.ExpiresAt = source, input.OwnerName, input.Notes, input.ExpiresAt
 	return item, nil
 }
@@ -801,6 +886,10 @@ func (s *Service) Update(ctx context.Context, principal auth.Principal, assetID 
 	if err != nil {
 		return Asset{}, err
 	}
+	ownerUsername, ownerDisplayName, err := validateOwnerUser(ctx, tx, input.OwnerUserID, input.OrganizationID)
+	if err != nil {
+		return Asset{}, err
+	}
 
 	var systemCode, systemName string
 	if input.BusinessSystemID != "" {
@@ -839,9 +928,9 @@ func (s *Service) Update(ctx context.Context, principal auth.Principal, assetID 
 		return Asset{}, fmt.Errorf("clear primary asset organization: %w", err)
 	}
 	if _, err := tx.Exec(ctx, `
-		INSERT INTO asset_organizations (asset_id, organization_id, relationship_type, is_primary, owner_name)
-		VALUES ($1::uuid, $2::uuid, 'owner', true, NULLIF($3, ''))
-	`, assetID, input.OrganizationID, input.OwnerName); err != nil {
+		INSERT INTO asset_organizations (asset_id, organization_id, relationship_type, is_primary, owner_user_id, owner_name)
+		VALUES ($1::uuid, $2::uuid, 'owner', true, NULLIF($3, '')::uuid, NULLIF($4, ''))
+	`, assetID, input.OrganizationID, input.OwnerUserID, input.OwnerName); err != nil {
 		return Asset{}, fmt.Errorf("update asset organization: %w", err)
 	}
 	if _, err := tx.Exec(ctx, `DELETE FROM system_assets WHERE asset_id::text = $1 AND is_primary`, assetID); err != nil {
@@ -855,7 +944,7 @@ func (s *Service) Update(ctx context.Context, principal auth.Principal, assetID 
 			return Asset{}, fmt.Errorf("update asset system: %w", err)
 		}
 	}
-	changesJSON, err := json.Marshal(assetFieldChanges(current, input, organizationName, systemName, networkAreaName))
+	changesJSON, err := json.Marshal(assetFieldChanges(current, input, organizationName, systemName, networkAreaName, ownerUsername, ownerDisplayName))
 	if err != nil {
 		return Asset{}, fmt.Errorf("encode asset changes: %w", err)
 	}
@@ -878,7 +967,7 @@ func (s *Service) Update(ctx context.Context, principal auth.Principal, assetID 
 		}
 		if err := notification.WriteEvent(ctx, tx, notification.EventInput{
 			EventType: eventType, Category: notification.CategoryAssetChange,
-			TargetOrganizationID: input.OrganizationID, ActorUserID: principal.UserID, RequiredPermission: "asset.manage",
+			TargetOrganizationID: input.OrganizationID, TargetUserID: input.OwnerUserID, ActorUserID: principal.UserID, RequiredPermission: "asset.manage",
 			ResourceType: "asset", ResourceID: assetID, ResourceLabel: resourceLabel, BatchKey: requestID, Level: level,
 			Details: map[string]any{"before": current.Status, "after": input.Status},
 		}); err != nil {
@@ -888,7 +977,7 @@ func (s *Service) Update(ctx context.Context, principal auth.Principal, assetID 
 	if current.NetworkAreaID != input.NetworkAreaID {
 		if err := notification.WriteEvent(ctx, tx, notification.EventInput{
 			EventType: notification.EventAssetNetworkAreaChanged, Category: notification.CategoryAssetChange,
-			TargetOrganizationID: input.OrganizationID, ActorUserID: principal.UserID, RequiredPermission: "asset.manage",
+			TargetOrganizationID: input.OrganizationID, TargetUserID: input.OwnerUserID, ActorUserID: principal.UserID, RequiredPermission: "asset.manage",
 			ResourceType: "asset", ResourceID: assetID, ResourceLabel: resourceLabel, BatchKey: requestID, Level: "info",
 			Details: map[string]any{"before": current.NetworkAreaName, "after": networkAreaName},
 		}); err != nil {
@@ -937,7 +1026,7 @@ func (s *Service) Delete(ctx context.Context, principal auth.Principal, assetID,
 	}
 	if err := notification.WriteEvent(ctx, tx, notification.EventInput{
 		EventType: notification.EventAssetDeleted, Category: notification.CategoryAssetChange,
-		TargetOrganizationID: current.OrganizationID, ActorUserID: principal.UserID, RequiredPermission: "asset.manage",
+		TargetOrganizationID: current.OrganizationID, TargetUserID: current.OwnerUserID, ActorUserID: principal.UserID, RequiredPermission: "asset.manage",
 		ResourceType: "asset", ResourceID: assetID, ResourceLabel: resourceLabel, BatchKey: requestID, Level: "danger",
 		Details: map[string]any{"asset_type": current.Type, "asset_value": current.Value},
 	}); err != nil {
@@ -1063,6 +1152,30 @@ func validateNetworkArea(ctx context.Context, tx pgx.Tx, networkAreaID, organiza
 	return areaName, nil
 }
 
+func validateOwnerUser(ctx context.Context, tx pgx.Tx, ownerUserID, organizationID string) (string, string, error) {
+	ownerUserID = strings.TrimSpace(ownerUserID)
+	if ownerUserID == "" {
+		return "", "", nil
+	}
+	var username, displayName string
+	err := tx.QueryRow(ctx, `
+		SELECT u.username, u.display_name
+		FROM users u
+		JOIN user_organizations uo ON uo.user_id = u.id
+		WHERE u.id::text = $1
+		  AND uo.organization_id = $2::uuid
+		  AND u.status = 'enabled'
+		  AND u.deleted_at IS NULL
+	`, ownerUserID, organizationID).Scan(&username, &displayName)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return "", "", ErrInvalid
+	}
+	if err != nil {
+		return "", "", fmt.Errorf("validate asset owner user: %w", err)
+	}
+	return username, displayName, nil
+}
+
 func queryAsset(ctx context.Context, querier interface {
 	QueryRow(context.Context, string, ...any) pgx.Row
 }, assetID string) (Asset, error) {
@@ -1073,10 +1186,12 @@ func queryAsset(ctx context.Context, querier interface {
 		       COALESCE(bs.id::text, ''), COALESCE(bs.system_code, ''), COALESCE(bs.system_name, ''),
 		       a.environment, a.network_scope, COALESCE(na.id::text, ''), COALESCE(na.area_name, ''),
 		       a.status, a.importance, a.source,
+		       COALESCE(ao.owner_user_id::text, ''), COALESCE(owner_user.username, ''), COALESCE(owner_user.display_name, ''),
 		       COALESCE(ao.owner_name, ''), COALESCE(a.notes, ''), a.expires_at, a.created_at, a.updated_at
 		FROM assets a
 		LEFT JOIN asset_network_areas na ON na.id = a.network_area_id
 		JOIN asset_organizations ao ON ao.asset_id = a.id AND ao.is_primary
+		LEFT JOIN users owner_user ON owner_user.id = ao.owner_user_id
 		JOIN organizations o ON o.id = ao.organization_id
 		LEFT JOIN LATERAL (
 			SELECT system.id, system.system_code, system.system_name
@@ -1089,7 +1204,8 @@ func queryAsset(ctx context.Context, querier interface {
 		&item.OrganizationID, &item.OrganizationCode, &item.OrganizationName,
 		&item.BusinessSystemID, &item.BusinessSystemCode, &item.BusinessSystemName,
 		&item.Environment, &item.NetworkScope, &item.NetworkAreaID, &item.NetworkAreaName,
-		&item.Status, &item.Importance, &item.Source, &item.OwnerName, &item.Notes, &item.ExpiresAt, &item.CreatedAt, &item.UpdatedAt)
+		&item.Status, &item.Importance, &item.Source, &item.OwnerUserID, &item.OwnerUsername, &item.OwnerUserDisplayName,
+		&item.OwnerName, &item.Notes, &item.ExpiresAt, &item.CreatedAt, &item.UpdatedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return Asset{}, ErrNotFound
 	}
@@ -1114,8 +1230,8 @@ func (s *Service) Template(ctx context.Context, principal auth.Principal, organi
 }
 
 func buildTemplate(format string, definitions []customfield.Definition) ([]byte, string, string, error) {
-	headers := []string{"资产类型", "资产值", "资产名称", "业务系统编码", "环境", "网络暴露范围", "网络区域", "重要程度", "负责人", "有效期至", "备注"}
-	example := []string{"domain", "portal.example.com", "门户网站域名", "", "production", "public", "上海办事处", "important", "张三", "2027-12-31", "网络区域按所属组织下已配置的名称填写；有效期支持 YYYY-MM-DD、YYYY-MM-DD HH:mm:ss 或 RFC3339；无时区值按 UTC+8 解释"}
+	headers := []string{"资产类型", "资产值", "资产名称", "业务系统编码", "环境", "网络暴露范围", "网络区域", "重要程度", "责任人账号", "负责人", "有效期至", "备注"}
+	example := []string{"domain", "portal.example.com", "门户网站域名", "", "production", "public", "上海办事处", "important", "zhangsan", "张三/信息化团队", "2027-12-31", "责任人账号必须是所属组织内已启用用户；网络区域按所属组织下已配置的名称填写；有效期支持 YYYY-MM-DD、YYYY-MM-DD HH:mm:ss 或 RFC3339；无时区值按 UTC+8 解释"}
 	for _, definition := range definitions {
 		headers = append(headers, customfield.ImportHeader(definition))
 		example = append(example, customFieldTemplateExample(definition))
@@ -1280,6 +1396,18 @@ func (s *Service) PreviewImport(ctx context.Context, principal auth.Principal, o
 			}
 			input.NetworkAreaID = networkAreaID
 		}
+		if input.OwnerUserID != "" {
+			ownerUserID, err := s.resolveImportOwnerUser(ctx, organizationID, input.OwnerUserID)
+			if errors.Is(err, ErrNotFound) {
+				result.FailureCount++
+				result.Errors = append(result.Errors, ImportError{Row: rowNumber, Code: "owner_user_not_found", Message: "责任人账号不存在、已停用或未任职于当前组织"})
+				continue
+			}
+			if err != nil {
+				return ImportResult{}, err
+			}
+			input.OwnerUserID = ownerUserID
+		}
 
 		normalizeInput(&input)
 		normalizedValue, normalizeErr := normalizeValue(input.Type, input.Value)
@@ -1391,6 +1519,18 @@ func (s *Service) Import(ctx context.Context, principal auth.Principal, organiza
 			}
 			input.NetworkAreaID = networkAreaID
 		}
+		if input.OwnerUserID != "" {
+			ownerUserID, err := s.resolveImportOwnerUser(ctx, organizationID, input.OwnerUserID)
+			if errors.Is(err, ErrNotFound) {
+				result.FailureCount++
+				result.Errors = append(result.Errors, ImportError{Row: rowNumber, Code: "owner_user_not_found", Message: "责任人账号不存在、已停用或未任职于当前组织"})
+				continue
+			}
+			if err != nil {
+				return ImportResult{}, err
+			}
+			input.OwnerUserID = ownerUserID
+		}
 		_, err := s.create(ctx, principal, input, "import", requestID, ipAddress, func(tx pgx.Tx, item Asset) error {
 			return customfield.SaveImportedValuesInTx(ctx, tx, "asset", item.ID, definitions, customValues, principal.UserID)
 		})
@@ -1461,7 +1601,27 @@ func (s *Service) saveImportResult(ctx context.Context, principal auth.Principal
 	return importID, nil
 }
 
-func assetFieldChanges(current Asset, input CreateInput, organizationName, systemName, networkAreaName string) []fieldChange {
+func (s *Service) resolveImportOwnerUser(ctx context.Context, organizationID, username string) (string, error) {
+	var userID string
+	err := s.pool.QueryRow(ctx, `
+		SELECT u.id::text
+		FROM users u
+		JOIN user_organizations uo ON uo.user_id = u.id
+		WHERE lower(u.username) = lower($1)
+		  AND uo.organization_id = $2::uuid
+		  AND u.status = 'enabled'
+		  AND u.deleted_at IS NULL
+	`, strings.TrimSpace(username), organizationID).Scan(&userID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return "", ErrNotFound
+	}
+	if err != nil {
+		return "", fmt.Errorf("resolve import asset owner user: %w", err)
+	}
+	return userID, nil
+}
+
+func assetFieldChanges(current Asset, input CreateInput, organizationName, systemName, networkAreaName, ownerUsername, ownerDisplayName string) []fieldChange {
 	changes := make([]fieldChange, 0, 12)
 	add := func(field, label, before, after string) {
 		if before != after {
@@ -1473,6 +1633,7 @@ func assetFieldChanges(current Asset, input CreateInput, organizationName, syste
 	add("asset_name", "资产名称", displayValue(current.Name, "未填写"), displayValue(input.Name, "未填写"))
 	add("organization", "所属组织", displayValue(current.OrganizationName, "未关联"), displayValue(organizationName, "未关联"))
 	add("business_system", "关联业务系统", displayValue(current.BusinessSystemName, "未关联"), displayValue(systemName, "未关联"))
+	add("owner_user_id", "责任人账号", ownerUserLabel(current.OwnerUsername, current.OwnerUserDisplayName), ownerUserLabel(ownerUsername, ownerDisplayName))
 	add("owner_name", "负责人", displayValue(current.OwnerName, "未填写"), displayValue(input.OwnerName, "未填写"))
 	add("environment", "部署环境", assetEnvironmentLabel(current.Environment), assetEnvironmentLabel(input.Environment))
 	add("network_scope", "网络暴露范围", assetNetworkScopeLabel(current.NetworkScope), assetNetworkScopeLabel(input.NetworkScope))
@@ -1482,6 +1643,18 @@ func assetFieldChanges(current Asset, input CreateInput, organizationName, syste
 	add("expires_at", "有效期至", formatOptionalDisplayTime(current.ExpiresAt), formatOptionalDisplayTime(input.ExpiresAt))
 	add("notes", "备注", displayValue(current.Notes, "未填写"), displayValue(input.Notes, "未填写"))
 	return changes
+}
+
+func ownerUserLabel(username, displayName string) string {
+	username = strings.TrimSpace(username)
+	displayName = strings.TrimSpace(displayName)
+	if username == "" {
+		return "未绑定"
+	}
+	if displayName == "" || displayName == username {
+		return username
+	}
+	return displayName + "（" + username + "）"
 }
 
 func formatOptionalDisplayTime(value *time.Time) string {
@@ -1542,6 +1715,7 @@ func normalizeInput(input *CreateInput) {
 	input.NetworkAreaID = strings.TrimSpace(input.NetworkAreaID)
 	input.Status = defaultValue(strings.ToLower(strings.TrimSpace(input.Status)), "active")
 	input.Importance = defaultValue(strings.ToLower(strings.TrimSpace(input.Importance)), "normal")
+	input.OwnerUserID = strings.TrimSpace(input.OwnerUserID)
 	input.OwnerName = strings.TrimSpace(input.OwnerName)
 	input.Notes = strings.TrimSpace(input.Notes)
 }
@@ -1630,9 +1804,10 @@ func mapHeaders(row []string) map[string]int {
 		"资产类型": "type", "type": "type", "资产值": "value", "value": "value", "资产名称": "name", "name": "name",
 		"业务系统编码": "business_system_code", "business_system_code": "business_system_code", "环境": "environment", "environment": "environment",
 		"网络范围": "network_scope", "网络暴露范围": "network_scope", "network_scope": "network_scope", "网络区域": "network_area", "网络归属": "network_area", "network_area": "network_area", "重要程度": "importance", "importance": "importance",
+		"责任人账号": "owner_username", "owner_username": "owner_username", "负责人账号": "owner_username",
 		"负责人": "owner_name", "owner_name": "owner_name", "有效期至": "expires_at", "到期时间": "expires_at", "expires_at": "expires_at", "备注": "notes", "notes": "notes",
 	}
-	result := map[string]int{"type": -1, "value": -1, "name": -1, "business_system_code": -1, "environment": -1, "network_scope": -1, "network_area": -1, "importance": -1, "owner_name": -1, "expires_at": -1, "notes": -1}
+	result := map[string]int{"type": -1, "value": -1, "name": -1, "business_system_code": -1, "environment": -1, "network_scope": -1, "network_area": -1, "importance": -1, "owner_username": -1, "owner_name": -1, "expires_at": -1, "notes": -1}
 	for index, header := range row {
 		if key, ok := aliases[strings.ToLower(strings.TrimSpace(strings.TrimPrefix(header, "\ufeff")))]; ok {
 			result[key] = index
@@ -1654,7 +1829,7 @@ func importInput(row []string, headers map[string]int, organizationID string) (C
 	}
 	return CreateInput{Type: translateAssetType(get("type")), Value: get("value"), Name: get("name"), OrganizationID: organizationID,
 		BusinessSystemID: get("business_system_code"), Environment: translateEnvironment(get("environment")), NetworkScope: translateScope(get("network_scope")),
-		NetworkAreaID: get("network_area"), Status: "active", Importance: translateImportance(get("importance")), OwnerName: get("owner_name"), Notes: get("notes"), ExpiresAt: expiresAt}, nil
+		NetworkAreaID: get("network_area"), Status: "active", Importance: translateImportance(get("importance")), OwnerUserID: get("owner_username"), OwnerName: get("owner_name"), Notes: get("notes"), ExpiresAt: expiresAt}, nil
 }
 
 func parseImportExpiry(value string) (*time.Time, error) {

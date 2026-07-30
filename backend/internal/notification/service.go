@@ -197,13 +197,20 @@ WITH RECURSIVE descendant_roots(id) AS (
 		END::text AS action_path,
 		ne.updated_at AS occurred_at,
 		NULL::timestamptz AS due_at
-	FROM notification_events ne
-	LEFT JOIN users actor ON actor.id=ne.actor_user_id
-	WHERE ne.actor_user_id IS DISTINCT FROM $1::uuid
-	  AND ($2::boolean OR EXISTS (
-		SELECT 1 FROM event_permission_accessible visible
-		WHERE visible.permission_key=ne.required_permission AND visible.id=ne.target_organization_id
-	  ))
+		FROM notification_events ne
+		LEFT JOIN users actor ON actor.id=ne.actor_user_id
+		WHERE ne.actor_user_id IS DISTINCT FROM $1::uuid
+		  AND (
+			$2::boolean
+			OR ne.target_user_id=$1::uuid
+			OR (
+				ne.target_user_id IS NULL
+				AND EXISTS (
+					SELECT 1 FROM event_permission_accessible visible
+					WHERE visible.permission_key=ne.required_permission AND visible.id=ne.target_organization_id
+				)
+			)
+		  )
 
 
 	UNION ALL
@@ -471,8 +478,19 @@ WITH RECURSIVE descendant_roots(id) AS (
 		'/data-quality-issues?issue_id=' || i.id::text,
 		i.first_detected_at,
 		NULL::timestamptz
-	FROM data_quality_issues i
-	WHERE NOT $2::boolean AND i.status='pending' AND i.organization_id IN (SELECT id FROM quality_scoped_organizations)
+		FROM data_quality_issues i
+		LEFT JOIN asset_organizations quality_asset_owner
+		  ON i.resource_type='asset' AND quality_asset_owner.asset_id=i.resource_id AND quality_asset_owner.is_primary
+		WHERE NOT $2::boolean AND i.status='pending'
+		  AND (
+			i.assignee_user_id=$1::uuid
+			OR (i.assignee_user_id IS NULL AND i.resource_type='asset' AND quality_asset_owner.owner_user_id=$1::uuid)
+			OR (
+				i.assignee_user_id IS NULL
+				AND (i.resource_type<>'asset' OR quality_asset_owner.owner_user_id IS NULL)
+				AND i.organization_id IN (SELECT id FROM quality_scoped_organizations)
+			)
+		  )
 
 	UNION ALL
 
@@ -487,11 +505,22 @@ WITH RECURSIVE descendant_roots(id) AS (
 		'/data-quality-issues?issue_id=' || i.id::text,
 		e.created_at,
 		NULL::timestamptz
-	FROM data_quality_issues i
-	JOIN LATERAL (
-		SELECT event_type,created_at FROM data_quality_issue_events WHERE issue_id=i.id ORDER BY created_at DESC,id DESC LIMIT 1
-	) e ON e.event_type='returned'
-	WHERE NOT $2::boolean AND i.status='in_progress' AND i.organization_id IN (SELECT id FROM quality_scoped_organizations)
+		FROM data_quality_issues i
+		LEFT JOIN asset_organizations quality_asset_owner
+		  ON i.resource_type='asset' AND quality_asset_owner.asset_id=i.resource_id AND quality_asset_owner.is_primary
+		JOIN LATERAL (
+			SELECT event_type,created_at FROM data_quality_issue_events WHERE issue_id=i.id ORDER BY created_at DESC,id DESC LIMIT 1
+		) e ON e.event_type='returned'
+		WHERE NOT $2::boolean AND i.status='in_progress'
+		  AND (
+			i.assignee_user_id=$1::uuid
+			OR (i.assignee_user_id IS NULL AND i.resource_type='asset' AND quality_asset_owner.owner_user_id=$1::uuid)
+			OR (
+				i.assignee_user_id IS NULL
+				AND (i.resource_type<>'asset' OR quality_asset_owner.owner_user_id IS NULL)
+				AND i.organization_id IN (SELECT id FROM quality_scoped_organizations)
+			)
+		  )
 
 	UNION ALL
 

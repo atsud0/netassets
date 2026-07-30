@@ -8,12 +8,14 @@ import SavedFilterViews from '../components/SavedFilterViews.vue'
 
 interface Organization { id: string; code: string; name: string; type: string; status: string }
 interface BusinessSystem { id: string; code: string; name: string; organization_id: string; organization_name: string }
+interface OwnerOption { id: string; username: string; display_name: string; email?: string; mobile_phone?: string }
 interface Asset {
   id: string; type: string; value: string; normalized_value: string; name?: string
   organization_id: string; organization_code: string; organization_name: string
   business_system_id?: string; business_system_code?: string; business_system_name?: string
   environment: string; network_scope: string; network_area_id?: string; network_area_name?: string
   status: string; importance: string; source: string
+  owner_user_id?: string; owner_username?: string; owner_user_display_name?: string
   owner_name?: string; notes?: string; expires_at?: string; created_at: string; updated_at: string
 }
 interface NetworkArea {
@@ -76,6 +78,8 @@ const total = ref(0)
 const organizations = ref<Organization[]>([])
 const systems = ref<BusinessSystem[]>([])
 const networkAreas = ref<NetworkArea[]>([])
+const ownerOptions = ref<OwnerOption[]>([])
+const ownerOptionsLoading = ref(false)
 const customFields = ref<CustomField[]>([])
 const customValues = reactive<Record<string, unknown>>({})
 const importHistory = ref<ImportHistory[]>([])
@@ -100,7 +104,7 @@ const batchResultTitle = ref('批量更新结果')
 
 const form = reactive({
   type: 'domain', value: '', name: '', organization_id: '', business_system_id: '', network_area_id: '',
-  environment: 'production', network_scope: 'public', status: 'active', importance: 'normal', owner_name: '', notes: '', expires_at: null as Date | null,
+  environment: 'production', network_scope: 'public', status: 'active', importance: 'normal', owner_user_id: '', owner_name: '', notes: '', expires_at: null as Date | null,
 })
 const networkAreaForm = reactive({ organization_id: '', name: '', code: '', status: 'enabled', sort_order: 0, notes: '' })
 const importForm = reactive({ organization_id: '' })
@@ -160,6 +164,43 @@ watch(() => form.organization_id, () => {
   if (!availableSystems.value.some((item) => item.id === form.business_system_id)) form.business_system_id = ''
   if (!availableNetworkAreas.value.some((item) => item.id === form.network_area_id)) form.network_area_id = ''
 })
+
+function ownerOptionLabel(item: Pick<OwnerOption, 'username' | 'display_name'>) {
+  return item.display_name && item.display_name !== item.username ? `${item.display_name}（${item.username}）` : item.username
+}
+
+function assetOwnerLabel(item: Asset) {
+  if (!item.owner_user_id || !item.owner_username) return '未绑定'
+  return ownerOptionLabel({ username: item.owner_username, display_name: item.owner_user_display_name ?? '' })
+}
+
+async function loadOwnerOptions(keyword = '') {
+  if (!form.organization_id) {
+    ownerOptions.value = []
+    return
+  }
+  ownerOptionsLoading.value = true
+  try {
+    const response = await apiClient.get<ListResponse<OwnerOption>>('/assets/owner-options', {
+      params: { organization_id: form.organization_id, q: keyword.trim() || undefined, page_size: 50 },
+    })
+    const current = ownerOptions.value.find((item) => item.id === form.owner_user_id)
+    ownerOptions.value = current && !response.data.items.some((item) => item.id === current.id)
+      ? [current, ...response.data.items]
+      : response.data.items
+  } catch (error) {
+    ownerOptions.value = []
+    ElMessage.error(getAPIErrorMessage(error, '读取责任人候选失败'))
+  } finally {
+    ownerOptionsLoading.value = false
+  }
+}
+
+function handleFormOrganizationChange() {
+  form.owner_user_id = ''
+  ownerOptions.value = []
+  void loadOwnerOptions()
+}
 
 async function loadAssets() {
   loading.value = true
@@ -243,21 +284,25 @@ function resetForm() {
   customFields.value.forEach((field) => { customValues[field.field_key] = field.field_type === 'multiselect' ? [] : field.field_type === 'boolean' ? false : '' })
   Object.assign(form, {
     type: 'domain', value: '', name: '', organization_id: defaultOrganizationID(), business_system_id: '', network_area_id: '',
-    environment: 'production', network_scope: 'public', status: 'active', importance: 'normal', owner_name: '', notes: '', expires_at: null,
+    environment: 'production', network_scope: 'public', status: 'active', importance: 'normal', owner_user_id: '', owner_name: '', notes: '', expires_at: null,
   })
+  ownerOptions.value = []
 }
 function openCreateDialog() {
   editingAssetID.value = ''
   resetForm()
   editDialogVisible.value = true
+  void loadOwnerOptions()
 }
 function openEditDialog(item: Asset) {
   editingAssetID.value = item.id
   Object.assign(form, {
     type: item.type, value: item.value, name: item.name ?? '', organization_id: item.organization_id,
     business_system_id: item.business_system_id ?? '', network_area_id: item.network_area_id ?? '', environment: item.environment, network_scope: item.network_scope,
-    status: item.status, importance: item.importance, owner_name: item.owner_name ?? '', notes: item.notes ?? '', expires_at: item.expires_at ? new Date(item.expires_at) : null,
+    status: item.status, importance: item.importance, owner_user_id: item.owner_user_id ?? '', owner_name: item.owner_name ?? '', notes: item.notes ?? '', expires_at: item.expires_at ? new Date(item.expires_at) : null,
   })
+  ownerOptions.value = item.owner_user_id && item.owner_username ? [{ id: item.owner_user_id, username: item.owner_username, display_name: item.owner_user_display_name ?? item.owner_username }] : []
+  void loadOwnerOptions()
   void loadCustomValues(item.id)
   editDialogVisible.value = true
 }
@@ -301,7 +346,7 @@ function assetPayload(item: Asset, overrides: Partial<typeof form> = {}) {
   return {
     type: item.type, value: item.value, name: item.name ?? '', organization_id: item.organization_id,
     business_system_id: item.business_system_id ?? '', network_area_id: item.network_area_id ?? '', environment: item.environment, network_scope: item.network_scope,
-    status: item.status, importance: item.importance, owner_name: item.owner_name ?? '', notes: item.notes ?? '', expires_at: item.expires_at ?? null, ...overrides,
+    status: item.status, importance: item.importance, owner_user_id: item.owner_user_id ?? '', owner_name: item.owner_name ?? '', notes: item.notes ?? '', expires_at: item.expires_at ?? null, ...overrides,
   }
 }
 async function submit() {
@@ -704,6 +749,7 @@ onMounted(() => load(true))
         <el-table-column label="类型" width="95"><template #default="scope">{{ typeLabel(scope.row.type) }}</template></el-table-column>
         <el-table-column label="所属组织" min-width="150"><template #default="scope"><div class="organization-name-cell"><strong>{{ scope.row.organization_name }}</strong><span>{{ scope.row.organization_code }}</span></div></template></el-table-column>
         <el-table-column label="业务系统" min-width="150"><template #default="scope"><div v-if="scope.row.business_system_id" class="organization-name-cell"><strong>{{ scope.row.business_system_name }}</strong><span>{{ scope.row.business_system_code }}</span></div><span v-else class="muted-text">未绑定</span></template></el-table-column>
+        <el-table-column label="责任人账号" min-width="150"><template #default="scope"><div v-if="scope.row.owner_user_id" class="organization-name-cell"><strong>{{ scope.row.owner_user_display_name || scope.row.owner_username }}</strong><span>{{ scope.row.owner_username }}</span></div><span v-else class="muted-text">未绑定</span></template></el-table-column>
         <el-table-column label="环境 / 暴露范围" width="145"><template #default="scope">{{ environmentLabel(scope.row.environment) }} / {{ scopeLabel(scope.row.network_scope) }}</template></el-table-column>
         <el-table-column label="网络区域" min-width="135"><template #default="scope"><span>{{ scope.row.network_area_name || '未指定' }}</span></template></el-table-column>
         <el-table-column label="有效期" min-width="185"><template #default="scope"><el-tag :type="expiryTag(scope.row.expires_at)" effect="plain">{{ expiryLabel(scope.row.expires_at) }}</el-tag></template></el-table-column>
@@ -741,7 +787,7 @@ onMounted(() => load(true))
       <div v-loading="detailLoading" class="detail-drawer">
         <template v-if="detail">
           <div class="detail-hero"><div><span class="eyebrow">NETWORK ASSET</span><h2>{{ detail.name || detail.value }}</h2><p>{{ typeLabel(detail.type) }} · {{ detail.value }}</p></div><el-tag :type="statusTag(detail.status)" effect="plain">{{ statusLabel(detail.status) }}</el-tag></div>
-          <div class="detail-grid"><div><span>所属组织</span><strong>{{ detail.organization_name }}</strong></div><div><span>关联业务系统</span><strong>{{ detail.business_system_name || '未绑定' }}</strong></div><div><span>负责人</span><strong>{{ detail.owner_name || '未填写' }}</strong></div><div><span>环境</span><strong>{{ environmentLabel(detail.environment) }}</strong></div><div><span>网络暴露范围</span><strong>{{ scopeLabel(detail.network_scope) }}</strong></div><div><span>网络区域</span><strong>{{ detail.network_area_name || '未指定' }}</strong></div><div><span>重要程度</span><strong>{{ importanceLabel(detail.importance) }}</strong></div><div><span>登记来源</span><strong>{{ sourceLabel(detail.source) }}</strong></div><div><span>有效期至</span><strong><el-tag :type="expiryTag(detail.expires_at)" effect="plain">{{ expiryLabel(detail.expires_at) }}</el-tag></strong></div><div><span>最近更新</span><strong>{{ formatDate(detail.updated_at) }}</strong></div></div>
+          <div class="detail-grid"><div><span>所属组织</span><strong>{{ detail.organization_name }}</strong></div><div><span>关联业务系统</span><strong>{{ detail.business_system_name || '未绑定' }}</strong></div><div><span>责任人账号</span><strong>{{ assetOwnerLabel(detail) }}</strong></div><div><span>负责人补充说明</span><strong>{{ detail.owner_name || '未填写' }}</strong></div><div><span>环境</span><strong>{{ environmentLabel(detail.environment) }}</strong></div><div><span>网络暴露范围</span><strong>{{ scopeLabel(detail.network_scope) }}</strong></div><div><span>网络区域</span><strong>{{ detail.network_area_name || '未指定' }}</strong></div><div><span>重要程度</span><strong>{{ importanceLabel(detail.importance) }}</strong></div><div><span>登记来源</span><strong>{{ sourceLabel(detail.source) }}</strong></div><div><span>有效期至</span><strong><el-tag :type="expiryTag(detail.expires_at)" effect="plain">{{ expiryLabel(detail.expires_at) }}</el-tag></strong></div><div><span>最近更新</span><strong>{{ formatDate(detail.updated_at) }}</strong></div></div>
           <template v-if="detailCustomFields.length">
             <div class="form-section-title">集团自定义字段</div>
             <div class="detail-grid"><div v-for="field in detailCustomFields" :key="field.id"><span>{{ field.field_name }}</span><strong>{{ customValueLabel(detailCustomValues[field.field_key]) }}</strong></div></div>
@@ -758,9 +804,15 @@ onMounted(() => load(true))
           <el-form-item label="资产类型" prop="type"><el-select v-model="form.type" style="width: 100%"><el-option v-for="(label, value) in typeLabels" :key="value" :label="label" :value="value" /></el-select></el-form-item>
           <el-form-item label="资产值" prop="value"><el-input v-model="form.value" :placeholder="valuePlaceholder" /></el-form-item>
           <el-form-item label="资产名称"><el-input v-model="form.name" placeholder="便于识别的名称（可选）" /></el-form-item>
-          <el-form-item label="所属组织" prop="organization_id"><el-select v-model="form.organization_id" filterable :disabled="!auth.isGroupAdmin" style="width: 100%"><el-option v-for="item in enabledOrganizations" :key="item.id" :label="`${item.name}（${item.code}）`" :value="item.id" /></el-select></el-form-item>
+          <el-form-item label="所属组织" prop="organization_id"><el-select v-model="form.organization_id" filterable :disabled="!auth.isGroupAdmin" style="width: 100%" @change="handleFormOrganizationChange"><el-option v-for="item in enabledOrganizations" :key="item.id" :label="`${item.name}（${item.code}）`" :value="item.id" /></el-select></el-form-item>
           <el-form-item label="关联业务系统"><el-select v-model="form.business_system_id" clearable filterable placeholder="可选" style="width: 100%"><el-option v-for="item in availableSystems" :key="item.id" :label="`${item.name}（${item.code}）`" :value="item.id" /></el-select></el-form-item>
-          <el-form-item label="负责人"><el-input v-model="form.owner_name" placeholder="姓名或团队" /></el-form-item>
+          <el-form-item label="责任人账号" class="full-span">
+            <el-select v-model="form.owner_user_id" clearable filterable remote reserve-keyword :remote-method="loadOwnerOptions" :loading="ownerOptionsLoading" placeholder="按姓名、账号或联系方式搜索所属组织用户" style="width: 100%">
+              <el-option v-for="item in ownerOptions" :key="item.id" :label="ownerOptionLabel(item)" :value="item.id"><div class="owner-option"><strong>{{ ownerOptionLabel(item) }}</strong><span>{{ item.email || item.mobile_phone || '已启用账号' }}</span></div></el-option>
+            </el-select>
+            <div class="form-tip">绑定账号后，资产到期、数据质量问题和关键台账变更将优先通知该用户。</div>
+          </el-form-item>
+          <el-form-item label="负责人补充说明"><el-input v-model="form.owner_name" placeholder="外部联系人、团队或职责说明（可选）" /></el-form-item>
           <el-form-item label="环境"><el-select v-model="form.environment" style="width: 100%"><el-option v-for="(label, value) in environmentLabels" :key="value" :label="label" :value="value" /></el-select></el-form-item>
           <el-form-item label="网络暴露范围"><el-select v-model="form.network_scope" style="width: 100%"><el-option v-for="(label, value) in scopeLabels" :key="value" :label="label" :value="value" /></el-select></el-form-item>
           <el-form-item label="网络区域"><el-select v-model="form.network_area_id" clearable filterable placeholder="如：上海办事处（可选）" style="width: 100%"><el-option v-for="item in availableNetworkAreas" :key="item.id" :label="item.code ? `${item.name}（${item.code}）` : item.name" :value="item.id" :disabled="item.status !== 'enabled'" /></el-select></el-form-item>
@@ -803,7 +855,7 @@ onMounted(() => load(true))
       <div class="import-toolbar"><el-button link type="primary" :loading="downloading" @click="downloadTemplate('xlsx')">下载 XLSX 模板</el-button><el-button link type="primary" :loading="downloading" @click="downloadTemplate('csv')">下载 CSV 模板</el-button></div>
       <el-form label-position="top">
         <el-form-item label="导入到所属组织" required><el-select v-model="importForm.organization_id" filterable :disabled="!auth.isGroupAdmin" @change="resetImportPreview" style="width: 100%"><el-option v-for="item in enabledOrganizations" :key="item.id" :label="`${item.name}（${item.code}）`" :value="item.id" /></el-select></el-form-item>
-        <el-form-item label="CSV / XLSX 文件" required><el-upload drag :auto-upload="false" :limit="1" accept=".csv,.xlsx" :on-change="handleFileChange" :on-remove="handleFileRemove"><div class="el-upload__text">拖入文件，或<em>点击选择</em></div><template #tip><div class="el-upload__tip">文件不超过 10 MB；业务系统使用同组织内的系统编码匹配；有效期格式错误会在预检中逐行提示。</div></template></el-upload></el-form-item>
+        <el-form-item label="CSV / XLSX 文件" required><el-upload drag :auto-upload="false" :limit="1" accept=".csv,.xlsx" :on-change="handleFileChange" :on-remove="handleFileRemove"><div class="el-upload__text">拖入文件，或<em>点击选择</em></div><template #tip><div class="el-upload__tip">文件不超过 10 MB；业务系统使用同组织内的系统编码匹配；责任人账号按所属组织内的启用用户名匹配；有效期格式错误会在预检中逐行提示。</div></template></el-upload></el-form-item>
       </el-form>
       <div v-if="importResult" class="import-result" data-testid="import-result">
         <el-alert :title="importResultMode === 'preview' ? '预检结果：尚未写入台账，请确认后执行正式导入' : '正式导入结果'" :type="importResultMode === 'preview' ? 'info' : 'success'" :closable="false" show-icon />
