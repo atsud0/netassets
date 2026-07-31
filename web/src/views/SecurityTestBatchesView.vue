@@ -298,7 +298,7 @@ async function openEdit(item: SecurityTestBatch) {
 function scopeReferenceTitle(item: ScopeReference) {
   if (scopePickerMode.value === 'organization') {
     const organization = item as OrganizationReference
-    return `${organization.code} · ${organization.name}`
+    return organization.name
   }
   if (scopePickerMode.value === 'business_system') {
     const system = item as BusinessSystemReference

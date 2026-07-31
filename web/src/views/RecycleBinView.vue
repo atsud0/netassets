@@ -149,10 +149,7 @@ onMounted(load)
         </el-table-column>
         <el-table-column label="所属组织" min-width="180">
           <template #default="scope">
-            <div class="audit-action-cell">
-              <strong>{{ scope.row.organization_name }}</strong>
-              <span>{{ scope.row.organization_code }}</span>
-            </div>
+            {{ scope.row.organization_name }}
           </template>
         </el-table-column>
         <el-table-column label="删除前状态" min-width="120">

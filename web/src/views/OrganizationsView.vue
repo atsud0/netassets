@@ -28,15 +28,19 @@ const auth = useAuthStore()
 const loading = ref(false)
 const submitting = ref(false)
 const groupSubmitting = ref(false)
+const editSubmitting = ref(false)
 const dialogVisible = ref(false)
 const groupDialogVisible = ref(false)
+const editDialogVisible = ref(false)
 const organizations = ref<Organization[]>([])
 const rootOrganization = ref<Organization | null>(null)
+const editingOrganization = ref<Organization | null>(null)
 const page = ref(1)
 const pageSize = ref(20)
 const total = ref(0)
 const formRef = ref<FormInstance>()
 const groupFormRef = ref<FormInstance>()
+const editFormRef = ref<FormInstance>()
 const form = reactive({
   parent_id: '',
   code: '',
@@ -48,8 +52,12 @@ const form = reactive({
   notes: '',
 })
 const groupForm = reactive({ name: '', short_name: '', manager: '', contact: '', notes: '' })
+const editForm = reactive({ name: '', short_name: '', manager: '', contact: '', notes: '' })
 const groupRules: FormRules = {
   name: [{ required: true, message: '请输入集团名称', trigger: 'blur' }],
+}
+const editRules: FormRules = {
+  name: [{ required: true, message: '请输入组织名称', trigger: 'blur' }],
 }
 const rules: FormRules = {
   parent_id: [{ required: true, message: '请选择上级组织', trigger: 'change' }],
@@ -141,6 +149,38 @@ function openGroupEditDialog() {
   groupDialogVisible.value = true
 }
 
+function openEditDialog(item: Organization) {
+  if (item.type === 'group') {
+    openGroupEditDialog()
+    return
+  }
+  editingOrganization.value = item
+  Object.assign(editForm, {
+    name: item.name,
+    short_name: item.short_name ?? '',
+    manager: item.manager ?? '',
+    contact: item.contact ?? '',
+    notes: item.notes ?? '',
+  })
+  editDialogVisible.value = true
+}
+
+async function submitOrganizationInfo() {
+  if (!editingOrganization.value || !editFormRef.value || !(await editFormRef.value.validate())) return
+  editSubmitting.value = true
+  try {
+    await apiClient.patch(`/organizations/${editingOrganization.value.id}`, editForm)
+    editDialogVisible.value = false
+    editingOrganization.value = null
+    await refreshAfterMutation()
+    ElMessage.success('组织信息已更新')
+  } catch (error) {
+    ElMessage.error(getAPIErrorMessage(error, '更新组织信息失败'))
+  } finally {
+    editSubmitting.value = false
+  }
+}
+
 async function submitGroupInfo() {
   if (!rootOrganization.value || !groupFormRef.value || !(await groupFormRef.value.validate())) return
   groupSubmitting.value = true
@@ -199,33 +239,32 @@ onMounted(async () => {
 
     <div class="panel organization-table-panel">
       <el-table v-loading="loading" :data="organizations" row-key="id" empty-text="暂无组织数据">
-        <el-table-column label="组织名称" min-width="220">
-          <template #default="scope">
-            <div class="organization-name-cell">
-              <strong>{{ scope.row.name }}</strong>
-              <span>{{ scope.row.code }}</span>
-            </div>
-          </template>
+        <el-table-column prop="name" label="组织名称" min-width="165" />
+        <el-table-column label="组织编码" min-width="175">
+          <template #default="scope"><span class="organization-code-cell">{{ scope.row.code }}</span></template>
         </el-table-column>
-        <el-table-column prop="parent_name" label="上级组织" min-width="170">
+        <el-table-column prop="parent_name" label="上级组织" min-width="145">
           <template #default="scope">{{ scope.row.parent_name || '—' }}</template>
         </el-table-column>
-        <el-table-column label="类型" width="110">
+        <el-table-column label="类型" width="90">
           <template #default="scope"><el-tag effect="plain">{{ typeLabels[scope.row.type as Organization['type']] }}</el-tag></template>
         </el-table-column>
-        <el-table-column prop="manager" label="负责人" min-width="120">
+        <el-table-column prop="manager" label="负责人" min-width="100">
           <template #default="scope">{{ scope.row.manager || '—' }}</template>
         </el-table-column>
-        <el-table-column prop="contact" label="联系方式" min-width="170">
+        <el-table-column prop="contact" label="联系方式" min-width="140">
           <template #default="scope">{{ scope.row.contact || '—' }}</template>
         </el-table-column>
-        <el-table-column label="系统 / 资产" width="120" align="center">
+        <el-table-column label="系统 / 资产" width="100" align="center">
           <template #default="scope">{{ scope.row.business_system_count }} / {{ scope.row.asset_count }}</template>
         </el-table-column>
-        <el-table-column label="状态" width="90">
+        <el-table-column label="状态" width="80">
           <template #default="scope">
             <el-tag :type="scope.row.status === 'enabled' ? 'success' : 'info'">{{ scope.row.status === 'enabled' ? '启用' : '停用' }}</el-tag>
           </template>
+        </el-table-column>
+        <el-table-column v-if="auth.isGroupAdmin" label="操作" width="80" fixed="right">
+          <template #default="scope"><el-button link type="primary" @click="openEditDialog(scope.row)">编辑</el-button></template>
         </el-table-column>
       </el-table>
       <div class="table-pagination">
@@ -259,12 +298,29 @@ onMounted(async () => {
       </template>
     </el-dialog>
 
+    <el-dialog v-model="editDialogVisible" title="编辑组织信息" width="620px" destroy-on-close @closed="editingOrganization = null">
+      <el-alert title="组织编码、上级组织和组织类型属于稳定的组织结构标识；如需调整结构，请通过后续组织迁移能力处理。" type="info" :closable="false" show-icon />
+      <el-form ref="editFormRef" :model="editForm" :rules="editRules" label-position="top" class="dialog-form-with-alert">
+        <div class="form-grid two-columns">
+          <el-form-item label="组织名称" prop="name"><el-input v-model="editForm.name" maxlength="255" placeholder="请输入组织完整名称" /></el-form-item>
+          <el-form-item label="组织简称"><el-input v-model="editForm.short_name" maxlength="128" /></el-form-item>
+          <el-form-item label="负责人"><el-input v-model="editForm.manager" maxlength="128" /></el-form-item>
+          <el-form-item label="联系方式"><el-input v-model="editForm.contact" maxlength="255" placeholder="邮箱、电话或内部通讯账号" /></el-form-item>
+          <el-form-item label="备注" class="full-span"><el-input v-model="editForm.notes" type="textarea" :rows="3" maxlength="5000" show-word-limit /></el-form-item>
+        </div>
+      </el-form>
+      <template #footer>
+        <el-button @click="editDialogVisible = false">取消</el-button>
+        <el-button type="primary" :loading="editSubmitting" @click="submitOrganizationInfo">保存组织信息</el-button>
+      </template>
+    </el-dialog>
+
     <el-dialog v-model="dialogVisible" title="新增组织机构" width="620px" destroy-on-close>
       <el-form ref="formRef" :model="form" :rules="rules" label-position="top">
         <div class="form-grid two-columns">
           <el-form-item label="上级组织" prop="parent_id">
             <el-select v-model="form.parent_id" placeholder="请选择" style="width: 100%">
-              <el-option v-for="item in enabledParents" :key="item.id" :label="`${item.name}（${item.code}）`" :value="item.id" />
+              <el-option v-for="item in enabledParents" :key="item.id" :label="item.name" :value="item.id" />
             </el-select>
           </el-form-item>
           <el-form-item label="组织类型" prop="type">
@@ -303,5 +359,6 @@ onMounted(async () => {
 </template>
 
 <style scoped>
+.organization-code-cell { white-space: nowrap; font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; }
 .table-pagination { display:flex; justify-content:flex-end; margin-top:18px; }
 </style>

@@ -1,4 +1,4 @@
-import { expect, test, type Page } from '@playwright/test'
+import { expect, test, type Locator, type Page } from '@playwright/test'
 
 const adminUsername = process.env.E2E_USERNAME ?? 'admin'
 const adminPassword = process.env.E2E_PASSWORD
@@ -408,4 +408,37 @@ test('业务系统名称和系统编码使用独立列表列', async ({ page }) 
     await expect(cells.nth(1).locator('.table-link')).toBeVisible()
     await expect(cells.nth(2).locator('.mono-text')).not.toHaveText('')
   }
+})
+
+test('组织名称与编码独立展示且集团管理员可编辑已有组织', async ({ page }) => {
+  test.skip(!adminPassword, 'E2E_PASSWORD/BOOTSTRAP_ADMIN_PASSWORD 未配置')
+
+  await page.setViewportSize({ width: 1440, height: 950 })
+  await page.goto('/organizations')
+  await login(page, adminUsername, adminPassword!)
+  await expect(page.getByRole('heading', { name: '组织机构', exact: true })).toBeVisible()
+
+  const table = page.locator('.organization-table-panel .el-table')
+  const headerLabels = (await table.locator('.el-table__header-wrapper').first().locator('th .cell').allTextContents()).map(label => label.trim())
+  expect(headerLabels).toEqual(expect.arrayContaining(['组织名称', '组织编码', '上级组织', '操作']))
+
+  const rows = table.locator('.el-table__body-wrapper tbody tr')
+  let editableRow: Locator | undefined
+  for (let index = 0; index < await rows.count(); index += 1) {
+    const row = rows.nth(index)
+    const type = (await row.locator('.el-tag').first().textContent())?.trim()
+    if (type && type !== '集团') {
+      editableRow = row
+      break
+    }
+  }
+  test.skip(!editableRow, '当前测试数据没有可编辑的下级组织')
+  if (!editableRow) return
+
+  await editableRow.getByRole('button', { name: '编辑', exact: true }).click()
+  const dialog = page.getByRole('dialog', { name: '编辑组织信息' })
+  await expect(dialog).toBeVisible()
+  await expect(dialog.getByLabel('组织名称')).not.toHaveValue('')
+  await expect(dialog.getByText('组织编码、上级组织和组织类型属于稳定的组织结构标识')).toBeVisible()
+  await dialog.getByRole('button', { name: '取消', exact: true }).click()
 })

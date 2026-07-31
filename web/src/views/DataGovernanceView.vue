@@ -109,10 +109,10 @@ const enumOptions = {
 } satisfies Record<string, Array<[string, string]>>
 const conditionOperatorLabels: Record<ConditionOperator, string> = { eq: '等于', ne: '不等于', in: '属于多个值之一', not_in: '不属于多个值', empty: '为空', not_empty: '不为空', is_true: '为真', is_false: '为假' }
 function buildConditionFieldOptions(resourceType: string): ConditionFieldOption[] {
-  const organizationOptions = organizations.value.map((item) => [item.id, `${item.code} · ${item.name}`] as [string, string])
+  const organizationOptions = organizations.value.map((item) => [item.id, item.name] as [string, string])
   const networkAreaOptions = networkAreas.value.map((item) => [
     item.id,
-    `${item.organization_code} · ${item.name}${item.code ? `（${item.code}）` : ''}${item.status === 'enabled' ? '' : '（已停用）'}`,
+    `${item.organization_name} · ${item.name}${item.code ? `（${item.code}）` : ''}${item.status === 'enabled' ? '' : '（已停用）'}`,
   ] as [string, string])
   const builtins: Record<string, ConditionFieldOption[]> = {
     asset: [
@@ -482,7 +482,7 @@ onMounted(load)
           <el-button type="primary" :loading="scanLoading" @click="runScan">执行当前台账检测</el-button>
         </div>
         <div class="quality-scan-filters">
-          <el-select v-model="scanFilters.organization_id" filterable clearable placeholder="全部组织"><el-option v-for="item in organizations" :key="item.id" :label="`${item.code} · ${item.name}`" :value="item.id" /></el-select>
+          <el-select v-model="scanFilters.organization_id" filterable clearable placeholder="全部组织"><el-option v-for="item in organizations" :key="item.id" :label="item.name" :value="item.id" /></el-select>
           <el-select v-model="scanFilters.resource_type" clearable placeholder="全部检查对象"><el-option label="网络资产" value="asset" /><el-option label="业务系统" value="business_system" /></el-select>
           <el-select v-model="scanFilters.severity" clearable placeholder="全部严重程度"><el-option label="错误" value="error" /><el-option label="警告" value="warning" /></el-select>
         </div>
@@ -496,7 +496,7 @@ onMounted(load)
             <el-table-column prop="rule_name" label="规则名称" min-width="190" show-overflow-tooltip />
             <el-table-column label="对象类型" width="110"><template #default="{ row }">{{ row.resource_type === 'asset' ? '网络资产' : '业务系统' }}</template></el-table-column>
             <el-table-column label="资源" min-width="210"><template #default="{ row }"><strong>{{ row.resource_name || '未命名资源' }}</strong><div class="table-subtext">{{ row.resource_id }}</div></template></el-table-column>
-            <el-table-column label="所属组织" min-width="190"><template #default="{ row }">{{ row.organization_name }}<div class="table-subtext">{{ row.organization_code }}</div></template></el-table-column>
+            <el-table-column prop="organization_name" label="所属组织" min-width="190" />
             <el-table-column label="检查项" min-width="210"><template #default="{ row }">{{ qualityTargetLabel(row) }}</template></el-table-column>
             <el-table-column label="操作" width="100" fixed="right"><template #default="{ row }"><router-link :to="resourceRoute(row)"><el-button link type="primary">前往台账</el-button></router-link></template></el-table-column>
           </el-table>

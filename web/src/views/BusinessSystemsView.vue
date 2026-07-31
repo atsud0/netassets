@@ -551,7 +551,7 @@ onMounted(load)
         <el-option v-for="(label, value) in statusLabels" :key="value" :label="label" :value="value" />
       </el-select>
       <el-select v-if="auth.isGroupAdmin" v-model="organizationFilter" clearable filterable placeholder="全部组织" @change="resetAndLoadSystems" @clear="resetAndLoadSystems">
-        <el-option v-for="item in eligibleOrganizations" :key="item.id" :label="`${item.name}（${item.code}）`" :value="item.id" />
+        <el-option v-for="item in eligibleOrganizations" :key="item.id" :label="item.name" :value="item.id" />
       </el-select>
       <el-button @click="resetAndLoadSystems">查询</el-button>
       <span class="asset-filter-count">共 {{ total }} 条</span>
@@ -598,7 +598,7 @@ onMounted(load)
       <el-form ref="formRef" :model="form" :rules="rules" label-position="top">
         <div class="form-section-title">基本信息</div>
         <div class="form-grid two-columns">
-          <el-form-item label="所属组织" prop="organization_id"><el-select v-model="form.organization_id" :disabled="!auth.isGroupAdmin" style="width:100%"><el-option v-for="item in eligibleOrganizations" :key="item.id" :label="`${item.name}（${item.code}）`" :value="item.id" /></el-select></el-form-item>
+          <el-form-item label="所属组织" prop="organization_id"><el-select v-model="form.organization_id" :disabled="!auth.isGroupAdmin" style="width:100%"><el-option v-for="item in eligibleOrganizations" :key="item.id" :label="item.name" :value="item.id" /></el-select></el-form-item>
           <el-form-item label="系统编码" prop="code"><el-input v-model="form.code" placeholder="如：CRM_001" maxlength="64" /></el-form-item>
           <el-form-item label="系统名称" prop="name"><el-input v-model="form.name" placeholder="请输入系统名称" maxlength="255" /></el-form-item>
           <el-form-item label="系统简称"><el-input v-model="form.short_name" maxlength="128" /></el-form-item>
@@ -643,7 +643,7 @@ onMounted(load)
       <el-alert title="所属组织由当前表单统一指定，导入文件不需要填写组织列；请先选择所属组织再下载模板，模板会包含当前启用的集团自定义字段；系统编码已存在的行会跳过，不覆盖原记录。" type="info" :closable="false" show-icon />
       <div class="import-toolbar"><el-button link type="primary" :loading="downloading" @click="downloadTemplate('xlsx')">下载 XLSX 模板</el-button><el-button link type="primary" :loading="downloading" @click="downloadTemplate('csv')">下载 CSV 模板</el-button></div>
       <el-form label-position="top">
-        <el-form-item label="导入到所属组织" required><el-select v-model="importForm.organization_id" filterable :disabled="!auth.isGroupAdmin" @change="resetImportPreview" style="width: 100%"><el-option v-for="item in eligibleOrganizations" :key="item.id" :label="`${item.name}（${item.code}）`" :value="item.id" /></el-select></el-form-item>
+        <el-form-item label="导入到所属组织" required><el-select v-model="importForm.organization_id" filterable :disabled="!auth.isGroupAdmin" @change="resetImportPreview" style="width: 100%"><el-option v-for="item in eligibleOrganizations" :key="item.id" :label="item.name" :value="item.id" /></el-select></el-form-item>
         <el-form-item label="CSV / XLSX 文件" required><el-upload drag :auto-upload="false" :limit="1" accept=".csv,.xlsx" :on-change="handleImportFileChange" :on-remove="handleImportFileRemove"><el-icon><UploadFilled /></el-icon><div class="el-upload__text">拖入文件，或<em>点击选择</em></div><template #tip><div class="el-upload__tip">文件不超过 10 MB，单次最多 5000 行；允许部分成功。</div></template></el-upload></el-form-item>
       </el-form>
       <div v-if="importResult" class="import-result" data-testid="business-system-import-result">

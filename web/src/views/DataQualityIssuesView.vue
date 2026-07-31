@@ -430,7 +430,7 @@ onMounted(async () => {
       </div>
 
       <div class="panel quality-workflow-filters">
-      <el-select v-model="filters.organization_id" clearable filterable placeholder="全部组织"><el-option v-for="item in organizations" :key="item.id" :label="`${item.code} · ${item.name}`" :value="item.id" /></el-select>
+      <el-select v-model="filters.organization_id" clearable filterable placeholder="全部组织"><el-option v-for="item in organizations" :key="item.id" :label="item.name" :value="item.id" /></el-select>
       <el-select v-model="filters.status" clearable placeholder="全部状态"><el-option v-for="(label, value) in statusLabels" :key="value" :label="label" :value="value" /></el-select>
       <el-select v-model="filters.severity" clearable placeholder="全部级别"><el-option label="错误" value="error" /><el-option label="警告" value="warning" /></el-select>
       <el-select v-model="filters.resource_type" clearable placeholder="全部对象"><el-option label="网络资产" value="asset" /><el-option label="业务系统" value="business_system" /></el-select>
@@ -450,7 +450,7 @@ onMounted(async () => {
           <el-table-column type="selection" width="46" :reserve-selection="true" />
         <el-table-column label="问题" min-width="230"><template #default="scope"><el-button class="table-link" link type="primary" @click="openDetail(scope.row)">{{ scope.row.rule_name }}</el-button><div class="muted-text">检查项：{{ targetLabel(scope.row.target_field, scope.row) }}</div></template></el-table-column>
         <el-table-column label="资源" min-width="190"><template #default="scope"><strong>{{ scope.row.resource_name }}</strong><div class="muted-text">{{ resourceTypeLabel(scope.row.resource_type) }}</div></template></el-table-column>
-        <el-table-column label="责任组织" min-width="170"><template #default="scope"><strong>{{ scope.row.organization_name }}</strong><div class="muted-text">{{ scope.row.organization_code }}</div></template></el-table-column>
+        <el-table-column prop="organization_name" label="责任组织" min-width="170" />
         <el-table-column label="级别" width="86"><template #default="scope"><el-tag :type="scope.row.severity === 'error' ? 'danger' : 'warning'">{{ severityLabel(scope.row.severity) }}</el-tag></template></el-table-column>
         <el-table-column label="状态" width="100"><template #default="scope"><el-tag :type="statusTypes[scope.row.status] as any">{{ statusLabels[scope.row.status] }}</el-tag></template></el-table-column>
         <el-table-column label="负责人" min-width="110"><template #default="scope">{{ scope.row.assignee_display_name || '未指派' }}</template></el-table-column>

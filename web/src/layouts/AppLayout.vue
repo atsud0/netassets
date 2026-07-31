@@ -186,7 +186,7 @@ async function logout() {
             <span class="topbar-subtitle">{{ perspective }}</span>
           </div>
           <el-select v-if="availableOrganizations.length > 1" v-model="activeOrganizationID" size="small" :loading="switchingOrganization" class="work-organization-switcher" aria-label="当前工作组织">
-            <el-option v-for="organization in availableOrganizations" :key="organization.id" :value="organization.id" :label="`${organization.name}（${organization.code}）`" />
+            <el-option v-for="organization in availableOrganizations" :key="organization.id" :value="organization.id" :label="organization.name" />
           </el-select>
         </div>
         <div class="topbar-actions">

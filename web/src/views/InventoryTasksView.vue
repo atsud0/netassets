@@ -982,7 +982,7 @@ onMounted(async () => {
               <div><strong>逾期提交</strong><span>{{ scope.row.allow_late_submission ? '允许' : '不允许' }}</span></div>
               <el-table v-loading="taskOrganizationState(scope.row).loading" :data="taskOrganizationState(scope.row).items" size="small" class="task-organization-table" empty-text="暂无组织" max-height="420">
                 <el-table-column label="填报组织" min-width="190">
-                  <template #default="itemScope"><strong>{{ itemScope.row.organization_name }}</strong><span class="table-secondary">{{ itemScope.row.organization_code }}</span></template>
+                  <template #default="itemScope"><strong>{{ itemScope.row.organization_name }}</strong></template>
                 </el-table-column>
                 <el-table-column label="状态" width="100">
                   <template #default="itemScope"><el-tag :type="progressStatusTag(effectiveProgressStatus(scope.row, itemScope.row))" effect="plain">{{ progressStatusLabels[effectiveProgressStatus(scope.row, itemScope.row)] || itemScope.row.status }}</el-tag></template>
@@ -1163,7 +1163,7 @@ onMounted(async () => {
           <el-form-item label="开始时间" prop="start_at"><el-date-picker v-model="form.start_at" type="datetime" placeholder="选择开始时间" style="width:100%" /></el-form-item>
           <el-form-item label="截止时间" prop="deadline_at"><el-date-picker v-model="form.deadline_at" type="datetime" placeholder="选择截止时间" style="width:100%" /></el-form-item>
           <el-form-item label="任务状态"><el-select v-model="form.status" style="width:100%"><el-option label="立即下发" value="active" /><el-option label="保存草稿" value="draft" /></el-select></el-form-item>
-          <el-form-item label="填报组织" prop="organization_ids"><el-select v-model="form.organization_ids" multiple filterable collapse-tags collapse-tags-tooltip placeholder="请选择子公司或部门" style="width:100%"><el-option v-for="item in eligibleOrganizations" :key="item.id" :label="`${item.name}（${item.code}）`" :value="item.id" /></el-select></el-form-item>
+          <el-form-item label="填报组织" prop="organization_ids"><el-select v-model="form.organization_ids" multiple filterable collapse-tags collapse-tags-tooltip placeholder="请选择子公司或部门" style="width:100%"><el-option v-for="item in eligibleOrganizations" :key="item.id" :label="item.name" :value="item.id" /></el-select></el-form-item>
           <el-form-item label="填报内容" class="full-span"><el-checkbox-group v-model="form.required_fields"><el-checkbox label="business_systems">业务系统信息</el-checkbox><el-checkbox label="data_security">数据安全属性</el-checkbox><el-checkbox label="network_assets">网络资产信息</el-checkbox><el-checkbox label="owner_contacts">负责人及联系方式</el-checkbox></el-checkbox-group></el-form-item>
           <el-form-item label="网络资产核查范围" class="full-span">
             <el-radio-group v-model="form.asset_network_scope" :disabled="!form.required_fields.includes('network_assets')">
@@ -1190,7 +1190,7 @@ onMounted(async () => {
                 </div>
                 <el-alert v-if="scopePreview.empty_organization_count > 0" :title="`${scopePreview.empty_organization_count} 家组织在当前核查范围内暂无资源，请确认是否仍需下发。`" type="warning" :closable="false" show-icon />
                 <el-table :data="scopePreview.items" size="small" max-height="220" empty-text="暂无预览数据">
-                  <el-table-column label="填报组织" min-width="240"><template #default="scope"><div class="organization-name-cell"><strong>{{ scope.row.organization_name }}</strong><span>{{ scope.row.organization_code }}</span></div></template></el-table-column>
+                  <el-table-column prop="organization_name" label="填报组织" min-width="240" />
                   <el-table-column label="业务系统" prop="system_count" width="120" align="right" />
                   <el-table-column label="网络资产" prop="asset_count" width="120" align="right" />
                   <el-table-column label="范围状态" width="120"><template #default="scope"><el-tag :type="scope.row.system_count + scope.row.asset_count > 0 ? 'success' : 'warning'" effect="plain">{{ scope.row.system_count + scope.row.asset_count > 0 ? '有数据' : '暂无资源' }}</el-tag></template></el-table-column>

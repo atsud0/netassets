@@ -174,7 +174,7 @@ onMounted(async () => {
         <el-option v-for="item in users" :key="item.id" :label="`${item.display_name}（${item.username}）`" :value="item.id" />
       </el-select>
       <el-select v-model="filters.organization_id" clearable filterable placeholder="全部组织">
-        <el-option v-for="item in organizations" :key="item.id" :label="`${item.name}（${item.code}）`" :value="item.id" />
+        <el-option v-for="item in organizations" :key="item.id" :label="item.name" :value="item.id" />
       </el-select>
       <el-date-picker
         v-model="filters.date_range"
@@ -200,7 +200,7 @@ onMounted(async () => {
         <el-table-column label="操作时间" min-width="172"><template #default="scope">{{ formatTime(scope.row.created_at) }}</template></el-table-column>
         <el-table-column label="操作" min-width="150"><template #default="scope"><div class="audit-action-cell"><strong>{{ scope.row.action_label }}</strong><span>{{ scope.row.action }}</span></div></template></el-table-column>
         <el-table-column label="操作人" min-width="160"><template #default="scope"><div class="audit-action-cell"><strong>{{ actorName(scope.row) }}</strong><span>{{ scope.row.username || '账号已删除' }}</span></div></template></el-table-column>
-        <el-table-column label="所属组织" min-width="180"><template #default="scope"><div class="audit-action-cell"><strong>{{ scope.row.organization_name || '—' }}</strong><span>{{ scope.row.organization_code || '' }}</span></div></template></el-table-column>
+        <el-table-column label="所属组织" min-width="180"><template #default="scope">{{ scope.row.organization_name || '—' }}</template></el-table-column>
         <el-table-column label="资源" min-width="180"><template #default="scope"><div class="audit-action-cell"><strong>{{ scope.row.resource_type_label || '—' }}</strong><span class="audit-resource-id">{{ scope.row.resource_id || '—' }}</span></div></template></el-table-column>
         <el-table-column prop="summary" label="摘要" min-width="190"><template #default="scope">{{ scope.row.summary || '—' }}</template></el-table-column>
         <el-table-column label="结果" width="86"><template #default="scope"><el-tag :type="scope.row.result === 'success' ? 'success' : 'danger'" effect="plain">{{ scope.row.result_label }}</el-tag></template></el-table-column>

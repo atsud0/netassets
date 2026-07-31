@@ -722,7 +722,7 @@ onMounted(() => load(true))
           <el-option v-for="(label, value) in statusLabels" :key="value" :label="label" :value="value" />
         </el-select>
         <el-select v-if="auth.isGroupAdmin" v-model="organizationFilter" clearable filterable placeholder="全部组织" @change="resetAndLoadAssets" @clear="resetAndLoadAssets">
-          <el-option v-for="item in enabledOrganizations" :key="item.id" :label="`${item.name}（${item.code}）`" :value="item.id" />
+          <el-option v-for="item in enabledOrganizations" :key="item.id" :label="item.name" :value="item.id" />
         </el-select>
         <el-button @click="resetAndLoadAssets">查询</el-button>
         <span class="asset-filter-count">共 {{ total }} 条</span>
@@ -749,7 +749,7 @@ onMounted(() => load(true))
           <template #default="scope"><div class="organization-name-cell"><strong>{{ scope.row.name || scope.row.value }}</strong><span v-if="scope.row.name">{{ scope.row.value }}</span></div></template>
         </el-table-column>
         <el-table-column label="类型" width="95"><template #default="scope">{{ typeLabel(scope.row.type) }}</template></el-table-column>
-        <el-table-column label="所属组织" min-width="150"><template #default="scope"><div class="organization-name-cell"><strong>{{ scope.row.organization_name }}</strong><span>{{ scope.row.organization_code }}</span></div></template></el-table-column>
+        <el-table-column prop="organization_name" label="所属组织" min-width="150" />
         <el-table-column label="业务系统" min-width="150"><template #default="scope"><div v-if="scope.row.business_system_id" class="organization-name-cell"><strong>{{ scope.row.business_system_name }}</strong><span>{{ scope.row.business_system_code }}</span></div><span v-else class="muted-text">未绑定</span></template></el-table-column>
         <el-table-column label="责任人账号" min-width="150"><template #default="scope"><div v-if="scope.row.owner_user_id" class="organization-name-cell"><strong>{{ scope.row.owner_user_display_name || scope.row.owner_username }}</strong><span>{{ scope.row.owner_username }}</span></div><span v-else class="muted-text">未绑定</span></template></el-table-column>
         <el-table-column label="环境 / 暴露范围" width="145"><template #default="scope">{{ environmentLabel(scope.row.environment) }} / {{ scopeLabel(scope.row.network_scope) }}</template></el-table-column>
@@ -806,7 +806,7 @@ onMounted(() => load(true))
           <el-form-item label="资产类型" prop="type"><el-select v-model="form.type" style="width: 100%"><el-option v-for="(label, value) in typeLabels" :key="value" :label="label" :value="value" /></el-select></el-form-item>
           <el-form-item label="资产值" prop="value"><el-input v-model="form.value" :placeholder="valuePlaceholder" /></el-form-item>
           <el-form-item label="资产名称"><el-input v-model="form.name" placeholder="便于识别的名称（可选）" /></el-form-item>
-          <el-form-item label="所属组织" prop="organization_id"><el-select v-model="form.organization_id" filterable :disabled="!auth.isGroupAdmin" style="width: 100%" @change="handleFormOrganizationChange"><el-option v-for="item in enabledOrganizations" :key="item.id" :label="`${item.name}（${item.code}）`" :value="item.id" /></el-select></el-form-item>
+          <el-form-item label="所属组织" prop="organization_id"><el-select v-model="form.organization_id" filterable :disabled="!auth.isGroupAdmin" style="width: 100%" @change="handleFormOrganizationChange"><el-option v-for="item in enabledOrganizations" :key="item.id" :label="item.name" :value="item.id" /></el-select></el-form-item>
           <el-form-item label="关联业务系统"><el-select v-model="form.business_system_id" clearable filterable placeholder="可选" style="width: 100%"><el-option v-for="item in availableSystems" :key="item.id" :label="`${item.name}（${item.code}）`" :value="item.id" /></el-select></el-form-item>
           <el-form-item label="责任人账号" class="full-span">
             <el-select v-model="form.owner_user_id" clearable filterable remote reserve-keyword :remote-method="loadOwnerOptions" :loading="ownerOptionsLoading" placeholder="按姓名、账号或联系方式搜索所属组织用户" style="width: 100%">
@@ -831,7 +831,7 @@ onMounted(() => load(true))
       <el-alert title="“网络暴露范围”固定表示公网、内网和未知；此处配置的是资产所属的办公地点、园区、云区域或网络分区。子公司用户可选择，集团管理员统一维护。" type="info" :closable="false" show-icon />
       <div class="dialog-toolbar"><el-button type="primary" @click="openCreateNetworkArea">新增网络区域</el-button></div>
       <el-table :data="networkAreas" empty-text="暂无网络区域，请先按组织新增">
-        <el-table-column label="所属组织" min-width="180"><template #default="scope"><div class="organization-name-cell"><strong>{{ scope.row.organization_name }}</strong><span>{{ scope.row.organization_code }}</span></div></template></el-table-column>
+        <el-table-column prop="organization_name" label="所属组织" min-width="180" />
         <el-table-column prop="name" label="网络区域" min-width="170" />
         <el-table-column prop="code" label="标识 / 地址范围" min-width="150"><template #default="scope">{{ scope.row.code || '—' }}</template></el-table-column>
         <el-table-column prop="asset_count" label="关联资产" width="90" align="center" />
@@ -842,7 +842,7 @@ onMounted(() => load(true))
 
     <el-dialog v-model="areaFormVisible" :title="editingNetworkAreaID ? '编辑网络区域' : '新增网络区域'" width="620px" destroy-on-close>
       <el-form label-position="top"><div class="form-grid two-columns">
-        <el-form-item label="所属组织" required><el-select v-model="networkAreaForm.organization_id" :disabled="Boolean(editingNetworkAreaID)" filterable style="width:100%"><el-option v-for="item in enabledOrganizations" :key="item.id" :label="`${item.name}（${item.code}）`" :value="item.id" /></el-select></el-form-item>
+        <el-form-item label="所属组织" required><el-select v-model="networkAreaForm.organization_id" :disabled="Boolean(editingNetworkAreaID)" filterable style="width:100%"><el-option v-for="item in enabledOrganizations" :key="item.id" :label="item.name" :value="item.id" /></el-select></el-form-item>
         <el-form-item label="网络区域名称" required><el-input v-model="networkAreaForm.name" maxlength="128" placeholder="如：上海办事处、生产云 VPC" /></el-form-item>
         <el-form-item label="标识 / 地址范围"><el-input v-model="networkAreaForm.code" maxlength="64" placeholder="如：SH-OFFICE、10.20.0.0/16" /></el-form-item>
         <el-form-item label="状态"><el-select v-model="networkAreaForm.status" style="width:100%"><el-option label="启用" value="enabled" /><el-option label="停用" value="disabled" /></el-select></el-form-item>
@@ -856,7 +856,7 @@ onMounted(() => load(true))
       <el-alert title="单次最多导入 5000 行，资产类型和值在集团范围内去重；允许部分成功。请先选择所属组织再下载模板，模板会包含当前启用的集团自定义字段。网络区域按所属组织已配置的名称填写；有效期支持 YYYY-MM-DD、YYYY-MM-DD HH:mm:ss 或 RFC3339；无时区值按 UTC+8 解释，留空表示长期有效。" type="info" :closable="false" show-icon />
       <div class="import-toolbar"><el-button link type="primary" :loading="downloading" @click="downloadTemplate('xlsx')">下载 XLSX 模板</el-button><el-button link type="primary" :loading="downloading" @click="downloadTemplate('csv')">下载 CSV 模板</el-button></div>
       <el-form label-position="top">
-        <el-form-item label="导入到所属组织" required><el-select v-model="importForm.organization_id" filterable :disabled="!auth.isGroupAdmin" @change="resetImportPreview" style="width: 100%"><el-option v-for="item in enabledOrganizations" :key="item.id" :label="`${item.name}（${item.code}）`" :value="item.id" /></el-select></el-form-item>
+        <el-form-item label="导入到所属组织" required><el-select v-model="importForm.organization_id" filterable :disabled="!auth.isGroupAdmin" @change="resetImportPreview" style="width: 100%"><el-option v-for="item in enabledOrganizations" :key="item.id" :label="item.name" :value="item.id" /></el-select></el-form-item>
         <el-form-item label="CSV / XLSX 文件" required><el-upload drag :auto-upload="false" :limit="1" accept=".csv,.xlsx" :on-change="handleFileChange" :on-remove="handleFileRemove"><div class="el-upload__text">拖入文件，或<em>点击选择</em></div><template #tip><div class="el-upload__tip">文件不超过 10 MB；业务系统使用同组织内的系统编码匹配；责任人账号按所属组织内的启用用户名匹配；有效期格式错误会在预检中逐行提示。</div></template></el-upload></el-form-item>
       </el-form>
       <div v-if="importResult" class="import-result" data-testid="import-result">
@@ -870,7 +870,7 @@ onMounted(() => load(true))
     <el-dialog v-model="historyDialogVisible" title="资产导入记录" width="980px">
       <el-table v-loading="historyLoading" :data="importHistory" empty-text="暂无导入记录" max-height="560">
         <el-table-column label="文件" min-width="190"><template #default="scope"><div class="organization-name-cell"><strong>{{ scope.row.file_name }}</strong><span>{{ scope.row.file_type.toUpperCase() }}</span></div></template></el-table-column>
-        <el-table-column label="所属组织" min-width="170"><template #default="scope"><div class="organization-name-cell"><strong>{{ scope.row.organization_name }}</strong><span>{{ scope.row.organization_code }}</span></div></template></el-table-column>
+        <el-table-column prop="organization_name" label="所属组织" min-width="170" />
         <el-table-column label="状态" width="105"><template #default="scope"><el-tag :type="importStatusTag(scope.row.status)" effect="plain">{{ importStatusLabels[scope.row.status] ?? scope.row.status }}</el-tag></template></el-table-column>
         <el-table-column prop="total_count" label="总数" width="70" /><el-table-column prop="success_count" label="成功" width="70" /><el-table-column prop="duplicate_count" label="重复" width="70" /><el-table-column prop="failure_count" label="失败" width="70" />
         <el-table-column label="导入人 / 时间" min-width="160"><template #default="scope"><div class="organization-name-cell"><strong>{{ scope.row.created_by_name || '-' }}</strong><span>{{ formatDate(scope.row.created_at) }}</span></div></template></el-table-column>

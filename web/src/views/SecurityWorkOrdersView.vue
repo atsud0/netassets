@@ -968,7 +968,7 @@ async function onTabChange() {
       </div>
       <div v-else class="filter-bar">
         <el-select v-if="auth.hasGroupSecurityRole" v-model="organizationFilter" clearable filterable placeholder="全部责任组织" style="width: 220px">
-          <el-option v-for="item in enabledOrganizations" :key="item.id" :label="`${item.name}（${item.code}）`" :value="item.id" />
+          <el-option v-for="item in enabledOrganizations" :key="item.id" :label="item.name" :value="item.id" />
         </el-select>
         <el-select v-model="statusFilter" clearable placeholder="全部状态" style="width: 170px">
           <template v-if="activeTab === 'orders'">
@@ -989,7 +989,7 @@ async function onTabChange() {
           <template #default="scope"><strong>{{ scope.row.title }}</strong><span class="table-secondary mono-text">{{ scope.row.number }}</span></template>
         </el-table-column>
         <el-table-column label="责任组织" min-width="170">
-          <template #default="scope">{{ scope.row.assignee_organization_name }}<span class="table-secondary">{{ scope.row.assignee_organization_code }}</span></template>
+          <template #default="scope">{{ scope.row.assignee_organization_name }}</template>
         </el-table-column>
         <el-table-column label="等级" width="85"><template #default="scope"><el-tag :type="severityTag(scope.row.severity)" effect="dark">{{ severityLabels[scope.row.severity] }}</el-tag></template></el-table-column>
         <el-table-column label="状态" width="115"><template #default="scope"><el-tag :type="orderStatusTag(scope.row.status)" effect="plain">{{ orderStatusLabels[scope.row.status] }}</el-tag></template></el-table-column>
@@ -1019,7 +1019,7 @@ async function onTabChange() {
         <el-table-column label="安全发现" min-width="250">
           <template #default="scope"><strong>{{ scope.row.title }}</strong><span class="table-secondary mono-text">{{ scope.row.code }} · {{ scope.row.vulnerability_type || '未分类' }}</span></template>
         </el-table-column>
-        <el-table-column label="责任组织" min-width="170"><template #default="scope">{{ scope.row.assignee_organization_name }}<span class="table-secondary">{{ scope.row.assignee_organization_code }}</span></template></el-table-column>
+        <el-table-column label="责任组织" min-width="170"><template #default="scope">{{ scope.row.assignee_organization_name }}</template></el-table-column>
         <el-table-column label="关联资产/系统" min-width="210"><template #default="scope">{{ findingTarget(scope.row) }}<span v-if="scope.row.asset_value && scope.row.business_system_name" class="table-secondary">{{ scope.row.business_system_name }}</span></template></el-table-column>
         <el-table-column label="测试批次" min-width="180"><template #default="scope"><span v-if="scope.row.test_batch_id">{{ scope.row.test_batch_name }}<span class="table-secondary mono-text">{{ scope.row.test_batch_code }}</span></span><span v-else>—</span></template></el-table-column>
         <el-table-column label="等级" width="85"><template #default="scope"><el-tag :type="severityTag(scope.row.severity)" effect="dark">{{ severityLabels[scope.row.severity] }}</el-tag></template></el-table-column>
@@ -1130,7 +1130,7 @@ async function onTabChange() {
           <el-form-item label="漏洞标题" prop="title"><el-input v-model="findingForm.title" maxlength="255" show-word-limit /></el-form-item>
           <el-form-item label="严重等级" prop="severity"><el-select v-model="findingForm.severity" style="width:100%"><el-option v-for="(label, value) in severityLabels" :key="value" :label="label" :value="value" /></el-select></el-form-item>
           <el-form-item label="测试批次"><el-select v-model="findingForm.test_batch_id" clearable filterable style="width:100%" placeholder="可选；选择后资产限于授权范围"><el-option v-for="item in usableTestBatches" :key="item.id" :label="`${item.name}（${item.code}）`" :value="item.id" /></el-select></el-form-item>
-          <el-form-item label="责任组织" prop="assignee_organization_id"><el-select v-model="findingForm.assignee_organization_id" filterable style="width:100%" :disabled="Boolean(findingForm.test_batch_id)"><el-option v-for="item in enabledOrganizations" :key="item.id" :label="`${item.name}（${item.code}）`" :value="item.id" /></el-select></el-form-item>
+          <el-form-item label="责任组织" prop="assignee_organization_id"><el-select v-model="findingForm.assignee_organization_id" filterable style="width:100%" :disabled="Boolean(findingForm.test_batch_id)"><el-option v-for="item in enabledOrganizations" :key="item.id" :label="item.name" :value="item.id" /></el-select></el-form-item>
           <el-form-item label="漏洞类型"><el-input v-model="findingForm.vulnerability_type" placeholder="例如：越权访问、SQL 注入" /></el-form-item>
           <el-form-item label="关联网络资产"><el-select v-model="findingForm.asset_id" clearable filterable style="width:100%" placeholder="URL、IP、域名等"><el-option v-for="item in scopedAssets" :key="item.id" :label="`${item.name || item.value}（${item.value}）`" :value="item.id" /></el-select></el-form-item>
           <el-form-item label="关联业务系统"><el-select v-model="findingForm.business_system_id" clearable filterable style="width:100%" placeholder="可与网络资产同时选择"><el-option v-for="item in scopedSystems" :key="item.id" :label="`${item.name}（${item.code}）`" :value="item.id" /></el-select></el-form-item>
@@ -1206,7 +1206,7 @@ async function onTabChange() {
       <el-form ref="workOrderFormRef" :model="workOrderForm" :rules="workOrderRules" label-position="top">
         <div class="form-grid two-columns">
           <el-form-item label="工单标题" prop="title"><el-input v-model="workOrderForm.title" maxlength="255" /></el-form-item>
-          <el-form-item label="责任组织" prop="assignee_organization_id"><el-select v-model="workOrderForm.assignee_organization_id" filterable style="width:100%"><el-option v-for="item in enabledOrganizations" :key="item.id" :label="`${item.name}（${item.code}）`" :value="item.id" /></el-select></el-form-item>
+          <el-form-item label="责任组织" prop="assignee_organization_id"><el-select v-model="workOrderForm.assignee_organization_id" filterable style="width:100%"><el-option v-for="item in enabledOrganizations" :key="item.id" :label="item.name" :value="item.id" /></el-select></el-form-item>
           <el-form-item label="整改期限" prop="due_at"><el-date-picker v-model="workOrderForm.due_at" type="datetime" style="width:100%" /></el-form-item>
           <el-form-item label="下发方式"><el-switch v-model="workOrderForm.issue_immediately" active-text="保存后立即下发" inactive-text="先保存草稿" /></el-form-item>
         </div>
