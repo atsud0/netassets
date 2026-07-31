@@ -53,6 +53,12 @@ const form = reactive({
 })
 const groupForm = reactive({ name: '', short_name: '', manager: '', contact: '', notes: '' })
 const editForm = reactive({ name: '', short_name: '', manager: '', contact: '', notes: '' })
+const editEntityLabel = computed(() => {
+  if (editingOrganization.value?.type === 'subsidiary') return '子公司'
+  if (editingOrganization.value?.type === 'department') return '部门'
+  return '组织'
+})
+const editDialogTitle = computed(() => `编辑${editEntityLabel.value}基本信息`)
 const groupRules: FormRules = {
   name: [{ required: true, message: '请输入集团名称', trigger: 'blur' }],
 }
@@ -168,12 +174,13 @@ function openEditDialog(item: Organization) {
 async function submitOrganizationInfo() {
   if (!editingOrganization.value || !editFormRef.value || !(await editFormRef.value.validate())) return
   editSubmitting.value = true
+  const entityLabel = editEntityLabel.value
   try {
     await apiClient.patch(`/organizations/${editingOrganization.value.id}`, editForm)
     editDialogVisible.value = false
     editingOrganization.value = null
     await refreshAfterMutation()
-    ElMessage.success('组织信息已更新')
+    ElMessage.success(`${entityLabel}基本信息已更新`)
   } catch (error) {
     ElMessage.error(getAPIErrorMessage(error, '更新组织信息失败'))
   } finally {
@@ -263,8 +270,8 @@ onMounted(async () => {
             <el-tag :type="scope.row.status === 'enabled' ? 'success' : 'info'">{{ scope.row.status === 'enabled' ? '启用' : '停用' }}</el-tag>
           </template>
         </el-table-column>
-        <el-table-column v-if="auth.isGroupAdmin" label="操作" width="80" fixed="right">
-          <template #default="scope"><el-button link type="primary" @click="openEditDialog(scope.row)">编辑</el-button></template>
+        <el-table-column v-if="auth.isGroupAdmin" label="操作" width="110" fixed="right">
+          <template #default="scope"><el-button link type="primary" @click="openEditDialog(scope.row)">编辑基本信息</el-button></template>
         </el-table-column>
       </el-table>
       <div class="table-pagination">
@@ -298,12 +305,12 @@ onMounted(async () => {
       </template>
     </el-dialog>
 
-    <el-dialog v-model="editDialogVisible" title="编辑组织信息" width="620px" destroy-on-close @closed="editingOrganization = null">
+    <el-dialog v-model="editDialogVisible" :title="editDialogTitle" width="620px" destroy-on-close @closed="editingOrganization = null">
       <el-alert title="组织编码、上级组织和组织类型属于稳定的组织结构标识；如需调整结构，请通过后续组织迁移能力处理。" type="info" :closable="false" show-icon />
       <el-form ref="editFormRef" :model="editForm" :rules="editRules" label-position="top" class="dialog-form-with-alert">
         <div class="form-grid two-columns">
-          <el-form-item label="组织名称" prop="name"><el-input v-model="editForm.name" maxlength="255" placeholder="请输入组织完整名称" /></el-form-item>
-          <el-form-item label="组织简称"><el-input v-model="editForm.short_name" maxlength="128" /></el-form-item>
+          <el-form-item :label="`${editEntityLabel}名称`" prop="name"><el-input v-model="editForm.name" maxlength="255" :placeholder="`请输入${editEntityLabel}完整名称`" /></el-form-item>
+          <el-form-item :label="`${editEntityLabel}简称`"><el-input v-model="editForm.short_name" maxlength="128" /></el-form-item>
           <el-form-item label="负责人"><el-input v-model="editForm.manager" maxlength="128" /></el-form-item>
           <el-form-item label="联系方式"><el-input v-model="editForm.contact" maxlength="255" placeholder="邮箱、电话或内部通讯账号" /></el-form-item>
           <el-form-item label="备注" class="full-span"><el-input v-model="editForm.notes" type="textarea" :rows="3" maxlength="5000" show-word-limit /></el-form-item>
@@ -311,7 +318,7 @@ onMounted(async () => {
       </el-form>
       <template #footer>
         <el-button @click="editDialogVisible = false">取消</el-button>
-        <el-button type="primary" :loading="editSubmitting" @click="submitOrganizationInfo">保存组织信息</el-button>
+        <el-button type="primary" :loading="editSubmitting" @click="submitOrganizationInfo">保存基本信息</el-button>
       </template>
     </el-dialog>
 

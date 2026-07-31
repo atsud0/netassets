@@ -427,18 +427,33 @@ test('组织名称与编码独立展示且集团管理员可编辑已有组织',
   for (let index = 0; index < await rows.count(); index += 1) {
     const row = rows.nth(index)
     const type = (await row.locator('.el-tag').first().textContent())?.trim()
-    if (type && type !== '集团') {
+    if (type === '子公司') {
       editableRow = row
       break
     }
   }
-  test.skip(!editableRow, '当前测试数据没有可编辑的下级组织')
-  if (!editableRow) return
 
-  await editableRow.getByRole('button', { name: '编辑', exact: true }).click()
-  const dialog = page.getByRole('dialog', { name: '编辑组织信息' })
+  if (!editableRow) {
+    const subsidiaryName = `E2E 子公司 ${Date.now()}`
+    await page.getByRole('button', { name: '新增组织', exact: true }).click()
+    const createDialog = page.getByRole('dialog', { name: '新增组织机构' })
+    await expect(createDialog).toBeVisible()
+    await createDialog.getByLabel('组织编码').fill(`E2E_SUB_${Date.now()}`)
+    await createDialog.getByLabel('组织名称').fill(subsidiaryName)
+    await createDialog.getByRole('button', { name: '确认新增', exact: true }).click()
+    await expect(createDialog).toBeHidden()
+    editableRow = rows.filter({ hasText: subsidiaryName }).first()
+    await expect(editableRow).toBeVisible()
+  }
+
+  await editableRow.getByRole('button', { name: '编辑基本信息', exact: true }).click()
+  const dialog = page.getByRole('dialog', { name: '编辑子公司基本信息' })
   await expect(dialog).toBeVisible()
-  await expect(dialog.getByLabel('组织名称')).not.toHaveValue('')
+  await expect(dialog.getByLabel('子公司名称')).not.toHaveValue('')
   await expect(dialog.getByText('组织编码、上级组织和组织类型属于稳定的组织结构标识')).toBeVisible()
-  await dialog.getByRole('button', { name: '取消', exact: true }).click()
+  const updatedContact = `e2e-${Date.now()}@example.test`
+  await dialog.getByLabel('联系方式').fill(updatedContact)
+  await dialog.getByRole('button', { name: '保存基本信息', exact: true }).click()
+  await expect(dialog).toBeHidden()
+  await expect(editableRow).toContainText(updatedContact)
 })
