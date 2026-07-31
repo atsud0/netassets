@@ -563,7 +563,12 @@ onMounted(load)
       </div>
       <el-table v-loading="loading" :data="systems" row-key="id" empty-text="暂无业务系统" @selection-change="handleSelectionChange">
         <el-table-column type="selection" width="46" />
-        <el-table-column label="系统" min-width="220"><template #default="scope"><div class="organization-name-cell"><el-button link type="primary" class="table-link" @click="openDetail(scope.row)">{{ scope.row.name }}</el-button><span>{{ scope.row.code }}</span></div></template></el-table-column>
+        <el-table-column label="系统名称" min-width="190">
+          <template #default="scope"><el-button link type="primary" class="table-link" @click="openDetail(scope.row)">{{ scope.row.name }}</el-button></template>
+        </el-table-column>
+        <el-table-column label="系统编码" min-width="145">
+          <template #default="scope"><span class="mono-text">{{ scope.row.code }}</span></template>
+        </el-table-column>
         <el-table-column prop="organization_name" label="所属组织" min-width="180" />
         <el-table-column label="状态/等级" min-width="150"><template #default="scope"><el-tag effect="plain">{{ statusLabel(scope.row.status) }}</el-tag><span class="inline-note">{{ levelLabel(scope.row.level) }}</span></template></el-table-column>
         <el-table-column label="个人信息" min-width="120"><template #default="scope"><el-tag :type="scope.row.contains_personal_information === 'yes' ? 'warning' : 'info'">{{ yesNo(scope.row.contains_personal_information) }}</el-tag></template></el-table-column>

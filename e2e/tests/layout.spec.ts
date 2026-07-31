@@ -388,3 +388,24 @@ test('列表操作按钮保持统一高度、基线和间距', async ({ page }) 
 
   expect(inspectedGroups).toBeGreaterThan(0)
 })
+
+test('业务系统名称和系统编码使用独立列表列', async ({ page }) => {
+  test.skip(!adminPassword, 'E2E_PASSWORD/BOOTSTRAP_ADMIN_PASSWORD 未配置')
+
+  await page.setViewportSize({ width: 1440, height: 950 })
+  await page.goto('/systems')
+  await login(page, adminUsername, adminPassword!)
+  await expect(page.getByRole('heading', { name: '业务系统', exact: true })).toBeVisible()
+
+  const table = page.locator('.data-table-panel > .el-table')
+  const headerLabels = await table.locator('.el-table__header-wrapper').first().locator('th .cell').allTextContents()
+  expect(headerLabels.map(label => label.trim())).toEqual(expect.arrayContaining(['系统名称', '系统编码', '所属组织']))
+  expect(headerLabels.map(label => label.trim())).not.toContain('系统')
+
+  const firstRow = table.locator('.el-table__body-wrapper tbody tr').first()
+  if (await firstRow.count()) {
+    const cells = firstRow.locator('td')
+    await expect(cells.nth(1).locator('.table-link')).toBeVisible()
+    await expect(cells.nth(2).locator('.mono-text')).not.toHaveText('')
+  }
+})
