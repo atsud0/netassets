@@ -102,6 +102,11 @@ button, input { font: inherit; }
 .form-grid.two-columns { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 .form-grid .full-span { grid-column: 1 / -1; }
 .data-table-panel { padding: 6px 18px 18px; }
+/* 表格操作列中的普通按钮与下拉按钮使用同一垂直基线和 12px 间距。 */
+.el-table__cell .cell > .el-button,
+.el-table__cell .cell > .el-dropdown { vertical-align: middle; }
+.el-table__cell .cell > .el-button + .el-dropdown,
+.el-table__cell .cell > .el-dropdown + .el-button { margin-left: 12px; }
 /* 台账列表统一使用 18px 的表格—分页间距；分页只在卡片内部右对齐。 */
 .data-table-panel > .table-pagination { display: flex; justify-content: flex-end; margin-top: 18px; }
 .inline-note { margin-left: 8px; color: var(--muted); font-size: 12px; }

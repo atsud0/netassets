@@ -321,3 +321,70 @@ test('网络资产筛选结果与查询控件同排，保存视图操作使用�
   expect(layout.savedRowGap).toBe(12)
   expect(layout.savedItemGaps.every(gap => Math.abs(gap - 8) <= 1)).toBe(true)
 })
+
+test('列表操作按钮保持统一高度、基线和间距', async ({ page }) => {
+  test.skip(!adminPassword, 'E2E_PASSWORD/BOOTSTRAP_ADMIN_PASSWORD 未配置')
+
+  await page.setViewportSize({ width: 1440, height: 950 })
+  await page.goto('/assets')
+  await login(page, adminUsername, adminPassword!)
+
+  const routes = [
+    '/assets', '/systems', '/asset-candidates', '/data-governance', '/data-quality-issues',
+    '/inventory-tasks', '/security-test-batches', '/security-work-orders', '/organizations',
+    '/users', '/recycle-bin', '/audit-logs', '/backups', '/export-jobs',
+  ]
+  let inspectedGroups = 0
+
+  for (const route of routes) {
+    await page.goto(route)
+    await expect(page.locator('h1')).toBeVisible()
+
+    const groups = await page.evaluate(() => {
+      const isVisible = (element: HTMLElement) => {
+        const rect = element.getBoundingClientRect()
+        const style = getComputedStyle(element)
+        return rect.width > 0 && rect.height > 0 && style.display !== 'none' && style.visibility !== 'hidden'
+      }
+
+      return Array.from(document.querySelectorAll<HTMLElement>('td.el-table__cell'))
+        .filter(isVisible)
+        .map((cell) => Array.from(cell.querySelectorAll<HTMLElement>('.el-button')).filter(isVisible))
+        .filter((buttons) => buttons.length > 1)
+        .map((buttons) => buttons.map((button) => {
+          const rect = button.getBoundingClientRect()
+          return {
+            text: button.textContent?.trim() || '',
+            left: rect.left,
+            right: rect.right,
+            top: rect.top,
+            height: rect.height,
+            centerY: (rect.top + rect.bottom) / 2,
+          }
+        }))
+    })
+
+    inspectedGroups += groups.length
+    for (const buttons of groups) {
+      const lines: Array<typeof buttons> = []
+      for (const button of buttons) {
+        const matchingLine = lines.find(line => Math.abs(line[0].centerY - button.centerY) <= 8)
+        if (matchingLine) matchingLine.push(button)
+        else lines.push([button])
+      }
+
+      for (const lineButtons of lines) {
+        const sorted = [...lineButtons].sort((a, b) => a.left - b.left)
+        const heights = sorted.map(button => button.height)
+        const centers = sorted.map(button => button.centerY)
+        expect(Math.max(...heights) - Math.min(...heights), `${route} 操作按钮高度不一致`).toBeLessThanOrEqual(0.5)
+        expect(Math.max(...centers) - Math.min(...centers), `${route} 操作按钮基线不一致`).toBeLessThanOrEqual(1)
+        for (let index = 1; index < sorted.length; index += 1) {
+          expect(sorted[index].left - sorted[index - 1].right, `${route} 操作按钮间距过小`).toBeGreaterThanOrEqual(8)
+        }
+      }
+    }
+  }
+
+  expect(inspectedGroups).toBeGreaterThan(0)
+})
