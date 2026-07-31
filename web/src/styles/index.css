@@ -108,7 +108,11 @@ button, input { font: inherit; }
 .form-section-title { margin: 4px 0 16px; padding-left: 10px; border-left: 3px solid #2a9d8f; color: var(--navy); font-weight: 700; }
 .form-section-title:not(:first-child) { margin-top: 14px; }
 .asset-filter-panel { display: grid; grid-template-columns: minmax(240px, 1fr) 140px 140px 210px auto; gap: 12px; align-items: center; margin-bottom: 16px; padding: 16px 18px; }
+.network-asset-filter-panel { display: flex; flex-direction: column; align-items: stretch; }
+.network-asset-filter-controls { display: grid; grid-template-columns: minmax(220px, 1fr) 140px 140px auto auto; gap: 12px; align-items: center; }
+.network-asset-filter-controls.with-organization-filter { grid-template-columns: minmax(220px, 1fr) 140px 140px minmax(170px, 210px) auto auto; }
 .asset-filter-count { color: var(--muted); font-size: 13px; white-space: nowrap; text-align: right; }
+.network-asset-filter-controls .asset-filter-count { justify-self: end; }
 .muted-text { color: var(--muted); font-size: 13px; }
 .import-toolbar { display: flex; justify-content: flex-end; margin: 8px 0 4px; }
 .import-result { margin-top: 18px; padding: 16px; background: #f6f9fb; border: 1px solid var(--line); border-radius: 12px; }

@@ -712,20 +712,22 @@ onMounted(() => load(true))
       <div><span>本页域名资产</span><strong>{{ domainCount }}</strong></div>
     </div>
 
-    <div class="panel asset-filter-panel">
-      <el-input v-model="search" clearable placeholder="搜索资产值、名称、系统或负责人" @keyup.enter="resetAndLoadAssets" @clear="resetAndLoadAssets" />
-      <el-select v-model="typeFilter" clearable placeholder="全部类型" @change="resetAndLoadAssets" @clear="resetAndLoadAssets">
-        <el-option v-for="(label, value) in typeLabels" :key="value" :label="label" :value="value" />
-      </el-select>
-      <el-select v-model="statusFilter" clearable placeholder="全部状态" @change="resetAndLoadAssets" @clear="resetAndLoadAssets">
-        <el-option v-for="(label, value) in statusLabels" :key="value" :label="label" :value="value" />
-      </el-select>
-      <el-select v-if="auth.isGroupAdmin" v-model="organizationFilter" clearable filterable placeholder="全部组织" @change="resetAndLoadAssets" @clear="resetAndLoadAssets">
-        <el-option v-for="item in enabledOrganizations" :key="item.id" :label="`${item.name}（${item.code}）`" :value="item.id" />
-      </el-select>
-      <el-button @click="resetAndLoadAssets">查询</el-button>
-      <span class="asset-filter-count">共 {{ total }} 条</span>
-      <SavedFilterViews ref="savedFilterViews" page-key="assets" :current-filters="currentAssetFilters" style="grid-column:1 / -1" @apply="applySavedAssetFilters" />
+    <div class="panel asset-filter-panel network-asset-filter-panel">
+      <div class="network-asset-filter-controls" :class="{ 'with-organization-filter': auth.isGroupAdmin }">
+        <el-input v-model="search" clearable placeholder="搜索资产值、名称、系统或负责人" @keyup.enter="resetAndLoadAssets" @clear="resetAndLoadAssets" />
+        <el-select v-model="typeFilter" clearable placeholder="全部类型" @change="resetAndLoadAssets" @clear="resetAndLoadAssets">
+          <el-option v-for="(label, value) in typeLabels" :key="value" :label="label" :value="value" />
+        </el-select>
+        <el-select v-model="statusFilter" clearable placeholder="全部状态" @change="resetAndLoadAssets" @clear="resetAndLoadAssets">
+          <el-option v-for="(label, value) in statusLabels" :key="value" :label="label" :value="value" />
+        </el-select>
+        <el-select v-if="auth.isGroupAdmin" v-model="organizationFilter" clearable filterable placeholder="全部组织" @change="resetAndLoadAssets" @clear="resetAndLoadAssets">
+          <el-option v-for="item in enabledOrganizations" :key="item.id" :label="`${item.name}（${item.code}）`" :value="item.id" />
+        </el-select>
+        <el-button @click="resetAndLoadAssets">查询</el-button>
+        <span class="asset-filter-count">共 {{ total }} 条</span>
+      </div>
+      <SavedFilterViews ref="savedFilterViews" page-key="assets" :current-filters="currentAssetFilters" @apply="applySavedAssetFilters" />
     </div>
 
     <div class="panel data-table-panel" v-loading="loading">

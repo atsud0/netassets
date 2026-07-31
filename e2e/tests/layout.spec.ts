@@ -287,3 +287,37 @@ test('管理页面在常用窄内容宽度下不出现整体横向溢出，安�
   expect(actionLayout.hasWrappedButton).toBe(true)
   expect(actionLayout.wrappedRight).toBeCloseTo(actionLayout.groupRight, 0)
 })
+
+test('网络资产筛选结果与查询控件同排，保存视图操作使用统一间距', async ({ page }) => {
+  test.skip(!adminPassword, 'E2E_PASSWORD/BOOTSTRAP_ADMIN_PASSWORD 未配置')
+
+  await page.setViewportSize({ width: 1280, height: 900 })
+  await page.goto('/assets')
+  await login(page, adminUsername, adminPassword!)
+  await expect(page.getByRole('heading', { name: '网络资产', exact: true })).toBeVisible()
+
+  const layout = await page.evaluate(() => {
+    const controls = document.querySelector<HTMLElement>('.network-asset-filter-controls')
+    const count = controls?.querySelector<HTMLElement>('.asset-filter-count')
+    const queryButton = Array.from(controls?.querySelectorAll<HTMLElement>('.el-button') ?? []).find(button => button.textContent?.trim() === '查询')
+    const savedViews = document.querySelector<HTMLElement>('.network-asset-filter-panel .saved-filter-views')
+    const savedItems = savedViews
+      ? Array.from(savedViews.children).filter((item): item is HTMLElement => item instanceof HTMLElement && (item.classList.contains('el-select') || item.classList.contains('el-button')))
+      : []
+    if (!controls || !count || !queryButton || !savedViews || savedItems.length < 4) throw new Error('网络资产筛选布局节点不存在')
+    const controlsRect = controls.getBoundingClientRect()
+    const countRect = count.getBoundingClientRect()
+    const queryRect = queryButton.getBoundingClientRect()
+    const savedRect = savedViews.getBoundingClientRect()
+    const itemRects = savedItems.map(item => item.getBoundingClientRect())
+    return {
+      countCenterOffset: Math.abs((countRect.top + countRect.bottom) / 2 - (queryRect.top + queryRect.bottom) / 2),
+      savedRowGap: savedRect.top - controlsRect.bottom,
+      savedItemGaps: itemRects.slice(1).map((rect, index) => rect.left - itemRects[index].right),
+    }
+  })
+
+  expect(layout.countCenterOffset).toBeLessThanOrEqual(1)
+  expect(layout.savedRowGap).toBe(12)
+  expect(layout.savedItemGaps.every(gap => Math.abs(gap - 8) <= 1)).toBe(true)
+})

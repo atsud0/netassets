@@ -167,6 +167,7 @@ defineExpose({ initialize, loadViews })
 
 <style scoped>
 .saved-filter-views { display:flex; align-items:center; gap:8px; flex-wrap:wrap; }
+.saved-filter-views > .el-button { margin-left:0; }
 .saved-view-select { width:190px; }
 .default-tag { float:right; margin-left:12px; }
 .default-help { margin-top:7px; color:var(--muted); font-size:12px; line-height:1.55; }
