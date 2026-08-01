@@ -116,7 +116,7 @@ test('集团创建子公司账号，子公司隔离登记业务系统和网络�
   for (const [name, code] of [[shanghaiOffice, '10.20.0.0/16'], [shenzhenOffice, '10.30.0.0/16']]) {
     await areaManagement.getByRole('button', { name: '新增网络区域', exact: true }).click()
     dialog = page.getByRole('dialog', { name: '新增网络区域' })
-    await selectFormOption(page, dialog, '所属组织', `${organizationName}（${organizationCode}）`)
+    await selectFormOption(page, dialog, '所属组织', organizationName)
     await dialog.getByPlaceholder('如：上海办事处、生产云 VPC').fill(name)
     await dialog.getByPlaceholder('如：SH-OFFICE、10.20.0.0/16').fill(code)
     await dialog.getByRole('button', { name: '保存', exact: true }).click()
@@ -130,7 +130,7 @@ test('集团创建子公司账号，子公司隔离登记业务系统和网络�
   await page.getByRole('button', { name: '创建任务', exact: true }).click()
   dialog = page.getByRole('dialog', { name: '创建填报任务' })
   await dialog.getByPlaceholder('如：2026 年第三季度网络资产填报').fill(inventoryTaskName)
-  await selectFormOption(page, dialog, '填报组织', `${organizationName}（${organizationCode}）`)
+  await selectFormOption(page, dialog, '填报组织', organizationName)
   const publicScope = dialog.locator('.el-radio-button').filter({ hasText: '仅公网资产' })
   await publicScope.click()
   await expect(publicScope.locator('input')).toBeChecked()
@@ -157,7 +157,7 @@ test('集团创建子公司账号，子公司隔离登记业务系统和网络�
     await dialog.getByRole('button', { name: '新增任职组织', exact: true }).click()
   }
   await dialog.locator('.appointment-topline .el-select').first().click()
-  await page.locator('.el-select-dropdown:visible').getByText(`${organizationName}（${organizationCode}）`, { exact: true }).first().click()
+  await page.locator('.el-select-dropdown:visible').getByText(organizationName, { exact: true }).first().click()
   await dialog.locator('.assignment-row .el-select').first().click()
   await page.locator('.el-select-dropdown:visible').getByText('子公司管理员', { exact: true }).first().click()
   await dialog.locator('.el-form-item').filter({ hasText: '用户名' }).locator('input').fill(subsidiaryUsername)
@@ -224,7 +224,7 @@ test('集团创建子公司账号，子公司隔离登记业务系统和网络�
 
   await page.getByRole('button', { name: '组织架构', exact: true }).click()
   await expect(page.getByRole('cell', { name: organizationName }).getByText(organizationName, { exact: true })).toBeVisible()
-  await expect(page.locator('.organization-table-panel .el-table__body-wrapper tbody tr')).toHaveCount(1)
+  await expect(page.locator('.organization-tree-panel .el-table__body-wrapper tbody tr')).toHaveCount(1)
 
   await page.getByRole('button', { name: '业务系统' }).click()
   await page.getByRole('button', { name: '新增业务系统' }).click()

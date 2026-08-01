@@ -329,6 +329,26 @@ test('列表操作按钮保持统一高度、基线和间距', async ({ page }) 
   await page.goto('/assets')
   await login(page, adminUsername, adminPassword!)
 
+  // 新数据库可能只有集团根节点，先补一个空子组织，确保组织操作列存在多个按钮可供几何校验。
+  await page.evaluate(async (suffix) => {
+    const treeResponse = await fetch('/api/v1/organizations/tree')
+    if (!treeResponse.ok) throw new Error(`读取组织树失败：${treeResponse.status}`)
+    const tree = await treeResponse.json() as { items: Array<{ id: string; type: string; children?: unknown[] }> }
+    const root = tree.items.find(item => item.type === 'group')
+    if (!root) throw new Error('未找到集团根组织')
+    const response = await fetch('/api/v1/organizations', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        parent_id: root.id,
+        code: `LAYOUT_${suffix}`,
+        name: `布局检查子公司_${suffix}`,
+        type: 'subsidiary',
+      }),
+    })
+    if (!response.ok && response.status !== 409) throw new Error(`创建布局检查组织失败：${response.status}`)
+  }, Date.now())
+
   const routes = [
     '/assets', '/systems', '/asset-candidates', '/data-governance', '/data-quality-issues',
     '/inventory-tasks', '/security-test-batches', '/security-work-orders', '/organizations',
@@ -416,11 +436,12 @@ test('组织名称与编码独立展示且集团管理员可编辑已有组织',
   await page.setViewportSize({ width: 1440, height: 950 })
   await page.goto('/organizations')
   await login(page, adminUsername, adminPassword!)
-  await expect(page.getByRole('heading', { name: '组织机构', exact: true })).toBeVisible()
+  await expect(page.getByRole('heading', { name: '组织架构', exact: true })).toBeVisible()
 
-  const table = page.locator('.organization-table-panel .el-table')
+  const table = page.locator('.organization-tree-panel .el-table')
   const headerLabels = (await table.locator('.el-table__header-wrapper').first().locator('th .cell').allTextContents()).map(label => label.trim())
-  expect(headerLabels).toEqual(expect.arrayContaining(['组织名称', '组织编码', '上级组织', '操作']))
+  expect(headerLabels).toEqual(expect.arrayContaining(['组织名称', '组织编码', '类型', '状态', '操作']))
+  expect(headerLabels).not.toContain('上级组织')
 
   const rows = table.locator('.el-table__body-wrapper tbody tr')
   let editableRow: Locator | undefined
@@ -446,11 +467,10 @@ test('组织名称与编码独立展示且集团管理员可编辑已有组织',
     await expect(editableRow).toBeVisible()
   }
 
-  await editableRow.getByRole('button', { name: '编辑基本信息', exact: true }).click()
+  await editableRow.getByRole('button', { name: '编辑信息', exact: true }).click()
   const dialog = page.getByRole('dialog', { name: '编辑子公司基本信息' })
   await expect(dialog).toBeVisible()
-  await expect(dialog.getByLabel('子公司名称')).not.toHaveValue('')
-  await expect(dialog.getByText('组织编码、上级组织和组织类型属于稳定的组织结构标识')).toBeVisible()
+  await expect(dialog.getByLabel('组织名称')).not.toHaveValue('')
   const updatedContact = `e2e-${Date.now()}@example.test`
   await dialog.getByLabel('联系方式').fill(updatedContact)
   await dialog.getByRole('button', { name: '保存基本信息', exact: true }).click()
