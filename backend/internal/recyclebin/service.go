@@ -51,7 +51,7 @@ func (s *Service) Search(ctx context.Context, principal auth.Principal, query pa
 		return pagination.Result[Item]{}, ErrForbidden
 	}
 	resourceType = strings.TrimSpace(resourceType)
-	if resourceType != "" && resourceType != "asset" && resourceType != "business_system" {
+	if resourceType != "" && resourceType != "asset" && resourceType != "business_system" && resourceType != "organization" {
 		return pagination.Result[Item]{}, ErrInvalid
 	}
 
@@ -72,6 +72,14 @@ func (s *Service) Search(ctx context.Context, principal auth.Principal, query pa
 			FROM business_systems bs
 			JOIN organizations o ON o.id = bs.owner_organization_id
 			WHERE bs.deleted_at IS NOT NULL
+			UNION ALL
+			SELECT deleted.id::text AS id, 'organization'::text AS resource_type,
+			       deleted.organization_name AS display_name,
+			       deleted.organization_code || ' · ' || deleted.organization_type AS secondary_text,
+			       deleted.id::text AS organization_id, deleted.organization_code, deleted.organization_name,
+			       deleted.status, deleted.deleted_at
+			FROM organizations deleted
+			WHERE deleted.deleted_at IS NOT NULL
 		)
 		SELECT recycle.*, count(*) OVER ()
 		FROM recycle
@@ -102,6 +110,8 @@ func (s *Service) Search(ctx context.Context, principal auth.Principal, query pa
                 SELECT 'asset'::text AS resource_type FROM assets WHERE deleted_at IS NOT NULL
                 UNION ALL
                 SELECT 'business_system'::text AS resource_type FROM business_systems WHERE deleted_at IS NOT NULL
+                UNION ALL
+                SELECT 'organization'::text AS resource_type FROM organizations WHERE deleted_at IS NOT NULL
             )
             SELECT count(*) FROM recycle
             WHERE ($1::text = '' OR resource_type = $1::text)
@@ -272,6 +282,72 @@ func (s *Service) RestoreBusinessSystem(ctx context.Context, principal auth.Prin
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return fmt.Errorf("commit business system restore: %w", err)
+	}
+	return nil
+}
+
+// RestoreOrganization returns a soft-deleted empty organization to the organization tree in a
+// disabled state. The administrator must explicitly enable it after reviewing its parent relation.
+func (s *Service) RestoreOrganization(ctx context.Context, principal auth.Principal, organizationID, requestID, ipAddress string) error {
+	if !principal.HasRole("group_admin") {
+		return ErrForbidden
+	}
+	organizationID = strings.TrimSpace(organizationID)
+	if !validUUID(organizationID) {
+		return ErrInvalid
+	}
+
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("begin organization restore: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	var parentID *string
+	var organizationCode, organizationName, organizationType string
+	err = tx.QueryRow(ctx, `
+		SELECT parent_id::text,organization_code,organization_name,organization_type
+		FROM organizations
+		WHERE id=$1::uuid AND deleted_at IS NOT NULL
+		FOR UPDATE
+	`, organizationID).Scan(&parentID, &organizationCode, &organizationName, &organizationType)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return ErrNotFound
+	}
+	if err != nil {
+		return fmt.Errorf("load deleted organization: %w", err)
+	}
+	if organizationType == "group" || parentID == nil {
+		return ErrConflict
+	}
+	var parentExists bool
+	if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM organizations WHERE id=$1::uuid AND deleted_at IS NULL)`, *parentID).Scan(&parentExists); err != nil {
+		return fmt.Errorf("check organization restore parent: %w", err)
+	}
+	if !parentExists {
+		return ErrConflict
+	}
+	command, err := tx.Exec(ctx, `
+		UPDATE organizations
+		SET deleted_at=NULL,deleted_by=NULL,status='disabled',updated_at=now()
+		WHERE id=$1::uuid AND deleted_at IS NOT NULL
+	`, organizationID)
+	if err != nil {
+		return fmt.Errorf("restore organization: %w", err)
+	}
+	if command.RowsAffected() == 0 {
+		return ErrNotFound
+	}
+	if _, err := tx.Exec(ctx, `
+		INSERT INTO audit_logs (user_id,organization_id,action,resource_type,resource_id,summary,details,request_ip,request_id)
+		VALUES ($1::uuid,$2::uuid,'organization.restore','organization',$2,'从回收站恢复组织机构',
+		        jsonb_build_object('organization_code',$3::text,'organization_name',$4::text,'restored_status','disabled'),
+		        NULLIF($5,'')::inet,NULLIF($6,''))
+	`, principal.UserID, organizationID, organizationCode, organizationName, ipAddress, requestID); err != nil {
+		return fmt.Errorf("write organization restore audit: %w", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("commit organization restore: %w", err)
 	}
 	return nil
 }

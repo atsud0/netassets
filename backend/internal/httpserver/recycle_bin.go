@@ -23,7 +23,7 @@ func registerRecycleBinRoutes(api *gin.RouterGroup, requireAuth gin.HandlerFunc,
 		case errors.Is(err, recyclebin.ErrForbidden):
 			writeAPIError(c, http.StatusForbidden, "forbidden", "仅集团管理员可查看回收站")
 		case errors.Is(err, recyclebin.ErrInvalid):
-			writeAPIError(c, http.StatusBadRequest, "invalid_query", "资源类型仅支持 asset 或 business_system")
+			writeAPIError(c, http.StatusBadRequest, "invalid_query", "资源类型仅支持 asset、business_system 或 organization")
 		case err != nil:
 			logger.Error("list recycle bin", "error", err, "request_id", c.GetString("request_id"))
 			writeAPIError(c, http.StatusInternalServerError, "internal_error", "读取回收站失败")
@@ -39,6 +39,10 @@ func registerRecycleBinRoutes(api *gin.RouterGroup, requireAuth gin.HandlerFunc,
 	group.POST("/business-systems/:id/restore", func(c *gin.Context) {
 		err := service.RestoreBusinessSystem(c.Request.Context(), mustPrincipal(c), c.Param("id"), c.GetString("request_id"), c.ClientIP())
 		handleRecycleBinRestoreError(c, err, logger, "业务系统")
+	})
+	group.POST("/organizations/:id/restore", func(c *gin.Context) {
+		err := service.RestoreOrganization(c.Request.Context(), mustPrincipal(c), c.Param("id"), c.GetString("request_id"), c.ClientIP())
+		handleRecycleBinRestoreError(c, err, logger, "组织机构")
 	})
 }
 

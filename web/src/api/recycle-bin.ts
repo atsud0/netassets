@@ -1,6 +1,6 @@
 import { apiClient } from './client'
 
-export type RecycleBinResourceType = 'asset' | 'business_system'
+export type RecycleBinResourceType = 'asset' | 'business_system' | 'organization'
 
 export interface RecycleBinItem {
   id: string
@@ -31,6 +31,6 @@ export async function listRecycleBin(params: {
 }
 
 export async function restoreRecycleBinItem(item: RecycleBinItem) {
-  const resourcePath = item.resource_type === 'asset' ? 'assets' : 'business-systems'
+  const resourcePath = item.resource_type === 'asset' ? 'assets' : item.resource_type === 'business_system' ? 'business-systems' : 'organizations'
   await apiClient.post(`/recycle-bin/${resourcePath}/${item.id}/restore`)
 }

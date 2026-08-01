@@ -21,19 +21,24 @@ const assetStatusLabels: Record<string, string> = {
 const systemStatusLabels: Record<string, string> = {
   planning: '规划中', running: '运行中', suspended: '已暂停', offline: '已下线', archived: '已归档',
 }
+const organizationTypeLabels: Record<string, string> = { group: '集团', subsidiary: '子公司', department: '部门', other: '其他' }
 
 function formatTime(value: string) {
   return new Date(value).toLocaleString('zh-CN', { hour12: false })
 }
 
 function statusLabel(item: RecycleBinItem) {
-  return item.resource_type === 'asset'
-    ? (assetStatusLabels[item.status] ?? item.status)
-    : (systemStatusLabels[item.status] ?? item.status)
+  if (item.resource_type === 'asset') return assetStatusLabels[item.status] ?? item.status
+  if (item.resource_type === 'business_system') return systemStatusLabels[item.status] ?? item.status
+  return item.status === 'disabled' ? '停用' : item.status
 }
 
 function secondaryLabel(item: RecycleBinItem) {
   if (item.resource_type === 'business_system') return item.secondary_text
+  if (item.resource_type === 'organization') {
+    const [code, type] = item.secondary_text.split(' · ')
+    return `${code} · ${organizationTypeLabels[type] ?? type}`
+  }
   const [assetType, ...rest] = item.secondary_text.split(' · ')
   const value = rest.join(' · ')
   return `${assetTypeLabels[assetType] ?? assetType} · ${value}`
@@ -83,12 +88,15 @@ function handlePageSizeChange(value: number) {
 
 async function restore(item: RecycleBinItem) {
   const isSystem = item.resource_type === 'business_system'
+  const isOrganization = item.resource_type === 'organization'
   try {
     await ElMessageBox.confirm(
       isSystem
         ? `确定恢复业务系统“${item.display_name}”吗？恢复后系统将保持“已归档”状态，请确认后再手动启用。`
-        : `确定恢复网络资产“${item.display_name}”吗？将恢复其原有归属、关联关系和网络区域。`,
-      `恢复${isSystem ? '业务系统' : '网络资产'}`,
+        : isOrganization
+          ? `确定恢复组织“${item.display_name}”吗？恢复后组织将保持停用状态，需在组织架构中确认层级后再启用。`
+          : `确定恢复网络资产“${item.display_name}”吗？将恢复其原有归属、关联关系和网络区域。`,
+      `恢复${isSystem ? '业务系统' : isOrganization ? '组织机构' : '网络资产'}`,
       { type: 'warning', confirmButtonText: '确认恢复', cancelButtonText: '取消' },
     )
   } catch {
@@ -98,7 +106,7 @@ async function restore(item: RecycleBinItem) {
   restoringID.value = item.id
   try {
     await restoreRecycleBinItem(item)
-    ElMessage.success(isSystem ? '业务系统已恢复为归档状态' : '网络资产已恢复')
+    ElMessage.success(isSystem ? '业务系统已恢复为归档状态' : isOrganization ? '组织已恢复为停用状态' : '网络资产已恢复')
     await refreshAfterMutation()
   } catch (error) {
     ElMessage.error(getAPIErrorMessage(error, '恢复失败，请稍后重试'))
@@ -116,7 +124,7 @@ onMounted(load)
       <div>
         <p class="eyebrow">RECYCLE BIN</p>
         <h1>回收站</h1>
-        <p>仅展示已软删除的网络资产和业务系统。恢复会保留原所属组织与关联信息；业务系统恢复后始终保持归档状态，需人工确认后再启用。</p>
+        <p>展示已软删除的网络资产、业务系统和空组织。业务系统恢复后保持归档状态，组织恢复后保持停用状态，均需人工确认后再启用。</p>
       </div>
       <div class="page-heading-actions">
         <el-button :loading="loading" @click="load">刷新</el-button>
@@ -125,7 +133,7 @@ onMounted(load)
 
     <div class="panel recycle-bin-notice">
       <strong>集团治理提示</strong>
-      <span>恢复前会自动检查是否已有相同的在用资产或系统编码，避免重复台账；若存在冲突，请先处理重复数据。</span>
+      <span>恢复前会检查资源冲突和组织上级关系；组织恢复后不会自动启用，避免未经确认重新进入业务范围。</span>
     </div>
 
     <div class="panel data-table-panel" v-loading="loading">
@@ -135,6 +143,9 @@ onMounted(load)
         </el-tab-pane>
         <el-tab-pane name="business_system">
           <template #label>业务系统</template>
+        </el-tab-pane>
+        <el-tab-pane name="organization">
+          <template #label>组织机构</template>
         </el-tab-pane>
       </el-tabs>
 
@@ -147,7 +158,7 @@ onMounted(load)
             </div>
           </template>
         </el-table-column>
-        <el-table-column label="所属组织" min-width="180">
+        <el-table-column :label="activeTab === 'organization' ? '组织名称' : '所属组织'" min-width="180">
           <template #default="scope">
             {{ scope.row.organization_name }}
           </template>
