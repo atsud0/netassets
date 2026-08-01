@@ -91,12 +91,15 @@ func NewService(pool *pgxpool.Pool) *Service { return &Service{pool: pool} }
 const scopeCTE = `
 	WITH RECURSIVE descendant_roots(id) AS (
 		SELECT ur.organization_id FROM user_roles ur
+		JOIN organizations root ON root.id=ur.organization_id AND root.status='enabled' AND root.deleted_at IS NULL
 		WHERE ur.user_id = $1::uuid AND ur.organization_id IS NOT NULL AND ur.data_scope = 'organization_and_descendants'
 	), descendants(id) AS (
 		SELECT id FROM descendant_roots
 		UNION SELECT child.id FROM organizations child JOIN descendants parent ON child.parent_id = parent.id
+	WHERE child.status='enabled' AND child.deleted_at IS NULL
 	), accessible(id) AS (
 		SELECT ur.organization_id FROM user_roles ur
+		JOIN organizations direct ON direct.id=ur.organization_id AND direct.status='enabled' AND direct.deleted_at IS NULL
 		WHERE ur.user_id = $1::uuid AND ur.organization_id IS NOT NULL
 		  AND ur.data_scope IN ('organization', 'organization_and_descendants')
 		UNION SELECT id FROM descendants

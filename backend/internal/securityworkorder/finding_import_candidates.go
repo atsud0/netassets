@@ -107,7 +107,7 @@ func (s *Service) loadFindingImportScopes(ctx context.Context, batchID string) (
 		       COALESCE(scope.business_system_name_snapshot, '')
 		FROM security_test_scope_assets scope
 		JOIN assets a ON a.id=scope.asset_id AND a.deleted_at IS NULL
-		JOIN organizations o ON o.id=scope.organization_id AND o.status='enabled'
+		JOIN organizations o ON o.id=scope.organization_id AND o.status='enabled' AND o.deleted_at IS NULL
 		JOIN asset_organizations ao ON ao.asset_id=a.id AND ao.organization_id=scope.organization_id
 		WHERE scope.batch_id::text=$1
 		ORDER BY scope.created_at`, batchID)
@@ -415,7 +415,7 @@ func (s *Service) ListFindingImportScopeOptions(ctx context.Context, principal a
 		FROM security_finding_import_candidates c
 		JOIN security_test_scope_assets scope ON scope.batch_id=c.test_batch_id
 		JOIN assets a ON a.id=scope.asset_id AND a.deleted_at IS NULL
-		JOIN organizations o ON o.id=scope.organization_id AND o.status='enabled'
+		JOIN organizations o ON o.id=scope.organization_id AND o.status='enabled' AND o.deleted_at IS NULL
 		JOIN asset_organizations ao ON ao.asset_id=a.id AND ao.organization_id=scope.organization_id
 		WHERE c.id=$1::uuid
 		ORDER BY scope.id=c.suggested_scope_asset_id DESC, scope.organization_name_snapshot,
@@ -487,7 +487,7 @@ func (s *Service) LinkFindingImportCandidate(ctx context.Context, principal auth
 		       COALESCE(scope.business_system_name_snapshot,'')
 		FROM security_test_scope_assets scope
 		JOIN assets a ON a.id=scope.asset_id AND a.deleted_at IS NULL
-		JOIN organizations o ON o.id=scope.organization_id AND o.status='enabled'
+		JOIN organizations o ON o.id=scope.organization_id AND o.status='enabled' AND o.deleted_at IS NULL
 		JOIN asset_organizations ao ON ao.asset_id=a.id AND ao.organization_id=scope.organization_id
 		WHERE scope.id=$1::uuid AND scope.batch_id=$2::uuid`, input.ScopeAssetID, candidate.TestBatchID).Scan(
 		&scope.ScopeAssetID, &scope.AssetID, &scope.OrganizationID, &scope.BusinessSystemID,

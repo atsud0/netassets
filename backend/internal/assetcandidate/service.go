@@ -249,7 +249,7 @@ func (s *Service) Create(ctx context.Context, principal auth.Principal, in Creat
 	}
 	defer tx.Rollback(ctx)
 	var enabled bool
-	if err := tx.QueryRow(ctx, `SELECT status='enabled' FROM organizations WHERE id=$1::uuid`, in.OrganizationID).Scan(&enabled); errors.Is(err, pgx.ErrNoRows) {
+	if err := tx.QueryRow(ctx, `SELECT status='enabled' FROM organizations WHERE id=$1::uuid AND deleted_at IS NULL`, in.OrganizationID).Scan(&enabled); errors.Is(err, pgx.ErrNoRows) {
 		return Candidate{}, ErrNotFound
 	} else if err != nil {
 		return Candidate{}, err

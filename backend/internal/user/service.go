@@ -251,17 +251,17 @@ func (s *Service) SearchManageableOrganizations(ctx context.Context, principal a
 	}
 	rows, err := s.pool.Query(ctx, `
 		WITH RECURSIVE descendant_roots(id) AS (
-			SELECT ur.organization_id FROM user_roles ur JOIN roles r ON r.id=ur.role_id AND r.status='enabled' JOIN role_permissions rp ON rp.role_id=r.id AND rp.permission_key='user.manage'
+			SELECT ur.organization_id FROM user_roles ur JOIN roles r ON r.id=ur.role_id AND r.status='enabled' JOIN role_permissions rp ON rp.role_id=r.id AND rp.permission_key='user.manage' JOIN organizations root ON root.id=ur.organization_id AND root.status='enabled' AND root.deleted_at IS NULL
 			WHERE ur.user_id=$1::uuid AND ur.organization_id IS NOT NULL AND ur.data_scope='organization_and_descendants'
 		), descendants(id) AS (
-			SELECT id FROM descendant_roots UNION SELECT child.id FROM organizations child JOIN descendants parent ON child.parent_id=parent.id
+			SELECT id FROM descendant_roots UNION SELECT child.id FROM organizations child JOIN descendants parent ON child.parent_id=parent.id WHERE child.status='enabled' AND child.deleted_at IS NULL
 		), accessible(id) AS (
-			SELECT ur.organization_id FROM user_roles ur JOIN roles r ON r.id=ur.role_id AND r.status='enabled' JOIN role_permissions rp ON rp.role_id=r.id AND rp.permission_key='user.manage'
+			SELECT ur.organization_id FROM user_roles ur JOIN roles r ON r.id=ur.role_id AND r.status='enabled' JOIN role_permissions rp ON rp.role_id=r.id AND rp.permission_key='user.manage' JOIN organizations direct ON direct.id=ur.organization_id AND direct.status='enabled' AND direct.deleted_at IS NULL
 			WHERE ur.user_id=$1::uuid AND ur.organization_id IS NOT NULL AND ur.data_scope IN ('organization','organization_and_descendants')
 			UNION SELECT id FROM descendants
 		)
 		SELECT o.id::text,o.organization_code,o.organization_name,o.organization_type,o.status,count(*) OVER ()
-		FROM organizations o WHERE o.status='enabled' AND o.organization_type<>'group' AND ($2::boolean OR o.id IN (SELECT id FROM accessible))
+		FROM organizations o WHERE o.status='enabled' AND o.deleted_at IS NULL AND o.organization_type<>'group' AND ($2::boolean OR o.id IN (SELECT id FROM accessible))
 		ORDER BY o.organization_code LIMIT $3 OFFSET $4`, principal.UserID, principal.HasRole("group_admin"), page.PageSize, page.Offset())
 	if err != nil {
 		return pagination.Result[Organization]{}, fmt.Errorf("search manageable organizations: %w", err)
@@ -282,17 +282,17 @@ func (s *Service) SearchManageableOrganizations(ctx context.Context, principal a
 	if pagination.NeedsTotalFallback(len(items), page) {
 		if err := s.pool.QueryRow(ctx, `
             WITH RECURSIVE descendant_roots(id) AS (
-                SELECT ur.organization_id FROM user_roles ur JOIN roles r ON r.id=ur.role_id AND r.status='enabled' JOIN role_permissions rp ON rp.role_id=r.id AND rp.permission_key='user.manage'
+                SELECT ur.organization_id FROM user_roles ur JOIN roles r ON r.id=ur.role_id AND r.status='enabled' JOIN role_permissions rp ON rp.role_id=r.id AND rp.permission_key='user.manage' JOIN organizations root ON root.id=ur.organization_id AND root.status='enabled' AND root.deleted_at IS NULL
                 WHERE ur.user_id=$1::uuid AND ur.organization_id IS NOT NULL AND ur.data_scope='organization_and_descendants'
             ), descendants(id) AS (
-                SELECT id FROM descendant_roots UNION SELECT child.id FROM organizations child JOIN descendants parent ON child.parent_id=parent.id
+                SELECT id FROM descendant_roots UNION SELECT child.id FROM organizations child JOIN descendants parent ON child.parent_id=parent.id WHERE child.status='enabled' AND child.deleted_at IS NULL
             ), accessible(id) AS (
-                SELECT ur.organization_id FROM user_roles ur JOIN roles r ON r.id=ur.role_id AND r.status='enabled' JOIN role_permissions rp ON rp.role_id=r.id AND rp.permission_key='user.manage'
+                SELECT ur.organization_id FROM user_roles ur JOIN roles r ON r.id=ur.role_id AND r.status='enabled' JOIN role_permissions rp ON rp.role_id=r.id AND rp.permission_key='user.manage' JOIN organizations direct ON direct.id=ur.organization_id AND direct.status='enabled' AND direct.deleted_at IS NULL
                 WHERE ur.user_id=$1::uuid AND ur.organization_id IS NOT NULL AND ur.data_scope IN ('organization','organization_and_descendants')
                 UNION SELECT id FROM descendants
             )
             SELECT count(*) FROM organizations o
-            WHERE o.status='enabled' AND o.organization_type<>'group' AND ($2::boolean OR o.id IN (SELECT id FROM accessible))
+            WHERE o.status='enabled' AND o.deleted_at IS NULL AND o.organization_type<>'group' AND ($2::boolean OR o.id IN (SELECT id FROM accessible))
         `, principal.UserID, principal.HasRole("group_admin")).Scan(&total); err != nil {
 			return pagination.Result[Organization]{}, fmt.Errorf("count manageable organizations: %w", err)
 		}
@@ -778,7 +778,7 @@ func (s *Service) ensureGroupAdminRetained(ctx context.Context, tx pgx.Tx, userI
 func (s *Service) validateAppointments(ctx context.Context, tx pgx.Tx, appointments []AppointmentInput) error {
 	for _, appointment := range appointments {
 		var organizationType, status string
-		if err := tx.QueryRow(ctx, `SELECT organization_type,status FROM organizations WHERE id=$1::uuid`, appointment.OrganizationID).Scan(&organizationType, &status); errors.Is(err, pgx.ErrNoRows) {
+		if err := tx.QueryRow(ctx, `SELECT organization_type,status FROM organizations WHERE id=$1::uuid AND deleted_at IS NULL`, appointment.OrganizationID).Scan(&organizationType, &status); errors.Is(err, pgx.ErrNoRows) {
 			return ErrNotFound
 		} else if err != nil {
 			return fmt.Errorf("load appointment organization: %w", err)
@@ -827,7 +827,7 @@ func replaceAppointments(ctx context.Context, tx pgx.Tx, userID string, appointm
 }
 
 func (s *Service) loadUserRelations(ctx context.Context, item *User) error {
-	rows, err := s.pool.Query(ctx, `SELECT o.id::text,o.organization_code,o.organization_name,o.organization_type,uo.is_primary FROM user_organizations uo JOIN organizations o ON o.id=uo.organization_id WHERE uo.user_id=$1::uuid ORDER BY uo.is_primary DESC,o.organization_code`, item.ID)
+	rows, err := s.pool.Query(ctx, `SELECT o.id::text,o.organization_code,o.organization_name,o.organization_type,uo.is_primary FROM user_organizations uo JOIN organizations o ON o.id=uo.organization_id AND o.deleted_at IS NULL WHERE uo.user_id=$1::uuid ORDER BY uo.is_primary DESC,o.organization_code`, item.ID)
 	if err != nil {
 		return fmt.Errorf("load user appointments: %w", err)
 	}

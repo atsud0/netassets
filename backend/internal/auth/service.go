@@ -315,7 +315,7 @@ func (s *Service) SwitchOrganization(ctx context.Context, principal Principal, o
 		SELECT EXISTS (
 			SELECT 1 FROM user_organizations uo
 			JOIN organizations o ON o.id = uo.organization_id
-			WHERE uo.user_id = $1::uuid AND uo.organization_id = $2::uuid AND o.status = 'enabled'
+			WHERE uo.user_id = $1::uuid AND uo.organization_id = $2::uuid AND o.status = 'enabled' AND o.deleted_at IS NULL
 		)
 	`, principal.UserID, organizationID).Scan(&allowed); err != nil {
 		return Principal{}, fmt.Errorf("verify working organization: %w", err)
@@ -528,7 +528,7 @@ func (s *Service) loadOrganizations(ctx context.Context, userID string) ([]Organ
 		SELECT o.id::text, o.organization_code, o.organization_name, o.organization_type, uo.is_primary
 		FROM user_organizations uo
 		JOIN organizations o ON o.id = uo.organization_id
-		WHERE uo.user_id = $1::uuid AND o.status = 'enabled'
+		WHERE uo.user_id = $1::uuid AND o.status = 'enabled' AND o.deleted_at IS NULL
 		ORDER BY uo.is_primary DESC, o.organization_code
 	`, userID)
 	if err != nil {

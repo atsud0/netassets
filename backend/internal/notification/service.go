@@ -74,6 +74,7 @@ const notificationCandidatesCTE = `
 WITH RECURSIVE descendant_roots(id) AS (
 	SELECT ur.organization_id
 	FROM user_roles ur
+	JOIN organizations root ON root.id=ur.organization_id AND root.status='enabled' AND root.deleted_at IS NULL
 	WHERE ur.user_id = $1::uuid
 	  AND ur.organization_id IS NOT NULL
 	  AND ur.data_scope = 'organization_and_descendants'
@@ -83,9 +84,11 @@ WITH RECURSIVE descendant_roots(id) AS (
 	SELECT child.id
 	FROM organizations child
 	JOIN descendants parent ON child.parent_id = parent.id
+WHERE child.status='enabled' AND child.deleted_at IS NULL
 ), accessible(id) AS (
 	SELECT ur.organization_id
 	FROM user_roles ur
+	JOIN organizations direct ON direct.id=ur.organization_id AND direct.status='enabled' AND direct.deleted_at IS NULL
 	WHERE ur.user_id = $1::uuid
 	  AND ur.organization_id IS NOT NULL
 	  AND ur.data_scope IN ('organization', 'organization_and_descendants')
@@ -95,31 +98,36 @@ WITH RECURSIVE descendant_roots(id) AS (
 	SELECT o.id
 	FROM organizations o
 	WHERE o.status = 'enabled'
+	  AND o.deleted_at IS NULL
 	  AND ($2::boolean OR o.id IN (SELECT id FROM accessible))
 ), quality_descendant_roots(id) AS (
 	SELECT ur.organization_id
 	FROM user_roles ur
 	JOIN roles r ON r.id=ur.role_id AND r.status='enabled'
 	JOIN role_permissions rp ON rp.role_id=r.id AND rp.permission_key='data_quality.manage'
+	JOIN organizations quality_root ON quality_root.id=ur.organization_id AND quality_root.status='enabled' AND quality_root.deleted_at IS NULL
 	WHERE ur.user_id=$1::uuid AND ur.organization_id IS NOT NULL AND ur.data_scope='organization_and_descendants'
 ), quality_descendants(id) AS (
 	SELECT id FROM quality_descendant_roots
 	UNION
 	SELECT child.id FROM organizations child JOIN quality_descendants parent ON child.parent_id=parent.id
+	WHERE child.status='enabled' AND child.deleted_at IS NULL
 ), quality_accessible(id) AS (
 	SELECT ur.organization_id
 	FROM user_roles ur
 	JOIN roles r ON r.id=ur.role_id AND r.status='enabled'
 	JOIN role_permissions rp ON rp.role_id=r.id AND rp.permission_key='data_quality.manage'
+	JOIN organizations quality_direct ON quality_direct.id=ur.organization_id AND quality_direct.status='enabled' AND quality_direct.deleted_at IS NULL
 	WHERE ur.user_id=$1::uuid AND ur.organization_id IS NOT NULL AND ur.data_scope IN ('organization','organization_and_descendants')
 	UNION SELECT id FROM quality_descendants
 ), quality_scoped_organizations(id) AS (
-	SELECT o.id FROM organizations o WHERE o.status='enabled' AND ($2::boolean OR o.id IN (SELECT id FROM quality_accessible))
+	SELECT o.id FROM organizations o WHERE o.status='enabled' AND o.deleted_at IS NULL AND ($2::boolean OR o.id IN (SELECT id FROM quality_accessible))
 ), event_permission_descendant_roots(permission_key,id) AS (
 	SELECT rp.permission_key, ur.organization_id
 	FROM user_roles ur
 	JOIN roles r ON r.id=ur.role_id AND r.status='enabled'
 	JOIN role_permissions rp ON rp.role_id=r.id
+	JOIN organizations event_root ON event_root.id=ur.organization_id AND event_root.status='enabled' AND event_root.deleted_at IS NULL
 	WHERE ur.user_id=$1::uuid AND ur.organization_id IS NOT NULL AND ur.data_scope='organization_and_descendants'
 ), event_permission_descendants(permission_key,id) AS (
 	SELECT permission_key,id FROM event_permission_descendant_roots
@@ -127,11 +135,13 @@ WITH RECURSIVE descendant_roots(id) AS (
 	SELECT parent.permission_key,child.id
 	FROM organizations child
 	JOIN event_permission_descendants parent ON child.parent_id=parent.id
+	WHERE child.status='enabled' AND child.deleted_at IS NULL
 ), event_permission_accessible(permission_key,id) AS (
 	SELECT rp.permission_key,ur.organization_id
 	FROM user_roles ur
 	JOIN roles r ON r.id=ur.role_id AND r.status='enabled'
 	JOIN role_permissions rp ON rp.role_id=r.id
+	JOIN organizations event_direct ON event_direct.id=ur.organization_id AND event_direct.status='enabled' AND event_direct.deleted_at IS NULL
 	WHERE ur.user_id=$1::uuid AND ur.organization_id IS NOT NULL AND ur.data_scope IN ('organization','organization_and_descendants')
 	UNION SELECT permission_key,id FROM event_permission_descendants
 ), notification_candidates AS (

@@ -220,7 +220,7 @@ func (s *Service) AuthenticateAPIToken(ctx context.Context, token string) (Princ
 		       t.id::text,t.organization_id::text
 		FROM api_tokens t
 		JOIN users u ON u.id=t.user_id
-		JOIN organizations o ON o.id=t.organization_id AND o.status='enabled'
+		JOIN organizations o ON o.id=t.organization_id AND o.status='enabled' AND o.deleted_at IS NULL
 		JOIN user_organizations uo ON uo.user_id=t.user_id AND uo.organization_id=t.organization_id
 		WHERE t.token_hash=$1 AND t.revoked_at IS NULL AND t.expires_at > now()
 		  AND u.deleted_at IS NULL AND u.status='enabled' AND u.must_change_password=false

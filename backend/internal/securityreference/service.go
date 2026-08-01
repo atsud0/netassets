@@ -149,7 +149,7 @@ func (s *Service) SearchOrganizations(ctx context.Context, principal auth.Princi
 	var total int
 	if err := s.pool.QueryRow(ctx, `
 		SELECT count(*) FROM organizations
-		WHERE status = 'enabled'
+		WHERE status = 'enabled' AND deleted_at IS NULL
 		  AND ($1 = '' OR concat_ws(' ', organization_code, organization_name, short_name) ILIKE '%' || $1 || '%')
 	`, keyword).Scan(&total); err != nil {
 		return pagination.Result[Organization]{}, fmt.Errorf("count security reference organizations: %w", err)
@@ -157,7 +157,7 @@ func (s *Service) SearchOrganizations(ctx context.Context, principal auth.Princi
 	rows, err := s.pool.Query(ctx, `
 		SELECT id::text, organization_code, organization_name, organization_type, status
 		FROM organizations
-		WHERE status = 'enabled'
+		WHERE status = 'enabled' AND deleted_at IS NULL
 		  AND ($1 = '' OR concat_ws(' ', organization_code, organization_name, short_name) ILIKE '%' || $1 || '%')
 		ORDER BY CASE WHEN organization_type = 'group' THEN 0 ELSE 1 END, organization_code
 		LIMIT $2 OFFSET $3
@@ -183,7 +183,7 @@ func (s *Service) SearchOrganizations(ctx context.Context, principal auth.Princi
 const assetReferenceFrom = `
 	FROM assets a
 	JOIN asset_organizations ao ON ao.asset_id = a.id AND ao.is_primary
-	JOIN organizations o ON o.id = ao.organization_id
+	JOIN organizations o ON o.id = ao.organization_id AND o.status = 'enabled' AND o.deleted_at IS NULL
 	LEFT JOIN asset_network_areas na ON na.id = a.network_area_id
 	LEFT JOIN LATERAL (
 		SELECT bs.id, bs.system_name
@@ -306,7 +306,7 @@ func (s *Service) SearchBusinessSystems(ctx context.Context, principal auth.Prin
 	keyword := strings.TrimSpace(filter.Keyword)
 	const where = `
 		FROM business_systems bs
-		JOIN organizations o ON o.id = bs.owner_organization_id
+		JOIN organizations o ON o.id = bs.owner_organization_id AND o.status = 'enabled' AND o.deleted_at IS NULL
 		WHERE bs.deleted_at IS NULL AND bs.system_status <> 'archived'
 		  AND ($1 = '' OR bs.owner_organization_id::text = $1)
 		  AND ($2 = '' OR concat_ws(' ', bs.system_code, bs.system_name, bs.short_name, o.organization_name) ILIKE '%' || $2 || '%')`
@@ -350,7 +350,7 @@ func (s *Service) SearchNetworkAreas(ctx context.Context, principal auth.Princip
 	const where = `
 		FROM asset_network_areas na
 		JOIN organizations o ON o.id = na.organization_id
-		WHERE na.status = 'enabled' AND o.status = 'enabled'
+		WHERE na.status = 'enabled' AND o.status = 'enabled' AND o.deleted_at IS NULL
 		  AND ($1 = '' OR na.organization_id::text = $1)
 		  AND ($2 = '' OR concat_ws(' ', na.area_code, na.area_name, o.organization_name) ILIKE '%' || $2 || '%')`
 	var total int

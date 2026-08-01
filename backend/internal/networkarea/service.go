@@ -71,15 +71,18 @@ func (s *Service) List(ctx context.Context, principal auth.Principal, organizati
             FROM user_roles ur
             JOIN roles r ON r.id = ur.role_id AND r.status = 'enabled'
             JOIN role_permissions rp ON rp.role_id = r.id AND rp.permission_key = 'asset.manage'
+            JOIN organizations root ON root.id=ur.organization_id AND root.status='enabled' AND root.deleted_at IS NULL
             WHERE ur.user_id = $1::uuid AND ur.organization_id IS NOT NULL AND ur.data_scope = 'organization_and_descendants'
         ), descendants(id) AS (
             SELECT id FROM descendant_roots
             UNION SELECT child.id FROM organizations child JOIN descendants parent ON child.parent_id = parent.id
+        WHERE child.status='enabled' AND child.deleted_at IS NULL
         ), accessible(id) AS (
             SELECT ur.organization_id
             FROM user_roles ur
             JOIN roles r ON r.id = ur.role_id AND r.status = 'enabled'
             JOIN role_permissions rp ON rp.role_id = r.id AND rp.permission_key = 'asset.manage'
+            JOIN organizations direct ON direct.id=ur.organization_id AND direct.status='enabled' AND direct.deleted_at IS NULL
             WHERE ur.user_id = $1::uuid AND ur.organization_id IS NOT NULL
               AND ur.data_scope IN ('organization', 'organization_and_descendants')
             UNION SELECT id FROM descendants
@@ -132,11 +135,14 @@ func (s *Service) Search(ctx context.Context, principal auth.Principal, organiza
 	rows, err := s.pool.Query(ctx, `
         WITH RECURSIVE descendant_roots(id) AS (
             SELECT ur.organization_id FROM user_roles ur JOIN roles r ON r.id = ur.role_id AND r.status = 'enabled' JOIN role_permissions rp ON rp.role_id = r.id AND rp.permission_key = 'asset.manage'
+            JOIN organizations root ON root.id=ur.organization_id AND root.status='enabled' AND root.deleted_at IS NULL
             WHERE ur.user_id = $1::uuid AND ur.organization_id IS NOT NULL AND ur.data_scope = 'organization_and_descendants'
         ), descendants(id) AS (
             SELECT id FROM descendant_roots UNION SELECT child.id FROM organizations child JOIN descendants parent ON child.parent_id = parent.id
+        WHERE child.status='enabled' AND child.deleted_at IS NULL
         ), accessible(id) AS (
             SELECT ur.organization_id FROM user_roles ur JOIN roles r ON r.id = ur.role_id AND r.status = 'enabled' JOIN role_permissions rp ON rp.role_id = r.id AND rp.permission_key = 'asset.manage'
+            JOIN organizations direct ON direct.id=ur.organization_id AND direct.status='enabled' AND direct.deleted_at IS NULL
             WHERE ur.user_id = $1::uuid AND ur.organization_id IS NOT NULL AND ur.data_scope IN ('organization', 'organization_and_descendants')
             UNION SELECT id FROM descendants
         )
@@ -168,11 +174,14 @@ func (s *Service) Search(ctx context.Context, principal auth.Principal, organiza
 		if err := s.pool.QueryRow(ctx, `
             WITH RECURSIVE descendant_roots(id) AS (
                 SELECT ur.organization_id FROM user_roles ur JOIN roles r ON r.id = ur.role_id AND r.status = 'enabled' JOIN role_permissions rp ON rp.role_id = r.id AND rp.permission_key = 'asset.manage'
+                JOIN organizations root ON root.id=ur.organization_id AND root.status='enabled' AND root.deleted_at IS NULL
                 WHERE ur.user_id = $1::uuid AND ur.organization_id IS NOT NULL AND ur.data_scope = 'organization_and_descendants'
             ), descendants(id) AS (
                 SELECT id FROM descendant_roots UNION SELECT child.id FROM organizations child JOIN descendants parent ON child.parent_id = parent.id
+            WHERE child.status='enabled' AND child.deleted_at IS NULL
             ), accessible(id) AS (
                 SELECT ur.organization_id FROM user_roles ur JOIN roles r ON r.id = ur.role_id AND r.status = 'enabled' JOIN role_permissions rp ON rp.role_id = r.id AND rp.permission_key = 'asset.manage'
+                JOIN organizations direct ON direct.id=ur.organization_id AND direct.status='enabled' AND direct.deleted_at IS NULL
                 WHERE ur.user_id = $1::uuid AND ur.organization_id IS NOT NULL AND ur.data_scope IN ('organization', 'organization_and_descendants')
                 UNION SELECT id FROM descendants
             )
@@ -202,7 +211,7 @@ func (s *Service) Create(ctx context.Context, principal auth.Principal, input In
 		return NetworkArea{}, ErrForbidden
 	}
 	var organizationCode, organizationName, organizationStatus string
-	if err := s.pool.QueryRow(ctx, `SELECT organization_code, organization_name, status FROM organizations WHERE id::text = $1`, input.OrganizationID).
+	if err := s.pool.QueryRow(ctx, `SELECT organization_code, organization_name, status FROM organizations WHERE id::text = $1 AND deleted_at IS NULL`, input.OrganizationID).
 		Scan(&organizationCode, &organizationName, &organizationStatus); errors.Is(err, pgx.ErrNoRows) {
 		return NetworkArea{}, ErrNotFound
 	} else if err != nil {

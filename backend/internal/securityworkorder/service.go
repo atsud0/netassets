@@ -881,7 +881,7 @@ func (s *Service) CreateWorkOrder(ctx context.Context, principal auth.Principal,
 		return WorkOrder{}, ErrInvalid
 	}
 	var organizationStatus, organizationType string
-	if err := s.pool.QueryRow(ctx, `SELECT status, organization_type FROM organizations WHERE id::text = $1`, input.AssigneeOrganizationID).Scan(&organizationStatus, &organizationType); errors.Is(err, pgx.ErrNoRows) {
+	if err := s.pool.QueryRow(ctx, `SELECT status, organization_type FROM organizations WHERE id::text = $1 AND deleted_at IS NULL`, input.AssigneeOrganizationID).Scan(&organizationStatus, &organizationType); errors.Is(err, pgx.ErrNoRows) {
 		return WorkOrder{}, ErrNotFound
 	} else if err != nil {
 		return WorkOrder{}, fmt.Errorf("load work order organization: %w", err)
@@ -1132,7 +1132,7 @@ func (s *Service) getFinding(ctx context.Context, id string) (Finding, error) {
 
 func (s *Service) validateReferences(ctx context.Context, organizationID, assetID, systemID string) error {
 	var valid bool
-	if err := s.pool.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM organizations WHERE id::text = $1 AND status = 'enabled' AND organization_type <> 'group')`, organizationID).Scan(&valid); err != nil {
+	if err := s.pool.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM organizations WHERE id::text = $1 AND status = 'enabled' AND deleted_at IS NULL AND organization_type <> 'group')`, organizationID).Scan(&valid); err != nil {
 		return fmt.Errorf("validate finding organization: %w", err)
 	}
 	if !valid {
@@ -1231,12 +1231,15 @@ func validateFindingsForWorkOrder(ctx context.Context, tx pgx.Tx, organizationID
 const accessibleCTE = `
 	WITH RECURSIVE descendant_roots(id) AS (
 		SELECT ur.organization_id FROM user_roles ur
+		JOIN organizations root ON root.id=ur.organization_id AND root.status='enabled' AND root.deleted_at IS NULL
 		WHERE ur.user_id = $1::uuid AND ur.organization_id IS NOT NULL AND ur.data_scope = 'organization_and_descendants'
 	), descendants(id) AS (
 		SELECT id FROM descendant_roots
 		UNION SELECT child.id FROM organizations child JOIN descendants parent ON child.parent_id = parent.id
+	WHERE child.status='enabled' AND child.deleted_at IS NULL
 	), accessible(id) AS (
 		SELECT ur.organization_id FROM user_roles ur
+		JOIN organizations direct ON direct.id=ur.organization_id AND direct.status='enabled' AND direct.deleted_at IS NULL
 		WHERE ur.user_id = $1::uuid AND ur.organization_id IS NOT NULL
 		  AND ur.data_scope IN ('organization', 'organization_and_descendants')
 		UNION SELECT id FROM descendants
@@ -1245,6 +1248,7 @@ const accessibleCTE = `
 		FROM user_roles ur
 		JOIN roles r ON r.id = ur.role_id AND r.status = 'enabled'
 		JOIN role_permissions rp ON rp.role_id = r.id
+		JOIN organizations finding_root ON finding_root.id=ur.organization_id AND finding_root.status='enabled' AND finding_root.deleted_at IS NULL
 		WHERE ur.user_id = $1::uuid
 		  AND ur.organization_id IS NOT NULL
 		  AND ur.data_scope = 'organization_and_descendants'
@@ -1255,11 +1259,13 @@ const accessibleCTE = `
 		SELECT parent.permission_key, child.id
 		FROM organizations child
 		JOIN finding_permission_descendants parent ON child.parent_id = parent.id
+		WHERE child.status='enabled' AND child.deleted_at IS NULL
 	), finding_permission_accessible(permission_key, id) AS (
 		SELECT rp.permission_key, ur.organization_id
 		FROM user_roles ur
 		JOIN roles r ON r.id = ur.role_id AND r.status = 'enabled'
 		JOIN role_permissions rp ON rp.role_id = r.id
+		JOIN organizations finding_direct ON finding_direct.id=ur.organization_id AND finding_direct.status='enabled' AND finding_direct.deleted_at IS NULL
 		WHERE ur.user_id = $1::uuid
 		  AND ur.organization_id IS NOT NULL
 		  AND ur.data_scope IN ('organization', 'organization_and_descendants')

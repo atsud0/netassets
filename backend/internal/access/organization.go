@@ -27,6 +27,7 @@ func CanAccessOrganization(ctx context.Context, pool *pgxpool.Pool, principal au
             SELECT ur.organization_id
             FROM user_roles ur
             JOIN roles r ON r.id = ur.role_id AND r.status = 'enabled'
+            JOIN organizations root ON root.id = ur.organization_id AND root.status = 'enabled' AND root.deleted_at IS NULL
             WHERE ur.user_id = $1::uuid
               AND ur.organization_id IS NOT NULL
               AND ur.data_scope = 'organization_and_descendants'
@@ -36,10 +37,12 @@ func CanAccessOrganization(ctx context.Context, pool *pgxpool.Pool, principal au
             SELECT child.id
             FROM organizations child
             JOIN descendants parent ON child.parent_id = parent.id
+            WHERE child.status = 'enabled' AND child.deleted_at IS NULL
         ), accessible(id) AS (
             SELECT ur.organization_id
             FROM user_roles ur
             JOIN roles r ON r.id = ur.role_id AND r.status = 'enabled'
+            JOIN organizations direct ON direct.id = ur.organization_id AND direct.status = 'enabled' AND direct.deleted_at IS NULL
             WHERE ur.user_id = $1::uuid
               AND ur.organization_id IS NOT NULL
               AND ur.data_scope IN ('organization', 'organization_and_descendants')
@@ -74,6 +77,7 @@ func CanOperateOrganization(ctx context.Context, pool *pgxpool.Pool, principal a
             FROM user_roles ur
             JOIN roles r ON r.id = ur.role_id AND r.status = 'enabled'
             JOIN role_permissions rp ON rp.role_id = r.id AND rp.permission_key = $3
+            JOIN organizations root ON root.id = ur.organization_id AND root.status = 'enabled' AND root.deleted_at IS NULL
             WHERE ur.user_id = $1::uuid
               AND ur.organization_id IS NOT NULL
               AND ur.data_scope = 'organization_and_descendants'
@@ -83,11 +87,13 @@ func CanOperateOrganization(ctx context.Context, pool *pgxpool.Pool, principal a
             SELECT child.id
             FROM organizations child
             JOIN descendants parent ON child.parent_id = parent.id
+            WHERE child.status = 'enabled' AND child.deleted_at IS NULL
         ), accessible(id) AS (
             SELECT ur.organization_id
             FROM user_roles ur
             JOIN roles r ON r.id = ur.role_id AND r.status = 'enabled'
             JOIN role_permissions rp ON rp.role_id = r.id AND rp.permission_key = $3
+            JOIN organizations direct ON direct.id = ur.organization_id AND direct.status = 'enabled' AND direct.deleted_at IS NULL
             WHERE ur.user_id = $1::uuid
               AND ur.organization_id IS NOT NULL
               AND ur.data_scope IN ('organization', 'organization_and_descendants')

@@ -85,7 +85,7 @@ func (s *Service) scan(ctx context.Context, actorUserID string, filter ScanFilte
 	}
 	if filter.OrganizationID != "" {
 		var exists bool
-		if err := s.pool.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM organizations WHERE id=$1::uuid)`, filter.OrganizationID).Scan(&exists); err != nil {
+		if err := s.pool.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM organizations WHERE id=$1::uuid AND status='enabled' AND deleted_at IS NULL)`, filter.OrganizationID).Scan(&exists); err != nil {
 			return ScanResult{}, fmt.Errorf("validate scan organization: %w", err)
 		}
 		if !exists {
