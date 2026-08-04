@@ -746,11 +746,11 @@ onMounted(() => load(true))
       <el-table :data="assets" row-key="id" empty-text="暂无网络资产" @selection-change="handleSelectionChange">
         <el-table-column type="selection" width="46" />
         <el-table-column label="资产" min-width="230">
-          <template #default="scope"><div class="organization-name-cell"><strong>{{ scope.row.name || scope.row.value }}</strong><span v-if="scope.row.name">{{ scope.row.value }}</span></div></template>
+          <template #default="scope"><div class="organization-name-cell"><el-button link type="primary" class="table-link" @click="openDetail(scope.row)">{{ scope.row.name || scope.row.value }}</el-button><span v-if="scope.row.name">{{ scope.row.value }}</span></div></template>
         </el-table-column>
         <el-table-column label="类型" width="95"><template #default="scope">{{ typeLabel(scope.row.type) }}</template></el-table-column>
         <el-table-column prop="organization_name" label="所属组织" min-width="150" />
-        <el-table-column label="业务系统" min-width="150"><template #default="scope"><div v-if="scope.row.business_system_id" class="organization-name-cell"><strong>{{ scope.row.business_system_name }}</strong><span>{{ scope.row.business_system_code }}</span></div><span v-else class="muted-text">未绑定</span></template></el-table-column>
+        <el-table-column label="业务系统" min-width="150"><template #default="scope"><span v-if="scope.row.business_system_id">{{ scope.row.business_system_name }}</span><span v-else class="muted-text">未绑定</span></template></el-table-column>
         <el-table-column label="责任人账号" min-width="150"><template #default="scope"><div v-if="scope.row.owner_user_id" class="organization-name-cell"><strong>{{ scope.row.owner_user_display_name || scope.row.owner_username }}</strong><span>{{ scope.row.owner_username }}</span></div><span v-else class="muted-text">未绑定</span></template></el-table-column>
         <el-table-column label="环境 / 暴露范围" width="145"><template #default="scope">{{ environmentLabel(scope.row.environment) }} / {{ scopeLabel(scope.row.network_scope) }}</template></el-table-column>
         <el-table-column label="网络区域" min-width="135"><template #default="scope"><span>{{ scope.row.network_area_name || '未指定' }}</span></template></el-table-column>
@@ -758,9 +758,8 @@ onMounted(() => load(true))
         <el-table-column label="状态" width="90"><template #default="scope"><el-tag :type="statusTag(scope.row.status)" effect="plain">{{ statusLabel(scope.row.status) }}</el-tag></template></el-table-column>
         <el-table-column label="重要程度" width="95"><template #default="scope"><el-tag :type="importanceTag(scope.row.importance)" effect="plain">{{ importanceLabel(scope.row.importance) }}</el-tag></template></el-table-column>
         <el-table-column label="来源" width="75"><template #default="scope">{{ sourceLabel(scope.row.source) }}</template></el-table-column>
-        <el-table-column label="操作" width="280" fixed="right">
+        <el-table-column label="操作" width="235" fixed="right">
           <template #default="scope">
-            <el-button link type="primary" @click="openDetail(scope.row)">详情</el-button>
             <el-button link type="primary" @click="openChangeHistory(scope.row)">历史</el-button>
             <el-button link type="primary" @click="openEditDialog(scope.row)">编辑</el-button>
             <el-button link :type="scope.row.status === 'archived' ? 'success' : 'warning'" @click="toggleArchive(scope.row)">{{ scope.row.status === 'archived' ? '启用' : '归档' }}</el-button>

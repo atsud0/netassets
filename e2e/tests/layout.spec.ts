@@ -430,6 +430,67 @@ test('业务系统名称和系统编码使用独立列表列', async ({ page }) 
   }
 })
 
+test('网络资产名称打开详情且业务系统列仅展示名称', async ({ page }) => {
+  test.skip(!adminPassword, 'E2E_PASSWORD/BOOTSTRAP_ADMIN_PASSWORD 未配置')
+
+  await page.setViewportSize({ width: 1440, height: 950 })
+  await page.goto('/assets')
+  await login(page, adminUsername, adminPassword!)
+  await expect(page.getByRole('heading', { name: '网络资产', exact: true })).toBeVisible()
+
+  const suffix = Date.now().toString()
+  const systemCode = `ASSET_UI_${suffix}`
+  const systemName = `资产交互测试系统_${suffix}`
+  const assetName = `资产名称点击测试_${suffix}`
+  const assetValue = `asset-ui-${suffix}.example.com`
+  await page.evaluate(async ({ systemCode, systemName, assetName, assetValue }) => {
+    const organizationsResponse = await fetch('/api/v1/organizations?page=1&page_size=100')
+    if (!organizationsResponse.ok) throw new Error(`organizations request failed: ${organizationsResponse.status}`)
+    const organizations = await organizationsResponse.json()
+    const group = organizations.items.find((item: { type: string }) => item.type === 'group')
+    if (!group) throw new Error('group organization not found')
+
+    const systemResponse = await fetch('/api/v1/business-systems', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        code: systemCode, name: systemName, organization_id: group.id, status: 'running', level: 'normal',
+        internet_exposure: 'unknown', contains_personal_information: 'unknown',
+        contains_sensitive_personal_information: 'unknown', data_volume_over_100k: 'unknown',
+        contains_important_data: 'unknown', contains_core_data: 'unknown',
+      }),
+    })
+    if (!systemResponse.ok) throw new Error(`create system failed: ${systemResponse.status}`)
+    const system = await systemResponse.json()
+
+    const assetResponse = await fetch('/api/v1/assets', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        type: 'domain', value: assetValue, name: assetName, organization_id: group.id,
+        business_system_id: system.item.id, environment: 'production', network_scope: 'public',
+        status: 'active', importance: 'normal',
+      }),
+    })
+    if (!assetResponse.ok) throw new Error(`create asset failed: ${assetResponse.status}`)
+  }, { systemCode, systemName, assetName, assetValue })
+
+  await page.getByPlaceholder('搜索资产值、名称、系统或负责人').fill(assetValue)
+  await page.getByPlaceholder('搜索资产值、名称、系统或负责人').press('Enter')
+  const tablePanel = page.locator('.data-table-panel')
+  const row = tablePanel.locator('.el-table__body-wrapper tbody tr').filter({ hasText: assetValue }).first()
+  await expect(row).toBeVisible()
+  await expect(row.locator('td').nth(4)).toHaveText(systemName)
+  await expect(row.getByText(systemCode, { exact: true })).toHaveCount(0)
+  await expect(tablePanel.getByRole('button', { name: '详情', exact: true })).toHaveCount(0)
+
+  await row.getByRole('button', { name: assetName, exact: true }).click()
+  const drawer = page.getByRole('dialog', { name: '网络资产详情' })
+  await expect(drawer).toBeVisible()
+  await expect(drawer.getByText(assetName, { exact: true })).toBeVisible()
+  await expect(drawer).toContainText(assetValue)
+})
+
 test('组织名称与编码独立展示且集团管理员可编辑已有组织', async ({ page }) => {
   test.skip(!adminPassword, 'E2E_PASSWORD/BOOTSTRAP_ADMIN_PASSWORD 未配置')
 

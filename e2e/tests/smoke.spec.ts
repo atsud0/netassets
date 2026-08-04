@@ -65,6 +65,7 @@ test('集团创建子公司账号，子公司隔离登记业务系统和网络�
   const systemCode = `SYS_PW_${suffix}`
   const systemName = `客户数据系统_${suffix}`
   const domainAsset = `portal-${suffix}.example.com`
+  const domainAssetName = `门户资产_${suffix}`
   const importedIP = `198.51.100.${Number(suffix.slice(-2)) % 250 + 1}`
   const scopeExcludedIP = `10.250.${Number(suffix.slice(-4, -2)) % 250}.${Number(suffix.slice(-2)) % 250 + 1}`
   const importFileName = `assets-${suffix}.csv`
@@ -320,14 +321,22 @@ test('集团创建子公司账号，子公司隔离登记业务系统和网络�
   await page.getByRole('button', { name: '新增资产' }).click()
   dialog = page.getByRole('dialog', { name: '新增网络资产' })
   await dialog.getByPlaceholder('如：portal.example.com').fill(domainAsset)
-  await dialog.getByPlaceholder('便于识别的名称（可选）').fill(`门户资产_${suffix}`)
+  await dialog.getByPlaceholder('便于识别的名称（可选）').fill(domainAssetName)
   await selectFormOption(page, dialog, '关联业务系统', `${systemName}（${systemCode}）`)
   await selectFormOption(page, dialog, '网络区域', `${shanghaiOffice}（10.20.0.0/16）`)
   await dialog.getByRole('button', { name: '确认新增' }).click()
   await expect(page.getByText('网络资产已新增')).toBeVisible()
-  await expect(page.getByText(domainAsset, { exact: true })).toBeVisible()
-  await expect(page.getByText(systemCode, { exact: true })).toBeVisible()
-  await expect(page.getByText(shanghaiOffice, { exact: true })).toBeVisible()
+  let assetRow = page.locator('.data-table-panel .el-table__body-wrapper tbody tr').filter({ hasText: domainAsset }).first()
+  await expect(assetRow).toBeVisible()
+  await expect(assetRow.getByText(systemName, { exact: true })).toBeVisible()
+  await expect(assetRow.getByText(systemCode, { exact: true })).toHaveCount(0)
+  await expect(assetRow.getByRole('button', { name: '详情', exact: true })).toHaveCount(0)
+  await assetRow.getByRole('button', { name: domainAssetName, exact: true }).click()
+  const assetDrawer = page.getByRole('dialog', { name: '网络资产详情' })
+  await expect(assetDrawer).toContainText(domainAsset)
+  await page.keyboard.press('Escape')
+  await expect(assetDrawer).toBeHidden()
+  await expect(assetRow.getByText(shanghaiOffice, { exact: true })).toBeVisible()
 
   await page.getByPlaceholder('搜索资产值、名称、系统或负责人').fill(domainAsset)
   const assetDownloadPromise = page.waitForEvent('download')
@@ -401,7 +410,7 @@ test('集团创建子公司账号，子公司隔离登记业务系统和网络�
   await dialog.getByRole('button', { name: '关闭' }).click()
   await expect(page.getByText(importedIP, { exact: true })).toBeVisible()
 
-  let assetRow = page.locator('.data-table-panel .el-table__body-wrapper tbody tr').filter({ hasText: domainAsset }).first()
+  assetRow = page.locator('.data-table-panel .el-table__body-wrapper tbody tr').filter({ hasText: domainAsset }).first()
   await assetRow.getByRole('button', { name: '编辑', exact: true }).click()
   dialog = page.getByRole('dialog', { name: '编辑网络资产' })
   const editedAssetName = `门户资产_编辑后_${suffix}`
