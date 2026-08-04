@@ -235,8 +235,8 @@ onMounted(load)
           <div class="trend-chart" aria-label="近14天漏洞趋势">
             <div v-for="item in latestTrend" :key="item.date" class="trend-column" :title="`${item.date}：新增 ${item.new_finding_count}，关闭 ${item.closed_finding_count}`">
               <div class="trend-bars">
-                <span class="trend-bar new" :style="{ height: `${Math.max(3, item.new_finding_count * 100 / trendMax)}%` }" />
-                <span class="trend-bar closed" :style="{ height: `${Math.max(3, item.closed_finding_count * 100 / trendMax)}%` }" />
+                <span class="trend-bar new" :style="{ height: item.new_finding_count ? `${Math.max(3, item.new_finding_count * 100 / trendMax)}%` : '0' }" />
+                <span class="trend-bar closed" :style="{ height: item.closed_finding_count ? `${Math.max(3, item.closed_finding_count * 100 / trendMax)}%` : '0' }" />
               </div>
               <small>{{ item.date.slice(5) }}</small>
             </div>
@@ -249,7 +249,7 @@ onMounted(load)
         <article class="panel security-panel test-coverage-panel">
           <div class="panel-header"><div><h2>安全测试覆盖</h2><p>以已完成批次统计公网资产覆盖与测试发现闭环。</p></div><el-button v-if="auth.canManageSecurityTests" text type="primary" @click="router.push('/security-test-batches')">查看测试批次</el-button></div>
           <div class="coverage-progress-row"><div><span>公网资产已测试</span><strong>{{ overview.test_coverage.public_asset_coverage_rate }}%</strong></div><el-progress :percentage="overview.test_coverage.public_asset_coverage_rate" :stroke-width="12" /></div>
-          <div class="coverage-progress-row"><div><span>测试发现已关闭</span><strong>{{ overview.test_coverage.test_finding_closure_rate }}%</strong></div><el-progress status="success" :percentage="overview.test_coverage.test_finding_closure_rate" :stroke-width="12" /></div>
+          <div class="coverage-progress-row"><div><span>测试发现已关闭</span><strong>{{ overview.test_coverage.test_finding_closure_rate }}%</strong></div><el-progress :status="overview.test_coverage.test_finding_count > 0 && overview.test_coverage.test_finding_closure_rate === 100 ? 'success' : undefined" :percentage="overview.test_coverage.test_finding_closure_rate" :stroke-width="12" /></div>
           <div class="coverage-metrics"><span>执行中批次 <strong>{{ overview.test_coverage.active_batch_count }}</strong></span><span>已完成批次 <strong>{{ overview.test_coverage.completed_batch_count }}</strong></span><button type="button" @click="toFindings()">测试发现 <strong>{{ overview.test_coverage.test_finding_count }}</strong></button></div>
         </article>
 
@@ -269,6 +269,9 @@ onMounted(load)
 
 <style scoped>
 .heading-actions { display: flex; gap: 10px; flex-wrap: wrap; }
+.panel-header { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; }
+.panel-header > div { min-width: 0; }
+.panel-header > .el-button { flex: 0 0 auto; margin-left: auto; }
 .security-overview-section { margin-top: 28px; display: grid; gap: 16px; }
 .section-heading { display: flex; justify-content: space-between; align-items: end; gap: 18px; }
 .section-heading h2 { margin: 4px 0 6px; font-size: 22px; }
@@ -293,7 +296,7 @@ onMounted(load)
 .trend-chart { height: 166px; display: grid; grid-template-columns: repeat(14, minmax(16px, 1fr)); gap: 5px; align-items: end; padding-top: 8px; border-bottom: 1px solid var(--el-border-color-lighter); }
 .trend-column { height: 100%; min-width: 0; display: grid; grid-template-rows: 1fr 18px; align-items: end; }
 .trend-bars { display: flex; align-items: end; justify-content: center; gap: 3px; height: 100%; }
-.trend-bar { width: min(10px, 42%); min-height: 3px; border-radius: 3px 3px 0 0; }
+.trend-bar { width: min(10px, 42%); border-radius: 3px 3px 0 0; }
 .trend-bar.new, .legend-dot.new { background: var(--el-color-primary); }
 .trend-bar.closed, .legend-dot.closed { background: var(--el-color-success); }
 .trend-column small { overflow: hidden; font-size: 10px; white-space: nowrap; color: var(--el-text-color-secondary); transform: scale(.86); transform-origin: center; }
@@ -306,6 +309,18 @@ onMounted(load)
 .coverage-metrics strong { color: var(--el-text-color-primary); margin-left: 4px; }
 .coverage-metrics button { border: 0; padding: 0; cursor: pointer; color: var(--el-color-primary); background: transparent; }
 :deep(.el-table__row) { cursor: pointer; }
-@media (max-width: 1050px) { .security-highlight-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
-@media (max-width: 760px) { .section-heading { align-items: start; flex-direction: column; } .security-content-grid { grid-template-columns: 1fr; } .security-highlight-grid { grid-template-columns: 1fr; } .heading-actions { width: 100%; } }
+@media (max-width: 1100px) {
+  .stat-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .content-grid, .security-content-grid { grid-template-columns: 1fr; }
+  .security-highlight-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+@media (max-width: 900px) {
+  .page-heading, .section-heading { align-items: flex-start; flex-direction: column; }
+  .heading-actions { width: 100%; }
+}
+@media (max-width: 720px) {
+  .stat-grid, .security-highlight-grid { grid-template-columns: 1fr; }
+  .panel-header { flex-wrap: wrap; }
+  .panel-header > .el-button { margin-left: 0; }
+}
 </style>

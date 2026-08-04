@@ -477,3 +477,51 @@ test('组织名称与编码独立展示且集团管理员可编辑已有组织',
   await expect(dialog).toBeHidden()
   await expect(editableRow).toContainText(updatedContact)
 })
+
+test('集团工作台卡片操作对齐、零值图表语义正确并适配常用窄屏', async ({ page }) => {
+  test.skip(!adminPassword, 'E2E_PASSWORD/BOOTSTRAP_ADMIN_PASSWORD 未配置')
+
+  await page.setViewportSize({ width: 1024, height: 768 })
+  await page.goto('/dashboard')
+  await login(page, adminUsername, adminPassword!)
+  await expect(page.getByRole('heading', { name: '集团安全治理工作台', exact: true })).toBeVisible()
+
+  const panelHeaders = page.locator('.panel-header').filter({ has: page.locator('.el-button') })
+  await expect(panelHeaders).toHaveCount(5)
+  for (let index = 0; index < await panelHeaders.count(); index += 1) {
+    const alignment = await panelHeaders.nth(index).evaluate((element) => {
+      const header = element.getBoundingClientRect()
+      const button = element.querySelector<HTMLElement>('.el-button')!.getBoundingClientRect()
+      return { topDifference: Math.abs(button.top - header.top), rightDifference: Math.abs(header.right - button.right) }
+    })
+    expect(alignment.topDifference).toBeLessThanOrEqual(2)
+    expect(alignment.rightDifference).toBeLessThanOrEqual(2)
+  }
+
+  const zeroTrendBars = page.locator('.trend-bar')
+  await expect(zeroTrendBars).toHaveCount(28)
+  const visibleZeroBars = await zeroTrendBars.evaluateAll(elements => elements.filter(element => element.getBoundingClientRect().height > 0).length)
+  expect(visibleZeroBars).toBe(0)
+  await expect(page.locator('.test-coverage-panel .coverage-progress-row').nth(1).locator('.el-progress__text .el-icon')).toHaveCount(0)
+
+  for (const viewport of [{ width: 1024, height: 768 }, { width: 800, height: 900 }]) {
+    await page.setViewportSize(viewport)
+    const layout = await page.evaluate(() => {
+      const cards = Array.from(document.querySelectorAll<HTMLElement>('.stat-card')).map(element => element.getBoundingClientRect())
+      const contentPanels = Array.from(document.querySelectorAll<HTMLElement>('.content-grid > .panel')).map(element => element.getBoundingClientRect())
+      const securityPanels = Array.from(document.querySelectorAll<HTMLElement>('.security-content-grid > .panel')).map(element => element.getBoundingClientRect())
+      return {
+        documentOverflow: document.documentElement.scrollWidth - document.documentElement.clientWidth,
+        contentOverflow: document.querySelector<HTMLElement>('.page-content')!.scrollWidth - document.querySelector<HTMLElement>('.page-content')!.clientWidth,
+        statThirdRowOffset: cards[2].top - cards[0].top,
+        contentSecondRowOffset: contentPanels[1].top - contentPanels[0].top,
+        securitySecondRowOffset: securityPanels[1].top - securityPanels[0].top,
+      }
+    })
+    expect(layout.documentOverflow, `${viewport.width}px 下页面出现整体横向溢出`).toBeLessThanOrEqual(1)
+    expect(layout.contentOverflow, `${viewport.width}px 下内容区出现横向溢出`).toBeLessThanOrEqual(1)
+    expect(layout.statThirdRowOffset).toBeGreaterThan(0)
+    expect(layout.contentSecondRowOffset).toBeGreaterThan(0)
+    expect(layout.securitySecondRowOffset).toBeGreaterThan(0)
+  }
+})
