@@ -132,6 +132,9 @@ button, input { font: inherit; }
 @media (max-width: 1050px) { .asset-filter-panel { grid-template-columns: 1fr 160px; } .asset-filter-count { text-align: left; } }
 .dialog-form-with-alert { margin-top: 18px; }
 .page-alert { margin-bottom: 16px; }
+.inventory-draft-alert { margin-bottom: 16px; }
+.inventory-draft-panel { margin-bottom: 16px; }
+.dialog-context-alert { margin-bottom: 18px; }
 .task-organization-table { margin-top: 4px; }
 .table-secondary { display: block; color: var(--muted); font-size: 12px; margin-top: 2px; }
 .inventory-guide-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; }

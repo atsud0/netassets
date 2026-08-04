@@ -453,6 +453,22 @@ func TestBuildSubmissionDiffUsesHistoricalCustomFieldLabelWhenCurrentSnapshotDoe
 	}
 }
 
+func TestCompareSnapshotDataIgnoresInventoryDraftMarker(t *testing.T) {
+	changes := compareSnapshotData("network_asset",
+		map[string]any{
+			"asset_value":      "draft.example.com",
+			"_inventory_draft": false,
+		},
+		map[string]any{
+			"asset_value":      "draft.example.com",
+			"_inventory_draft": true,
+		},
+	)
+	if len(changes) != 0 {
+		t.Fatalf("inventory draft marker must not produce a business field diff: %+v", changes)
+	}
+}
+
 func TestBuildInventoryTaskExportRejectsOversizedSynchronousXLSX(t *testing.T) {
 	task := Task{Organizations: make([]OrganizationProgress, exportfile.MaxSynchronousXLSXRows+1)}
 	if _, _, _, err := buildExport(task, "xlsx"); !errors.Is(err, ErrExportTooLarge) {

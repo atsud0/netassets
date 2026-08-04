@@ -22,6 +22,7 @@ import (
 var (
 	ErrForbidden      = errors.New("forbidden")
 	ErrNotFound       = errors.New("not found")
+	ErrConflict       = errors.New("conflict")
 	ErrInvalid        = errors.New("invalid input")
 	ErrExportTooLarge = errors.New("synchronous xlsx export too large")
 	ErrState          = errors.New("invalid state")
@@ -679,13 +680,23 @@ func loadQualityCheck(ctx context.Context, q qualityCheckQuerier, principal auth
 			WHERE bs.owner_organization_id::text = $3 AND bs.deleted_at IS NULL
 			  AND (task_scope.required_fields ? 'business_systems' OR task_scope.required_fields ? 'data_security')
 		), org_assets AS (
-			SELECT a.id, a.network_scope, a.importance, ao.owner_name
+			SELECT a.id, a.network_scope, a.importance, ao.owner_name,
+			       EXISTS (SELECT 1 FROM system_assets sa WHERE sa.asset_id = a.id) AS has_system
 			FROM assets a
 			JOIN asset_organizations ao ON ao.asset_id = a.id AND ao.is_primary
 			CROSS JOIN assignment task_scope
 			WHERE ao.organization_id::text = $3 AND a.deleted_at IS NULL
 			  AND task_scope.required_fields ? 'network_assets'
 			  AND (task_scope.asset_network_scope = 'all' OR a.network_scope = task_scope.asset_network_scope)
+			UNION ALL
+			SELECT draft.id, draft.network_scope, draft.importance, draft.owner_name,
+			       draft.business_system_id IS NOT NULL AS has_system
+			FROM inventory_asset_drafts draft
+			CROSS JOIN assignment task_scope
+			WHERE draft.task_id::text = $2 AND draft.organization_id::text = $3
+			  AND draft.draft_status IN ('editing', 'returned')
+			  AND task_scope.required_fields ? 'network_assets'
+			  AND (task_scope.asset_network_scope = 'all' OR draft.network_scope = task_scope.asset_network_scope)
 		)
 		SELECT a.required_fields, a.asset_network_scope,
 		       (SELECT count(*) FROM org_systems),
@@ -698,8 +709,7 @@ func loadQualityCheck(ctx context.Context, q qualityCheckQuerier, principal auth
 		          OR data_volume_over_100k = 'unknown'
 		          OR contains_important_data = 'unknown'
 		          OR contains_core_data = 'unknown'),
-		       (SELECT count(*) FROM org_assets oa WHERE oa.network_scope = 'public'
-		          AND NOT EXISTS (SELECT 1 FROM system_assets sa WHERE sa.asset_id = oa.id)),
+		       (SELECT count(*) FROM org_assets oa WHERE oa.network_scope = 'public' AND NOT oa.has_system),
 		       (SELECT count(*) FROM org_systems WHERE system_level IN ('important', 'core')
 		          AND (btrim(COALESCE(owner_name, '')) = '' OR btrim(COALESCE(owner_contact, '')) = '')),
 		       (SELECT count(*) FROM org_assets WHERE importance IN ('important', 'core') AND btrim(COALESCE(owner_name, '')) = '')
@@ -874,11 +884,19 @@ func (s *Service) Submit(ctx context.Context, principal auth.Principal, taskID, 
 					  AND (t.required_fields ? 'business_systems' OR t.required_fields ? 'data_security')
 				),
 			    submitted_asset_count = (
-					SELECT count(*) FROM assets a
-					JOIN asset_organizations ao ON ao.asset_id = a.id AND ao.is_primary
-					WHERE ao.organization_id = ito.organization_id AND a.deleted_at IS NULL
-					  AND t.required_fields ? 'network_assets'
-					  AND (t.asset_network_scope = 'all' OR a.network_scope = t.asset_network_scope)
+					SELECT (
+						SELECT count(*) FROM assets a
+						JOIN asset_organizations ao ON ao.asset_id = a.id AND ao.is_primary
+						WHERE ao.organization_id = ito.organization_id AND a.deleted_at IS NULL
+						  AND t.required_fields ? 'network_assets'
+						  AND (t.asset_network_scope = 'all' OR a.network_scope = t.asset_network_scope)
+					) + (
+						SELECT count(*) FROM inventory_asset_drafts draft
+						WHERE draft.task_id = t.id AND draft.organization_id = ito.organization_id
+						  AND draft.draft_status IN ('editing', 'returned')
+						  AND t.required_fields ? 'network_assets'
+						  AND (t.asset_network_scope = 'all' OR draft.network_scope = t.asset_network_scope)
+					)
 				),
 		    reviewed_by = NULL,
 		    reviewed_at = CASE WHEN t.require_review THEN NULL ELSE now() END,
@@ -902,6 +920,13 @@ func (s *Service) Submit(ctx context.Context, principal auth.Principal, taskID, 
 		return OrganizationProgress{}, err
 	}
 	if _, err := tx.Exec(ctx, `
+		UPDATE inventory_asset_drafts
+		SET draft_status='submitted', submitted_at=now(), updated_by=$3::uuid, updated_at=now()
+		WHERE task_id::text=$1 AND organization_id::text=$2 AND draft_status IN ('editing','returned')
+	`, taskID, organizationID, principal.UserID); err != nil {
+		return OrganizationProgress{}, fmt.Errorf("submit inventory asset drafts: %w", err)
+	}
+	if _, err := tx.Exec(ctx, `
 		UPDATE inventory_task_organizations
 		SET latest_submission_id = $3::uuid,
 		    submitted_system_count = $4,
@@ -914,6 +939,11 @@ func (s *Service) Submit(ctx context.Context, principal auth.Principal, taskID, 
 	item, err := loadOrganizationProgress(ctx, tx, taskID, organizationID)
 	if err != nil {
 		return OrganizationProgress{}, err
+	}
+	if item.Status == "approved" {
+		if err := publishAssetDrafts(ctx, tx, principal, taskID, organizationID, requestID, ipAddress); err != nil {
+			return OrganizationProgress{}, err
+		}
 	}
 	if err := writeSubmissionAudit(ctx, tx, principal, organizationID, taskID, input.Note, item.Status, snapshot, requestID, ipAddress); err != nil {
 		return OrganizationProgress{}, err
@@ -943,6 +973,11 @@ func (s *Service) Review(ctx context.Context, principal auth.Principal, taskID, 
 	if err := insertReviewComments(ctx, tx, principal, taskID, organizationID, input.Comments); err != nil {
 		return OrganizationProgress{}, err
 	}
+	if input.Decision == "approved" {
+		if err := publishAssetDrafts(ctx, tx, principal, taskID, organizationID, requestID, ipAddress); err != nil {
+			return OrganizationProgress{}, err
+		}
+	}
 
 	result, err := tx.Exec(ctx, `
 		UPDATE inventory_task_organizations ito
@@ -960,6 +995,11 @@ func (s *Service) Review(ctx context.Context, principal auth.Principal, taskID, 
 	}
 	if result.RowsAffected() == 0 {
 		return OrganizationProgress{}, ErrState
+	}
+	if input.Decision == "returned" {
+		if _, err := tx.Exec(ctx, `UPDATE inventory_asset_drafts SET draft_status='returned',updated_by=$3::uuid,updated_at=now() WHERE task_id::text=$1 AND organization_id::text=$2 AND draft_status='submitted'`, taskID, organizationID, principal.UserID); err != nil {
+			return OrganizationProgress{}, fmt.Errorf("return inventory asset drafts: %w", err)
+		}
 	}
 	summary := "审核通过填报任务"
 	if input.Decision == "returned" {

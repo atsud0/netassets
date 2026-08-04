@@ -760,8 +760,44 @@ func createSubmissionSnapshot(ctx context.Context, tx pgx.Tx, principal auth.Pri
 	if err != nil {
 		return SubmissionMetadata{}, fmt.Errorf("snapshot network assets: %w", err)
 	}
+	draftAssetResult, err := tx.Exec(ctx, `
+		INSERT INTO inventory_submission_items (
+			submission_id, resource_type, resource_id, resource_key, resource_name, snapshot_data
+		)
+		SELECT $1::uuid, 'network_asset', draft.id,
+		       draft.asset_type || ':' || draft.normalized_value,
+		       COALESCE(NULLIF(draft.asset_name, ''), draft.asset_value),
+		       jsonb_build_object(
+		           'asset_type', draft.asset_type,
+		           'asset_value', draft.asset_value,
+		           'asset_name', COALESCE(draft.asset_name, ''),
+		           'owner_name', COALESCE(draft.owner_name, ''),
+		           'environment', draft.environment,
+		           'network_scope', draft.network_scope,
+		           'network_area_name', COALESCE(area.area_name, ''),
+		           'status', draft.status,
+		           'importance', draft.importance,
+		           'expires_at', draft.expires_at,
+		           'linked_system_codes', CASE WHEN system.id IS NULL THEN '[]'::jsonb ELSE jsonb_build_array(system.system_code) END,
+		           'notes', COALESCE(draft.notes, ''),
+		           '_inventory_draft', true
+		       )
+		FROM inventory_asset_drafts draft
+		LEFT JOIN asset_network_areas area ON area.id=draft.network_area_id
+		LEFT JOIN business_systems system ON system.id=draft.business_system_id AND system.deleted_at IS NULL
+		WHERE draft.task_id=$3::uuid AND draft.organization_id=$2::uuid
+		  AND draft.draft_status IN ('editing','returned')
+		  AND EXISTS (
+		      SELECT 1 FROM inventory_tasks task
+		      WHERE task.id=$3::uuid AND task.required_fields ? 'network_assets'
+		        AND (task.asset_network_scope='all' OR draft.network_scope=task.asset_network_scope)
+		  )
+	`, item.ID, organizationID, taskID)
+	if err != nil {
+		return SubmissionMetadata{}, fmt.Errorf("snapshot network asset drafts: %w", err)
+	}
 	item.SystemCount = systemResult.RowsAffected()
-	item.AssetCount = assetResult.RowsAffected()
+	item.AssetCount = assetResult.RowsAffected() + draftAssetResult.RowsAffected()
 	if _, err := tx.Exec(ctx, `
 		UPDATE inventory_submissions
 		SET system_count = $2, asset_count = $3

@@ -719,6 +719,18 @@ func formatExportTime(value time.Time) string {
 	return value.Format("2006-01-02 15:04:05Z07:00")
 }
 
+// PrepareCreateInput normalizes and validates the fields shared by formal assets
+// and inventory-task drafts. Reference authorization is intentionally handled by
+// the caller because drafts are scoped by their task assignment.
+func PrepareCreateInput(input *CreateInput) (string, error) {
+	normalizeInput(input)
+	normalizedValue, err := normalizeValue(input.Type, input.Value)
+	if err != nil || !validInput(*input) {
+		return "", ErrInvalid
+	}
+	return normalizedValue, nil
+}
+
 func (s *Service) Create(ctx context.Context, principal auth.Principal, input CreateInput, source, requestID, ipAddress string) (Asset, error) {
 	return s.create(ctx, principal, input, source, requestID, ipAddress, nil)
 }

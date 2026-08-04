@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, onMounted, reactive, ref, watch } from 'vue'
+import { useRoute, useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox, type FormInstance, type FormRules, type UploadFile, type UploadFiles } from 'element-plus'
 import { apiClient, getAPIErrorMessage, getDownloadAPIError } from '../api/client'
 import { createExportJob } from '../api/export-jobs'
@@ -17,6 +18,7 @@ interface Asset {
   status: string; importance: string; source: string
   owner_user_id?: string; owner_username?: string; owner_user_display_name?: string
   owner_name?: string; notes?: string; expires_at?: string; created_at: string; updated_at: string
+  is_draft?: boolean; draft_status?: 'editing' | 'submitted' | 'returned' | 'published'; task_id?: string
 }
 interface NetworkArea {
   id: string; organization_id: string; organization_code: string; organization_name: string
@@ -43,6 +45,8 @@ interface BatchOperationResult { total_count: number; success_count: number; fai
 interface DetailResponse { item: Asset }
 
 const auth = useAuthStore()
+const route = useRoute()
+const router = useRouter()
 const loading = ref(false)
 const submitting = ref(false)
 const importing = ref(false)
@@ -72,6 +76,11 @@ const editingNetworkAreaID = ref('')
 const editingAssetID = ref('')
 const formRef = ref<FormInstance>()
 const assets = ref<Asset[]>([])
+const draftAssets = ref<Asset[]>([])
+const draftTotal = ref(0)
+const draftPage = ref(1)
+const draftPageSize = ref(20)
+const editingIsDraft = ref(false)
 const page = ref(1)
 const pageSize = ref(20)
 const total = ref(0)
@@ -113,6 +122,14 @@ const rules: FormRules = {
   value: [{ required: true, message: '请输入资产值', trigger: 'blur' }],
   organization_id: [{ required: true, message: '请选择所属组织', trigger: 'change' }],
 }
+
+const inventoryTaskID = computed(() => typeof route.query.task_id === 'string' ? route.query.task_id : '')
+const inventoryOrganizationID = computed(() => typeof route.query.organization_id === 'string' ? route.query.organization_id : '')
+const inventoryTaskName = computed(() => typeof route.query.task_name === 'string' ? route.query.task_name : '当前填报任务')
+const inventoryNetworkScope = computed(() => typeof route.query.asset_network_scope === 'string' ? route.query.asset_network_scope : 'all')
+const inventoryMode = computed(() => route.query.mode === 'inventory' && Boolean(inventoryTaskID.value && inventoryOrganizationID.value))
+const inventoryOrganizationName = computed(() => organizations.value.find((item) => item.id === inventoryOrganizationID.value)?.name || '当前填报组织')
+const draftStatusLabels: Record<string, string> = { editing: '编辑中', returned: '已退回', submitted: '已提交', published: '已发布' }
 
 const enabledOrganizations = computed(() => organizations.value.filter((item) => item.status === 'enabled'))
 const availableSystems = computed(() => systems.value.filter((item) => item.organization_id === form.organization_id))
@@ -202,19 +219,37 @@ function handleFormOrganizationChange() {
   void loadOwnerOptions()
 }
 
+async function loadAssetDrafts() {
+  if (!inventoryMode.value) {
+    draftAssets.value = []
+    draftTotal.value = 0
+    return
+  }
+  const response = await apiClient.get<ListResponse<Asset>>(
+    `/inventory-tasks/${inventoryTaskID.value}/organizations/${inventoryOrganizationID.value}/asset-drafts`,
+    { params: { page: draftPage.value, page_size: draftPageSize.value } },
+  )
+  draftAssets.value = response.data.items
+  draftTotal.value = response.data.total
+}
+
 async function loadAssets() {
   loading.value = true
   try {
-    const response = await apiClient.get<ListResponse<Asset>>('/assets', {
-      params: {
-        page: page.value,
-        page_size: pageSize.value,
-        q: search.value.trim() || undefined,
-        type: typeFilter.value || undefined,
-        status: statusFilter.value || undefined,
-        organization_id: organizationFilter.value || undefined,
-      },
-    })
+    if (inventoryMode.value) organizationFilter.value = inventoryOrganizationID.value
+    const [response] = await Promise.all([
+      apiClient.get<ListResponse<Asset>>('/assets', {
+        params: {
+          page: page.value,
+          page_size: pageSize.value,
+          q: search.value.trim() || undefined,
+          type: typeFilter.value || undefined,
+          status: statusFilter.value || undefined,
+          organization_id: inventoryMode.value ? inventoryOrganizationID.value : (organizationFilter.value || undefined),
+        },
+      }),
+      loadAssetDrafts(),
+    ])
     assets.value = response.data.items
     total.value = response.data.total
     selectedAssets.value = []
@@ -276,26 +311,39 @@ function handlePageSizeChange(value: number) {
   void loadAssets()
 }
 
+function handleDraftPageChange(value: number) {
+  draftPage.value = value
+  void loadAssetDrafts()
+}
+
+function handleDraftPageSizeChange(value: number) {
+  draftPageSize.value = value
+  draftPage.value = 1
+  void loadAssetDrafts()
+}
+
 function defaultOrganizationID() {
-  return auth.user?.organization?.id ?? enabledOrganizations.value[0]?.id ?? ''
+  return inventoryMode.value ? inventoryOrganizationID.value : (auth.user?.organization?.id ?? enabledOrganizations.value[0]?.id ?? '')
 }
 function resetForm() {
   Object.keys(customValues).forEach((key) => delete customValues[key])
   customFields.value.forEach((field) => { customValues[field.field_key] = field.field_type === 'multiselect' ? [] : field.field_type === 'boolean' ? false : '' })
   Object.assign(form, {
     type: 'domain', value: '', name: '', organization_id: defaultOrganizationID(), business_system_id: '', network_area_id: '',
-    environment: 'production', network_scope: 'public', status: 'active', importance: 'normal', owner_user_id: '', owner_name: '', notes: '', expires_at: null,
+    environment: 'production', network_scope: inventoryMode.value && inventoryNetworkScope.value !== 'all' ? inventoryNetworkScope.value : 'public', status: 'active', importance: 'normal', owner_user_id: '', owner_name: '', notes: '', expires_at: null,
   })
   ownerOptions.value = []
 }
 function openCreateDialog() {
   editingAssetID.value = ''
+  editingIsDraft.value = false
   resetForm()
   editDialogVisible.value = true
   void loadOwnerOptions()
 }
 function openEditDialog(item: Asset) {
   editingAssetID.value = item.id
+  editingIsDraft.value = Boolean(item.is_draft)
   Object.assign(form, {
     type: item.type, value: item.value, name: item.name ?? '', organization_id: item.organization_id,
     business_system_id: item.business_system_id ?? '', network_area_id: item.network_area_id ?? '', environment: item.environment, network_scope: item.network_scope,
@@ -303,7 +351,7 @@ function openEditDialog(item: Asset) {
   })
   ownerOptions.value = item.owner_user_id && item.owner_username ? [{ id: item.owner_user_id, username: item.owner_username, display_name: item.owner_user_display_name ?? item.owner_username }] : []
   void loadOwnerOptions()
-  void loadCustomValues(item.id)
+  if (!item.is_draft) void loadCustomValues(item.id)
   editDialogVisible.value = true
 }
 function isEmptyCustomValue(value: unknown) { return value == null || (typeof value === 'string' && value.trim() === '') || (Array.isArray(value) && value.length === 0) }
@@ -353,21 +401,46 @@ async function submit() {
   if (!formRef.value || !(await formRef.value.validate())) return
   submitting.value = true
   try {
-    const missing = customFields.value.find((field) => field.is_required && isEmptyCustomValue(customValues[field.field_key]))
-    if (missing) { ElMessage.warning(`请填写自定义字段：${missing.field_name}`); return }
-    const payload = { ...form, expires_at: form.expires_at?.toISOString() ?? null }
-    const response = editingAssetID.value ? await apiClient.patch<{ item: Asset }>(`/assets/${editingAssetID.value}`, payload) : await apiClient.post<{ item: Asset }>('/assets', payload)
+    if (!inventoryMode.value) {
+      const missing = customFields.value.find((field) => field.is_required && isEmptyCustomValue(customValues[field.field_key]))
+      if (missing) { ElMessage.warning(`请填写自定义字段：${missing.field_name}`); return }
+    }
+    const payload = { ...form, organization_id: inventoryMode.value ? inventoryOrganizationID.value : form.organization_id, expires_at: form.expires_at?.toISOString() ?? null }
+    let response
+    if (inventoryMode.value) {
+      const base = `/inventory-tasks/${inventoryTaskID.value}/organizations/${inventoryOrganizationID.value}/asset-drafts`
+      response = editingAssetID.value && editingIsDraft.value
+        ? await apiClient.patch<{ item: Asset }>(`${base}/${editingAssetID.value}`, payload)
+        : await apiClient.post<{ item: Asset }>(base, payload)
+    } else {
+      response = editingAssetID.value
+        ? await apiClient.patch<{ item: Asset }>(`/assets/${editingAssetID.value}`, payload)
+        : await apiClient.post<{ item: Asset }>('/assets', payload)
+    }
     const id = editingAssetID.value || response.data.item.id
-    if (customFields.value.length) await apiClient.put(`/assets/${id}/custom-fields`, { values: customFields.value.map((field) => ({ field_key: field.field_key, value: customValues[field.field_key] })) })
-    ElMessage.success(editingAssetID.value ? '网络资产已更新' : '网络资产已新增')
+    if (!inventoryMode.value && customFields.value.length) await apiClient.put(`/assets/${id}/custom-fields`, { values: customFields.value.map((field) => ({ field_key: field.field_key, value: customValues[field.field_key] })) })
+    ElMessage.success(inventoryMode.value ? (editingAssetID.value ? '填报资产草稿已更新' : '填报资产草稿已保存，集团审核前不会进入正式台账') : (editingAssetID.value ? '网络资产已更新' : '网络资产已新增'))
     editDialogVisible.value = false
     await refreshAfterMutation()
   } catch (error) {
-    ElMessage.error(getAPIErrorMessage(error, editingAssetID.value ? '编辑网络资产失败' : '新增网络资产失败'))
+    ElMessage.error(getAPIErrorMessage(error, inventoryMode.value ? '保存填报资产草稿失败' : (editingAssetID.value ? '编辑网络资产失败' : '新增网络资产失败')))
   } finally {
     submitting.value = false
   }
 }
+
+async function removeDraft(item: Asset) {
+  try {
+    await ElMessageBox.confirm(`确认删除填报资产草稿“${item.name || item.value}”吗？`, '删除草稿', { type: 'warning', confirmButtonText: '删除', cancelButtonText: '取消' })
+    await apiClient.delete(`/inventory-tasks/${inventoryTaskID.value}/organizations/${inventoryOrganizationID.value}/asset-drafts/${item.id}`)
+    ElMessage.success('填报资产草稿已删除')
+    await loadAssetDrafts()
+  } catch (error) {
+    if (error === 'cancel' || error === 'close') return
+    ElMessage.error(getAPIErrorMessage(error, '删除填报资产草稿失败'))
+  }
+}
+
 function handleSelectionChange(rows: Asset[]) {
   selectedAssets.value = rows
   if (!selectedOrganizationID.value) batchNetworkAreaValue.value = ''
@@ -682,11 +755,25 @@ function expiryTag(value?: string) {
   return remaining < 0 ? 'danger' : remaining <= 30 * 86400000 ? 'warning' : 'success'
 }
 
-onMounted(() => load(true))
+onMounted(() => {
+  if (inventoryMode.value) organizationFilter.value = inventoryOrganizationID.value
+  void load(!inventoryMode.value)
+})
 </script>
 
 <template>
   <section>
+    <el-alert
+      v-if="inventoryMode"
+      :title="`当前为“${inventoryTaskName}”填报草稿模式`"
+      :description="`新增资产仅保存在 ${inventoryOrganizationName} 的任务草稿中；提交后集团可审核，审核通过后才会发布到正式网络资产台账。`"
+      type="warning"
+      :closable="false"
+      show-icon
+      class="inventory-draft-alert"
+    >
+      <template #default><el-button size="small" @click="router.push('/inventory-tasks')">返回填报任务</el-button></template>
+    </el-alert>
     <div class="page-heading">
       <div>
         <span class="eyebrow">NETWORK ASSETS</span>
@@ -694,13 +781,13 @@ onMounted(() => load(true))
         <p>集团统一维护域名、IP、URL 和网络服务，子公司仅管理授权组织范围内的数据。</p>
       </div>
       <div class="button-row ledger-page-actions asset-page-actions">
-        <el-dropdown>
+        <el-dropdown v-if="!inventoryMode">
           <el-button :loading="exporting">导出台账</el-button>
           <template #dropdown><el-dropdown-menu><el-dropdown-item @click="exportLedger('xlsx')">导出 XLSX</el-dropdown-item><el-dropdown-item @click="exportLedger('csv')">导出 CSV</el-dropdown-item><el-dropdown-item divided @click="queueXLSXExport">后台生成 XLSX</el-dropdown-item></el-dropdown-menu></template>
         </el-dropdown>
-        <el-button v-if="auth.isGroupAdmin" @click="openAreaManagement">网络区域配置</el-button>
-        <el-button @click="openImportHistory">导入记录</el-button>
-        <el-button @click="openImportDialog">批量导入</el-button>
+        <el-button v-if="auth.isGroupAdmin && !inventoryMode" @click="openAreaManagement">网络区域配置</el-button>
+        <el-button v-if="!inventoryMode" @click="openImportHistory">导入记录</el-button>
+        <el-button v-if="!inventoryMode" @click="openImportDialog">批量导入</el-button>
         <el-button type="primary" @click="openCreateDialog">新增资产</el-button>
       </div>
     </div>
@@ -727,11 +814,30 @@ onMounted(() => load(true))
         <el-button @click="resetAndLoadAssets">查询</el-button>
         <span class="asset-filter-count">共 {{ total }} 条</span>
       </div>
-      <SavedFilterViews ref="savedFilterViews" page-key="assets" :current-filters="currentAssetFilters" @apply="applySavedAssetFilters" />
+      <SavedFilterViews v-if="!inventoryMode" ref="savedFilterViews" page-key="assets" :current-filters="currentAssetFilters" @apply="applySavedAssetFilters" />
+    </div>
+
+    <div v-if="inventoryMode" class="panel data-table-panel inventory-draft-panel" v-loading="loading">
+      <div class="table-panel-heading">
+        <div><strong>本次任务新增草稿</strong><span>共 {{ draftTotal }} 项；未提交时集团在正式台账中不可见</span></div>
+        <el-tag type="warning" effect="plain">任务草稿</el-tag>
+      </div>
+      <el-table :data="draftAssets" row-key="id" empty-text="当前任务尚未新增资产草稿">
+        <el-table-column label="资产名称" min-width="180"><template #default="scope"><el-button link type="primary" class="table-link" @click="openEditDialog(scope.row)">{{ scope.row.name || '未命名资产' }}</el-button></template></el-table-column>
+        <el-table-column label="资产值" min-width="230"><template #default="scope"><span class="mono-text">{{ scope.row.value }}</span></template></el-table-column>
+        <el-table-column label="类型" width="95"><template #default="scope">{{ typeLabel(scope.row.type) }}</template></el-table-column>
+        <el-table-column prop="business_system_name" label="业务系统" min-width="150"><template #default="scope">{{ scope.row.business_system_name || '未绑定' }}</template></el-table-column>
+        <el-table-column label="暴露范围" width="105"><template #default="scope">{{ scopeLabel(scope.row.network_scope) }}</template></el-table-column>
+        <el-table-column label="草稿状态" width="105"><template #default="scope"><el-tag type="warning" effect="plain">{{ draftStatusLabels[scope.row.draft_status || 'editing'] || scope.row.draft_status }}</el-tag></template></el-table-column>
+        <el-table-column label="操作" width="140" fixed="right"><template #default="scope"><el-button link type="primary" :disabled="scope.row.draft_status === 'submitted'" @click="openEditDialog(scope.row)">编辑</el-button><el-button link type="danger" :disabled="scope.row.draft_status === 'submitted'" @click="removeDraft(scope.row)">删除</el-button></template></el-table-column>
+      </el-table>
+      <div v-if="draftTotal > 0" class="table-pagination">
+        <el-pagination background layout="total, sizes, prev, pager, next" :total="draftTotal" :current-page="draftPage" :page-size="draftPageSize" :page-sizes="[20, 50, 100]" @current-change="handleDraftPageChange" @size-change="handleDraftPageSizeChange" />
+      </div>
     </div>
 
     <div class="panel data-table-panel" v-loading="loading">
-      <div class="batch-toolbar">
+      <div v-if="!inventoryMode" class="batch-toolbar">
         <div><strong>批量操作</strong><span>已选择 {{ selectedAssets.length }} 个资产；设置网络区域时需选择同一组织的资产</span></div>
         <div class="batch-toolbar-actions">
           <el-select v-model="batchStatusValue" aria-label="批量设置状态" :disabled="selectedAssets.length === 0 || batchLoading" placeholder="批量设置状态" style="width: 150px" @change="applyBatchStatus">
@@ -744,7 +850,7 @@ onMounted(() => load(true))
         </div>
       </div>
       <el-table :data="assets" row-key="id" empty-text="暂无网络资产" @selection-change="handleSelectionChange">
-        <el-table-column type="selection" width="46" />
+        <el-table-column v-if="!inventoryMode" type="selection" width="46" />
         <el-table-column label="资产名称" min-width="180">
           <template #default="scope"><el-button link type="primary" class="table-link" @click="openDetail(scope.row)">{{ scope.row.name || '未命名资产' }}</el-button></template>
         </el-table-column>
@@ -764,9 +870,12 @@ onMounted(() => load(true))
         <el-table-column label="操作" width="235" fixed="right">
           <template #default="scope">
             <el-button link type="primary" @click="openChangeHistory(scope.row)">历史</el-button>
-            <el-button link type="primary" @click="openEditDialog(scope.row)">编辑</el-button>
-            <el-button link :type="scope.row.status === 'archived' ? 'success' : 'warning'" @click="toggleArchive(scope.row)">{{ scope.row.status === 'archived' ? '启用' : '归档' }}</el-button>
-            <el-button link type="danger" @click="removeAsset(scope.row)">删除</el-button>
+            <template v-if="!inventoryMode">
+              <el-button link type="primary" @click="openEditDialog(scope.row)">编辑</el-button>
+              <el-button link :type="scope.row.status === 'archived' ? 'success' : 'warning'" @click="toggleArchive(scope.row)">{{ scope.row.status === 'archived' ? '启用' : '归档' }}</el-button>
+              <el-button link type="danger" @click="removeAsset(scope.row)">删除</el-button>
+            </template>
+            <span v-else class="muted-text">正式台账只读</span>
           </template>
         </el-table-column>
       </el-table>
@@ -803,12 +912,12 @@ onMounted(() => load(true))
     </el-drawer>
 
     <el-dialog v-model="editDialogVisible" :title="dialogTitle" width="720px" destroy-on-close>
-      <el-form ref="formRef" :model="form" :rules="rules" label-position="top">
+      <el-alert v-if="inventoryMode" title="此处保存的是任务草稿，不会立即进入集团正式台账。任务审核通过后系统会自动发布。" type="info" :closable="false" show-icon class="dialog-context-alert" /><el-form ref="formRef" :model="form" :rules="rules" label-position="top">
         <div class="form-grid two-columns">
           <el-form-item label="资产类型" prop="type"><el-select v-model="form.type" style="width: 100%"><el-option v-for="(label, value) in typeLabels" :key="value" :label="label" :value="value" /></el-select></el-form-item>
           <el-form-item label="资产值" prop="value"><el-input v-model="form.value" :placeholder="valuePlaceholder" /></el-form-item>
           <el-form-item label="资产名称"><el-input v-model="form.name" placeholder="便于识别的名称（可选）" /></el-form-item>
-          <el-form-item label="所属组织" prop="organization_id"><el-select v-model="form.organization_id" filterable :disabled="!auth.isGroupAdmin" style="width: 100%" @change="handleFormOrganizationChange"><el-option v-for="item in enabledOrganizations" :key="item.id" :label="item.name" :value="item.id" /></el-select></el-form-item>
+          <el-form-item label="所属组织" prop="organization_id"><el-select v-model="form.organization_id" filterable :disabled="!auth.isGroupAdmin || inventoryMode" style="width: 100%" @change="handleFormOrganizationChange"><el-option v-for="item in enabledOrganizations" :key="item.id" :label="item.name" :value="item.id" /></el-select></el-form-item>
           <el-form-item label="关联业务系统"><el-select v-model="form.business_system_id" clearable filterable placeholder="可选" style="width: 100%"><el-option v-for="item in availableSystems" :key="item.id" :label="`${item.name}（${item.code}）`" :value="item.id" /></el-select></el-form-item>
           <el-form-item label="责任人账号" class="full-span">
             <el-select v-model="form.owner_user_id" clearable filterable remote reserve-keyword :remote-method="loadOwnerOptions" :loading="ownerOptionsLoading" placeholder="按姓名、账号或联系方式搜索所属组织用户" style="width: 100%">
@@ -818,12 +927,12 @@ onMounted(() => load(true))
           </el-form-item>
           <el-form-item label="负责人补充说明"><el-input v-model="form.owner_name" placeholder="外部联系人、团队或职责说明（可选）" /></el-form-item>
           <el-form-item label="环境"><el-select v-model="form.environment" style="width: 100%"><el-option v-for="(label, value) in environmentLabels" :key="value" :label="label" :value="value" /></el-select></el-form-item>
-          <el-form-item label="网络暴露范围"><el-select v-model="form.network_scope" style="width: 100%"><el-option v-for="(label, value) in scopeLabels" :key="value" :label="label" :value="value" /></el-select></el-form-item>
+          <el-form-item label="网络暴露范围"><el-select v-model="form.network_scope" :disabled="inventoryMode && inventoryNetworkScope !== 'all'" style="width: 100%"><el-option v-for="(label, value) in scopeLabels" :key="value" :label="label" :value="value" /></el-select></el-form-item>
           <el-form-item label="网络区域"><el-select v-model="form.network_area_id" clearable filterable placeholder="如：上海办事处（可选）" style="width: 100%"><el-option v-for="item in availableNetworkAreas" :key="item.id" :label="item.code ? `${item.name}（${item.code}）` : item.name" :value="item.id" :disabled="item.status !== 'enabled'" /></el-select></el-form-item>
           <el-form-item label="重要程度"><el-select v-model="form.importance" style="width: 100%"><el-option v-for="(label, value) in importanceLabels" :key="value" :label="label" :value="value" /></el-select></el-form-item>
           <el-form-item label="资产状态"><el-select v-model="form.status" style="width: 100%"><el-option v-for="(label, value) in statusLabels" :key="value" :label="label" :value="value" /></el-select></el-form-item>
           <el-form-item label="有效期至" class="full-span"><el-date-picker v-model="form.expires_at" type="datetime" placeholder="留空表示长期有效" style="width: 100%" /><div class="form-tip">适用于域名、临时 URL、公网 IP 租约等资产生命周期；该字段不是“最后更新时间”。</div></el-form-item>
-          <el-form-item label="备注" class="full-span"><el-input v-model="form.notes" type="textarea" :rows="3" placeholder="补充资产用途、管理要求等信息" /></el-form-item><template v-if="customFields.length"><el-divider class="full-span" content-position="left">集团自定义字段</el-divider><el-form-item v-for="field in customFields" :key="field.id" :label="field.field_name" :required="field.is_required"><el-input v-if="field.field_type === 'text'" v-model="customValues[field.field_key]"/><el-input v-else-if="field.field_type === 'textarea'" v-model="customValues[field.field_key]" type="textarea" :rows="2"/><el-input-number v-else-if="field.field_type === 'number'" v-model="customValues[field.field_key]"/><el-date-picker v-else-if="field.field_type === 'date'" v-model="customValues[field.field_key]" type="date" value-format="YYYY-MM-DD"/><el-switch v-else-if="field.field_type === 'boolean'" v-model="customValues[field.field_key]"/><el-select v-else-if="field.field_type === 'multiselect'" v-model="customValues[field.field_key]" multiple><el-option v-for="option in field.options" :key="option" :label="option" :value="option"/></el-select><el-select v-else v-model="customValues[field.field_key]"><el-option v-for="option in field.options" :key="option" :label="option" :value="option"/></el-select><div v-if="field.description" class="form-tip">{{ field.description }}</div></el-form-item></template>
+          <el-form-item label="备注" class="full-span"><el-input v-model="form.notes" type="textarea" :rows="3" placeholder="补充资产用途、管理要求等信息" /></el-form-item><template v-if="customFields.length && !inventoryMode"><el-divider class="full-span" content-position="left">集团自定义字段</el-divider><el-form-item v-for="field in customFields" :key="field.id" :label="field.field_name" :required="field.is_required"><el-input v-if="field.field_type === 'text'" v-model="customValues[field.field_key]"/><el-input v-else-if="field.field_type === 'textarea'" v-model="customValues[field.field_key]" type="textarea" :rows="2"/><el-input-number v-else-if="field.field_type === 'number'" v-model="customValues[field.field_key]"/><el-date-picker v-else-if="field.field_type === 'date'" v-model="customValues[field.field_key]" type="date" value-format="YYYY-MM-DD"/><el-switch v-else-if="field.field_type === 'boolean'" v-model="customValues[field.field_key]"/><el-select v-else-if="field.field_type === 'multiselect'" v-model="customValues[field.field_key]" multiple><el-option v-for="option in field.options" :key="option" :label="option" :value="option"/></el-select><el-select v-else v-model="customValues[field.field_key]"><el-option v-for="option in field.options" :key="option" :label="option" :value="option"/></el-select><div v-if="field.description" class="form-tip">{{ field.description }}</div></el-form-item></template>
         </div>
       </el-form>
       <template #footer><el-button @click="editDialogVisible = false">取消</el-button><el-button type="primary" :loading="submitting" @click="submit">{{ submitLabel }}</el-button></template>

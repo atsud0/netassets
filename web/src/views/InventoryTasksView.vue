@@ -558,6 +558,25 @@ function canSubmit(task: InventoryTask, progress: OrganizationProgress) {
   return isTaskOpen(task) && ['in_progress', 'returned', 'overdue'].includes(progress.status)
 }
 
+function openInventoryAssets(task: InventoryTask, progress: OrganizationProgress) {
+  void router.push({
+    path: '/assets',
+    query: {
+      mode: 'inventory',
+      task_id: task.id,
+      task_name: task.name,
+      organization_id: progress.organization_id,
+      asset_network_scope: task.asset_network_scope,
+    },
+  })
+}
+
+function openSelectedInventoryAssets() {
+  if (!selectedTask.value || !selectedProgress.value) return
+  submissionDialogVisible.value = false
+  openInventoryAssets(selectedTask.value, selectedProgress.value)
+}
+
 async function startProgress(task: InventoryTask, progress: OrganizationProgress) {
   const key = operationKey(task, progress)
   actionLoading.value = key
@@ -978,7 +997,7 @@ onMounted(async () => {
         <div class="inventory-guide-actions">
           <span>填报任务以系统中当前的业务系统和网络资产为准。请先维护数据，再回到本页面提交。</span>
           <el-button size="small" @click="router.push('/systems')">维护业务系统</el-button>
-          <el-button size="small" @click="router.push('/assets')">维护网络资产</el-button>
+          <el-button size="small" @click="router.push('/inventory-tasks')">从具体任务进入资产草稿</el-button>
         </div>
       </template>
     </el-alert>
@@ -1091,6 +1110,7 @@ onMounted(async () => {
                 <span v-else-if="itemScope.row.reviewed_at" class="table-secondary">审核：{{ itemScope.row.reviewed_by_name || '系统自动' }}<br>{{ formatDate(itemScope.row.reviewed_at) }}</span>
               </template>
               <template v-else>
+                <el-button v-if="isTaskOpen(detailTask) && !['submitted', 'approved'].includes(itemScope.row.status)" type="primary" link @click="openInventoryAssets(detailTask, itemScope.row)">维护网络资产</el-button>
                 <el-button v-if="canStart(detailTask, itemScope.row)" type="primary" link :loading="actionLoading === operationKey(detailTask, itemScope.row)" @click="startProgress(detailTask, itemScope.row)">开始填报</el-button>
                 <el-button v-if="canSubmit(detailTask, itemScope.row)" type="success" link :disabled="actionLoading === operationKey(detailTask, itemScope.row)" @click="openSubmissionDialog(detailTask, itemScope.row)">提交</el-button>
                 <span v-if="detailTask.status === 'active' && new Date(detailTask.start_at).getTime() > Date.now()" class="table-secondary">尚未到开始时间</span>
@@ -1266,7 +1286,7 @@ onMounted(async () => {
         </ul>
         <div v-if="qualityCheck && !qualityCheck.passed" class="quality-actions">
           <el-button size="small" @click="router.push('/systems'); submissionDialogVisible = false">维护业务系统</el-button>
-          <el-button size="small" @click="router.push('/assets'); submissionDialogVisible = false">维护网络资产</el-button>
+          <el-button size="small" @click="openSelectedInventoryAssets">维护网络资产草稿</el-button>
         </div>
       </div>
       <el-form label-position="top">

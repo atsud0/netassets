@@ -10,6 +10,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 
+	"netassets/internal/asset"
 	"netassets/internal/exportfile"
 	"netassets/internal/inventorytask"
 )
@@ -29,6 +30,46 @@ func registerInventoryTaskRoutes(api *gin.RouterGroup, requireAuth gin.HandlerFu
 			return
 		}
 		c.JSON(http.StatusOK, result)
+	})
+	group.GET("/:taskID/organizations/:organizationID/asset-drafts", func(c *gin.Context) {
+		page, err := parsePageQuery(c)
+		if err != nil {
+			writeAPIError(c, http.StatusBadRequest, "invalid_query", "分页参数不正确，page_size 最大为 100")
+			return
+		}
+		result, err := service.SearchAssetDrafts(c.Request.Context(), mustPrincipal(c), c.Param("taskID"), c.Param("organizationID"), page)
+		writeInventoryAssetDraftResult(c, logger, "list inventory asset drafts", result, err)
+	})
+	group.POST("/:taskID/organizations/:organizationID/asset-drafts", func(c *gin.Context) {
+		var input asset.CreateInput
+		if err := c.ShouldBindJSON(&input); err != nil {
+			writeAPIError(c, http.StatusBadRequest, "invalid_request", "资产草稿信息格式不正确")
+			return
+		}
+		item, err := service.CreateAssetDraft(c.Request.Context(), mustPrincipal(c), c.Param("taskID"), c.Param("organizationID"), input, c.GetString("request_id"), c.ClientIP())
+		if writeInventoryAssetDraftError(c, logger, "create inventory asset draft", err) {
+			return
+		}
+		c.JSON(http.StatusCreated, gin.H{"item": item})
+	})
+	group.PATCH("/:taskID/organizations/:organizationID/asset-drafts/:draftID", func(c *gin.Context) {
+		var input asset.CreateInput
+		if err := c.ShouldBindJSON(&input); err != nil {
+			writeAPIError(c, http.StatusBadRequest, "invalid_request", "资产草稿信息格式不正确")
+			return
+		}
+		item, err := service.UpdateAssetDraft(c.Request.Context(), mustPrincipal(c), c.Param("taskID"), c.Param("organizationID"), c.Param("draftID"), input, c.GetString("request_id"), c.ClientIP())
+		if writeInventoryAssetDraftError(c, logger, "update inventory asset draft", err) {
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"item": item})
+	})
+	group.DELETE("/:taskID/organizations/:organizationID/asset-drafts/:draftID", func(c *gin.Context) {
+		err := service.DeleteAssetDraft(c.Request.Context(), mustPrincipal(c), c.Param("taskID"), c.Param("organizationID"), c.Param("draftID"), c.GetString("request_id"), c.ClientIP())
+		if writeInventoryAssetDraftError(c, logger, "delete inventory asset draft", err) {
+			return
+		}
+		c.Status(http.StatusNoContent)
 	})
 	group.GET("/:taskID/organizations", func(c *gin.Context) {
 		page, err := parsePageQuery(c)
@@ -297,4 +338,32 @@ func writeInventoryProgressResult(c *gin.Context, logger *slog.Logger, operation
 	default:
 		c.JSON(http.StatusOK, gin.H{"item": item})
 	}
+}
+
+func writeInventoryAssetDraftResult(c *gin.Context, logger *slog.Logger, operation string, result any, err error) {
+	if writeInventoryAssetDraftError(c, logger, operation, err) {
+		return
+	}
+	c.JSON(http.StatusOK, result)
+}
+
+func writeInventoryAssetDraftError(c *gin.Context, logger *slog.Logger, operation string, err error) bool {
+	switch {
+	case err == nil:
+		return false
+	case errors.Is(err, inventorytask.ErrForbidden):
+		writeAPIError(c, http.StatusForbidden, "forbidden", "当前账号无权维护该组织的填报资产草稿")
+	case errors.Is(err, inventorytask.ErrInvalid):
+		writeAPIError(c, http.StatusBadRequest, "invalid_asset_draft", "请检查资产字段、所属资源或任务网络范围")
+	case errors.Is(err, inventorytask.ErrConflict):
+		writeAPIError(c, http.StatusConflict, "asset_draft_conflict", "相同资产已存在于正式台账或当前任务草稿中")
+	case errors.Is(err, inventorytask.ErrNotFound):
+		writeAPIError(c, http.StatusNotFound, "asset_draft_not_found", "填报任务、组织或资产草稿不存在")
+	case errors.Is(err, inventorytask.ErrState):
+		writeAPIError(c, http.StatusConflict, "invalid_state", "任务当前状态不允许修改资产草稿，请先开始填报或等待退回")
+	default:
+		logger.Error(operation, "error", err, "request_id", c.GetString("request_id"))
+		writeAPIError(c, http.StatusInternalServerError, "internal_error", "处理填报资产草稿失败")
+	}
+	return true
 }
