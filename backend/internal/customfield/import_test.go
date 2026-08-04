@@ -57,3 +57,45 @@ func TestExportValueUsesSpreadsheetFriendlyForms(t *testing.T) {
 		t.Fatalf("number export = %q", got)
 	}
 }
+
+func TestValidateValuesAcceptsTypedValues(t *testing.T) {
+	definitions := []Definition{
+		{ID: "field-text", FieldKey: "owner_department", FieldType: "text", IsRequired: true},
+		{ID: "field-select", FieldKey: "data_level", FieldType: "select", Options: []string{"一般", "重要"}},
+		{ID: "field-number", FieldKey: "retention_days", FieldType: "number"},
+	}
+	byKey, provided, err := ValidateValues(definitions, []Value{
+		{FieldKey: "owner_department", Value: "信息技术部"},
+		{FieldKey: "data_level", Value: "重要"},
+		{FieldKey: "retention_days", Value: float64(365)},
+	})
+	if err != nil {
+		t.Fatalf("ValidateValues() error = %v", err)
+	}
+	if byKey["data_level"].ID != "field-select" || provided["owner_department"] != "信息技术部" {
+		t.Fatalf("unexpected validation result: byKey=%#v provided=%#v", byKey, provided)
+	}
+}
+
+func TestValidateValuesRejectsInvalidPayloads(t *testing.T) {
+	definitions := []Definition{
+		{FieldKey: "owner_department", FieldType: "text", IsRequired: true},
+		{FieldKey: "data_level", FieldType: "select", Options: []string{"一般", "重要"}},
+	}
+	tests := []struct {
+		name   string
+		values []Value
+	}{
+		{name: "missing required", values: []Value{{FieldKey: "data_level", Value: "一般"}}},
+		{name: "unknown field", values: []Value{{FieldKey: "owner_department", Value: "信息技术部"}, {FieldKey: "removed", Value: "x"}}},
+		{name: "duplicate field", values: []Value{{FieldKey: "owner_department", Value: "信息技术部"}, {FieldKey: "owner_department", Value: "安全部"}}},
+		{name: "invalid option", values: []Value{{FieldKey: "owner_department", Value: "信息技术部"}, {FieldKey: "data_level", Value: "核心"}}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if _, _, err := ValidateValues(definitions, tt.values); err != ErrInvalid {
+				t.Fatalf("ValidateValues() error = %v, want ErrInvalid", err)
+			}
+		})
+	}
+}

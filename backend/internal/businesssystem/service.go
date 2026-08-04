@@ -576,9 +576,8 @@ func (s *Service) create(ctx context.Context, principal auth.Principal, input Cr
 	if !principal.HasPermission("system.manage") {
 		return BusinessSystem{}, ErrForbidden
 	}
-	normalize(&input)
-	if !validInput(input) {
-		return BusinessSystem{}, ErrInvalid
+	if err := PrepareCreateInput(&input); err != nil {
+		return BusinessSystem{}, err
 	}
 	allowed, err := access.CanOperateOrganization(ctx, s.pool, principal, input.OrganizationID, "system.manage")
 	if err != nil {
@@ -588,13 +587,6 @@ func (s *Service) create(ctx context.Context, principal auth.Principal, input Cr
 		return BusinessSystem{}, ErrForbidden
 	}
 
-	if input.PersonalInformationRecordCount != nil {
-		if *input.PersonalInformationRecordCount >= 100000 {
-			input.DataVolumeOver100K = "yes"
-		} else {
-			input.DataVolumeOver100K = "no"
-		}
-	}
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return BusinessSystem{}, fmt.Errorf("begin business system: %w", err)
@@ -1570,6 +1562,23 @@ func translateEnum(value string, values map[string]string) string {
 		return mapped
 	}
 	return strings.ToLower(value)
+}
+
+// PrepareCreateInput normalizes and validates business-system fields for both
+// formal ledger writes and inventory-task drafts.
+func PrepareCreateInput(input *CreateInput) error {
+	normalize(input)
+	if input.PersonalInformationRecordCount != nil {
+		if *input.PersonalInformationRecordCount >= 100000 {
+			input.DataVolumeOver100K = "yes"
+		} else {
+			input.DataVolumeOver100K = "no"
+		}
+	}
+	if !validInput(*input) {
+		return ErrInvalid
+	}
+	return nil
 }
 
 func normalize(input *CreateInput) {

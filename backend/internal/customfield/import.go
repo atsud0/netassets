@@ -257,25 +257,9 @@ func SaveImportedValuesInTx(ctx context.Context, tx pgx.Tx, typ, resourceID stri
 	if typ != "asset" && typ != "business_system" {
 		return ErrInvalid
 	}
-	byKey := make(map[string]Definition, len(definitions))
-	for _, definition := range definitions {
-		byKey[definition.FieldKey] = definition
-	}
-	provided := make(map[string]any, len(values))
-	for _, value := range values {
-		definition, ok := byKey[value.FieldKey]
-		if !ok || !validFieldValue(definition, value.Value) {
-			return ErrInvalid
-		}
-		if _, duplicate := provided[value.FieldKey]; duplicate {
-			return ErrInvalid
-		}
-		provided[value.FieldKey] = value.Value
-	}
-	for _, definition := range definitions {
-		if definition.IsRequired && isBlank(provided[definition.FieldKey]) {
-			return ErrInvalid
-		}
+	byKey, provided, err := ValidateValues(definitions, values)
+	if err != nil {
+		return err
 	}
 	for key, value := range provided {
 		raw, err := json.Marshal(value)
@@ -287,4 +271,31 @@ func SaveImportedValuesInTx(ctx context.Context, tx pgx.Tx, typ, resourceID stri
 		}
 	}
 	return nil
+}
+
+// ValidateValues validates API/import-style custom values without persisting
+// them. It is used by inventory drafts so required and typed group fields are
+// enforced before submission.
+func ValidateValues(definitions []Definition, values []Value) (map[string]Definition, map[string]any, error) {
+	byKey := make(map[string]Definition, len(definitions))
+	for _, definition := range definitions {
+		byKey[definition.FieldKey] = definition
+	}
+	provided := make(map[string]any, len(values))
+	for _, value := range values {
+		definition, ok := byKey[value.FieldKey]
+		if !ok || !validFieldValue(definition, value.Value) {
+			return nil, nil, ErrInvalid
+		}
+		if _, duplicate := provided[value.FieldKey]; duplicate {
+			return nil, nil, ErrInvalid
+		}
+		provided[value.FieldKey] = value.Value
+	}
+	for _, definition := range definitions {
+		if definition.IsRequired && isBlank(provided[definition.FieldKey]) {
+			return nil, nil, ErrInvalid
+		}
+	}
+	return byKey, provided, nil
 }

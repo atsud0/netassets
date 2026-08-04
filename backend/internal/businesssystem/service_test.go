@@ -248,3 +248,42 @@ func TestBuildBusinessSystemExportRejectsOversizedSynchronousXLSX(t *testing.T) 
 		t.Fatalf("buildExport oversized xlsx error = %v, want ErrExportTooLarge", err)
 	}
 }
+
+func TestPrepareCreateInputNormalizesAndDerivesDataVolume(t *testing.T) {
+	count := int64(100000)
+	input := validBusinessSystemInput()
+	input.Code = "  CRM_100  "
+	input.Name = "  客户服务系统  "
+	input.OwnerContact = "  owner@example.com  "
+	input.PersonalInformationRecordCount = &count
+
+	if err := PrepareCreateInput(&input); err != nil {
+		t.Fatalf("PrepareCreateInput() error = %v", err)
+	}
+	if input.Code != "CRM_100" || input.Name != "客户服务系统" || input.OwnerContact != "owner@example.com" {
+		t.Fatalf("normalized input = %#v", input)
+	}
+	if input.DataVolumeOver100K != "yes" {
+		t.Fatalf("DataVolumeOver100K = %q, want yes", input.DataVolumeOver100K)
+	}
+
+	count = 99999
+	input = validBusinessSystemInput()
+	input.PersonalInformationRecordCount = &count
+	input.DataVolumeOver100K = "yes"
+	if err := PrepareCreateInput(&input); err != nil {
+		t.Fatalf("PrepareCreateInput() below threshold error = %v", err)
+	}
+	if input.DataVolumeOver100K != "no" {
+		t.Fatalf("DataVolumeOver100K = %q, want no", input.DataVolumeOver100K)
+	}
+}
+
+func TestPrepareCreateInputRejectsInvalidCombination(t *testing.T) {
+	input := validBusinessSystemInput()
+	input.ContainsPersonalInformation = "no"
+	input.ContainsSensitivePersonalInformation = "yes"
+	if err := PrepareCreateInput(&input); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("PrepareCreateInput() error = %v, want ErrInvalid", err)
+	}
+}

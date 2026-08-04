@@ -33,7 +33,7 @@ func (s *Service) SearchAssetDrafts(ctx context.Context, principal auth.Principa
 	if !principal.HasPermission("inventory.manage") || !principal.HasPermission("asset.manage") {
 		return pagination.Result[AssetDraft]{}, ErrForbidden
 	}
-	if _, err := s.loadDraftAssignment(ctx, s.pool, principal, taskID, organizationID, false); err != nil {
+	if _, err := s.loadDraftAssignment(ctx, s.pool, principal, taskID, organizationID, false, "network_assets"); err != nil {
 		return pagination.Result[AssetDraft]{}, err
 	}
 	visibility := ""
@@ -95,7 +95,7 @@ func (s *Service) CreateAssetDraft(ctx context.Context, principal auth.Principal
 		return AssetDraft{}, fmt.Errorf("begin inventory asset draft: %w", err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
-	assignment, err := s.loadDraftAssignment(ctx, tx, principal, taskID, organizationID, true)
+	assignment, err := s.loadDraftAssignment(ctx, tx, principal, taskID, organizationID, true, "network_assets")
 	if err != nil {
 		return AssetDraft{}, err
 	}
@@ -153,7 +153,7 @@ func (s *Service) UpdateAssetDraft(ctx context.Context, principal auth.Principal
 		return AssetDraft{}, fmt.Errorf("begin inventory asset draft update: %w", err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
-	assignment, err := s.loadDraftAssignment(ctx, tx, principal, taskID, organizationID, true)
+	assignment, err := s.loadDraftAssignment(ctx, tx, principal, taskID, organizationID, true, "network_assets")
 	if err != nil {
 		return AssetDraft{}, err
 	}
@@ -207,7 +207,7 @@ func (s *Service) DeleteAssetDraft(ctx context.Context, principal auth.Principal
 		return fmt.Errorf("begin inventory asset draft delete: %w", err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
-	if _, err := s.loadDraftAssignment(ctx, tx, principal, taskID, organizationID, true); err != nil {
+	if _, err := s.loadDraftAssignment(ctx, tx, principal, taskID, organizationID, true, "network_assets"); err != nil {
 		return err
 	}
 	result, err := tx.Exec(ctx, `DELETE FROM inventory_asset_drafts WHERE id::text=$1 AND task_id::text=$2 AND organization_id::text=$3 AND draft_status IN ('editing','returned')`, draftID, taskID, organizationID)
@@ -223,7 +223,7 @@ func (s *Service) DeleteAssetDraft(ctx context.Context, principal auth.Principal
 	return tx.Commit(ctx)
 }
 
-func (s *Service) loadDraftAssignment(ctx context.Context, q queryRower, principal auth.Principal, taskID, organizationID string, editing bool) (draftAssignment, error) {
+func (s *Service) loadDraftAssignment(ctx context.Context, q queryRower, principal auth.Principal, taskID, organizationID string, editing bool, resource string) (draftAssignment, error) {
 	if principal.HasRole("group_admin") {
 		if editing {
 			return draftAssignment{}, ErrForbidden
@@ -247,10 +247,14 @@ func (s *Service) loadDraftAssignment(ctx context.Context, q queryRower, princip
 		  AND progress.organization_id IN (SELECT id FROM accessible)`
 	if editing {
 		query += ` AND task.status='active' AND task.start_at<=now() AND (task.deadline_at>=now() OR task.allow_late_submission)
-		           AND progress.status IN ('not_started','in_progress','returned','overdue') AND task.required_fields ? 'network_assets'`
+		           AND progress.status IN ('not_started','in_progress','returned','overdue') AND (CASE WHEN $4='business_systems' THEN (task.required_fields ? 'business_systems' OR task.required_fields ? 'data_security') ELSE task.required_fields ? $4 END)`
+	}
+	args := []any{principal.UserID, taskID, organizationID}
+	if editing {
+		args = append(args, resource)
 	}
 	var item draftAssignment
-	err := q.QueryRow(ctx, query, principal.UserID, taskID, organizationID).Scan(&item.TaskName, &item.OrganizationName, &item.ProgressStatus, &item.AssetNetworkScope)
+	err := q.QueryRow(ctx, query, args...).Scan(&item.TaskName, &item.OrganizationName, &item.ProgressStatus, &item.AssetNetworkScope)
 	if errors.Is(err, pgx.ErrNoRows) {
 		if editing {
 			return draftAssignment{}, ErrState

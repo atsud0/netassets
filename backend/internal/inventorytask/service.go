@@ -679,6 +679,15 @@ func loadQualityCheck(ctx context.Context, q qualityCheckQuerier, principal auth
 			LEFT JOIN business_system_data_security_profiles p ON p.business_system_id = bs.id
 			WHERE bs.owner_organization_id::text = $3 AND bs.deleted_at IS NULL
 			  AND (task_scope.required_fields ? 'business_systems' OR task_scope.required_fields ? 'data_security')
+			UNION ALL
+			SELECT draft.id, draft.owner_name, draft.owner_contact, draft.system_level,
+			       draft.contains_personal_information, draft.contains_sensitive_personal_information,
+			       draft.data_volume_over_100k, draft.contains_important_data, draft.contains_core_data
+			FROM inventory_business_system_drafts draft
+			CROSS JOIN assignment task_scope
+			WHERE draft.task_id::text = $2 AND draft.organization_id::text = $3
+			  AND draft.draft_status IN ('editing', 'returned')
+			  AND (task_scope.required_fields ? 'business_systems' OR task_scope.required_fields ? 'data_security')
 		), org_assets AS (
 			SELECT a.id, a.network_scope, a.importance, ao.owner_name,
 			       EXISTS (SELECT 1 FROM system_assets sa WHERE sa.asset_id = a.id) AS has_system
@@ -730,7 +739,7 @@ func loadQualityCheck(ctx context.Context, q qualityCheckQuerier, principal auth
 		return QualityCheck{}, fmt.Errorf("decode inventory quality fields: %w", err)
 	}
 	result := buildQualityCheck(requiredFields, counts)
-	if err := appendConfiguredQualityRules(ctx, q, organizationID, requiredFields, assetNetworkScope, &result); err != nil {
+	if err := appendConfiguredQualityRules(ctx, q, taskID, organizationID, requiredFields, assetNetworkScope, &result); err != nil {
 		return QualityCheck{}, err
 	}
 	result.Passed = result.ErrorCount == 0
@@ -797,7 +806,7 @@ func buildQualityCheck(requiredFields []string, counts qualityCounts) QualityChe
 	return result
 }
 
-func appendConfiguredQualityRules(ctx context.Context, q qualityCheckQuerier, organizationID string, requiredFields []string, assetNetworkScope string, result *QualityCheck) error {
+func appendConfiguredQualityRules(ctx context.Context, q qualityCheckQuerier, taskID, organizationID string, requiredFields []string, assetNetworkScope string, result *QualityCheck) error {
 	includeSystems, includeAssets := selectedResourceTypes(requiredFields)
 	rows, err := q.Query(ctx, `SELECT id::text,rule_name,resource_type,target_field,severity,conditions FROM data_quality_rules WHERE is_enabled AND rule_type='required' ORDER BY sort_order,created_at`)
 	if err != nil {
@@ -817,7 +826,7 @@ func appendConfiguredQualityRules(ctx context.Context, q qualityCheckQuerier, or
 		if err := json.Unmarshal(rawConditions, &rule.Conditions); err != nil {
 			return fmt.Errorf("decode configured quality rule conditions: %w", err)
 		}
-		missing, err := configuredMissingCount(ctx, q, rule, organizationID, assetNetworkScope)
+		missing, err := configuredMissingCount(ctx, q, rule, taskID, organizationID, assetNetworkScope)
 		if err != nil {
 			return err
 		}
@@ -835,7 +844,7 @@ func appendConfiguredQualityRules(ctx context.Context, q qualityCheckQuerier, or
 	return rows.Err()
 }
 
-func configuredMissingCount(ctx context.Context, q qualityCheckQuerier, rule dataquality.Rule, organizationID, assetNetworkScope string) (int64, error) {
+func configuredMissingCount(ctx context.Context, q qualityCheckQuerier, rule dataquality.Rule, taskID, organizationID, assetNetworkScope string) (int64, error) {
 	query, args, err := dataquality.BuildRuleIssueCountQuery(rule, organizationID)
 	if err != nil {
 		return 0, fmt.Errorf("build configured quality rule %s: %w", rule.ID, err)
@@ -847,6 +856,13 @@ func configuredMissingCount(ctx context.Context, q qualityCheckQuerier, rule dat
 	var count int64
 	if err := q.QueryRow(ctx, query, args...).Scan(&count); err != nil {
 		return 0, fmt.Errorf("count configured quality rule %s: %w", rule.ID, err)
+	}
+	if rule.ResourceType == "business_system" {
+		draftCount, err := configuredBusinessSystemDraftMissingCount(ctx, q, rule, taskID, organizationID)
+		if err != nil {
+			return 0, err
+		}
+		count += draftCount
 	}
 	return count, nil
 }
@@ -879,9 +895,16 @@ func (s *Service) Submit(ctx context.Context, principal auth.Principal, taskID, 
 		    started_at = COALESCE(ito.started_at, now()), submitted_by = $1::uuid, submitted_at = now(),
 			    submission_note = NULLIF($4, ''),
 			    submitted_system_count = (
-					SELECT count(*) FROM business_systems bs
-					WHERE bs.owner_organization_id = ito.organization_id AND bs.deleted_at IS NULL
-					  AND (t.required_fields ? 'business_systems' OR t.required_fields ? 'data_security')
+					SELECT (
+						SELECT count(*) FROM business_systems bs
+						WHERE bs.owner_organization_id = ito.organization_id AND bs.deleted_at IS NULL
+						  AND (t.required_fields ? 'business_systems' OR t.required_fields ? 'data_security')
+					) + (
+						SELECT count(*) FROM inventory_business_system_drafts draft
+						WHERE draft.task_id=t.id AND draft.organization_id=ito.organization_id
+						  AND draft.draft_status IN ('editing','returned')
+						  AND (t.required_fields ? 'business_systems' OR t.required_fields ? 'data_security')
+					)
 				),
 			    submitted_asset_count = (
 					SELECT (
@@ -920,6 +943,13 @@ func (s *Service) Submit(ctx context.Context, principal auth.Principal, taskID, 
 		return OrganizationProgress{}, err
 	}
 	if _, err := tx.Exec(ctx, `
+		UPDATE inventory_business_system_drafts
+		SET draft_status='submitted', submitted_at=now(), updated_by=$3::uuid, updated_at=now()
+		WHERE task_id::text=$1 AND organization_id::text=$2 AND draft_status IN ('editing','returned')
+	`, taskID, organizationID, principal.UserID); err != nil {
+		return OrganizationProgress{}, fmt.Errorf("submit inventory business system drafts: %w", err)
+	}
+	if _, err := tx.Exec(ctx, `
 		UPDATE inventory_asset_drafts
 		SET draft_status='submitted', submitted_at=now(), updated_by=$3::uuid, updated_at=now()
 		WHERE task_id::text=$1 AND organization_id::text=$2 AND draft_status IN ('editing','returned')
@@ -941,6 +971,9 @@ func (s *Service) Submit(ctx context.Context, principal auth.Principal, taskID, 
 		return OrganizationProgress{}, err
 	}
 	if item.Status == "approved" {
+		if err := publishBusinessSystemDrafts(ctx, tx, principal, taskID, organizationID, requestID, ipAddress); err != nil {
+			return OrganizationProgress{}, err
+		}
 		if err := publishAssetDrafts(ctx, tx, principal, taskID, organizationID, requestID, ipAddress); err != nil {
 			return OrganizationProgress{}, err
 		}
@@ -974,6 +1007,9 @@ func (s *Service) Review(ctx context.Context, principal auth.Principal, taskID, 
 		return OrganizationProgress{}, err
 	}
 	if input.Decision == "approved" {
+		if err := publishBusinessSystemDrafts(ctx, tx, principal, taskID, organizationID, requestID, ipAddress); err != nil {
+			return OrganizationProgress{}, err
+		}
 		if err := publishAssetDrafts(ctx, tx, principal, taskID, organizationID, requestID, ipAddress); err != nil {
 			return OrganizationProgress{}, err
 		}
@@ -997,6 +1033,9 @@ func (s *Service) Review(ctx context.Context, principal auth.Principal, taskID, 
 		return OrganizationProgress{}, ErrState
 	}
 	if input.Decision == "returned" {
+		if _, err := tx.Exec(ctx, `UPDATE inventory_business_system_drafts SET draft_status='returned',updated_by=$3::uuid,updated_at=now() WHERE task_id::text=$1 AND organization_id::text=$2 AND draft_status='submitted'`, taskID, organizationID, principal.UserID); err != nil {
+			return OrganizationProgress{}, fmt.Errorf("return inventory business system drafts: %w", err)
+		}
 		if _, err := tx.Exec(ctx, `UPDATE inventory_asset_drafts SET draft_status='returned',updated_by=$3::uuid,updated_at=now() WHERE task_id::text=$1 AND organization_id::text=$2 AND draft_status='submitted'`, taskID, organizationID, principal.UserID); err != nil {
 			return OrganizationProgress{}, fmt.Errorf("return inventory asset drafts: %w", err)
 		}

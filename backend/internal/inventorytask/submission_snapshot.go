@@ -708,6 +708,38 @@ func createSubmissionSnapshot(ctx context.Context, tx pgx.Tx, principal auth.Pri
 	if err != nil {
 		return SubmissionMetadata{}, fmt.Errorf("snapshot business systems: %w", err)
 	}
+	draftSystemResult, err := tx.Exec(ctx, `
+		INSERT INTO inventory_submission_items (submission_id,resource_type,resource_id,resource_key,resource_name,snapshot_data)
+		SELECT $1::uuid,'business_system',draft.id,draft.system_code,draft.system_name,
+		       jsonb_build_object(
+		           'system_code',draft.system_code,'system_name',draft.system_name,'short_name',COALESCE(draft.short_name,''),
+		           'owner_name',COALESCE(draft.owner_name,''),'owner_contact',COALESCE(draft.owner_contact,''),
+		           'system_status',draft.system_status,'system_level',draft.system_level,'deployment_type',COALESCE(draft.deployment_type,''),
+		           'internet_exposure',draft.internet_exposure,'description',COALESCE(draft.description,''),
+		           'contains_personal_information',draft.contains_personal_information,
+		           'contains_sensitive_personal_information',draft.contains_sensitive_personal_information,
+		           'personal_information_record_count',draft.personal_information_record_count,
+		           'data_volume_over_100k',draft.data_volume_over_100k,'contains_important_data',draft.contains_important_data,
+		           'contains_core_data',draft.contains_core_data,'data_storage_location',COALESCE(draft.data_storage_location,''),
+		           'security_notes',COALESCE(draft.security_notes,''),'_inventory_draft',true
+		       ) || COALESCE((
+		           SELECT jsonb_object_agg('custom:' || (value->>'field_key'), value->'value')
+		           FROM jsonb_array_elements(draft.custom_values) value
+		       ),'{}'::jsonb) || jsonb_build_object('_custom_field_labels',COALESCE((
+		           SELECT jsonb_object_agg('custom:' || definition.field_key,definition.field_name)
+		           FROM jsonb_array_elements(draft.custom_values) value
+		           JOIN custom_field_definitions definition ON definition.field_key=value->>'field_key'
+		             AND definition.resource_type='business_system'
+		       ),'{}'::jsonb))
+		FROM inventory_business_system_drafts draft
+		WHERE draft.task_id=$3::uuid AND draft.organization_id=$2::uuid
+		  AND draft.draft_status IN ('editing','returned')
+		  AND EXISTS (SELECT 1 FROM inventory_tasks task WHERE task.id=$3::uuid
+		      AND (task.required_fields ? 'business_systems' OR task.required_fields ? 'data_security'))
+	`, item.ID, organizationID, taskID)
+	if err != nil {
+		return SubmissionMetadata{}, fmt.Errorf("snapshot business system drafts: %w", err)
+	}
 	assetResult, err := tx.Exec(ctx, `
 		INSERT INTO inventory_submission_items (
 			submission_id, resource_type, resource_id, resource_key, resource_name, snapshot_data
@@ -796,7 +828,7 @@ func createSubmissionSnapshot(ctx context.Context, tx pgx.Tx, principal auth.Pri
 	if err != nil {
 		return SubmissionMetadata{}, fmt.Errorf("snapshot network asset drafts: %w", err)
 	}
-	item.SystemCount = systemResult.RowsAffected()
+	item.SystemCount = systemResult.RowsAffected() + draftSystemResult.RowsAffected()
 	item.AssetCount = assetResult.RowsAffected() + draftAssetResult.RowsAffected()
 	if _, err := tx.Exec(ctx, `
 		UPDATE inventory_submissions
