@@ -502,7 +502,11 @@ test('集团工作台卡片操作对齐、零值图表语义正确并适配常�
   await expect(zeroTrendBars).toHaveCount(28)
   const visibleZeroBars = await zeroTrendBars.evaluateAll(elements => elements.filter(element => element.getBoundingClientRect().height > 0).length)
   expect(visibleZeroBars).toBe(0)
-  await expect(page.locator('.test-coverage-panel .coverage-progress-row').nth(1).locator('.el-progress__text .el-icon')).toHaveCount(0)
+  const coverageRows = page.locator('.test-coverage-panel .coverage-progress-row')
+  await expect(coverageRows).toHaveCount(2)
+  await expect(coverageRows.locator('.el-progress__text')).toHaveCount(0)
+  const percentageRightEdges = await coverageRows.locator('strong').evaluateAll(elements => elements.map(element => element.getBoundingClientRect().right))
+  expect(Math.abs(percentageRightEdges[0] - percentageRightEdges[1])).toBeLessThanOrEqual(1)
 
   for (const viewport of [{ width: 1024, height: 768 }, { width: 800, height: 900 }]) {
     await page.setViewportSize(viewport)

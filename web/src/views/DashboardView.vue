@@ -248,8 +248,8 @@ onMounted(load)
       <div class="security-content-grid">
         <article class="panel security-panel test-coverage-panel">
           <div class="panel-header"><div><h2>安全测试覆盖</h2><p>以已完成批次统计公网资产覆盖与测试发现闭环。</p></div><el-button v-if="auth.canManageSecurityTests" text type="primary" @click="router.push('/security-test-batches')">查看测试批次</el-button></div>
-          <div class="coverage-progress-row"><div><span>公网资产已测试</span><strong>{{ overview.test_coverage.public_asset_coverage_rate }}%</strong></div><el-progress :percentage="overview.test_coverage.public_asset_coverage_rate" :stroke-width="12" /></div>
-          <div class="coverage-progress-row"><div><span>测试发现已关闭</span><strong>{{ overview.test_coverage.test_finding_closure_rate }}%</strong></div><el-progress :status="overview.test_coverage.test_finding_count > 0 && overview.test_coverage.test_finding_closure_rate === 100 ? 'success' : undefined" :percentage="overview.test_coverage.test_finding_closure_rate" :stroke-width="12" /></div>
+          <div class="coverage-progress-row"><div><span>公网资产已测试</span><strong>{{ overview.test_coverage.public_asset_coverage_rate }}%</strong></div><el-progress :percentage="overview.test_coverage.public_asset_coverage_rate" :stroke-width="12" :show-text="false" /></div>
+          <div class="coverage-progress-row"><div><span>测试发现已关闭</span><strong>{{ overview.test_coverage.test_finding_closure_rate }}%</strong></div><el-progress :status="overview.test_coverage.test_finding_count > 0 && overview.test_coverage.test_finding_closure_rate === 100 ? 'success' : undefined" :percentage="overview.test_coverage.test_finding_closure_rate" :stroke-width="12" :show-text="false" /></div>
           <div class="coverage-metrics"><span>执行中批次 <strong>{{ overview.test_coverage.active_batch_count }}</strong></span><span>已完成批次 <strong>{{ overview.test_coverage.completed_batch_count }}</strong></span><button type="button" @click="toFindings()">测试发现 <strong>{{ overview.test_coverage.test_finding_count }}</strong></button></div>
         </article>
 
@@ -304,7 +304,8 @@ onMounted(load)
 .legend-dot { display: inline-block; width: 8px; height: 8px; margin-right: 5px; border-radius: 50%; }
 .coverage-progress-row { display: grid; gap: 8px; margin: 5px 0 19px; }
 .coverage-progress-row > div { display: flex; justify-content: space-between; color: var(--el-text-color-secondary); font-size: 13px; }
-.coverage-progress-row strong { color: var(--el-text-color-primary); }
+.coverage-progress-row strong { min-width: 52px; color: var(--el-text-color-primary); text-align: right; font-variant-numeric: tabular-nums; }
+.coverage-progress-row :deep(.el-progress-bar) { padding-right: 0; margin-right: 0; }
 .coverage-metrics { display: flex; flex-wrap: wrap; gap: 10px 18px; color: var(--el-text-color-secondary); font-size: 13px; }
 .coverage-metrics strong { color: var(--el-text-color-primary); margin-left: 4px; }
 .coverage-metrics button { border: 0; padding: 0; cursor: pointer; color: var(--el-color-primary); background: transparent; }
