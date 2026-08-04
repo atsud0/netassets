@@ -44,7 +44,6 @@ interface InventoryTask {
   allow_late_submission: boolean
   target_count: number
   submitted_count: number
-  created_by_name?: string
   created_at: string
 }
 interface QualityIssue {
@@ -213,7 +212,8 @@ const returnResourceIndex = reactive<Record<string, ReviewResource>>({})
 const formRef = ref<FormInstance>()
 const tasks = ref<InventoryTask[]>([])
 const taskOrganizationStates = reactive<Record<string, TaskOrganizationState>>({})
-const expandedTaskIDs = ref<string[]>([])
+const taskDetailVisible = ref(false)
+const detailTask = ref<InventoryTask | null>(null)
 const organizations = ref<Organization[]>([])
 const page = ref(1)
 const pageSize = ref(20)
@@ -336,11 +336,18 @@ async function loadTaskOrganizations(task: InventoryTask) {
   }
 }
 
-async function handleTaskExpand(task: InventoryTask, expandedRows: InventoryTask[]) {
-  expandedTaskIDs.value = expandedRows.map((item) => item.id)
-  if (!expandedRows.some((item) => item.id === task.id)) return
+async function openTaskDetail(task: InventoryTask) {
+  const switchedTask = detailTask.value?.id !== task.id
+  detailTask.value = task
+  taskDetailVisible.value = true
+  const state = taskOrganizationState(task)
+  if (switchedTask) state.page = 1
   try { await loadTaskOrganizations(task) }
   catch (error) { ElMessage.error(getAPIErrorMessage(error, '读取填报组织进度失败')) }
+}
+
+function closeTaskDetail() {
+  detailTask.value = null
 }
 
 async function handleTaskOrganizationPageChange(task: InventoryTask, value: number) {
@@ -371,12 +378,7 @@ async function load() {
     total.value = response.data.total
     if (focusedTaskID.value) {
       const focusedTask = tasks.value.find((item) => item.id === focusedTaskID.value)
-      if (focusedTask) {
-        expandedTaskIDs.value = [focusedTask.id]
-        const state = taskOrganizationState(focusedTask)
-        state.page = 1
-        await loadTaskOrganizations(focusedTask)
-      }
+      if (focusedTask) await openTaskDetail(focusedTask)
     }
   } catch (error) {
     ElMessage.error(getAPIErrorMessage(error, '读取填报任务失败'))
@@ -390,6 +392,8 @@ function resetTaskOrganizationStates() {
 }
 
 async function clearMessageFocus() {
+  taskDetailVisible.value = false
+  detailTask.value = null
   const query = { ...route.query }
   delete query.task_id
   delete query.organization_id
@@ -398,16 +402,26 @@ async function clearMessageFocus() {
 
 async function applyRouteFocus() {
   page.value = 1
-  expandedTaskIDs.value = []
+  taskDetailVisible.value = false
+  detailTask.value = null
   resetTaskOrganizationStates()
   await load()
 }
 
 async function refreshAfterMutation() {
+  const openTaskID = detailTask.value?.id
   await load()
   if (tasks.value.length === 0 && total.value > 0 && page.value > 1) {
     page.value -= 1
     await load()
+  }
+  if (openTaskID) {
+    const refreshedTask = tasks.value.find((task) => task.id === openTaskID)
+    if (refreshedTask) detailTask.value = refreshedTask
+    else {
+      taskDetailVisible.value = false
+      detailTask.value = null
+    }
   }
   await Promise.allSettled(tasks.value
     .filter((task) => taskOrganizationStates[task.id]?.loaded)
@@ -415,11 +429,15 @@ async function refreshAfterMutation() {
 }
 
 function handlePageChange(value: number) {
+  taskDetailVisible.value = false
+  detailTask.value = null
   page.value = value
   void load()
 }
 
 function handlePageSizeChange(value: number) {
+  taskDetailVisible.value = false
+  detailTask.value = null
   pageSize.value = value
   page.value = 1
   void load()
@@ -973,69 +991,10 @@ onMounted(async () => {
     </div>
 
     <div class="panel data-table-panel" v-loading="loading">
-      <el-table :data="tasks" row-key="id" :expand-row-keys="expandedTaskIDs" empty-text="暂无填报任务" @expand-change="handleTaskExpand">
-        <el-table-column type="expand">
-          <template #default="scope">
-            <div class="task-detail">
-              <div class="task-detail-description"><strong>任务说明</strong><span>{{ scope.row.description || '未填写' }}</span></div>
-              <div><strong>必填范围</strong><span>{{ scope.row.required_fields.map((item: string) => requiredFieldLabels[item] || item).join('、') || '未指定' }}</span></div>
-              <div><strong>网络资产范围</strong><span>{{ scope.row.required_fields.includes('network_assets') ? (assetNetworkScopeLabels[scope.row.asset_network_scope] || scope.row.asset_network_scope) : '本任务不核查网络资产' }}</span></div>
-              <div><strong>审核要求</strong><span>{{ scope.row.require_review ? '需要集团审核' : '提交后直接完成' }}</span></div>
-              <div><strong>逾期提交</strong><span>{{ scope.row.allow_late_submission ? '允许' : '不允许' }}</span></div>
-              <el-table v-loading="taskOrganizationState(scope.row).loading" :data="taskOrganizationState(scope.row).items" size="small" class="task-organization-table" empty-text="暂无组织" max-height="420">
-                <el-table-column label="填报组织" min-width="190">
-                  <template #default="itemScope"><strong>{{ itemScope.row.organization_name }}</strong></template>
-                </el-table-column>
-                <el-table-column label="状态" width="100">
-                  <template #default="itemScope"><el-tag :type="progressStatusTag(effectiveProgressStatus(scope.row, itemScope.row))" effect="plain">{{ progressStatusLabels[effectiveProgressStatus(scope.row, itemScope.row)] || itemScope.row.status }}</el-tag></template>
-                </el-table-column>
-                <el-table-column label="提交快照" min-width="150">
-                  <template #default="itemScope">
-                    <template v-if="itemScope.row.submitted_at"><strong>{{ itemScope.row.submitted_system_count }}</strong> 个系统 / <strong>{{ itemScope.row.submitted_asset_count }}</strong> 项资产<span class="table-secondary">{{ itemScope.row.submitted_by_name }} · {{ formatDate(itemScope.row.submitted_at) }}</span></template>
-                    <span v-else>—</span>
-                  </template>
-                </el-table-column>
-                <el-table-column label="填报说明/退回原因" min-width="190">
-                  <template #default="itemScope">
-                    <span v-if="itemScope.row.return_reason" class="return-reason">退回：{{ itemScope.row.return_reason }}</span>
-                    <span v-else>{{ itemScope.row.submission_note || '—' }}</span>
-                  </template>
-                </el-table-column>
-                <el-table-column label="操作" width="320" fixed="right">
-                  <template #default="itemScope">
-                    <el-button v-if="itemScope.row.snapshot_available" type="primary" link @click="openSubmissionDiff(scope.row, itemScope.row)">查看差异</el-button>
-                    <el-button v-if="itemScope.row.snapshot_available" type="primary" link @click="openReviewComments(scope.row, itemScope.row)">审核意见</el-button>
-                    <template v-if="auth.isGroupAdmin">
-                      <el-button v-if="scope.row.status === 'active' && itemScope.row.status === 'submitted'" type="success" link :loading="actionLoading === operationKey(scope.row, itemScope.row)" @click="approveProgress(scope.row, itemScope.row)">通过</el-button>
-                      <el-button v-if="scope.row.status === 'active' && itemScope.row.status === 'submitted'" type="danger" link :disabled="actionLoading === operationKey(scope.row, itemScope.row)" @click="openReturnDialog(scope.row, itemScope.row)">退回</el-button>
-                      <span v-else-if="itemScope.row.reviewed_at" class="table-secondary">审核：{{ itemScope.row.reviewed_by_name || '系统自动' }}<br>{{ formatDate(itemScope.row.reviewed_at) }}</span>
-                    </template>
-                    <template v-else>
-                      <el-button v-if="canStart(scope.row, itemScope.row)" type="primary" link :loading="actionLoading === operationKey(scope.row, itemScope.row)" @click="startProgress(scope.row, itemScope.row)">开始填报</el-button>
-                      <el-button v-if="canSubmit(scope.row, itemScope.row)" type="success" link :disabled="actionLoading === operationKey(scope.row, itemScope.row)" @click="openSubmissionDialog(scope.row, itemScope.row)">提交</el-button>
-                      <span v-if="scope.row.status === 'active' && new Date(scope.row.start_at).getTime() > Date.now()" class="table-secondary">尚未到开始时间</span>
-                      <span v-else-if="scope.row.status === 'active' && !scope.row.allow_late_submission && new Date(scope.row.deadline_at).getTime() < Date.now() && !['submitted', 'approved'].includes(itemScope.row.status)" class="table-secondary">已截止，不允许逾期提交</span>
-                    </template>
-                  </template>
-                </el-table-column>
-              </el-table>
-              <div v-if="taskOrganizationState(scope.row).total > 0" class="table-pagination task-organization-pagination">
-                <el-pagination
-                  background
-                  small
-                  layout="total, sizes, prev, pager, next"
-                  :total="taskOrganizationState(scope.row).total"
-                  :current-page="taskOrganizationState(scope.row).page"
-                  :page-size="taskOrganizationState(scope.row).pageSize"
-                  :page-sizes="[20, 50, 100]"
-                  @current-change="handleTaskOrganizationPageChange(scope.row, $event)"
-                  @size-change="handleTaskOrganizationPageSizeChange(scope.row, $event)"
-                />
-              </div>
-            </div>
-          </template>
+      <el-table :data="tasks" row-key="id" empty-text="暂无填报任务">
+        <el-table-column label="任务名称" min-width="220">
+          <template #default="scope"><el-button link type="primary" class="table-link" @click="openTaskDetail(scope.row)">{{ scope.row.name }}</el-button></template>
         </el-table-column>
-        <el-table-column label="任务名称" min-width="220"><template #default="scope"><div class="organization-name-cell"><strong>{{ scope.row.name }}</strong><span>创建人：{{ scope.row.created_by_name || '—' }}</span></div></template></el-table-column>
         <el-table-column label="状态" width="105"><template #default="scope"><el-tag :type="taskStatusTag(scope.row.status)" effect="plain">{{ taskStatusLabels[scope.row.status] || scope.row.status }}</el-tag></template></el-table-column>
         <el-table-column label="开始时间" min-width="165"><template #default="scope">{{ formatDate(scope.row.start_at) }}</template></el-table-column>
         <el-table-column label="截止时间" min-width="165"><template #default="scope">{{ formatDate(scope.row.deadline_at) }}</template></el-table-column>
@@ -1081,6 +1040,80 @@ onMounted(async () => {
         />
       </div>
     </div>
+
+    <el-drawer v-model="taskDetailVisible" title="填报任务详情" size="88%" destroy-on-close @closed="closeTaskDetail">
+      <div v-if="detailTask" class="detail-drawer inventory-task-detail-drawer">
+        <div class="detail-hero">
+          <div>
+            <span class="eyebrow">INVENTORY TASK</span>
+            <h2>{{ detailTask.name }}</h2>
+            <p>{{ formatDate(detailTask.start_at) }} 至 {{ formatDate(detailTask.deadline_at) }}</p>
+          </div>
+          <el-tag :type="taskStatusTag(detailTask.status)" effect="plain">{{ taskStatusLabels[detailTask.status] || detailTask.status }}</el-tag>
+        </div>
+        <div class="detail-grid inventory-task-detail-grid">
+          <div><span>目标组织</span><strong>{{ detailTask.target_count }} 家</strong></div>
+          <div><span>提交进度</span><strong>已提交 {{ detailTask.submitted_count }} · 待提交 {{ pendingSubmissionCount(detailTask) }}</strong></div>
+          <div><span>必填范围</span><strong>{{ detailTask.required_fields.map((item: string) => requiredFieldLabels[item] || item).join('、') || '未指定' }}</strong></div>
+          <div><span>网络资产范围</span><strong>{{ detailTask.required_fields.includes('network_assets') ? (assetNetworkScopeLabels[detailTask.asset_network_scope] || detailTask.asset_network_scope) : '本任务不核查网络资产' }}</strong></div>
+          <div><span>审核要求</span><strong>{{ detailTask.require_review ? '需要集团审核' : '提交后直接完成' }}</strong></div>
+          <div><span>逾期提交</span><strong>{{ detailTask.allow_late_submission ? '允许' : '不允许' }}</strong></div>
+        </div>
+        <div class="form-section-title">任务说明</div>
+        <p class="detail-description">{{ detailTask.description || '暂无说明' }}</p>
+        <div class="form-section-title">组织填报进度（{{ taskOrganizationState(detailTask).total }}）</div>
+        <el-table v-loading="taskOrganizationState(detailTask).loading" :data="taskOrganizationState(detailTask).items" size="small" class="task-organization-table" empty-text="暂无组织" max-height="460">
+          <el-table-column label="填报组织" min-width="190">
+            <template #default="itemScope"><strong>{{ itemScope.row.organization_name }}</strong></template>
+          </el-table-column>
+          <el-table-column label="状态" width="100">
+            <template #default="itemScope"><el-tag :type="progressStatusTag(effectiveProgressStatus(detailTask, itemScope.row))" effect="plain">{{ progressStatusLabels[effectiveProgressStatus(detailTask, itemScope.row)] || itemScope.row.status }}</el-tag></template>
+          </el-table-column>
+          <el-table-column label="提交快照" min-width="170">
+            <template #default="itemScope">
+              <template v-if="itemScope.row.submitted_at"><strong>{{ itemScope.row.submitted_system_count }}</strong> 个系统 / <strong>{{ itemScope.row.submitted_asset_count }}</strong> 项资产<span class="table-secondary">{{ itemScope.row.submitted_by_name }} · {{ formatDate(itemScope.row.submitted_at) }}</span></template>
+              <span v-else>—</span>
+            </template>
+          </el-table-column>
+          <el-table-column label="填报说明/退回原因" min-width="210">
+            <template #default="itemScope">
+              <span v-if="itemScope.row.return_reason" class="return-reason">退回：{{ itemScope.row.return_reason }}</span>
+              <span v-else>{{ itemScope.row.submission_note || '—' }}</span>
+            </template>
+          </el-table-column>
+          <el-table-column label="操作" width="320" fixed="right">
+            <template #default="itemScope">
+              <el-button v-if="itemScope.row.snapshot_available" type="primary" link @click="openSubmissionDiff(detailTask, itemScope.row)">查看差异</el-button>
+              <el-button v-if="itemScope.row.snapshot_available" type="primary" link @click="openReviewComments(detailTask, itemScope.row)">审核意见</el-button>
+              <template v-if="auth.isGroupAdmin">
+                <el-button v-if="detailTask.status === 'active' && itemScope.row.status === 'submitted'" type="success" link :loading="actionLoading === operationKey(detailTask, itemScope.row)" @click="approveProgress(detailTask, itemScope.row)">通过</el-button>
+                <el-button v-if="detailTask.status === 'active' && itemScope.row.status === 'submitted'" type="danger" link :disabled="actionLoading === operationKey(detailTask, itemScope.row)" @click="openReturnDialog(detailTask, itemScope.row)">退回</el-button>
+                <span v-else-if="itemScope.row.reviewed_at" class="table-secondary">审核：{{ itemScope.row.reviewed_by_name || '系统自动' }}<br>{{ formatDate(itemScope.row.reviewed_at) }}</span>
+              </template>
+              <template v-else>
+                <el-button v-if="canStart(detailTask, itemScope.row)" type="primary" link :loading="actionLoading === operationKey(detailTask, itemScope.row)" @click="startProgress(detailTask, itemScope.row)">开始填报</el-button>
+                <el-button v-if="canSubmit(detailTask, itemScope.row)" type="success" link :disabled="actionLoading === operationKey(detailTask, itemScope.row)" @click="openSubmissionDialog(detailTask, itemScope.row)">提交</el-button>
+                <span v-if="detailTask.status === 'active' && new Date(detailTask.start_at).getTime() > Date.now()" class="table-secondary">尚未到开始时间</span>
+                <span v-else-if="detailTask.status === 'active' && !detailTask.allow_late_submission && new Date(detailTask.deadline_at).getTime() < Date.now() && !['submitted', 'approved'].includes(itemScope.row.status)" class="table-secondary">已截止，不允许逾期提交</span>
+              </template>
+            </template>
+          </el-table-column>
+        </el-table>
+        <div v-if="taskOrganizationState(detailTask).total > 0" class="table-pagination task-organization-pagination">
+          <el-pagination
+            background
+            small
+            layout="total, sizes, prev, pager, next"
+            :total="taskOrganizationState(detailTask).total"
+            :current-page="taskOrganizationState(detailTask).page"
+            :page-size="taskOrganizationState(detailTask).pageSize"
+            :page-sizes="[20, 50, 100]"
+            @current-change="handleTaskOrganizationPageChange(detailTask, $event)"
+            @size-change="handleTaskOrganizationPageSizeChange(detailTask, $event)"
+          />
+        </div>
+      </div>
+    </el-drawer>
 
     <el-drawer v-model="diffDrawerVisible" title="填报提交差异" size="78%" destroy-on-close>
       <div v-loading="diffLoading" class="submission-diff-drawer">
@@ -1308,11 +1341,16 @@ onMounted(async () => {
 :global(.inventory-task-create-dialog .el-dialog__body) { max-height:calc(100vh - 190px); overflow-y:auto; }
 .table-pagination { display:flex; justify-content:flex-end; margin-top:18px; }
 .dialog-pagination { overflow-x:auto; padding-bottom:2px; }
-.task-organization-pagination { grid-column: span 3; flex-direction: row !important; }
+.inventory-task-detail-drawer { min-width:0; }
+.inventory-task-detail-grid { grid-template-columns:repeat(3, minmax(0, 1fr)); }
+.task-organization-pagination { flex-direction:row !important; }
 .submission-progress { display:flex; align-items:center; gap:8px; white-space:nowrap; color:var(--muted); }
 .submission-progress span { display:inline-flex; align-items:baseline; gap:4px; }
 .submission-progress strong { color:var(--navy); font-size:15px; }
 .submission-progress i { color:var(--line); font-style:normal; }
 .review-resource-toolbar { display:flex; gap:10px; margin:14px 0; }
 .review-resource-search { flex:1; }
+@media (max-width:900px) {
+  .inventory-task-detail-grid { grid-template-columns:1fr; }
+}
 </style>

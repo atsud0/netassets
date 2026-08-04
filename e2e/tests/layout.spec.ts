@@ -419,7 +419,8 @@ test('填报任务列表以已提交和待提交表达提交进度', async ({ pa
 
   const suffix = Date.now().toString()
   const taskName = `提交进度展示验证_${suffix}`
-  await page.evaluate(async ({ suffix, taskName }) => {
+  const organizationName = `进度展示子公司_${suffix}`
+  await page.evaluate(async ({ suffix, taskName, organizationName }) => {
     const treeResponse = await fetch('/api/v1/organizations/tree')
     if (!treeResponse.ok) throw new Error(`读取组织树失败：${treeResponse.status}`)
     const tree = await treeResponse.json() as { items: Array<{ id: string; type: string }> }
@@ -432,7 +433,7 @@ test('填报任务列表以已提交和待提交表达提交进度', async ({ pa
       body: JSON.stringify({
         parent_id: root.id,
         code: `TASK_PROGRESS_${suffix}`,
-        name: `进度展示子公司_${suffix}`,
+        name: organizationName,
         type: 'subsidiary',
       }),
     })
@@ -459,20 +460,33 @@ test('填报任务列表以已提交和待提交表达提交进度', async ({ pa
       }),
     })
     if (!taskResponse.ok) throw new Error(`创建填报任务失败：${taskResponse.status}`)
-  }, { suffix, taskName })
+  }, { suffix, taskName, organizationName })
 
   await page.reload()
   const table = page.locator('.data-table-panel > .el-table')
   await expect(table.locator('.el-table__header-wrapper').first()).toContainText('提交进度')
   await expect(table.locator('.el-table__header-wrapper').first()).not.toContainText('填报进度')
+  await expect(table.locator('.el-table__header-wrapper').first()).not.toContainText('创建人')
+  await expect(table.locator('.el-table__expand-icon')).toHaveCount(0)
 
   const taskRow = table.locator('.el-table__body-wrapper tbody tr').filter({ hasText: taskName }).first()
   await expect(taskRow).toBeVisible()
+  const taskNameLink = taskRow.getByRole('button', { name: taskName, exact: true })
+  await expect(taskNameLink).toBeVisible()
+  await expect(taskNameLink).toHaveClass(/table-link/)
   const progress = taskRow.locator('.submission-progress')
   await expect(progress).toContainText('已提交 0')
   await expect(progress).toContainText('待提交 1')
   await expect(progress).not.toContainText('已通过')
   expect(await progress.locator('strong').allTextContents()).toEqual(['0', '1'])
+
+  await taskNameLink.click()
+  const detailDrawer = page.locator('.el-drawer:visible').filter({ hasText: '填报任务详情' }).last()
+  await expect(detailDrawer).toBeVisible()
+  await expect(detailDrawer.getByRole('heading', { name: taskName, exact: true })).toBeVisible()
+  await expect(detailDrawer).toContainText('组织填报进度')
+  await expect(detailDrawer.locator('.task-organization-table')).toBeVisible()
+  await expect(detailDrawer.locator('.task-organization-table .el-table__body-wrapper tbody tr').filter({ hasText: organizationName }).first()).toBeVisible()
 })
 
 test('业务系统名称和系统编码使用独立列表列', async ({ page }) => {

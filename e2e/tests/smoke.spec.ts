@@ -19,12 +19,22 @@ async function selectFormOption(page: Page, dialog: Locator, label: string, opti
   await page.locator(`[id="${listboxID}"]`).getByRole('option', { name: option, exact: true }).click()
 }
 
-async function ensureTaskExpanded(page: Page, taskName: string) {
-  const row = page.locator('.data-table-panel > .el-table .el-table__body-wrapper tbody tr').filter({ hasText: taskName }).first()
-  const button = row.locator('.el-table__expand-icon')
-  const expanded = await button.evaluate((element) => element.classList.contains('el-table__expand-icon--expanded'))
-  if (!expanded) await button.click()
-  return row
+async function ensureTaskDetailOpen(page: Page, taskName: string) {
+  let drawer = page.locator('.el-drawer:visible').filter({ hasText: '填报任务详情' }).filter({ hasText: taskName }).last()
+  if (!await drawer.isVisible().catch(() => false)) {
+    const row = page.locator('.data-table-panel > .el-table .el-table__body-wrapper tbody tr').filter({ hasText: taskName }).first()
+    await row.getByRole('button', { name: taskName, exact: true }).click()
+    drawer = page.locator('.el-drawer:visible').filter({ hasText: '填报任务详情' }).filter({ hasText: taskName }).last()
+  }
+  await expect(drawer).toBeVisible()
+  return drawer
+}
+
+async function closeTaskDetail(page: Page) {
+  const drawer = page.locator('.el-drawer:visible').filter({ hasText: '填报任务详情' }).last()
+  if (!await drawer.isVisible().catch(() => false)) return
+  await drawer.locator('.el-drawer__close-btn').click()
+  await expect(drawer).toBeHidden()
 }
 
 test('集团创建子公司账号，子公司隔离登记业务系统和网络资产', async ({ page }) => {
@@ -143,10 +153,11 @@ test('集团创建子公司账号，子公司隔离登记业务系统和网络�
   await dialog.getByPlaceholder('填写本次填报范围、口径和注意事项').fill('端到端测试填报任务')
   await dialog.getByRole('button', { name: '创建并下发' }).click()
   await expect(page.getByText('填报任务已创建并下发')).toBeVisible()
-  await expect(page.getByText(inventoryTaskName, { exact: true })).toBeVisible()
-  const createdTaskRow = await ensureTaskExpanded(page, inventoryTaskName)
-  const createdTaskDetailRow = createdTaskRow.locator('xpath=following-sibling::tr[1]')
-  await expect(createdTaskDetailRow).toContainText('网络资产范围仅公网资产')
+  await expect(page.getByRole('button', { name: inventoryTaskName, exact: true })).toBeVisible()
+  const createdTaskDetail = await ensureTaskDetailOpen(page, inventoryTaskName)
+  await expect(createdTaskDetail).toContainText('网络资产范围')
+  await expect(createdTaskDetail).toContainText('仅公网资产')
+  await closeTaskDetail(page)
 
   await page.getByRole('button', { name: '用户和权限', exact: true }).click()
   await expect(page).toHaveURL(/\/users$/)
@@ -191,19 +202,20 @@ test('集团创建子公司账号，子公司隔离登记业务系统和网络�
   await inventoryNotificationCard.getByRole('button', { name: '查看处理', exact: true }).click()
   await expect(page).toHaveURL(/\/inventory-tasks\?task_id=[^&]+&organization_id=[^&]+$/)
   await expect(page.getByText('当前正在查看消息关联的填报任务及目标组织')).toBeVisible()
-  await expect(page.getByText(inventoryTaskName, { exact: true })).toBeVisible()
+  await expect(page.getByRole('heading', { name: inventoryTaskName, exact: true })).toBeVisible()
   await expect(page.locator('.task-organization-table .el-table__body-wrapper tbody tr').filter({ hasText: organizationName }).first()).toBeVisible()
+  await closeTaskDetail(page)
   await page.getByRole('button', { name: '查看全部任务', exact: true }).click()
   await expect(page).toHaveURL(/\/inventory-tasks$/)
 
   await page.getByRole('button', { name: '填报任务', exact: true }).click()
   await expect(page.getByRole('button', { name: '创建任务', exact: true })).toHaveCount(0)
   await expect(page.getByText(inventoryTaskName, { exact: true })).toBeVisible()
-  await ensureTaskExpanded(page, inventoryTaskName)
+  await ensureTaskDetailOpen(page, inventoryTaskName)
   let qualityProgressRow = page.locator('.task-organization-table .el-table__body-wrapper tbody tr').filter({ hasText: organizationName }).first()
   await qualityProgressRow.getByRole('button', { name: '开始填报', exact: true }).click()
   await expect(page.getByText('已开始填报，请完善业务系统和网络资产后提交')).toBeVisible()
-  await ensureTaskExpanded(page, inventoryTaskName)
+  await ensureTaskDetailOpen(page, inventoryTaskName)
   qualityProgressRow = page.locator('.task-organization-table .el-table__body-wrapper tbody tr').filter({ hasText: organizationName }).first()
   await qualityProgressRow.getByRole('button', { name: '提交', exact: true }).click()
   dialog = page.getByRole('dialog', { name: '提交填报结果' })
@@ -223,6 +235,7 @@ test('集团创建子公司账号，子公司隔离登记业务系统和网络�
   })
   expect(forbiddenTaskStatus).toBe(403)
 
+  await closeTaskDetail(page)
   await page.getByRole('button', { name: '组织架构', exact: true }).click()
   await expect(page.getByRole('cell', { name: organizationName }).getByText(organizationName, { exact: true })).toBeVisible()
   await expect(page.locator('.organization-tree-panel .el-table__body-wrapper tbody tr')).toHaveCount(1)
@@ -504,7 +517,7 @@ test('集团创建子公司账号，子公司隔离登记业务系统和网络�
   await expect(page.getByText('本人资料请到账户设置维护')).toBeVisible()
 
   await page.getByRole('button', { name: '填报任务', exact: true }).click()
-  let taskRow = await ensureTaskExpanded(page, inventoryTaskName)
+  await ensureTaskDetailOpen(page, inventoryTaskName)
   let progressRow = page.locator('.task-organization-table .el-table__body-wrapper tbody tr').filter({ hasText: organizationName }).first()
   await progressRow.getByRole('button', { name: '提交', exact: true }).click()
   dialog = page.getByRole('dialog', { name: '提交填报结果' })
@@ -514,6 +527,7 @@ test('集团创建子公司账号，子公司隔离登记业务系统和网络�
   await dialog.getByRole('button', { name: '确认提交', exact: true }).click()
   await expect(page.getByText('填报结果已提交，等待集团审核')).toBeVisible()
 
+  await closeTaskDetail(page)
   await page.getByRole('button', { name: '退出', exact: true }).click()
   await login(page, adminUsername, adminPassword!)
 
@@ -525,6 +539,7 @@ test('集团创建子公司账号，子公司隔离登记业务系统和网络�
   await expect(page).toHaveURL(/\/inventory-tasks\?task_id=[^&]+&organization_id=[^&]+$/)
   await expect(page.getByText('当前正在查看消息关联的填报任务及目标组织')).toBeVisible()
   await expect(page.locator('.task-organization-table .el-table__body-wrapper tbody tr').filter({ hasText: organizationName }).first()).toContainText('待审核')
+  await closeTaskDetail(page)
   await page.getByRole('button', { name: '查看全部任务', exact: true }).click()
 
   const populatedScopePreview = await page.evaluate(async ({ code }) => {
@@ -552,7 +567,7 @@ test('集团创建子公司账号，子公司隔离登记业务系统和网络�
     organization_code: organizationCode, system_count: 1, asset_count: 1,
   })
   await page.getByRole('button', { name: '填报任务', exact: true }).click()
-  taskRow = await ensureTaskExpanded(page, inventoryTaskName)
+  await ensureTaskDetailOpen(page, inventoryTaskName)
   progressRow = page.locator('.task-organization-table .el-table__body-wrapper tbody tr').filter({ hasText: organizationName }).first()
   await expect(progressRow.getByText('1 个系统 / 1 项资产')).toBeVisible()
   await progressRow.getByRole('button', { name: '查看差异', exact: true }).click()
@@ -570,6 +585,7 @@ test('集团创建子公司账号，子公司隔离登记业务系统和网络�
   await dialog.getByRole('button', { name: '确认退回', exact: true }).click()
   await expect(page.getByText('填报结果已退回修改')).toBeVisible()
 
+  await closeTaskDetail(page)
   await page.getByRole('button', { name: '退出', exact: true }).click()
   await login(page, subsidiaryUsername, formalPassword)
   await page.goto('/notifications')
@@ -577,7 +593,7 @@ test('集团创建子公司账号，子公司隔离登记业务系统和网络�
   await expect(inventoryNotificationCard).toContainText('填报任务已退回')
   await inventoryNotificationCard.getByRole('button', { name: '查看处理', exact: true }).click()
   await expect(page.getByText('当前正在查看消息关联的填报任务及目标组织')).toBeVisible()
-  taskRow = await ensureTaskExpanded(page, inventoryTaskName)
+  await ensureTaskDetailOpen(page, inventoryTaskName)
   progressRow = page.locator('.task-organization-table .el-table__body-wrapper tbody tr').filter({ hasText: organizationName }).first()
   await expect(progressRow.getByText('退回：请补充统计口径说明')).toBeVisible()
   await progressRow.getByRole('button', { name: '审核意见', exact: true }).click()
@@ -592,10 +608,11 @@ test('集团创建子公司账号，子公司隔离登记业务系统和网络�
   await dialog.getByRole('button', { name: '确认提交', exact: true }).click()
   await expect(page.getByText('填报结果已提交，等待集团审核')).toBeVisible()
 
+  await closeTaskDetail(page)
   await page.getByRole('button', { name: '退出', exact: true }).click()
   await login(page, adminUsername, adminPassword!)
   await page.getByRole('button', { name: '填报任务', exact: true }).click()
-  taskRow = await ensureTaskExpanded(page, inventoryTaskName)
+  await ensureTaskDetailOpen(page, inventoryTaskName)
   progressRow = page.locator('.task-organization-table .el-table__body-wrapper tbody tr').filter({ hasText: organizationName }).first()
   await progressRow.getByRole('button', { name: '查看差异', exact: true }).click()
   diffDrawer = page.locator('.el-drawer').filter({ hasText: '填报提交差异' }).last()
@@ -609,6 +626,7 @@ test('集团创建子公司账号，子公司隔离登记业务系统和网络�
   await progressRow.getByRole('button', { name: '通过', exact: true }).click()
   await page.getByRole('dialog', { name: '审核通过' }).getByRole('button', { name: '通过', exact: true }).click()
   await expect(page.getByText('填报结果已审核通过')).toBeVisible()
+  await closeTaskDetail(page)
   const completedTaskRow = page.locator('.data-table-panel > .el-table .el-table__body-wrapper tbody tr').filter({ hasText: inventoryTaskName }).first()
   await expect(completedTaskRow.getByText('已完成', { exact: true })).toBeVisible()
 

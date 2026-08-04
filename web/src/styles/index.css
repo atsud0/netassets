@@ -132,17 +132,8 @@ button, input { font: inherit; }
 @media (max-width: 1050px) { .asset-filter-panel { grid-template-columns: 1fr 160px; } .asset-filter-count { text-align: left; } }
 .dialog-form-with-alert { margin-top: 18px; }
 .page-alert { margin-bottom: 16px; }
-.task-detail { padding: 14px 28px 22px; display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 14px 24px; background: #f8fafc; }
-.task-detail > div { display: flex; flex-direction: column; gap: 5px; }
-.task-detail > div strong { color: var(--navy); font-size: 13px; }
-.task-detail > div span { color: var(--muted); font-size: 13px; }
-.task-detail-description { grid-column: span 3; }
-.task-organization-table { grid-column: span 3; margin-top: 4px; }
+.task-organization-table { margin-top: 4px; }
 .table-secondary { display: block; color: var(--muted); font-size: 12px; margin-top: 2px; }
-@media (max-width: 900px) {
-  .task-detail { grid-template-columns: 1fr; }
-  .task-detail-description, .task-organization-table { grid-column: span 1; }
-}
 .inventory-guide-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; }
 .inventory-guide-actions span { margin-right: 6px; }
 .return-reason { color: #c45656; }
