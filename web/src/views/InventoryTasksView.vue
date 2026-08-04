@@ -44,7 +44,6 @@ interface InventoryTask {
   allow_late_submission: boolean
   target_count: number
   submitted_count: number
-  approved_count: number
   created_by_name?: string
   created_at: string
 }
@@ -925,6 +924,9 @@ function taskStatusTag(value: string) {
 function progressStatusTag(value: string) {
   return value === 'approved' ? 'success' : value === 'submitted' ? 'primary' : value === 'returned' || value === 'overdue' ? 'danger' : value === 'in_progress' ? 'warning' : 'info'
 }
+function pendingSubmissionCount(task: InventoryTask) {
+  return Math.max(task.target_count - task.submitted_count, 0)
+}
 
 watch(
   () => [route.query.task_id, route.query.organization_id],
@@ -1037,7 +1039,15 @@ onMounted(async () => {
         <el-table-column label="状态" width="105"><template #default="scope"><el-tag :type="taskStatusTag(scope.row.status)" effect="plain">{{ taskStatusLabels[scope.row.status] || scope.row.status }}</el-tag></template></el-table-column>
         <el-table-column label="开始时间" min-width="165"><template #default="scope">{{ formatDate(scope.row.start_at) }}</template></el-table-column>
         <el-table-column label="截止时间" min-width="165"><template #default="scope">{{ formatDate(scope.row.deadline_at) }}</template></el-table-column>
-        <el-table-column label="填报进度" width="155"><template #default="scope"><strong>{{ scope.row.submitted_count }}</strong> / {{ scope.row.target_count }} 已提交，{{ scope.row.approved_count }} 已通过</template></el-table-column>
+        <el-table-column label="提交进度" width="205">
+          <template #default="scope">
+            <div class="submission-progress">
+              <span>已提交 <strong>{{ scope.row.submitted_count }}</strong></span>
+              <i aria-hidden="true">·</i>
+              <span>待提交 <strong>{{ pendingSubmissionCount(scope.row) }}</strong></span>
+            </div>
+          </template>
+        </el-table-column>
         <el-table-column label="任务操作" width="180" fixed="right">
           <template #default="scope">
             <template v-if="auth.isGroupAdmin">
@@ -1299,6 +1309,10 @@ onMounted(async () => {
 .table-pagination { display:flex; justify-content:flex-end; margin-top:18px; }
 .dialog-pagination { overflow-x:auto; padding-bottom:2px; }
 .task-organization-pagination { grid-column: span 3; flex-direction: row !important; }
+.submission-progress { display:flex; align-items:center; gap:8px; white-space:nowrap; color:var(--muted); }
+.submission-progress span { display:inline-flex; align-items:baseline; gap:4px; }
+.submission-progress strong { color:var(--navy); font-size:15px; }
+.submission-progress i { color:var(--line); font-style:normal; }
 .review-resource-toolbar { display:flex; gap:10px; margin:14px 0; }
 .review-resource-search { flex:1; }
 </style>

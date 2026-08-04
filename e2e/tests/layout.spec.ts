@@ -409,6 +409,72 @@ test('列表操作按钮保持统一高度、基线和间距', async ({ page }) 
   expect(inspectedGroups).toBeGreaterThan(0)
 })
 
+test('填报任务列表以已提交和待提交表达提交进度', async ({ page }) => {
+  test.skip(!adminPassword, 'E2E_PASSWORD/BOOTSTRAP_ADMIN_PASSWORD 未配置')
+
+  await page.setViewportSize({ width: 1440, height: 950 })
+  await page.goto('/inventory-tasks')
+  await login(page, adminUsername, adminPassword!)
+  await expect(page.getByRole('heading', { name: '填报任务', exact: true })).toBeVisible()
+
+  const suffix = Date.now().toString()
+  const taskName = `提交进度展示验证_${suffix}`
+  await page.evaluate(async ({ suffix, taskName }) => {
+    const treeResponse = await fetch('/api/v1/organizations/tree')
+    if (!treeResponse.ok) throw new Error(`读取组织树失败：${treeResponse.status}`)
+    const tree = await treeResponse.json() as { items: Array<{ id: string; type: string }> }
+    const root = tree.items.find(item => item.type === 'group')
+    if (!root) throw new Error('未找到集团根组织')
+
+    const organizationResponse = await fetch('/api/v1/organizations', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        parent_id: root.id,
+        code: `TASK_PROGRESS_${suffix}`,
+        name: `进度展示子公司_${suffix}`,
+        type: 'subsidiary',
+      }),
+    })
+    if (!organizationResponse.ok) throw new Error(`创建进度展示组织失败：${organizationResponse.status}`)
+    const organization = await organizationResponse.json() as { item: { id: string } }
+
+    const startAt = new Date()
+    const deadlineAt = new Date(startAt.getTime() + 24 * 60 * 60 * 1000)
+    const taskResponse = await fetch('/api/v1/inventory-tasks', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        name: taskName,
+        description: '验证提交进度只展示已提交与待提交数量',
+        start_at: startAt.toISOString(),
+        deadline_at: deadlineAt.toISOString(),
+        status: 'active',
+        asset_network_scope: 'all',
+        required_fields: ['business_systems', 'network_assets'],
+        quality_rules: [],
+        require_review: true,
+        allow_late_submission: false,
+        organization_ids: [organization.item.id],
+      }),
+    })
+    if (!taskResponse.ok) throw new Error(`创建填报任务失败：${taskResponse.status}`)
+  }, { suffix, taskName })
+
+  await page.reload()
+  const table = page.locator('.data-table-panel > .el-table')
+  await expect(table.locator('.el-table__header-wrapper').first()).toContainText('提交进度')
+  await expect(table.locator('.el-table__header-wrapper').first()).not.toContainText('填报进度')
+
+  const taskRow = table.locator('.el-table__body-wrapper tbody tr').filter({ hasText: taskName }).first()
+  await expect(taskRow).toBeVisible()
+  const progress = taskRow.locator('.submission-progress')
+  await expect(progress).toContainText('已提交 0')
+  await expect(progress).toContainText('待提交 1')
+  await expect(progress).not.toContainText('已通过')
+  expect(await progress.locator('strong').allTextContents()).toEqual(['0', '1'])
+})
+
 test('业务系统名称和系统编码使用独立列表列', async ({ page }) => {
   test.skip(!adminPassword, 'E2E_PASSWORD/BOOTSTRAP_ADMIN_PASSWORD 未配置')
 
