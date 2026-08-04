@@ -27,6 +27,7 @@ var (
 	ErrExportTooLarge = errors.New("synchronous xlsx export too large")
 	ErrState          = errors.New("invalid state")
 	ErrQuality        = errors.New("quality check failed")
+	ErrResourceInUse  = errors.New("resource in use")
 )
 
 type OrganizationProgress struct {
@@ -678,6 +679,7 @@ func loadQualityCheck(ctx context.Context, q qualityCheckQuerier, principal auth
 			CROSS JOIN assignment task_scope
 			LEFT JOIN business_system_data_security_profiles p ON p.business_system_id = bs.id
 			WHERE bs.owner_organization_id::text = $3 AND bs.deleted_at IS NULL
+			  AND NOT EXISTS (SELECT 1 FROM inventory_business_system_drafts change_draft WHERE change_draft.task_id::text=$2 AND change_draft.organization_id::text=$3 AND change_draft.source_system_id=bs.id AND change_draft.draft_status IN ('editing','returned'))
 			  AND (task_scope.required_fields ? 'business_systems' OR task_scope.required_fields ? 'data_security')
 			UNION ALL
 			SELECT draft.id, draft.owner_name, draft.owner_contact, draft.system_level,
@@ -687,6 +689,7 @@ func loadQualityCheck(ctx context.Context, q qualityCheckQuerier, principal auth
 			CROSS JOIN assignment task_scope
 			WHERE draft.task_id::text = $2 AND draft.organization_id::text = $3
 			  AND draft.draft_status IN ('editing', 'returned')
+			  AND draft.operation <> 'delete'
 			  AND (task_scope.required_fields ? 'business_systems' OR task_scope.required_fields ? 'data_security')
 		), org_assets AS (
 			SELECT a.id, a.network_scope, a.importance, ao.owner_name,
@@ -695,6 +698,7 @@ func loadQualityCheck(ctx context.Context, q qualityCheckQuerier, principal auth
 			JOIN asset_organizations ao ON ao.asset_id = a.id AND ao.is_primary
 			CROSS JOIN assignment task_scope
 			WHERE ao.organization_id::text = $3 AND a.deleted_at IS NULL
+			  AND NOT EXISTS (SELECT 1 FROM inventory_asset_drafts change_draft WHERE change_draft.task_id::text=$2 AND change_draft.organization_id::text=$3 AND change_draft.source_asset_id=a.id AND change_draft.draft_status IN ('editing','returned'))
 			  AND task_scope.required_fields ? 'network_assets'
 			  AND (task_scope.asset_network_scope = 'all' OR a.network_scope = task_scope.asset_network_scope)
 			UNION ALL
@@ -704,6 +708,7 @@ func loadQualityCheck(ctx context.Context, q qualityCheckQuerier, principal auth
 			CROSS JOIN assignment task_scope
 			WHERE draft.task_id::text = $2 AND draft.organization_id::text = $3
 			  AND draft.draft_status IN ('editing', 'returned')
+			  AND draft.operation <> 'delete'
 			  AND task_scope.required_fields ? 'network_assets'
 			  AND (task_scope.asset_network_scope = 'all' OR draft.network_scope = task_scope.asset_network_scope)
 		)

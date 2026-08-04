@@ -40,6 +40,25 @@ func registerInventoryTaskRoutes(api *gin.RouterGroup, requireAuth gin.HandlerFu
 		result, err := service.SearchBusinessSystemDrafts(c.Request.Context(), mustPrincipal(c), c.Param("taskID"), c.Param("organizationID"), page)
 		writeInventoryBusinessSystemDraftResult(c, logger, "list inventory business system drafts", result, err)
 	})
+	group.POST("/:taskID/organizations/:organizationID/business-systems/:systemID/update-draft", func(c *gin.Context) {
+		var input inventorytask.BusinessSystemDraftInput
+		if err := c.ShouldBindJSON(&input); err != nil {
+			writeAPIError(c, http.StatusBadRequest, "invalid_request", "业务系统草稿信息格式不正确")
+			return
+		}
+		item, err := service.CreateBusinessSystemUpdateDraft(c.Request.Context(), mustPrincipal(c), c.Param("taskID"), c.Param("organizationID"), c.Param("systemID"), input, c.GetString("request_id"), c.ClientIP())
+		if writeInventoryBusinessSystemDraftError(c, logger, "create business system update draft", err) {
+			return
+		}
+		c.JSON(http.StatusCreated, gin.H{"item": item})
+	})
+	group.POST("/:taskID/organizations/:organizationID/business-systems/:systemID/delete-draft", func(c *gin.Context) {
+		item, err := service.CreateBusinessSystemDeleteDraft(c.Request.Context(), mustPrincipal(c), c.Param("taskID"), c.Param("organizationID"), c.Param("systemID"), c.GetString("request_id"), c.ClientIP())
+		if writeInventoryBusinessSystemDraftError(c, logger, "create business system delete draft", err) {
+			return
+		}
+		c.JSON(http.StatusCreated, gin.H{"item": item})
+	})
 	group.POST("/:taskID/organizations/:organizationID/business-system-drafts", func(c *gin.Context) {
 		var input inventorytask.BusinessSystemDraftInput
 		if err := c.ShouldBindJSON(&input); err != nil {
@@ -79,6 +98,25 @@ func registerInventoryTaskRoutes(api *gin.RouterGroup, requireAuth gin.HandlerFu
 		}
 		result, err := service.SearchAssetDrafts(c.Request.Context(), mustPrincipal(c), c.Param("taskID"), c.Param("organizationID"), page)
 		writeInventoryAssetDraftResult(c, logger, "list inventory asset drafts", result, err)
+	})
+	group.POST("/:taskID/organizations/:organizationID/assets/:assetID/update-draft", func(c *gin.Context) {
+		var input asset.CreateInput
+		if err := c.ShouldBindJSON(&input); err != nil {
+			writeAPIError(c, http.StatusBadRequest, "invalid_request", "资产草稿信息格式不正确")
+			return
+		}
+		item, err := service.CreateAssetUpdateDraft(c.Request.Context(), mustPrincipal(c), c.Param("taskID"), c.Param("organizationID"), c.Param("assetID"), input, c.GetString("request_id"), c.ClientIP())
+		if writeInventoryAssetDraftError(c, logger, "create asset update draft", err) {
+			return
+		}
+		c.JSON(http.StatusCreated, gin.H{"item": item})
+	})
+	group.POST("/:taskID/organizations/:organizationID/assets/:assetID/delete-draft", func(c *gin.Context) {
+		item, err := service.CreateAssetDeleteDraft(c.Request.Context(), mustPrincipal(c), c.Param("taskID"), c.Param("organizationID"), c.Param("assetID"), c.GetString("request_id"), c.ClientIP())
+		if writeInventoryAssetDraftError(c, logger, "create asset delete draft", err) {
+			return
+		}
+		c.JSON(http.StatusCreated, gin.H{"item": item})
 	})
 	group.POST("/:taskID/organizations/:organizationID/asset-drafts", func(c *gin.Context) {
 		var input asset.CreateInput
@@ -372,6 +410,8 @@ func writeInventoryProgressResult(c *gin.Context, logger *slog.Logger, operation
 		writeAPIError(c, http.StatusNotFound, "not_found", "填报任务或目标组织不存在")
 	case errors.Is(err, inventorytask.ErrState):
 		writeAPIError(c, http.StatusConflict, "invalid_state", "任务未下发、未到开始时间、已截止，或当前状态不允许执行该操作")
+	case errors.Is(err, inventorytask.ErrResourceInUse):
+		writeAPIError(c, http.StatusConflict, "resource_in_use", "业务系统仍关联有效网络资产，无法发布删除变更；请先解除关联或取消删除变更")
 	case err != nil:
 		logger.Error(operation, "error", err, "request_id", c.GetString("request_id"))
 		writeAPIError(c, http.StatusInternalServerError, "internal_error", fallback)

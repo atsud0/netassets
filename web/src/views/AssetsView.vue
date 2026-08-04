@@ -19,6 +19,7 @@ interface Asset {
   owner_user_id?: string; owner_username?: string; owner_user_display_name?: string
   owner_name?: string; notes?: string; expires_at?: string; created_at: string; updated_at: string
   is_draft?: boolean; draft_status?: 'editing' | 'submitted' | 'returned' | 'published'; task_id?: string
+  source_asset_id?: string; operation?: 'create' | 'update' | 'delete'
 }
 interface NetworkArea {
   id: string; organization_id: string; organization_code: string; organization_name: string
@@ -130,6 +131,7 @@ const inventoryNetworkScope = computed(() => typeof route.query.asset_network_sc
 const inventoryMode = computed(() => route.query.mode === 'inventory' && Boolean(inventoryTaskID.value && inventoryOrganizationID.value))
 const inventoryOrganizationName = computed(() => organizations.value.find((item) => item.id === inventoryOrganizationID.value)?.name || '当前填报组织')
 const draftStatusLabels: Record<string, string> = { editing: '编辑中', returned: '已退回', submitted: '已提交', published: '已发布' }
+const draftOperationLabels: Record<string, string> = { create: '新增', update: '修改', delete: '删除' }
 
 const enabledOrganizations = computed(() => organizations.value.filter((item) => item.status === 'enabled'))
 const availableSystems = computed(() => systems.value.filter((item) => item.organization_id === form.organization_id))
@@ -409,9 +411,9 @@ async function submit() {
     let response
     if (inventoryMode.value) {
       const base = `/inventory-tasks/${inventoryTaskID.value}/organizations/${inventoryOrganizationID.value}/asset-drafts`
-      response = editingAssetID.value && editingIsDraft.value
-        ? await apiClient.patch<{ item: Asset }>(`${base}/${editingAssetID.value}`, payload)
-        : await apiClient.post<{ item: Asset }>(base, payload)
+      if (editingAssetID.value && editingIsDraft.value) response = await apiClient.patch<{ item: Asset }>(`${base}/${editingAssetID.value}`, payload)
+      else if (editingAssetID.value) response = await apiClient.post<{ item: Asset }>(`/inventory-tasks/${inventoryTaskID.value}/organizations/${inventoryOrganizationID.value}/assets/${editingAssetID.value}/update-draft`, payload)
+      else response = await apiClient.post<{ item: Asset }>(base, payload)
     } else {
       response = editingAssetID.value
         ? await apiClient.patch<{ item: Asset }>(`/assets/${editingAssetID.value}`, payload)
@@ -419,7 +421,7 @@ async function submit() {
     }
     const id = editingAssetID.value || response.data.item.id
     if (!inventoryMode.value && customFields.value.length) await apiClient.put(`/assets/${id}/custom-fields`, { values: customFields.value.map((field) => ({ field_key: field.field_key, value: customValues[field.field_key] })) })
-    ElMessage.success(inventoryMode.value ? (editingAssetID.value ? '填报资产草稿已更新' : '填报资产草稿已保存，集团审核前不会进入正式台账') : (editingAssetID.value ? '网络资产已更新' : '网络资产已新增'))
+    ElMessage.success(inventoryMode.value ? (editingAssetID.value ? '资产变更已保存为任务草稿，提交前不会改变正式台账' : '填报资产草稿已保存，集团审核前不会进入正式台账') : (editingAssetID.value ? '网络资产已更新' : '网络资产已新增'))
     editDialogVisible.value = false
     await refreshAfterMutation()
   } catch (error) {
@@ -429,11 +431,23 @@ async function submit() {
   }
 }
 
+async function requestAssetDeletion(item: Asset) {
+  try {
+    await ElMessageBox.confirm(`确认将网络资产“${item.name || item.value}”加入本次任务的删除草稿吗？提交并发布前不会删除正式台账。`, '申请删除网络资产', { type: 'warning', confirmButtonText: '加入删除草稿', cancelButtonText: '取消' })
+    await apiClient.post(`/inventory-tasks/${inventoryTaskID.value}/organizations/${inventoryOrganizationID.value}/assets/${item.id}/delete-draft`)
+    ElMessage.success('已加入删除草稿，提交前正式台账保持不变')
+    await loadAssetDrafts()
+  } catch (error) {
+    if (error === 'cancel' || error === 'close') return
+    ElMessage.error(getAPIErrorMessage(error, '创建资产删除草稿失败'))
+  }
+}
+
 async function removeDraft(item: Asset) {
   try {
-    await ElMessageBox.confirm(`确认删除填报资产草稿“${item.name || item.value}”吗？`, '删除草稿', { type: 'warning', confirmButtonText: '删除', cancelButtonText: '取消' })
+    await ElMessageBox.confirm(`确认取消任务中的“${draftOperationLabels[item.operation || 'create']}”变更“${item.name || item.value}”吗？`, '取消任务变更', { type: 'warning', confirmButtonText: '确认取消', cancelButtonText: '返回' })
     await apiClient.delete(`/inventory-tasks/${inventoryTaskID.value}/organizations/${inventoryOrganizationID.value}/asset-drafts/${item.id}`)
-    ElMessage.success('填报资产草稿已删除')
+    ElMessage.success('任务变更已取消')
     await loadAssetDrafts()
   } catch (error) {
     if (error === 'cancel' || error === 'close') return
@@ -819,7 +833,7 @@ onMounted(() => {
 
     <div v-if="inventoryMode" class="panel data-table-panel inventory-draft-panel" v-loading="loading">
       <div class="table-panel-heading">
-        <div><strong>本次任务新增草稿</strong><span>共 {{ draftTotal }} 项；未提交时集团在正式台账中不可见</span></div>
+        <div><strong>本次任务变更草稿</strong><span>共 {{ draftTotal }} 项；新增、修改和删除均在提交发布后影响正式台账</span></div>
         <el-tag type="warning" effect="plain">任务草稿</el-tag>
       </div>
       <el-table :data="draftAssets" row-key="id" empty-text="当前任务尚未新增资产草稿">
@@ -828,8 +842,9 @@ onMounted(() => {
         <el-table-column label="类型" width="95"><template #default="scope">{{ typeLabel(scope.row.type) }}</template></el-table-column>
         <el-table-column prop="business_system_name" label="业务系统" min-width="150"><template #default="scope">{{ scope.row.business_system_name || '未绑定' }}</template></el-table-column>
         <el-table-column label="暴露范围" width="105"><template #default="scope">{{ scopeLabel(scope.row.network_scope) }}</template></el-table-column>
+        <el-table-column label="变更类型" width="90"><template #default="scope"><el-tag :type="scope.row.operation === 'delete' ? 'danger' : scope.row.operation === 'update' ? 'warning' : 'success'" effect="plain">{{ draftOperationLabels[scope.row.operation || 'create'] }}</el-tag></template></el-table-column>
         <el-table-column label="草稿状态" width="105"><template #default="scope"><el-tag type="warning" effect="plain">{{ draftStatusLabels[scope.row.draft_status || 'editing'] || scope.row.draft_status }}</el-tag></template></el-table-column>
-        <el-table-column label="操作" width="140" fixed="right"><template #default="scope"><el-button link type="primary" :disabled="scope.row.draft_status === 'submitted'" @click="openEditDialog(scope.row)">编辑</el-button><el-button link type="danger" :disabled="scope.row.draft_status === 'submitted'" @click="removeDraft(scope.row)">删除</el-button></template></el-table-column>
+        <el-table-column label="操作" width="160" fixed="right"><template #default="scope"><el-button v-if="scope.row.operation !== 'delete'" link type="primary" :disabled="scope.row.draft_status === 'submitted'" @click="openEditDialog(scope.row)">编辑</el-button><el-button link type="danger" :disabled="scope.row.draft_status === 'submitted'" @click="removeDraft(scope.row)">取消变更</el-button></template></el-table-column>
       </el-table>
       <div v-if="draftTotal > 0" class="table-pagination">
         <el-pagination background layout="total, sizes, prev, pager, next" :total="draftTotal" :current-page="draftPage" :page-size="draftPageSize" :page-sizes="[20, 50, 100]" @current-change="handleDraftPageChange" @size-change="handleDraftPageSizeChange" />
@@ -869,13 +884,13 @@ onMounted(() => {
         <el-table-column label="来源" width="75"><template #default="scope">{{ sourceLabel(scope.row.source) }}</template></el-table-column>
         <el-table-column label="操作" width="235" fixed="right">
           <template #default="scope">
-            <el-button link type="primary" @click="openChangeHistory(scope.row)">历史</el-button>
             <template v-if="!inventoryMode">
+              <el-button link type="primary" @click="openChangeHistory(scope.row)">历史</el-button>
               <el-button link type="primary" @click="openEditDialog(scope.row)">编辑</el-button>
               <el-button link :type="scope.row.status === 'archived' ? 'success' : 'warning'" @click="toggleArchive(scope.row)">{{ scope.row.status === 'archived' ? '启用' : '归档' }}</el-button>
               <el-button link type="danger" @click="removeAsset(scope.row)">删除</el-button>
             </template>
-            <span v-else class="muted-text">正式台账只读</span>
+            <template v-else><el-button link type="primary" @click="openEditDialog(scope.row)">修改</el-button><el-button link type="danger" @click="requestAssetDeletion(scope.row)">申请删除</el-button></template>
           </template>
         </el-table-column>
       </el-table>

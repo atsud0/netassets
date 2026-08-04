@@ -699,6 +699,7 @@ func createSubmissionSnapshot(ctx context.Context, tx pgx.Tx, principal auth.Pri
 		FROM business_systems system
 		LEFT JOIN business_system_data_security_profiles profile ON profile.business_system_id = system.id
 		WHERE system.owner_organization_id = $2::uuid AND system.deleted_at IS NULL
+		  AND NOT EXISTS (SELECT 1 FROM inventory_business_system_drafts change_draft WHERE change_draft.task_id=$3::uuid AND change_draft.organization_id=$2::uuid AND change_draft.source_system_id=system.id AND change_draft.draft_status IN ('editing','returned'))
 		  AND EXISTS (
 		      SELECT 1 FROM inventory_tasks task
 		      WHERE task.id = $3::uuid
@@ -721,7 +722,8 @@ func createSubmissionSnapshot(ctx context.Context, tx pgx.Tx, principal auth.Pri
 		           'personal_information_record_count',draft.personal_information_record_count,
 		           'data_volume_over_100k',draft.data_volume_over_100k,'contains_important_data',draft.contains_important_data,
 		           'contains_core_data',draft.contains_core_data,'data_storage_location',COALESCE(draft.data_storage_location,''),
-		           'security_notes',COALESCE(draft.security_notes,''),'_inventory_draft',true
+		           'security_notes',COALESCE(draft.security_notes,''),'_inventory_draft',true,
+		           '_inventory_operation',draft.operation,'_source_resource_id',COALESCE(draft.source_system_id::text,'')
 		       ) || COALESCE((
 		           SELECT jsonb_object_agg('custom:' || (value->>'field_key'), value->'value')
 		           FROM jsonb_array_elements(draft.custom_values) value
@@ -782,6 +784,7 @@ func createSubmissionSnapshot(ctx context.Context, tx pgx.Tx, principal auth.Pri
 		JOIN asset_organizations owner ON owner.asset_id = asset.id AND owner.is_primary
 		LEFT JOIN asset_network_areas area ON area.id = asset.network_area_id
 		WHERE owner.organization_id = $2::uuid AND asset.deleted_at IS NULL
+		  AND NOT EXISTS (SELECT 1 FROM inventory_asset_drafts change_draft WHERE change_draft.task_id=$3::uuid AND change_draft.organization_id=$2::uuid AND change_draft.source_asset_id=asset.id AND change_draft.draft_status IN ('editing','returned'))
 		  AND EXISTS (
 		      SELECT 1 FROM inventory_tasks task
 		      WHERE task.id = $3::uuid
@@ -812,7 +815,9 @@ func createSubmissionSnapshot(ctx context.Context, tx pgx.Tx, principal auth.Pri
 		           'expires_at', draft.expires_at,
 		           'linked_system_codes', CASE WHEN system.id IS NULL THEN '[]'::jsonb ELSE jsonb_build_array(system.system_code) END,
 		           'notes', COALESCE(draft.notes, ''),
-		           '_inventory_draft', true
+		           '_inventory_draft', true,
+		           '_inventory_operation', draft.operation,
+		           '_source_resource_id', COALESCE(draft.source_asset_id::text, '')
 		       )
 		FROM inventory_asset_drafts draft
 		LEFT JOIN asset_network_areas area ON area.id=draft.network_area_id

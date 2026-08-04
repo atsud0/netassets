@@ -22,7 +22,7 @@ func configuredBusinessSystemDraftMissingCount(ctx context.Context, q qualityChe
 		       contains_sensitive_personal_information,data_volume_over_100k,contains_important_data,
 		       contains_core_data,custom_values
 		FROM inventory_business_system_drafts
-		WHERE task_id::text=$1 AND organization_id::text=$2 AND draft_status IN ('editing','returned')
+		WHERE task_id::text=$1 AND organization_id::text=$2 AND draft_status IN ('editing','returned') AND operation <> 'delete'
 	`, taskID, organizationID)
 	if err != nil {
 		return 0, fmt.Errorf("load business system drafts for configured quality rule %s: %w", rule.ID, err)

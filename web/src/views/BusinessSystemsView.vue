@@ -17,7 +17,7 @@ interface BusinessSystem {
   personal_information_record_count?: number; data_volume_over_100k: string
   contains_important_data: string; contains_core_data: string; data_storage_location?: string; security_notes?: string
   asset_count?: number; created_at: string; updated_at: string
-  task_id?: string; draft_status?: string; operation?: string; is_draft?: boolean
+  task_id?: string; draft_status?: string; operation?: 'create' | 'update' | 'delete'; is_draft?: boolean; source_system_id?: string
   custom_values?: Array<{ field_key: string; value: unknown }>
 }
 interface FieldChange { field: string; label: string; before: string; after: string }
@@ -56,6 +56,7 @@ const detailAssetPageSize = ref(20)
 const detailAssetTotal = ref(0)
 const detailCustomFields = ref<CustomField[]>([])
 const editingID = ref('')
+const editingIsDraft = ref(false)
 const formRef = ref<FormInstance>()
 const systems = ref<BusinessSystem[]>([])
 const draftSystems = ref<BusinessSystem[]>([])
@@ -79,6 +80,7 @@ const inventoryTaskName = computed(() => typeof route.query.task_name === 'strin
 const inventoryMode = computed(() => route.query.mode === 'inventory' && Boolean(inventoryTaskID.value && inventoryOrganizationID.value))
 const inventoryOrganizationName = computed(() => organizations.value.find((item) => item.id === inventoryOrganizationID.value)?.name || '当前填报组织')
 const draftStatusLabels: Record<string, string> = { editing: '编辑中', returned: '已退回', submitted: '已提交', published: '已发布' }
+const draftOperationLabels: Record<string, string> = { create: '新增', update: '修改', delete: '删除' }
 const form = reactive<FormData>(emptyForm())
 const importDialogVisible = ref(false)
 const historyDialogVisible = ref(false)
@@ -228,6 +230,7 @@ function openCreateDialog() {
   Object.assign(form, emptyForm(), { organization_id: inventoryMode.value ? inventoryOrganizationID.value : (auth.user?.organization?.id ?? eligibleOrganizations.value[0]?.id ?? '') })
   defaultCustomValues()
   editingID.value = ''
+  editingIsDraft.value = false
   dialogVisible.value = true
 }
 
@@ -244,6 +247,7 @@ async function openEditDialog(row: BusinessSystem) {
     defaultCustomValues()
     row.custom_values?.forEach((item) => { customValues[item.field_key] = item.value })
     editingID.value = row.id
+    editingIsDraft.value = true
     dialogVisible.value = true
     return
   }
@@ -262,6 +266,7 @@ async function openEditDialog(row: BusinessSystem) {
     })
     await loadCustomValues(row.id)
     editingID.value = row.id
+    editingIsDraft.value = false
     dialogVisible.value = true
   } catch (error) { ElMessage.error(getAPIErrorMessage(error, '读取业务系统详情失败')) }
   finally { submitting.value = false }
@@ -278,9 +283,9 @@ async function submit() {
     if (inventoryMode.value) {
       const base = `/inventory-tasks/${inventoryTaskID.value}/organizations/${inventoryOrganizationID.value}/business-system-drafts`
       const payload = { ...form, organization_id: inventoryOrganizationID.value, custom_values: customPayload }
-      response = editingID.value
-        ? await apiClient.patch<{ item: BusinessSystem }>(`${base}/${editingID.value}`, payload)
-        : await apiClient.post<{ item: BusinessSystem }>(base, payload)
+      if (editingID.value && editingIsDraft.value) response = await apiClient.patch<{ item: BusinessSystem }>(`${base}/${editingID.value}`, payload)
+      else if (editingID.value) response = await apiClient.post<{ item: BusinessSystem }>(`/inventory-tasks/${inventoryTaskID.value}/organizations/${inventoryOrganizationID.value}/business-systems/${editingID.value}/update-draft`, payload)
+      else response = await apiClient.post<{ item: BusinessSystem }>(base, payload)
     } else {
       response = editingID.value
         ? await apiClient.patch<{ item: BusinessSystem }>(`/business-systems/${editingID.value}`, form)
@@ -288,7 +293,7 @@ async function submit() {
     }
     const id = editingID.value || response.data.item.id
     if (!inventoryMode.value && customFields.value.length) await apiClient.put(`/business-systems/${id}/custom-fields`, { values: customPayload })
-    ElMessage.success(inventoryMode.value ? (editingID.value ? '业务系统草稿已更新' : '业务系统草稿已保存，集团审核前不会进入正式台账') : (editingID.value ? '业务系统已更新' : '业务系统已新增'))
+    ElMessage.success(inventoryMode.value ? (editingID.value ? '业务系统变更已保存为任务草稿，提交前不会改变正式台账' : '业务系统草稿已保存，集团审核前不会进入正式台账') : (editingID.value ? '业务系统已更新' : '业务系统已新增'))
     dialogVisible.value = false
     await refreshAfterMutation()
     if (detailVisible.value && detail.value?.id === id) await openDetail(detail.value as BusinessSystem)
@@ -298,11 +303,20 @@ async function submit() {
 
 async function removeDraft(row: BusinessSystem) {
   try {
-    await ElMessageBox.confirm(`确认删除任务草稿“${row.name}”吗？`, '删除业务系统草稿', { type: 'warning' })
+    await ElMessageBox.confirm(`确认取消任务中的“${draftOperationLabels[row.operation || 'create']}”变更“${row.name}”吗？`, '取消任务变更', { type: 'warning' })
     await apiClient.delete(`/inventory-tasks/${inventoryTaskID.value}/organizations/${inventoryOrganizationID.value}/business-system-drafts/${row.id}`)
-    ElMessage.success('业务系统草稿已删除')
+    ElMessage.success('任务变更已取消')
     await loadDraftSystems()
   } catch (error) { if (error !== 'cancel' && error !== 'close') ElMessage.error(getAPIErrorMessage(error, '删除业务系统草稿失败')) }
+}
+
+async function requestSystemDeletion(row: BusinessSystem) {
+  try {
+    await ElMessageBox.confirm(`确认将业务系统“${row.name}”加入本次任务的删除草稿吗？提交并发布前不会删除正式台账；仍有关联资产时发布会被阻止。`, '申请删除业务系统', { type: 'warning', confirmButtonText: '加入删除草稿', cancelButtonText: '取消' })
+    await apiClient.post(`/inventory-tasks/${inventoryTaskID.value}/organizations/${inventoryOrganizationID.value}/business-systems/${row.id}/delete-draft`)
+    ElMessage.success('已加入删除草稿，提交前正式台账保持不变')
+    await loadDraftSystems()
+  } catch (error) { if (error !== 'cancel' && error !== 'close') ElMessage.error(getAPIErrorMessage(error, '创建业务系统删除草稿失败')) }
 }
 function handleDraftPageChange(value: number) { draftPage.value = value; void loadDraftSystems() }
 function handleDraftPageSizeChange(value: number) { draftPageSize.value = value; draftPage.value = 1; void loadDraftSystems() }
@@ -618,14 +632,15 @@ onMounted(load)
       <span class="asset-filter-count">共 {{ total }} 条</span>
     </div>
     <div v-if="inventoryMode" class="panel data-table-panel inventory-draft-panel" v-loading="loading">
-      <div class="table-panel-heading"><div><strong>本次任务新增草稿</strong><span>共 {{ draftTotal }} 个；未提交时集团在正式台账中不可见</span></div><el-tag type="warning" effect="plain">任务草稿</el-tag></div>
-      <el-table :data="draftSystems" row-key="id" empty-text="当前任务尚未新增业务系统草稿">
-        <el-table-column label="系统名称" min-width="190"><template #default="scope"><el-button link type="primary" class="table-link" :disabled="scope.row.draft_status === 'submitted'" @click="openEditDialog(scope.row)">{{ scope.row.name }}</el-button></template></el-table-column>
+      <div class="table-panel-heading"><div><strong>本次任务变更草稿</strong><span>共 {{ draftTotal }} 个；新增、修改和删除均在提交发布后影响正式台账</span></div><el-tag type="warning" effect="plain">任务草稿</el-tag></div>
+      <el-table :data="draftSystems" row-key="id" empty-text="当前任务尚无业务系统变更草稿">
+        <el-table-column label="系统名称" min-width="190"><template #default="scope"><el-button link type="primary" class="table-link" :disabled="scope.row.draft_status === 'submitted' || scope.row.operation === 'delete'" @click="openEditDialog(scope.row)">{{ scope.row.name }}</el-button></template></el-table-column>
         <el-table-column label="系统编码" min-width="145"><template #default="scope"><span class="mono-text">{{ scope.row.code }}</span></template></el-table-column>
         <el-table-column prop="organization_name" label="所属组织" min-width="180" />
         <el-table-column label="状态/等级" min-width="150"><template #default="scope"><el-tag effect="plain">{{ statusLabel(scope.row.status) }}</el-tag><span class="inline-note">{{ levelLabel(scope.row.level) }}</span></template></el-table-column>
+        <el-table-column label="变更类型" width="90"><template #default="scope"><el-tag :type="scope.row.operation === 'delete' ? 'danger' : scope.row.operation === 'update' ? 'warning' : 'success'" effect="plain">{{ draftOperationLabels[scope.row.operation || 'create'] }}</el-tag></template></el-table-column>
         <el-table-column label="草稿状态" width="105"><template #default="scope"><el-tag type="warning" effect="plain">{{ draftStatusLabels[scope.row.draft_status || 'editing'] || scope.row.draft_status }}</el-tag></template></el-table-column>
-        <el-table-column label="操作" width="140" fixed="right"><template #default="scope"><el-button link type="primary" :disabled="scope.row.draft_status === 'submitted'" @click="openEditDialog(scope.row)">编辑</el-button><el-button link type="danger" :disabled="scope.row.draft_status === 'submitted'" @click="removeDraft(scope.row)">删除</el-button></template></el-table-column>
+        <el-table-column label="操作" width="160" fixed="right"><template #default="scope"><el-button v-if="scope.row.operation !== 'delete'" link type="primary" :disabled="scope.row.draft_status === 'submitted'" @click="openEditDialog(scope.row)">编辑</el-button><el-button link type="danger" :disabled="scope.row.draft_status === 'submitted'" @click="removeDraft(scope.row)">取消变更</el-button></template></el-table-column>
       </el-table>
       <div v-if="draftTotal > 0" class="table-pagination"><el-pagination background layout="total, sizes, prev, pager, next" :total="draftTotal" :current-page="draftPage" :page-size="draftPageSize" :page-sizes="[20, 50, 100]" @current-change="handleDraftPageChange" @size-change="handleDraftPageSizeChange" /></div>
     </div>
@@ -648,7 +663,7 @@ onMounted(load)
         <el-table-column label="敏感个人信息" min-width="140"><template #default="scope"><el-tag :type="scope.row.contains_sensitive_personal_information === 'yes' ? 'danger' : 'info'">{{ yesNo(scope.row.contains_sensitive_personal_information) }}</el-tag></template></el-table-column>
         <el-table-column label="数据量超 10 万" min-width="135"><template #default="scope">{{ yesNo(scope.row.data_volume_over_100k) }}</template></el-table-column>
         <el-table-column prop="owner_name" label="负责人" min-width="110"><template #default="scope">{{ scope.row.owner_name || '—' }}</template></el-table-column>
-        <el-table-column label="操作" fixed="right" width="280"><template #default="scope"><template v-if="!inventoryMode"><el-button link type="primary" @click="openChangeHistory(scope.row)">历史</el-button><el-button link type="primary" @click="openEditDialog(scope.row)">编辑</el-button><el-button link :type="scope.row.status === 'archived' ? 'success' : 'warning'" @click="changeArchive(scope.row, scope.row.status !== 'archived')">{{ scope.row.status === 'archived' ? '恢复' : '归档' }}</el-button><el-button link type="danger" @click="remove(scope.row)">删除</el-button></template><span v-else class="muted-text">正式台账只读</span></template></el-table-column>
+        <el-table-column label="操作" fixed="right" width="280"><template #default="scope"><template v-if="!inventoryMode"><el-button link type="primary" @click="openChangeHistory(scope.row)">历史</el-button><el-button link type="primary" @click="openEditDialog(scope.row)">编辑</el-button><el-button link :type="scope.row.status === 'archived' ? 'success' : 'warning'" @click="changeArchive(scope.row, scope.row.status !== 'archived')">{{ scope.row.status === 'archived' ? '恢复' : '归档' }}</el-button><el-button link type="danger" @click="remove(scope.row)">删除</el-button></template><template v-else><el-button link type="primary" @click="openEditDialog(scope.row)">修改</el-button><el-button link type="danger" @click="requestSystemDeletion(scope.row)">申请删除</el-button></template></template></el-table-column>
       </el-table>
       <div class="table-pagination">
         <el-pagination background layout="total, sizes, prev, pager, next" :total="total" :current-page="page" :page-size="pageSize" :page-sizes="[20, 50, 100]" @current-change="handlePageChange" @size-change="handlePageSizeChange" />
