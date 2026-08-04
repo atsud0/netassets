@@ -745,8 +745,11 @@ onMounted(() => load(true))
       </div>
       <el-table :data="assets" row-key="id" empty-text="暂无网络资产" @selection-change="handleSelectionChange">
         <el-table-column type="selection" width="46" />
-        <el-table-column label="资产" min-width="230">
-          <template #default="scope"><div class="organization-name-cell"><el-button link type="primary" class="table-link" @click="openDetail(scope.row)">{{ scope.row.name || scope.row.value }}</el-button><span v-if="scope.row.name">{{ scope.row.value }}</span></div></template>
+        <el-table-column label="资产名称" min-width="180">
+          <template #default="scope"><el-button link type="primary" class="table-link" @click="openDetail(scope.row)">{{ scope.row.name || '未命名资产' }}</el-button></template>
+        </el-table-column>
+        <el-table-column label="资产值" min-width="230">
+          <template #default="scope"><span class="mono-text">{{ scope.row.value }}</span></template>
         </el-table-column>
         <el-table-column label="类型" width="95"><template #default="scope">{{ typeLabel(scope.row.type) }}</template></el-table-column>
         <el-table-column prop="organization_name" label="所属组织" min-width="150" />
