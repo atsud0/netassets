@@ -94,7 +94,7 @@ button, input { font: inherit; }
 .organization-summary strong { color: var(--navy); font-size: 24px; }
 .organization-table-panel { padding: 6px 18px 18px; }
 .organization-name-cell { display: flex; flex-direction: column; gap: 3px; }
-.organization-name-cell span { color: var(--muted); font-size: 12px; }
+.organization-name-cell > span { color: var(--muted); font-size: 12px; }
 .owner-option { display: flex; align-items: center; justify-content: space-between; gap: 16px; width: 100%; }
 .owner-option strong { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .owner-option span { flex: 0 1 auto; min-width: 0; overflow: hidden; color: var(--muted); font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }

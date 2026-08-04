@@ -484,11 +484,31 @@ test('网络资产名称打开详情且业务系统列仅展示名称', async ({
   await expect(row.getByText(systemCode, { exact: true })).toHaveCount(0)
   await expect(tablePanel.getByRole('button', { name: '详情', exact: true })).toHaveCount(0)
 
-  await row.getByRole('button', { name: assetName, exact: true }).click()
+  const assetNameLink = row.getByRole('button', { name: assetName, exact: true })
+  const assetNameStyle = await assetNameLink.locator('span').evaluate(element => {
+    const style = getComputedStyle(element)
+    return { color: style.color, fontSize: style.fontSize, fontWeight: style.fontWeight, lineHeight: style.lineHeight }
+  })
+  await assetNameLink.click()
   const drawer = page.getByRole('dialog', { name: '网络资产详情' })
   await expect(drawer).toBeVisible()
   await expect(drawer.getByText(assetName, { exact: true })).toBeVisible()
   await expect(drawer).toContainText(assetValue)
+  await page.keyboard.press('Escape')
+  await expect(drawer).toBeHidden()
+
+  await page.goto('/systems')
+  await page.getByPlaceholder('搜索系统编码、名称、组织或负责人').fill(systemCode)
+  await page.getByPlaceholder('搜索系统编码、名称、组织或负责人').press('Enter')
+  const systemRow = page.locator('.data-table-panel .el-table__body-wrapper tbody tr').filter({ hasText: systemCode }).first()
+  const systemNameLink = systemRow.getByRole('button', { name: systemName, exact: true })
+  await expect(systemNameLink).toBeVisible()
+  const systemNameStyle = await systemNameLink.locator('span').evaluate(element => {
+    const style = getComputedStyle(element)
+    return { color: style.color, fontSize: style.fontSize, fontWeight: style.fontWeight, lineHeight: style.lineHeight }
+  })
+  expect(assetNameStyle).toEqual(systemNameStyle)
+  expect(assetNameStyle.color).not.toBe('rgb(107, 119, 133)')
 })
 
 test('组织名称与编码独立展示且集团管理员可编辑已有组织', async ({ page }) => {
