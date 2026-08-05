@@ -42,6 +42,7 @@ type SubmissionResourceChange struct {
 	ResourceID   string                  `json:"resource_id"`
 	ResourceKey  string                  `json:"resource_key"`
 	ResourceName string                  `json:"resource_name"`
+	Operation    string                  `json:"operation,omitempty"`
 	Changes      []SubmissionFieldChange `json:"changes,omitempty"`
 }
 
@@ -205,44 +206,11 @@ func validSubmissionDiffChangeType(value string) bool {
 }
 
 func (s *Service) countSimpleSubmissionDiffItems(ctx context.Context, currentID, previousID, resourceType, changeType string) (int, error) {
-	if previousID == "" {
-		if changeType != "added" {
-			return 0, nil
-		}
-		var total int
-		err := s.pool.QueryRow(ctx, `
-			SELECT count(*)
-			FROM inventory_submission_items
-			WHERE submission_id = $1::uuid AND resource_type = $2
-		`, currentID, resourceType).Scan(&total)
-		if err != nil {
-			return 0, fmt.Errorf("count initial inventory submission diff items: %w", err)
-		}
-		return total, nil
-	}
-
-	leftID, rightID := currentID, previousID
-	if changeType == "removed" {
-		leftID, rightID = previousID, currentID
-	}
-	var total int
-	err := s.pool.QueryRow(ctx, `
-		SELECT count(*)
-		FROM inventory_submission_items item
-		WHERE item.submission_id = $1::uuid
-		  AND item.resource_type = $3
-		  AND NOT EXISTS (
-			  SELECT 1
-			  FROM inventory_submission_items counterpart
-			  WHERE counterpart.submission_id = $2::uuid
-			    AND counterpart.resource_type = item.resource_type
-			    AND counterpart.resource_id = item.resource_id
-		  )
-	`, leftID, rightID, resourceType).Scan(&total)
+	result, err := s.searchSimpleSubmissionDiffItems(ctx, currentID, previousID, resourceType, changeType, pagination.Query{Page: 1, PageSize: 1})
 	if err != nil {
-		return 0, fmt.Errorf("count inventory submission %s items: %w", changeType, err)
+		return 0, err
 	}
-	return total, nil
+	return result.Total, nil
 }
 
 func (s *Service) searchSimpleSubmissionDiffItems(
@@ -250,52 +218,72 @@ func (s *Service) searchSimpleSubmissionDiffItems(
 	currentID, previousID, resourceType, changeType string,
 	page pagination.Query,
 ) (pagination.Result[SubmissionResourceChange], error) {
-	total, err := s.countSimpleSubmissionDiffItems(ctx, currentID, previousID, resourceType, changeType)
-	if err != nil {
-		return pagination.Result[SubmissionResourceChange]{}, err
-	}
-	if total == 0 {
-		return pagination.NewResult([]SubmissionResourceChange{}, 0, page), nil
+	if changeType != "added" && changeType != "removed" {
+		return pagination.Result[SubmissionResourceChange]{}, ErrInvalid
 	}
 
-	leftID, rightID := currentID, previousID
-	if changeType == "removed" {
-		leftID, rightID = previousID, currentID
-	}
-	var rows pgx.Rows
-	if rightID == "" {
-		rows, err = s.pool.Query(ctx, `
-			SELECT resource_id::text, resource_key, resource_name
-			FROM inventory_submission_items
-			WHERE submission_id = $1::uuid AND resource_type = $2
-			ORDER BY resource_key, resource_id
-			LIMIT $3 OFFSET $4
-		`, leftID, resourceType, page.PageSize, page.Offset())
-	} else {
-		rows, err = s.pool.Query(ctx, `
-			SELECT item.resource_id::text, item.resource_key, item.resource_name
-			FROM inventory_submission_items item
-			WHERE item.submission_id = $1::uuid
-			  AND item.resource_type = $3
-			  AND NOT EXISTS (
-				  SELECT 1
-				  FROM inventory_submission_items counterpart
-				  WHERE counterpart.submission_id = $2::uuid
-				    AND counterpart.resource_type = item.resource_type
-				    AND counterpart.resource_id = item.resource_id
+	// Draft operations are authoritative for the current task submission. An
+	// update/delete draft has a different draft UUID from its formal resource,
+	// so relying on UUID comparison alone would incorrectly render it as one
+	// added row plus one removed row.
+	query := `
+		WITH candidates AS (
+			SELECT current_item.resource_id, current_item.resource_key, current_item.resource_name,
+			       COALESCE(current_item.snapshot_data->>'_inventory_operation', '') AS operation
+			FROM inventory_submission_items current_item
+			WHERE current_item.submission_id = $1::uuid
+			  AND current_item.resource_type = $3
+			  AND (
+			      ($4 = 'added' AND (
+			          current_item.snapshot_data->>'_inventory_operation' = 'create'
+			          OR (
+			              COALESCE(current_item.snapshot_data->>'_inventory_operation', '') NOT IN ('update', 'delete')
+			              AND ($2::text = '' OR NOT EXISTS (
+			                  SELECT 1 FROM inventory_submission_items previous_item
+			                  WHERE previous_item.submission_id = NULLIF($2, '')::uuid
+			                    AND previous_item.resource_type = current_item.resource_type
+			                    AND previous_item.resource_id = current_item.resource_id
+			              ))
+			          )
+			      ))
+			      OR ($4 = 'removed' AND current_item.snapshot_data->>'_inventory_operation' = 'delete')
 			  )
-			ORDER BY item.resource_key, item.resource_id
-			LIMIT $4 OFFSET $5
-		`, leftID, rightID, resourceType, page.PageSize, page.Offset())
-	}
+			UNION ALL
+			SELECT previous_item.resource_id, previous_item.resource_key, previous_item.resource_name, '' AS operation
+			FROM inventory_submission_items previous_item
+			WHERE $4 = 'removed'
+			  AND $2::text <> ''
+			  AND previous_item.submission_id = NULLIF($2, '')::uuid
+			  AND previous_item.resource_type = $3
+			  AND NOT EXISTS (
+			      SELECT 1 FROM inventory_submission_items current_item
+			      WHERE current_item.submission_id = $1::uuid
+			        AND current_item.resource_type = previous_item.resource_type
+			        AND current_item.resource_id = previous_item.resource_id
+			  )
+			  AND NOT EXISTS (
+			      SELECT 1 FROM inventory_submission_items current_change
+			      WHERE current_change.submission_id = $1::uuid
+			        AND current_change.resource_type = previous_item.resource_type
+			        AND current_change.snapshot_data->>'_inventory_operation' IN ('update', 'delete')
+			        AND current_change.snapshot_data->>'_source_resource_id' = previous_item.resource_id::text
+			  )
+		)
+		SELECT resource_id::text, resource_key, resource_name, operation, count(*) OVER()
+		FROM candidates
+		ORDER BY resource_key, resource_id
+		LIMIT $5 OFFSET $6
+	`
+	rows, err := s.pool.Query(ctx, query, currentID, previousID, resourceType, changeType, page.PageSize, page.Offset())
 	if err != nil {
 		return pagination.Result[SubmissionResourceChange]{}, fmt.Errorf("list inventory submission %s items: %w", changeType, err)
 	}
 	defer rows.Close()
 	items := make([]SubmissionResourceChange, 0, page.PageSize)
+	total := 0
 	for rows.Next() {
 		var item SubmissionResourceChange
-		if err := rows.Scan(&item.ResourceID, &item.ResourceKey, &item.ResourceName); err != nil {
+		if err := rows.Scan(&item.ResourceID, &item.ResourceKey, &item.ResourceName, &item.Operation, &total); err != nil {
 			return pagination.Result[SubmissionResourceChange]{}, fmt.Errorf("scan inventory submission %s item: %w", changeType, err)
 		}
 		items = append(items, item)
@@ -307,9 +295,6 @@ func (s *Service) searchSimpleSubmissionDiffItems(
 }
 
 func (s *Service) countModifiedSubmissionDiffItems(ctx context.Context, currentID, previousID, resourceType string) (int, error) {
-	if previousID == "" {
-		return 0, nil
-	}
 	result, err := s.searchModifiedSubmissionDiffItems(ctx, currentID, previousID, resourceType, pagination.Query{Page: 1, PageSize: 1})
 	if err != nil {
 		return 0, err
@@ -322,19 +307,30 @@ func (s *Service) searchModifiedSubmissionDiffItems(
 	currentID, previousID, resourceType string,
 	page pagination.Query,
 ) (pagination.Result[SubmissionResourceChange], error) {
-	if previousID == "" {
-		return pagination.NewResult([]SubmissionResourceChange{}, 0, page), nil
-	}
 	rows, err := s.pool.Query(ctx, `
 		SELECT current_item.resource_id::text, current_item.resource_key, current_item.resource_name,
+		       COALESCE(current_item.snapshot_data->>'_inventory_operation', ''),
 		       previous_item.snapshot_data, current_item.snapshot_data
 		FROM inventory_submission_items current_item
-		JOIN inventory_submission_items previous_item
-		  ON previous_item.submission_id = $2::uuid
+		LEFT JOIN inventory_submission_items previous_item
+		  ON $2::text <> ''
+		 AND previous_item.submission_id = NULLIF($2, '')::uuid
 		 AND previous_item.resource_type = current_item.resource_type
-		 AND previous_item.resource_id = current_item.resource_id
+		 AND previous_item.resource_id = CASE
+		     WHEN current_item.snapshot_data->>'_inventory_operation' = 'update'
+		       AND COALESCE(current_item.snapshot_data->>'_source_resource_id', '') <> ''
+		     THEN (current_item.snapshot_data->>'_source_resource_id')::uuid
+		     ELSE current_item.resource_id
+		 END
 		WHERE current_item.submission_id = $1::uuid
 		  AND current_item.resource_type = $3
+		  AND (
+		      current_item.snapshot_data->>'_inventory_operation' = 'update'
+		      OR (
+		          COALESCE(current_item.snapshot_data->>'_inventory_operation', '') NOT IN ('create', 'delete')
+		          AND previous_item.resource_id IS NOT NULL
+		      )
+		  )
 		ORDER BY current_item.resource_key, current_item.resource_id
 	`, currentID, previousID, resourceType)
 	if err != nil {
@@ -347,15 +343,25 @@ func (s *Service) searchModifiedSubmissionDiffItems(
 	for rows.Next() {
 		var item SubmissionResourceChange
 		var beforeData, afterData []byte
-		if err := rows.Scan(&item.ResourceID, &item.ResourceKey, &item.ResourceName, &beforeData, &afterData); err != nil {
+		if err := rows.Scan(&item.ResourceID, &item.ResourceKey, &item.ResourceName, &item.Operation, &beforeData, &afterData); err != nil {
 			return pagination.Result[SubmissionResourceChange]{}, fmt.Errorf("scan inventory submission modified candidate: %w", err)
 		}
 		var before, after map[string]any
-		if err := json.Unmarshal(beforeData, &before); err != nil {
-			return pagination.Result[SubmissionResourceChange]{}, fmt.Errorf("decode previous inventory submission item: %w", err)
+		if len(beforeData) > 0 {
+			if err := json.Unmarshal(beforeData, &before); err != nil {
+				return pagination.Result[SubmissionResourceChange]{}, fmt.Errorf("decode previous inventory submission item: %w", err)
+			}
 		}
 		if err := json.Unmarshal(afterData, &after); err != nil {
 			return pagination.Result[SubmissionResourceChange]{}, fmt.Errorf("decode current inventory submission item: %w", err)
+		}
+		if item.Operation == "update" {
+			if embeddedBefore, ok := after[inventoryBeforeKey].(map[string]any); ok {
+				before = embeddedBefore
+			}
+		}
+		if before == nil {
+			before = map[string]any{}
 		}
 		changes := compareSnapshotData(resourceType, before, after)
 		if len(changes) == 0 {
@@ -470,20 +476,49 @@ func buildSubmissionDiff(currentItems, previousItems []snapshotItem) SubmissionD
 		current := itemsByID(currentItems, resourceType)
 		previous := itemsByID(previousItems, resourceType)
 		diff := emptyResourceDiff()
-		for id, item := range current {
-			old, exists := previous[id]
+		claimedPrevious := make(map[string]struct{})
+		for _, item := range current {
+			operation := snapshotString(item.Data, inventoryOperationKey)
+			sourceID := snapshotString(item.Data, inventorySourceIDKey)
+			if sourceID != "" && (operation == "update" || operation == "delete") {
+				claimedPrevious[sourceID] = struct{}{}
+			}
+			switch operation {
+			case "create":
+				diff.Added = append(diff.Added, resourceChange(item, operation, nil))
+				continue
+			case "update":
+				before := snapshotMap(item.Data, inventoryBeforeKey)
+				if len(before) == 0 {
+					if old, exists := previous[sourceID]; exists {
+						before = old.Data
+					}
+				}
+				changes := compareSnapshotData(resourceType, before, item.Data)
+				if len(changes) > 0 {
+					diff.Modified = append(diff.Modified, resourceChange(item, operation, changes))
+				}
+				continue
+			case "delete":
+				diff.Removed = append(diff.Removed, resourceChange(item, operation, nil))
+				continue
+			}
+			old, exists := previous[item.ResourceID]
 			if !exists {
-				diff.Added = append(diff.Added, resourceChange(item, nil))
+				diff.Added = append(diff.Added, resourceChange(item, "", nil))
 				continue
 			}
 			changes := compareSnapshotData(resourceType, old.Data, item.Data)
 			if len(changes) > 0 {
-				diff.Modified = append(diff.Modified, resourceChange(item, changes))
+				diff.Modified = append(diff.Modified, resourceChange(item, "", changes))
 			}
 		}
 		for id, item := range previous {
+			if _, claimed := claimedPrevious[id]; claimed {
+				continue
+			}
 			if _, exists := current[id]; !exists {
-				diff.Removed = append(diff.Removed, resourceChange(item, nil))
+				diff.Removed = append(diff.Removed, resourceChange(item, "", nil))
 			}
 		}
 		sortResourceChanges(diff.Added)
@@ -519,15 +554,32 @@ func itemsByID(items []snapshotItem, resourceType string) map[string]snapshotIte
 	return result
 }
 
-func resourceChange(item snapshotItem, changes []SubmissionFieldChange) SubmissionResourceChange {
+func resourceChange(item snapshotItem, operation string, changes []SubmissionFieldChange) SubmissionResourceChange {
 	return SubmissionResourceChange{
-		ResourceID: item.ResourceID, ResourceKey: item.ResourceKey, ResourceName: item.ResourceName, Changes: changes,
+		ResourceID: item.ResourceID, ResourceKey: item.ResourceKey, ResourceName: item.ResourceName,
+		Operation: operation, Changes: changes,
 	}
 }
 
+func snapshotString(data map[string]any, key string) string {
+	value, _ := data[key].(string)
+	return strings.TrimSpace(value)
+}
+
+func snapshotMap(data map[string]any, key string) map[string]any {
+	value, _ := data[key].(map[string]any)
+	if value == nil {
+		return map[string]any{}
+	}
+	return value
+}
+
 const (
-	customFieldPrefix    = "custom:"
-	customFieldLabelsKey = "_custom_field_labels"
+	customFieldPrefix     = "custom:"
+	customFieldLabelsKey  = "_custom_field_labels"
+	inventoryOperationKey = "_inventory_operation"
+	inventorySourceIDKey  = "_source_resource_id"
+	inventoryBeforeKey    = "_inventory_before"
 )
 
 func compareSnapshotData(resourceType string, before, after map[string]any) []SubmissionFieldChange {
@@ -833,6 +885,9 @@ func createSubmissionSnapshot(ctx context.Context, tx pgx.Tx, principal auth.Pri
 	if err != nil {
 		return SubmissionMetadata{}, fmt.Errorf("snapshot network asset drafts: %w", err)
 	}
+	if err := attachSubmissionDraftBeforeSnapshots(ctx, tx, item.ID, taskID, organizationID); err != nil {
+		return SubmissionMetadata{}, err
+	}
 	item.SystemCount = systemResult.RowsAffected() + draftSystemResult.RowsAffected()
 	item.AssetCount = assetResult.RowsAffected() + draftAssetResult.RowsAffected()
 	if _, err := tx.Exec(ctx, `
@@ -843,6 +898,112 @@ func createSubmissionSnapshot(ctx context.Context, tx pgx.Tx, principal auth.Pri
 		return SubmissionMetadata{}, fmt.Errorf("update inventory submission counts: %w", err)
 	}
 	return item, nil
+}
+
+// attachSubmissionDraftBeforeSnapshots freezes the formal resource state that
+// existed at submit time. Reviewers can therefore see an accurate before/after
+// comparison even after approval publishes the draft into the formal ledger.
+func attachSubmissionDraftBeforeSnapshots(ctx context.Context, tx pgx.Tx, submissionID, taskID, organizationID string) error {
+	if _, err := tx.Exec(ctx, `
+		UPDATE inventory_submission_items item
+		SET snapshot_data = item.snapshot_data || jsonb_build_object(
+		    '_inventory_before',
+		    jsonb_build_object(
+		        'system_code', source.system_code,
+		        'system_name', source.system_name,
+		        'short_name', COALESCE(source.short_name, ''),
+		        'owner_name', COALESCE(source.owner_name, ''),
+		        'owner_contact', COALESCE(source.owner_contact, ''),
+		        'system_status', source.system_status,
+		        'system_level', source.system_level,
+		        'deployment_type', COALESCE(source.deployment_type, ''),
+		        'internet_exposure', source.internet_exposure,
+		        'description', COALESCE(source.description, ''),
+		        'contains_personal_information', COALESCE(profile.contains_personal_information, 'unknown'),
+		        'contains_sensitive_personal_information', COALESCE(profile.contains_sensitive_personal_information, 'unknown'),
+		        'personal_information_record_count', profile.personal_information_record_count,
+		        'data_volume_over_100k', COALESCE(profile.data_volume_over_100k, 'unknown'),
+		        'contains_important_data', COALESCE(profile.contains_important_data, 'unknown'),
+		        'contains_core_data', COALESCE(profile.contains_core_data, 'unknown'),
+		        'data_storage_location', COALESCE(profile.data_storage_location, ''),
+		        'security_notes', COALESCE(profile.notes, '')
+		    ) || COALESCE((
+		        SELECT jsonb_object_agg('custom:' || definition.field_key, value.value)
+		        FROM custom_field_values value
+		        JOIN custom_field_definitions definition ON definition.id = value.field_definition_id
+		        WHERE value.resource_type = 'business_system' AND value.resource_id = source.id
+		    ), '{}'::jsonb) || jsonb_build_object(
+		        '_custom_field_labels', COALESCE((
+		            SELECT jsonb_object_agg('custom:' || definition.field_key, definition.field_name)
+		            FROM custom_field_values value
+		            JOIN custom_field_definitions definition ON definition.id = value.field_definition_id
+		            WHERE value.resource_type = 'business_system' AND value.resource_id = source.id
+		        ), '{}'::jsonb)
+		    )
+		)
+		FROM inventory_business_system_drafts draft
+		JOIN business_systems source ON source.id = draft.source_system_id
+		LEFT JOIN business_system_data_security_profiles profile ON profile.business_system_id = source.id
+		WHERE item.submission_id = $1::uuid
+		  AND item.resource_type = 'business_system'
+		  AND item.resource_id = draft.id
+		  AND draft.task_id = $2::uuid
+		  AND draft.organization_id = $3::uuid
+		  AND draft.operation IN ('update', 'delete')
+	`, submissionID, taskID, organizationID); err != nil {
+		return fmt.Errorf("attach business system draft before snapshot: %w", err)
+	}
+
+	if _, err := tx.Exec(ctx, `
+		UPDATE inventory_submission_items item
+		SET snapshot_data = item.snapshot_data || jsonb_build_object(
+		    '_inventory_before',
+		    jsonb_build_object(
+		        'asset_type', source.asset_type,
+		        'asset_value', source.asset_value,
+		        'asset_name', COALESCE(source.asset_name, ''),
+		        'owner_name', COALESCE(owner.owner_name, ''),
+		        'environment', source.environment,
+		        'network_scope', source.network_scope,
+		        'network_area_name', COALESCE(area.area_name, ''),
+		        'status', source.status,
+		        'importance', source.importance,
+		        'expires_at', source.expires_at,
+		        'linked_system_codes', COALESCE((
+		            SELECT jsonb_agg(system.system_code ORDER BY system.system_code)
+		            FROM system_assets link
+		            JOIN business_systems system ON system.id = link.business_system_id
+		            WHERE link.asset_id = source.id AND system.deleted_at IS NULL
+		        ), '[]'::jsonb),
+		        'notes', COALESCE(source.notes, '')
+		    ) || COALESCE((
+		        SELECT jsonb_object_agg('custom:' || definition.field_key, value.value)
+		        FROM custom_field_values value
+		        JOIN custom_field_definitions definition ON definition.id = value.field_definition_id
+		        WHERE value.resource_type = 'asset' AND value.resource_id = source.id
+		    ), '{}'::jsonb) || jsonb_build_object(
+		        '_custom_field_labels', COALESCE((
+		            SELECT jsonb_object_agg('custom:' || definition.field_key, definition.field_name)
+		            FROM custom_field_values value
+		            JOIN custom_field_definitions definition ON definition.id = value.field_definition_id
+		            WHERE value.resource_type = 'asset' AND value.resource_id = source.id
+		        ), '{}'::jsonb)
+		    )
+		)
+		FROM inventory_asset_drafts draft
+		JOIN assets source ON source.id = draft.source_asset_id
+		LEFT JOIN asset_organizations owner ON owner.asset_id = source.id AND owner.is_primary
+		LEFT JOIN asset_network_areas area ON area.id = source.network_area_id
+		WHERE item.submission_id = $1::uuid
+		  AND item.resource_type = 'network_asset'
+		  AND item.resource_id = draft.id
+		  AND draft.task_id = $2::uuid
+		  AND draft.organization_id = $3::uuid
+		  AND draft.operation IN ('update', 'delete')
+	`, submissionID, taskID, organizationID); err != nil {
+		return fmt.Errorf("attach network asset draft before snapshot: %w", err)
+	}
+	return nil
 }
 
 func writeSubmissionAudit(ctx context.Context, tx pgx.Tx, principal auth.Principal, organizationID, taskID, note, status string, snapshot SubmissionMetadata, requestID, ipAddress string) error {

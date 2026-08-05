@@ -329,6 +329,12 @@ test('已有资产和业务系统的修改删除先进入任务草稿，审核�
       deleteAssetStatus: (await fetch(`/api/v1/assets/${fixture.deleteAsset.id}`)).status,
       systemDrafts: await json(`/inventory-tasks/${fixture.reviewTaskID}/organizations/${fixture.organizationID}/business-system-drafts?page=1&page_size=20`),
       assetDrafts: await json(`/inventory-tasks/${fixture.reviewTaskID}/organizations/${fixture.organizationID}/asset-drafts?page=1&page_size=20`),
+      diff: (await json(`/inventory-tasks/${fixture.reviewTaskID}/organizations/${fixture.organizationID}/submission-diff`)).submission_diff,
+      modifiedSystems: await json(`/inventory-tasks/${fixture.reviewTaskID}/organizations/${fixture.organizationID}/submission-diff/items?resource_type=business_system&change_type=modified&page=1&page_size=20`),
+      modifiedAssets: await json(`/inventory-tasks/${fixture.reviewTaskID}/organizations/${fixture.organizationID}/submission-diff/items?resource_type=network_asset&change_type=modified&page=1&page_size=20`),
+      removedSystems: await json(`/inventory-tasks/${fixture.reviewTaskID}/organizations/${fixture.organizationID}/submission-diff/items?resource_type=business_system&change_type=removed&page=1&page_size=20`),
+      removedAssets: await json(`/inventory-tasks/${fixture.reviewTaskID}/organizations/${fixture.organizationID}/submission-diff/items?resource_type=network_asset&change_type=removed&page=1&page_size=20`),
+      reviewResources: await json(`/inventory-tasks/${fixture.reviewTaskID}/organizations/${fixture.organizationID}/review-resources?page=1&page_size=20`),
     }
   }, { fixture })
   expect(awaitingReview.system.name).toBe(fixture.updateSystem.name)
@@ -337,6 +343,48 @@ test('已有资产和业务系统的修改删除先进入任务草稿，审核�
   expect(awaitingReview.deleteAssetStatus).toBe(200)
   expect(awaitingReview.systemDrafts.items.every((item: { draft_status: string }) => item.draft_status === 'submitted')).toBeTruthy()
   expect(awaitingReview.assetDrafts.items.every((item: { draft_status: string }) => item.draft_status === 'submitted')).toBeTruthy()
+  expect(awaitingReview.diff.summary).toEqual({ added: 2, modified: 2, removed: 2 })
+  expect(awaitingReview.modifiedSystems.total).toBe(1)
+  expect(awaitingReview.modifiedSystems.items[0].operation).toBe('update')
+  expect(awaitingReview.modifiedSystems.items[0].changes.some((item: { field: string; before: unknown; after: unknown }) => item.field === 'system_name' && item.before === fixture.updateSystem.name && item.after === updatedSystemName)).toBeTruthy()
+  expect(awaitingReview.modifiedAssets.total).toBe(1)
+  expect(awaitingReview.modifiedAssets.items[0].operation).toBe('update')
+  expect(awaitingReview.modifiedAssets.items[0].changes.some((item: { field: string; before: unknown; after: unknown }) => item.field === 'asset_name' && item.before === fixture.updateAsset.name && item.after === updatedAssetName)).toBeTruthy()
+  expect(awaitingReview.removedSystems.items).toHaveLength(1)
+  expect(awaitingReview.removedSystems.items[0].operation).toBe('delete')
+  expect(awaitingReview.removedAssets.items).toHaveLength(1)
+  expect(awaitingReview.removedAssets.items[0].operation).toBe('delete')
+  expect(awaitingReview.reviewResources.items.filter((item: { operation?: string }) => item.operation === 'update')).toHaveLength(2)
+  expect(awaitingReview.reviewResources.items.filter((item: { operation?: string }) => item.operation === 'delete')).toHaveLength(2)
+
+  await page.goto(`/inventory-tasks?task_id=${fixture.reviewTaskID}&organization_id=${fixture.organizationID}`)
+  await expect(page.getByRole('heading', { name: `已有资源审核任务_${suffix}`, exact: true })).toBeVisible()
+  await page.getByRole('button', { name: '查看差异', exact: true }).click()
+  await expect(page.getByText('带“本次新增 / 本次修改 / 本次删除”标记的是子公司在本任务内发起、尚待发布的台账变更')).toBeVisible()
+  const diffGroups = page.locator('.submission-diff-group')
+  await diffGroups.nth(0).getByRole('tab', { name: '修改（1）', exact: true }).click()
+  await expect(diffGroups.nth(0).getByText('本次修改', { exact: true })).toBeVisible()
+  await diffGroups.nth(0).locator('.el-table__expand-icon').first().click()
+  const systemNameChange = diffGroups
+    .nth(0)
+    .locator('.submission-field-change')
+    .filter({ has: page.getByText('系统名称', { exact: true }) })
+  await expect(systemNameChange.getByText(fixture.updateSystem.name, { exact: true })).toBeVisible()
+  await expect(systemNameChange.getByText(updatedSystemName, { exact: true })).toBeVisible()
+  await diffGroups.nth(1).getByRole('tab', { name: '删除/归档（1）', exact: true }).click()
+  await expect(diffGroups.nth(1).getByText('本次删除', { exact: true })).toBeVisible()
+  await page
+    .locator('.el-drawer:visible')
+    .filter({ has: page.getByRole('heading', { name: '填报提交差异', exact: true }) })
+    .locator('.el-drawer__close-btn')
+    .click()
+  await expect(page.getByRole('heading', { name: '填报提交差异', exact: true })).toBeHidden()
+  await page
+    .locator('.el-drawer:visible')
+    .filter({ has: page.getByRole('heading', { name: '填报任务详情', exact: true }) })
+    .locator('.el-drawer__close-btn')
+    .click()
+  await expect(page.getByRole('heading', { name: '填报任务详情', exact: true })).toBeHidden()
 
   const published = await page.evaluate(async ({ fixture }) => {
     const reviewResponse = await fetch(`/api/v1/inventory-tasks/${fixture.reviewTaskID}/organizations/${fixture.organizationID}/review`, {

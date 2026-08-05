@@ -318,6 +318,55 @@ func TestBuildSubmissionDiffTracksAddedModifiedAndRemovedResources(t *testing.T)
 	}
 }
 
+func TestBuildSubmissionDiffUsesInventoryDraftOperationsWithoutDoubleCounting(t *testing.T) {
+	previous := []snapshotItem{
+		{
+			ResourceType: "business_system", ResourceID: "system-source", ResourceKey: "SYS-OLD", ResourceName: "旧系统",
+			Data: map[string]any{"system_code": "SYS-OLD", "system_name": "旧系统", "system_level": "normal"},
+		},
+		{
+			ResourceType: "network_asset", ResourceID: "asset-source", ResourceKey: "domain:old.example.com", ResourceName: "旧域名",
+			Data: map[string]any{"asset_type": "domain", "asset_value": "old.example.com", "asset_name": "旧域名"},
+		},
+	}
+	current := []snapshotItem{
+		{
+			ResourceType: "business_system", ResourceID: "system-draft", ResourceKey: "SYS-NEW", ResourceName: "新系统",
+			Data: map[string]any{
+				"system_code": "SYS-NEW", "system_name": "新系统", "system_level": "important",
+				inventoryOperationKey: "update", inventorySourceIDKey: "system-source",
+				inventoryBeforeKey: map[string]any{"system_code": "SYS-OLD", "system_name": "旧系统", "system_level": "normal"},
+			},
+		},
+		{
+			ResourceType: "network_asset", ResourceID: "asset-delete-draft", ResourceKey: "domain:old.example.com", ResourceName: "旧域名",
+			Data: map[string]any{
+				"asset_type": "domain", "asset_value": "old.example.com", "asset_name": "旧域名",
+				inventoryOperationKey: "delete", inventorySourceIDKey: "asset-source",
+				inventoryBeforeKey: map[string]any{"asset_type": "domain", "asset_value": "old.example.com", "asset_name": "旧域名"},
+			},
+		},
+		{
+			ResourceType: "network_asset", ResourceID: "asset-create-draft", ResourceKey: "domain:new.example.com", ResourceName: "新域名",
+			Data: map[string]any{
+				"asset_type": "domain", "asset_value": "new.example.com", "asset_name": "新域名",
+				inventoryOperationKey: "create",
+			},
+		},
+	}
+
+	result := buildSubmissionDiff(current, previous)
+	if result.Summary.Added != 1 || result.Summary.Modified != 1 || result.Summary.Removed != 1 {
+		t.Fatalf("draft operations must be counted once: %+v", result.Summary)
+	}
+	if result.BusinessSystems.Modified[0].Operation != "update" || len(result.BusinessSystems.Modified[0].Changes) != 3 {
+		t.Fatalf("unexpected update draft diff: %+v", result.BusinessSystems.Modified)
+	}
+	if result.NetworkAssets.Added[0].Operation != "create" || result.NetworkAssets.Removed[0].Operation != "delete" {
+		t.Fatalf("unexpected create/delete draft operations: %+v", result.NetworkAssets)
+	}
+}
+
 func TestBuildSubmissionDiffTreatsFirstSubmissionAsAddedBaseline(t *testing.T) {
 	current := []snapshotItem{
 		{ResourceType: "business_system", ResourceID: "system-1", ResourceKey: "SYS-001", ResourceName: "系统一", Data: map[string]any{"system_code": "SYS-001"}},

@@ -25,6 +25,7 @@ type ReviewResource struct {
 	ResourceID   string         `json:"resource_id"`
 	ResourceKey  string         `json:"resource_key"`
 	ResourceName string         `json:"resource_name"`
+	Operation    string         `json:"operation,omitempty"`
 	SnapshotData map[string]any `json:"snapshot_data"`
 }
 
@@ -72,7 +73,8 @@ func (s *Service) SearchReviewResources(ctx context.Context, principal auth.Prin
 		return pagination.Result[ReviewResource]{}, fmt.Errorf("count inventory review resources: %w", err)
 	}
 	rows, err := s.pool.Query(ctx, `
-		SELECT item.resource_type, item.resource_id::text, item.resource_key, item.resource_name, item.snapshot_data
+		SELECT item.resource_type, item.resource_id::text, item.resource_key, item.resource_name,
+		       COALESCE(item.snapshot_data->>'_inventory_operation', ''), item.snapshot_data
 		FROM inventory_submission_items item
 		WHERE item.submission_id = $1::uuid
 		  AND ($2::text = '' OR item.resource_name ILIKE '%' || $2 || '%' OR item.resource_key ILIKE '%' || $2 || '%')
@@ -87,7 +89,7 @@ func (s *Service) SearchReviewResources(ctx context.Context, principal auth.Prin
 	for rows.Next() {
 		var item ReviewResource
 		var snapshotData []byte
-		if err := rows.Scan(&item.ResourceType, &item.ResourceID, &item.ResourceKey, &item.ResourceName, &snapshotData); err != nil {
+		if err := rows.Scan(&item.ResourceType, &item.ResourceID, &item.ResourceKey, &item.ResourceName, &item.Operation, &snapshotData); err != nil {
 			return pagination.Result[ReviewResource]{}, fmt.Errorf("scan inventory review resource: %w", err)
 		}
 		if err := json.Unmarshal(snapshotData, &item.SnapshotData); err != nil {

@@ -99,6 +99,7 @@ interface SubmissionResourceChange {
   resource_id: string
   resource_key: string
   resource_name: string
+  operation?: 'create' | 'update' | 'delete'
   changes?: SubmissionFieldChange[]
 }
 type DiffResourceType = 'business_system' | 'network_asset'
@@ -126,6 +127,7 @@ interface ReviewResource {
   resource_id: string
   resource_key: string
   resource_name: string
+  operation?: 'create' | 'update' | 'delete'
   snapshot_data: Record<string, unknown>
 }
 interface ReviewComment {
@@ -774,6 +776,14 @@ function reviewResourceTypeLabel(value: string) {
   return value === 'business_system' ? '业务系统' : '网络资产'
 }
 
+function inventoryOperationLabel(value?: string) {
+  return ({ create: '本次新增', update: '本次修改', delete: '本次删除' } as Record<string, string>)[value || ''] || '存量数据'
+}
+
+function inventoryOperationTagType(value?: string): 'success' | 'warning' | 'danger' | 'info' {
+  return ({ create: 'success', update: 'warning', delete: 'danger' } as Record<string, 'success' | 'warning' | 'danger'>)[value || ''] || 'info'
+}
+
 function clearReturnCommentDrafts() {
   for (const key of Object.keys(returnCommentDrafts)) delete returnCommentDrafts[key]
   for (const key of Object.keys(returnResourceIndex)) delete returnResourceIndex[key]
@@ -1164,7 +1174,8 @@ onMounted(async () => {
             <el-descriptions-item label="快照规模">{{ submissionDiff.submission.system_count }} 个系统 / {{ submissionDiff.submission.asset_count }} 项资产</el-descriptions-item>
           </el-descriptions>
 
-          <el-alert v-if="!submissionDiff.previous_submission" title="这是该组织的首次提交，当前全部系统和资产均计为新增。" type="info" :closable="false" show-icon />
+          <el-alert v-if="!submissionDiff.previous_submission" title="这是该组织的首次提交；正式存量数据计为首次纳入，本次任务草稿仍会按新增、修改、删除准确分类。" type="info" :closable="false" show-icon />
+          <el-alert title="带“本次新增 / 本次修改 / 本次删除”标记的是子公司在本任务内发起、尚待发布的台账变更；其他记录是与上一次可比提交之间的范围或内容差异。" type="warning" :closable="false" show-icon />
           <div class="submission-diff-summary">
             <div class="added"><span>新增</span><strong>{{ submissionDiff.summary.added }}</strong></div>
             <div class="modified"><span>修改</span><strong>{{ submissionDiff.summary.modified }}</strong></div>
@@ -1204,6 +1215,13 @@ onMounted(async () => {
                           <span class="after">{{ formatSnapshotValue(change.after) }}</span>
                         </div>
                       </div>
+                    </template>
+                  </el-table-column>
+                  <el-table-column label="变更性质" width="112">
+                    <template #default="changeScope">
+                      <el-tag :type="inventoryOperationTagType(changeScope.row.operation)" effect="plain" size="small">
+                        {{ changeScope.row.operation ? inventoryOperationLabel(changeScope.row.operation) : '跨期差异' }}
+                      </el-tag>
                     </template>
                   </el-table-column>
                   <el-table-column prop="resource_name" label="名称" min-width="220" />
@@ -1324,6 +1342,7 @@ onMounted(async () => {
         </div>
         <el-table v-loading="returnResourceLoading" :data="returnResources" max-height="390" empty-text="本次提交没有可填写意见的明细">
           <el-table-column label="类型" width="95"><template #default="scope">{{ reviewResourceTypeLabel(scope.row.resource_type) }}</template></el-table-column>
+          <el-table-column label="变更性质" width="112"><template #default="scope"><el-tag :type="inventoryOperationTagType(scope.row.operation)" effect="plain" size="small">{{ inventoryOperationLabel(scope.row.operation) }}</el-tag></template></el-table-column>
           <el-table-column label="对象" min-width="230"><template #default="scope"><div class="organization-name-cell"><strong>{{ scope.row.resource_name }}</strong><span>{{ scope.row.resource_key }}</span></div></template></el-table-column>
           <el-table-column label="审核意见" min-width="390"><template #default="scope"><el-input v-model="returnCommentDrafts[reviewResourceKey(scope.row)]" maxlength="2000" placeholder="针对该条数据填写整改要求（可选）" /></template></el-table-column>
         </el-table>
