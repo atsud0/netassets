@@ -9,6 +9,7 @@ interface Organization {
   id: string; parent_id?: string; parent_name?: string; code: string; name: string; short_name?: string
   type: OrganizationType; manager?: string; contact?: string; status: 'enabled' | 'disabled'; notes?: string
   child_count: number; business_system_count: number; asset_count: number; created_at: string; children?: Organization[]
+  can_update: boolean; can_create_child: boolean
 }
 interface OrganizationTreeResponse { items: Organization[]; total: number }
 interface OrganizationImpact {
@@ -67,7 +68,8 @@ function collectDescendantIDs(item: Organization): string[] {
 }
 const flatOrganizations = computed(() => flattenOrganizations(organizations.value))
 const rootOrganization = computed(() => flatOrganizations.value.find((item) => item.type === 'group') ?? null)
-const enabledParents = computed(() => flatOrganizations.value.filter((item) => item.status === 'enabled'))
+const enabledParents = computed(() => flatOrganizations.value.filter((item) => item.status === 'enabled' && item.can_create_child))
+const canManageOrganizations = computed(() => flatOrganizations.value.some((item) => item.can_update || item.can_create_child))
 const structureParentOptions = computed(() => {
   const current = editingOrganization.value
   if (!current) return []
@@ -89,7 +91,9 @@ async function loadOrganizations() {
   } finally { loading.value = false }
 }
 function openCreateDialog(parent?: Organization) {
-  Object.assign(form, { parent_id: parent?.status === 'enabled' ? parent.id : (rootOrganization.value?.id ?? ''), code: '', name: '', short_name: '', type: 'subsidiary', manager: '', contact: '', notes: '' })
+  const defaultParentID = parent?.status === 'enabled' && parent.can_create_child ? parent.id : (enabledParents.value[0]?.id ?? '')
+  if (!defaultParentID) { ElMessage.warning('当前账号没有可新增下级组织的授权范围'); return }
+  Object.assign(form, { parent_id: defaultParentID, code: '', name: '', short_name: '', type: 'subsidiary', manager: '', contact: '', notes: '' })
   createDialogVisible.value = true
 }
 function openGroupEditDialog() {
@@ -201,7 +205,7 @@ onMounted(loadOrganizations)
       </div>
       <div class="page-heading-actions">
         <el-button :loading="loading" @click="loadOrganizations">刷新</el-button>
-        <el-button v-if="auth.isGroupAdmin" type="primary" @click="openCreateDialog()">新增组织</el-button>
+        <el-button v-if="enabledParents.length" type="primary" @click="openCreateDialog()">新增组织</el-button>
       </div>
     </div>
 
@@ -219,16 +223,17 @@ onMounted(loadOrganizations)
         <el-table-column label="负责人 / 联系方式" min-width="190"><template #default="scope"><div class="organization-contact-cell"><span>{{ scope.row.manager || '未填写负责人' }}</span><small>{{ scope.row.contact || '未填写联系方式' }}</small></div></template></el-table-column>
         <el-table-column label="系统 / 资产" width="130" align="center"><template #default="scope">{{ scope.row.business_system_count }} / {{ scope.row.asset_count }}</template></el-table-column>
         <el-table-column label="状态" width="96"><template #default="scope"><el-tag :type="scope.row.status === 'enabled' ? 'success' : 'info'" effect="plain">{{ scope.row.status === 'enabled' ? '启用' : '停用' }}</el-tag></template></el-table-column>
-        <el-table-column v-if="auth.isGroupAdmin" label="操作" width="245" fixed="right"><template #default="scope">
+        <el-table-column v-if="canManageOrganizations || auth.isGroupAdmin" label="操作" :width="auth.isGroupAdmin ? 245 : 210" fixed="right"><template #default="scope">
           <div class="table-row-actions organization-actions">
-            <el-button link type="primary" @click="openEditDialog(scope.row)">编辑信息</el-button>
-            <el-button v-if="scope.row.type !== 'group'" link type="primary" @click="openStructureDialog(scope.row)">调整结构</el-button>
-            <el-dropdown v-if="scope.row.type !== 'group'" trigger="click"><el-button link type="primary" :loading="operatingID === scope.row.id">更多</el-button><template #dropdown><el-dropdown-menu>
+            <el-button v-if="scope.row.can_update" link type="primary" @click="openEditDialog(scope.row)">编辑信息</el-button>
+            <el-button v-if="!auth.isGroupAdmin && scope.row.can_create_child" link type="primary" @click="openCreateDialog(scope.row)">新增下级组织</el-button>
+            <el-button v-if="auth.isGroupAdmin && scope.row.type !== 'group'" link type="primary" @click="openStructureDialog(scope.row)">调整结构</el-button>
+            <el-dropdown v-if="auth.isGroupAdmin && scope.row.type !== 'group'" trigger="click"><el-button link type="primary" :loading="operatingID === scope.row.id">更多</el-button><template #dropdown><el-dropdown-menu>
               <el-dropdown-item @click="showImpact(scope.row)">查看影响</el-dropdown-item>
               <el-dropdown-item v-if="scope.row.status === 'enabled'" @click="disableOrganization(scope.row)">停用组织</el-dropdown-item>
               <el-dropdown-item v-else @click="enableOrganization(scope.row)">恢复启用</el-dropdown-item>
               <el-dropdown-item divided :disabled="scope.row.status !== 'disabled'" @click="deleteOrganization(scope.row)">移入回收站</el-dropdown-item>
-              <el-dropdown-item v-if="scope.row.status === 'enabled'" divided @click="openCreateDialog(scope.row)">新增下级组织</el-dropdown-item>
+              <el-dropdown-item v-if="scope.row.can_create_child" divided @click="openCreateDialog(scope.row)">新增下级组织</el-dropdown-item>
             </el-dropdown-menu></template></el-dropdown>
           </div>
         </template></el-table-column>
@@ -244,7 +249,7 @@ onMounted(loadOrganizations)
     </el-dialog>
 
     <el-dialog v-model="editDialogVisible" :title="editDialogTitle" width="620px" destroy-on-close @closed="editingOrganization = null">
-      <el-alert title="组织编码不随基本信息修改；上级组织和组织类型请使用“调整结构”。" type="info" :closable="false" show-icon />
+      <el-alert :title="auth.isGroupAdmin ? '组织编码不随基本信息修改；上级组织和组织类型请使用“调整结构”。' : '可维护组织名称、简称、负责人、联系方式和备注；组织编码、上级组织和组织类型由集团管理员维护。'" type="info" :closable="false" show-icon />
       <el-form ref="editFormRef" :model="editForm" :rules="editRules" label-position="top" class="dialog-form-with-alert"><div class="form-grid two-columns">
         <el-form-item label="组织名称" prop="name"><el-input v-model="editForm.name" maxlength="255" /></el-form-item><el-form-item label="组织简称"><el-input v-model="editForm.short_name" maxlength="128" /></el-form-item>
         <el-form-item label="负责人"><el-input v-model="editForm.manager" maxlength="128" /></el-form-item><el-form-item label="联系方式"><el-input v-model="editForm.contact" maxlength="255" /></el-form-item>

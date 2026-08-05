@@ -120,7 +120,7 @@ func Ensure(ctx context.Context, pool *pgxpool.Pool, cfg config.Config, logger *
 		Description string
 		Permissions []string
 	}{
-		{Key: "organization_admin", Name: "子公司管理员", Description: "管理所属组织的业务系统、网络资产和填报数据", Permissions: []string{"organization.read", "system.manage", "asset.manage", "inventory.manage", "data_quality.manage", "user.manage"}},
+		{Key: "organization_admin", Name: "子公司管理员", Description: "管理授权组织树内的组织信息、用户、业务系统、网络资产和填报数据", Permissions: []string{"organization.read", "organization.create", "organization.update", "system.manage", "asset.manage", "inventory.manage", "data_quality.manage", "user.manage"}},
 		{Key: "organization_editor", Name: "子公司填报员", Description: "维护所属组织的业务系统、网络资产和填报数据", Permissions: []string{"organization.read", "system.manage", "asset.manage", "inventory.manage"}},
 	}
 	for _, role := range organizationRoles {

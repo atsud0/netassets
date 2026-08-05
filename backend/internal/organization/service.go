@@ -45,6 +45,8 @@ type Organization struct {
 	CreatedAt        time.Time      `json:"created_at"`
 	UpdatedAt        time.Time      `json:"updated_at"`
 	Children         []Organization `json:"children,omitempty"`
+	CanUpdate        bool           `json:"can_update"`
+	CanCreateChild   bool           `json:"can_create_child"`
 }
 
 type Impact struct {
@@ -119,6 +121,9 @@ func (s *Service) List(ctx context.Context, principal auth.Principal) ([]Organiz
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("iterate organizations: %w", err)
 	}
+	if err := s.attachCapabilities(ctx, principal, items); err != nil {
+		return nil, err
+	}
 	return items, nil
 }
 
@@ -184,13 +189,13 @@ func (s *Service) Search(ctx context.Context, principal auth.Principal, query pa
 			return pagination.Result[Organization]{}, fmt.Errorf("count organizations: %w", err)
 		}
 	}
+	if err := s.attachCapabilities(ctx, principal, items); err != nil {
+		return pagination.Result[Organization]{}, err
+	}
 	return pagination.NewResult(items, total, query), nil
 }
 
 func (s *Service) Create(ctx context.Context, principal auth.Principal, input CreateInput, requestID, ipAddress string) (Organization, error) {
-	if !principal.HasRole("group_admin") {
-		return Organization{}, ErrForbidden
-	}
 	input.Code = strings.TrimSpace(input.Code)
 	input.Name = strings.TrimSpace(input.Name)
 	input.ShortName = strings.TrimSpace(input.ShortName)
@@ -202,6 +207,13 @@ func (s *Service) Create(ctx context.Context, principal auth.Principal, input Cr
 	if !codePattern.MatchString(input.Code) || input.Name == "" || len(input.Name) > 255 || !validUUID(input.ParentID) || !validNonGroupType(input.Type) ||
 		len(input.ShortName) > 128 || len(input.Manager) > 128 || len(input.Contact) > 255 || len(input.Notes) > 5000 {
 		return Organization{}, ErrInvalid
+	}
+	allowed, err := s.canOperateOrganization(ctx, principal, input.ParentID, "organization.create")
+	if err != nil {
+		return Organization{}, err
+	}
+	if !allowed {
+		return Organization{}, ErrForbidden
 	}
 
 	tx, err := s.pool.Begin(ctx)
@@ -254,9 +266,6 @@ func (s *Service) Create(ctx context.Context, principal auth.Principal, input Cr
 }
 
 func (s *Service) Update(ctx context.Context, principal auth.Principal, organizationID string, input UpdateInput, requestID, ipAddress string) (Organization, error) {
-	if !principal.HasRole("group_admin") {
-		return Organization{}, ErrForbidden
-	}
 	organizationID = strings.TrimSpace(organizationID)
 	input.Name = strings.TrimSpace(input.Name)
 	input.ShortName = strings.TrimSpace(input.ShortName)
@@ -266,6 +275,13 @@ func (s *Service) Update(ctx context.Context, principal auth.Principal, organiza
 	if !validUUID(organizationID) || input.Name == "" || len(input.Name) > 255 || len(input.ShortName) > 128 ||
 		len(input.Manager) > 128 || len(input.Contact) > 255 || len(input.Notes) > 5000 {
 		return Organization{}, ErrInvalid
+	}
+	allowed, err := s.canOperateOrganization(ctx, principal, organizationID, "organization.update")
+	if err != nil {
+		return Organization{}, err
+	}
+	if !allowed {
+		return Organization{}, ErrForbidden
 	}
 
 	tx, err := s.pool.Begin(ctx)
@@ -604,6 +620,100 @@ func finalizeImpact(item *Impact) {
 	item.CanDelete = len(item.DeleteBlockers) == 0
 }
 
+func (s *Service) attachCapabilities(ctx context.Context, principal auth.Principal, items []Organization) error {
+	if principal.HasRole("group_admin") {
+		for index := range items {
+			items[index].CanUpdate = true
+			items[index].CanCreateChild = items[index].Status == "enabled"
+		}
+		return nil
+	}
+	updateIDs, err := s.operableOrganizationIDs(ctx, principal, "organization.update")
+	if err != nil {
+		return err
+	}
+	createIDs, err := s.operableOrganizationIDs(ctx, principal, "organization.create")
+	if err != nil {
+		return err
+	}
+	for index := range items {
+		items[index].CanUpdate = updateIDs[items[index].ID]
+		items[index].CanCreateChild = items[index].Status == "enabled" && createIDs[items[index].ID]
+	}
+	return nil
+}
+
+func (s *Service) canOperateOrganization(ctx context.Context, principal auth.Principal, organizationID, permission string) (bool, error) {
+	if principal.HasRole("group_admin") {
+		return true, nil
+	}
+	if !principal.HasPermission(permission) {
+		return false, nil
+	}
+	var allowed bool
+	if err := s.pool.QueryRow(ctx, operableOrganizationCTE()+`
+		SELECT EXISTS(SELECT 1 FROM operable WHERE id=$3::uuid)
+	`, principal.UserID, permission, organizationID).Scan(&allowed); err != nil {
+		return false, fmt.Errorf("check %s organization scope: %w", permission, err)
+	}
+	return allowed, nil
+}
+
+func (s *Service) operableOrganizationIDs(ctx context.Context, principal auth.Principal, permission string) (map[string]bool, error) {
+	result := make(map[string]bool)
+	if !principal.HasPermission(permission) {
+		return result, nil
+	}
+	rows, err := s.pool.Query(ctx, operableOrganizationCTE()+`
+		SELECT id::text FROM operable
+	`, principal.UserID, permission)
+	if err != nil {
+		return nil, fmt.Errorf("list %s organization scope: %w", permission, err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, fmt.Errorf("scan %s organization scope: %w", permission, err)
+		}
+		result[id] = true
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate %s organization scope: %w", permission, err)
+	}
+	return result, nil
+}
+
+func operableOrganizationCTE() string {
+	return `
+		WITH RECURSIVE descendant_roots(id) AS (
+			SELECT ur.organization_id
+			FROM user_roles ur
+			JOIN roles r ON r.id=ur.role_id AND r.status='enabled'
+			JOIN role_permissions rp ON rp.role_id=r.id AND rp.permission_key=$2
+			JOIN organizations root ON root.id=ur.organization_id
+			WHERE ur.user_id=$1::uuid AND ur.organization_id IS NOT NULL
+			  AND (ur.data_scope='organization_and_descendants' OR r.role_key='organization_admin')
+			  AND root.status='enabled' AND root.deleted_at IS NULL
+		), descendants(id) AS (
+			SELECT id FROM descendant_roots
+			UNION
+			SELECT child.id FROM organizations child JOIN descendants parent ON child.parent_id=parent.id
+			WHERE child.status='enabled' AND child.deleted_at IS NULL
+		), operable(id) AS (
+			SELECT ur.organization_id
+			FROM user_roles ur
+			JOIN roles r ON r.id=ur.role_id AND r.status='enabled'
+			JOIN role_permissions rp ON rp.role_id=r.id AND rp.permission_key=$2
+			JOIN organizations direct ON direct.id=ur.organization_id
+			WHERE ur.user_id=$1::uuid AND ur.organization_id IS NOT NULL
+			  AND (ur.data_scope IN ('organization','organization_and_descendants') OR r.role_key='organization_admin')
+			  AND direct.status='enabled' AND direct.deleted_at IS NULL
+			UNION SELECT id FROM descendants
+		)
+	`
+}
+
 func organizationListSQL(paged bool) string {
 	suffix := ""
 	if paged {
@@ -628,8 +738,12 @@ func organizationListSQL(paged bool) string {
 func accessibleOrganizationCTE() string {
 	return `
 		WITH RECURSIVE descendant_roots(id) AS (
-			SELECT ur.organization_id FROM user_roles ur JOIN organizations root ON root.id=ur.organization_id
-			WHERE ur.user_id=$1::uuid AND ur.organization_id IS NOT NULL AND ur.data_scope='organization_and_descendants'
+			SELECT ur.organization_id
+			FROM user_roles ur
+			JOIN roles r ON r.id=ur.role_id AND r.status='enabled'
+			JOIN organizations root ON root.id=ur.organization_id
+			WHERE ur.user_id=$1::uuid AND ur.organization_id IS NOT NULL
+			  AND (ur.data_scope='organization_and_descendants' OR r.role_key='organization_admin')
 			  AND root.status='enabled' AND root.deleted_at IS NULL
 		), descendants(id) AS (
 			SELECT id FROM descendant_roots
@@ -637,8 +751,12 @@ func accessibleOrganizationCTE() string {
 			SELECT child.id FROM organizations child JOIN descendants parent ON child.parent_id=parent.id
 			WHERE child.status='enabled' AND child.deleted_at IS NULL
 		), accessible(id) AS (
-			SELECT ur.organization_id FROM user_roles ur JOIN organizations direct ON direct.id=ur.organization_id
-			WHERE ur.user_id=$1::uuid AND ur.organization_id IS NOT NULL AND ur.data_scope IN ('organization','organization_and_descendants')
+			SELECT ur.organization_id
+			FROM user_roles ur
+			JOIN roles r ON r.id=ur.role_id AND r.status='enabled'
+			JOIN organizations direct ON direct.id=ur.organization_id
+			WHERE ur.user_id=$1::uuid AND ur.organization_id IS NOT NULL
+			  AND (ur.data_scope IN ('organization','organization_and_descendants') OR r.role_key='organization_admin')
 			  AND direct.status='enabled' AND direct.deleted_at IS NULL
 			UNION SELECT id FROM descendants
 		)
