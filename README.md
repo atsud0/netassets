@@ -224,6 +224,8 @@ GET    /api/v1/inventory-tasks/:taskID/organizations/:organizationID/submission-
 GET    /api/v1/inventory-tasks/:taskID/organizations/:organizationID/review-context
 GET    /api/v1/inventory-tasks/:taskID/organizations/:organizationID/review-resources?q=&page=&page_size=
 GET    /api/v1/inventory-tasks/:taskID/organizations/:organizationID/review-comments?page=&page_size=
+POST   /api/v1/inventory-tasks/:taskID/organizations/:organizationID/business-system-drafts/batch-select
+POST   /api/v1/inventory-tasks/:taskID/organizations/:organizationID/asset-drafts/batch-select
 POST   /api/v1/inventory-tasks/:taskID/organizations/:organizationID/start
 POST   /api/v1/inventory-tasks/:taskID/organizations/:organizationID/submit
 POST   /api/v1/inventory-tasks/:taskID/organizations/:organizationID/review

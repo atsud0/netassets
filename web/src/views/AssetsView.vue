@@ -457,6 +457,37 @@ async function selectWorkspaceAsset(item: Asset) {
   } catch (error) { ElMessage.error(getAPIErrorMessage(error, '选择上报网络资产失败')) }
 }
 
+function canSelectAsset(row: Asset) {
+  return inventoryMode.value ? Boolean(row.is_working_copy && !row.task_id && !auth.isGroupAdmin) : !row.is_working_copy
+}
+
+async function batchSelectWorkspaceAssets() {
+  if (!selectedAssets.value.length) return ElMessage.warning('请先选择需要上报的网络资产')
+  if (selectedAssets.value.length > 200) return ElMessage.warning('单次最多选择上报 200 个网络资产')
+  try {
+    await ElMessageBox.confirm(`确认将选中的 ${selectedAssets.value.length} 个未上报网络资产纳入本次填报任务吗？关联的未上报业务系统会按任务范围自动一并纳入。`, '批量选择上报', {
+      type: 'warning', confirmButtonText: '确认纳入', cancelButtonText: '取消',
+    })
+    batchLoading.value = true
+    const targets = [...selectedAssets.value]
+    const response = await apiClient.post<{ result: BatchOperationResult }>(`/inventory-tasks/${inventoryTaskID.value}/organizations/${inventoryOrganizationID.value}/asset-drafts/batch-select`, {
+      ids: targets.map((item) => item.id),
+    })
+    const names = new Map(targets.map((item) => [item.id, item.name || item.value]))
+    batchResult.value = {
+      ...response.data.result,
+      items: response.data.result.items.map((item) => ({ ...item, resource_name: names.get(item.id) || item.id })),
+    }
+    batchResultTitle.value = '批量选择上报网络资产结果'
+    batchResultVisible.value = true
+    if (response.data.result.failure_count === 0) ElMessage.success(`已将 ${response.data.result.success_count} 个网络资产纳入本次上报`)
+    await refreshAfterMutation()
+    selectedAssets.value = []
+  } catch (error) {
+    if (error !== 'cancel' && error !== 'close') ElMessage.error(getAPIErrorMessage(error, '批量选择上报网络资产失败'))
+  } finally { batchLoading.value = false }
+}
+
 async function requestAssetDeletion(item: Asset) {
   try {
     await ElMessageBox.confirm(`确认将网络资产“${item.name || item.value}”加入本次任务的删除草稿吗？提交并发布前不会删除正式台账。`, '申请删除网络资产', { type: 'warning', confirmButtonText: '加入删除草稿', cancelButtonText: '取消' })
@@ -878,7 +909,11 @@ onMounted(() => {
     </div>
 
     <div class="panel data-table-panel" v-loading="loading">
-      <div v-if="!inventoryMode" class="batch-toolbar">
+      <div v-if="inventoryMode" class="batch-toolbar">
+        <div><strong>选择上报</strong><span>已选择 {{ selectedAssets.length }} 个未上报网络资产，单次最多 200 个</span></div>
+        <div class="batch-toolbar-actions"><el-button type="primary" :loading="batchLoading" :disabled="selectedAssets.length === 0" @click="batchSelectWorkspaceAssets">批量纳入本次上报</el-button></div>
+      </div>
+      <div v-else class="batch-toolbar">
         <div><strong>批量操作</strong><span>已选择 {{ selectedAssets.length }} 个资产；设置网络区域时需选择同一组织的资产</span></div>
         <div class="batch-toolbar-actions">
           <el-select v-model="batchStatusValue" aria-label="批量设置状态" :disabled="selectedAssets.length === 0 || batchLoading" placeholder="批量设置状态" style="width: 150px" @change="applyBatchStatus">
@@ -891,7 +926,7 @@ onMounted(() => {
         </div>
       </div>
       <el-table :data="assets" row-key="id" empty-text="暂无网络资产" @selection-change="handleSelectionChange">
-        <el-table-column v-if="!inventoryMode" type="selection" width="46" :selectable="(row: Asset) => !row.is_working_copy" />
+        <el-table-column type="selection" width="46" :selectable="canSelectAsset" />
         <el-table-column label="资产名称" min-width="180">
           <template #default="scope"><el-button link type="primary" class="table-link" @click="openDetail(scope.row)">{{ scope.row.name || '未命名资产' }}</el-button></template>
         </el-table-column>

@@ -59,6 +59,18 @@ func registerInventoryTaskRoutes(api *gin.RouterGroup, requireAuth gin.HandlerFu
 		}
 		c.JSON(http.StatusCreated, gin.H{"item": item})
 	})
+	group.POST("/:taskID/organizations/:organizationID/business-system-drafts/batch-select", func(c *gin.Context) {
+		var input inventorytask.WorkspaceSelectionBatchInput
+		if err := c.ShouldBindJSON(&input); err != nil {
+			writeAPIError(c, http.StatusBadRequest, "invalid_request", "请选择需要上报的业务系统，单次最多 200 项")
+			return
+		}
+		result, err := service.SelectWorkspaceBusinessSystemsBatch(c.Request.Context(), mustPrincipal(c), c.Param("taskID"), c.Param("organizationID"), input, c.GetString("request_id"), c.ClientIP())
+		if writeInventoryBusinessSystemDraftError(c, logger, "batch select workspace business systems", err) {
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"result": result})
+	})
 	group.POST("/:taskID/organizations/:organizationID/business-system-drafts/:draftID/select", func(c *gin.Context) {
 		item, err := service.SelectWorkspaceBusinessSystem(c.Request.Context(), mustPrincipal(c), c.Param("taskID"), c.Param("organizationID"), c.Param("draftID"), c.GetString("request_id"), c.ClientIP())
 		if writeInventoryBusinessSystemDraftError(c, logger, "select workspace business system", err) {
@@ -124,6 +136,18 @@ func registerInventoryTaskRoutes(api *gin.RouterGroup, requireAuth gin.HandlerFu
 			return
 		}
 		c.JSON(http.StatusCreated, gin.H{"item": item})
+	})
+	group.POST("/:taskID/organizations/:organizationID/asset-drafts/batch-select", func(c *gin.Context) {
+		var input inventorytask.WorkspaceSelectionBatchInput
+		if err := c.ShouldBindJSON(&input); err != nil {
+			writeAPIError(c, http.StatusBadRequest, "invalid_request", "请选择需要上报的网络资产，单次最多 200 项")
+			return
+		}
+		result, err := service.SelectWorkspaceAssetsBatch(c.Request.Context(), mustPrincipal(c), c.Param("taskID"), c.Param("organizationID"), input, c.GetString("request_id"), c.ClientIP())
+		if writeInventoryAssetDraftError(c, logger, "batch select workspace assets", err) {
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"result": result})
 	})
 	group.POST("/:taskID/organizations/:organizationID/asset-drafts/:draftID/select", func(c *gin.Context) {
 		item, err := service.SelectWorkspaceAsset(c.Request.Context(), mustPrincipal(c), c.Param("taskID"), c.Param("organizationID"), c.Param("draftID"), c.GetString("request_id"), c.ClientIP())

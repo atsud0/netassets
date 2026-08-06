@@ -313,6 +313,37 @@ async function selectWorkspaceBusinessSystem(row: BusinessSystem) {
   } catch (error) { ElMessage.error(getAPIErrorMessage(error, '选择上报业务系统失败')) }
 }
 
+function canSelectBusinessSystem(row: BusinessSystem) {
+  return inventoryMode.value ? Boolean(row.is_working_copy && !row.task_id && !auth.isGroupAdmin) : !row.is_working_copy
+}
+
+async function batchSelectWorkspaceBusinessSystems() {
+  if (!selectedSystems.value.length) return ElMessage.warning('请先选择需要上报的业务系统')
+  if (selectedSystems.value.length > 200) return ElMessage.warning('单次最多选择上报 200 个业务系统')
+  try {
+    await ElMessageBox.confirm(`确认将选中的 ${selectedSystems.value.length} 个未上报业务系统纳入本次填报任务吗？系统会逐项校验并返回处理结果。`, '批量选择上报', {
+      type: 'warning', confirmButtonText: '确认纳入', cancelButtonText: '取消',
+    })
+    batchLoading.value = true
+    const targets = [...selectedSystems.value]
+    const response = await apiClient.post<{ result: BatchOperationResult }>(`/inventory-tasks/${inventoryTaskID.value}/organizations/${inventoryOrganizationID.value}/business-system-drafts/batch-select`, {
+      ids: targets.map((item) => item.id),
+    })
+    const names = new Map(targets.map((item) => [item.id, item.name]))
+    batchResult.value = {
+      ...response.data.result,
+      items: response.data.result.items.map((item) => ({ ...item, resource_name: names.get(item.id) || item.id })),
+    }
+    batchResultTitle.value = '批量选择上报业务系统结果'
+    batchResultVisible.value = true
+    if (response.data.result.failure_count === 0) ElMessage.success(`已将 ${response.data.result.success_count} 个业务系统纳入本次上报`)
+    await refreshAfterMutation()
+    selectedSystems.value = []
+  } catch (error) {
+    if (error !== 'cancel' && error !== 'close') ElMessage.error(getAPIErrorMessage(error, '批量选择上报业务系统失败'))
+  } finally { batchLoading.value = false }
+}
+
 async function removeDraft(row: BusinessSystem) {
   try {
     await ElMessageBox.confirm(`确认取消任务中的“${draftOperationLabels[row.operation || 'create']}”变更“${row.name}”吗？`, '取消任务变更', { type: 'warning' })
@@ -663,12 +694,16 @@ onMounted(load)
       <div v-if="draftTotal > 0" class="table-pagination"><el-pagination background layout="total, sizes, prev, pager, next" :total="draftTotal" :current-page="draftPage" :page-size="draftPageSize" :page-sizes="[20, 50, 100]" @current-change="handleDraftPageChange" @size-change="handleDraftPageSizeChange" /></div>
     </div>
     <div class="panel data-table-panel">
-      <div v-if="!inventoryMode" class="batch-toolbar">
+      <div v-if="inventoryMode" class="batch-toolbar">
+        <div><strong>选择上报</strong><span>已选择 {{ selectedSystems.length }} 个未上报业务系统，单次最多 200 个</span></div>
+        <div class="button-row"><el-button type="primary" :loading="batchLoading" :disabled="selectedSystems.length === 0" @click="batchSelectWorkspaceBusinessSystems">批量纳入本次上报</el-button></div>
+      </div>
+      <div v-else class="batch-toolbar">
         <div><strong>批量操作</strong><span>已选择 {{ selectedSystems.length }} 个业务系统，单次最多 200 个</span></div>
         <div class="button-row"><el-button :disabled="selectedSystems.length === 0" :loading="batchLoading" @click="runBatchArchive(false)">批量恢复</el-button><el-button type="warning" plain :disabled="selectedSystems.length === 0" :loading="batchLoading" @click="runBatchArchive(true)">批量归档</el-button></div>
       </div>
       <el-table v-loading="loading" :data="systems" row-key="id" empty-text="暂无业务系统" @selection-change="handleSelectionChange">
-        <el-table-column v-if="!inventoryMode" type="selection" width="46" :selectable="(row: BusinessSystem) => !row.is_working_copy" />
+        <el-table-column type="selection" width="46" :selectable="canSelectBusinessSystem" />
         <el-table-column label="系统名称" min-width="190">
           <template #default="scope"><el-button link type="primary" class="table-link" @click="openDetail(scope.row)">{{ scope.row.name }}</el-button></template>
         </el-table-column>
