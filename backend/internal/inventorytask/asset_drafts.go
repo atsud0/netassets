@@ -2,6 +2,7 @@ package inventorytask
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"time"
@@ -11,6 +12,7 @@ import (
 
 	"netassets/internal/asset"
 	"netassets/internal/auth"
+	"netassets/internal/customfield"
 	"netassets/internal/pagination"
 )
 
@@ -55,7 +57,7 @@ func (s *Service) SearchAssetDrafts(ctx context.Context, principal auth.Principa
 		       draft.environment, draft.network_scope, COALESCE(area.id::text, ''), COALESCE(area.area_name, ''),
 		       draft.status, draft.importance, 'manual',
 		       COALESCE(draft.owner_user_id::text, ''), COALESCE(owner.username, ''), COALESCE(owner.display_name, ''),
-		       COALESCE(draft.owner_name, ''), COALESCE(draft.notes, ''), draft.expires_at, draft.created_at, draft.updated_at
+		       COALESCE(draft.owner_name, ''), COALESCE(draft.notes, ''), draft.expires_at, draft.created_at, draft.updated_at, draft.custom_values
 		FROM inventory_asset_drafts draft
 		JOIN organizations organization ON organization.id=draft.organization_id
 		LEFT JOIN business_systems system ON system.id=draft.business_system_id AND system.deleted_at IS NULL
@@ -82,6 +84,17 @@ func (s *Service) SearchAssetDrafts(ctx context.Context, principal auth.Principa
 	return pagination.NewResult(items, total, page), nil
 }
 
+func (s *Service) validateAssetDraftCustomValues(ctx context.Context, values []customfield.Value) ([]byte, error) {
+	definitions, err := customfield.NewService(s.pool).EnabledDefinitions(ctx, "asset")
+	if err != nil {
+		return nil, err
+	}
+	if _, _, err := customfield.ValidateValues(definitions, values); err != nil {
+		return nil, ErrInvalid
+	}
+	return json.Marshal(values)
+}
+
 func (s *Service) CreateAssetDraft(ctx context.Context, principal auth.Principal, taskID, organizationID string, input asset.CreateInput, requestID, ipAddress string) (AssetDraft, error) {
 	if !principal.HasPermission("inventory.manage") || !principal.HasPermission("asset.manage") || principal.HasRole("group_admin") {
 		return AssetDraft{}, ErrForbidden
@@ -90,6 +103,10 @@ func (s *Service) CreateAssetDraft(ctx context.Context, principal auth.Principal
 	normalizedValue, err := asset.PrepareCreateInput(&input)
 	if err != nil {
 		return AssetDraft{}, mapAssetError(err)
+	}
+	customValues, err := s.validateAssetDraftCustomValues(ctx, input.CustomValues)
+	if err != nil {
+		return AssetDraft{}, err
 	}
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
@@ -118,12 +135,12 @@ func (s *Service) CreateAssetDraft(ctx context.Context, principal auth.Principal
 		INSERT INTO inventory_asset_drafts (
 			task_id, organization_id, asset_type, asset_value, normalized_value, asset_name,
 			environment, network_scope, network_area_id, business_system_id, status, importance,
-			owner_user_id, owner_name, notes, expires_at, created_by, updated_by
-		) VALUES ($1::uuid,$2::uuid,$3,$4,$5,NULLIF($6,''),$7,$8,NULLIF($9,'')::uuid,NULLIF($10,'')::uuid,$11,$12,NULLIF($13,'')::uuid,NULLIF($14,''),NULLIF($15,''),$16,$17::uuid,$17::uuid)
+			owner_user_id, owner_name, notes, expires_at, custom_values, created_by, updated_by
+		) VALUES ($1::uuid,$2::uuid,$3,$4,$5,NULLIF($6,''),$7,$8,NULLIF($9,'')::uuid,NULLIF($10,'')::uuid,$11,$12,NULLIF($13,'')::uuid,NULLIF($14,''),NULLIF($15,''),$16,$17::jsonb,$18::uuid,$18::uuid)
 		RETURNING id::text
 	`, taskID, organizationID, input.Type, input.Value, normalizedValue, input.Name, input.Environment, input.NetworkScope,
 		input.NetworkAreaID, input.BusinessSystemID, input.Status, input.Importance, input.OwnerUserID, input.OwnerName,
-		input.Notes, input.ExpiresAt, principal.UserID).Scan(&id)
+		input.Notes, input.ExpiresAt, customValues, principal.UserID).Scan(&id)
 	if err != nil {
 		return AssetDraft{}, mapDraftDatabaseError(err)
 	}
@@ -180,6 +197,12 @@ func (s *Service) createAssetChangeDraft(ctx context.Context, principal auth.Pri
 	if assignment.AssetNetworkScope != "all" && current.NetworkScope != assignment.AssetNetworkScope {
 		return AssetDraft{}, ErrInvalid
 	}
+	if operation == "delete" {
+		current.CustomValues, err = customfield.ValuesInTx(ctx, tx, "asset", sourceAssetID)
+		if err != nil {
+			return AssetDraft{}, fmt.Errorf("load formal asset custom values: %w", err)
+		}
+	}
 	if operation == "update" {
 		input.OrganizationID = organizationID
 		normalizedValue, err = asset.PrepareCreateInput(&input)
@@ -201,17 +224,21 @@ func (s *Service) createAssetChangeDraft(ctx context.Context, principal auth.Pri
 		}
 		current = input
 	}
+	customValues, err := s.validateAssetDraftCustomValues(ctx, current.CustomValues)
+	if err != nil {
+		return AssetDraft{}, err
+	}
 	var id string
 	err = tx.QueryRow(ctx, `
-		INSERT INTO inventory_asset_drafts(task_id,organization_id,operation,source_asset_id,asset_type,asset_value,normalized_value,asset_name,environment,network_scope,network_area_id,business_system_id,status,importance,owner_user_id,owner_name,notes,expires_at,created_by,updated_by)
-		VALUES($1::uuid,$2::uuid,$3,$4::uuid,$5,$6,$7,NULLIF($8,''),$9,$10,NULLIF($11,'')::uuid,NULLIF($12,'')::uuid,$13,$14,NULLIF($15,'')::uuid,NULLIF($16,''),NULLIF($17,''),$18,$19::uuid,$19::uuid)
-		ON CONFLICT (task_id,organization_id,source_asset_id) WHERE source_asset_id IS NOT NULL DO UPDATE SET
+		INSERT INTO inventory_asset_drafts(task_id,organization_id,operation,source_asset_id,asset_type,asset_value,normalized_value,asset_name,environment,network_scope,network_area_id,business_system_id,status,importance,owner_user_id,owner_name,notes,expires_at,custom_values,created_by,updated_by)
+		VALUES($1::uuid,$2::uuid,$3,$4::uuid,$5,$6,$7,NULLIF($8,''),$9,$10,NULLIF($11,'')::uuid,NULLIF($12,'')::uuid,$13,$14,NULLIF($15,'')::uuid,NULLIF($16,''),NULLIF($17,''),$18,$19::jsonb,$20::uuid,$20::uuid)
+		ON CONFLICT (organization_id,source_asset_id) WHERE source_asset_id IS NOT NULL AND draft_status IN ('editing','submitted','returned') DO UPDATE SET
 		operation=EXCLUDED.operation,asset_type=EXCLUDED.asset_type,asset_value=EXCLUDED.asset_value,normalized_value=EXCLUDED.normalized_value,asset_name=EXCLUDED.asset_name,
 		environment=EXCLUDED.environment,network_scope=EXCLUDED.network_scope,network_area_id=EXCLUDED.network_area_id,business_system_id=EXCLUDED.business_system_id,
-		status=EXCLUDED.status,importance=EXCLUDED.importance,owner_user_id=EXCLUDED.owner_user_id,owner_name=EXCLUDED.owner_name,notes=EXCLUDED.notes,expires_at=EXCLUDED.expires_at,
+		status=EXCLUDED.status,importance=EXCLUDED.importance,owner_user_id=EXCLUDED.owner_user_id,owner_name=EXCLUDED.owner_name,notes=EXCLUDED.notes,expires_at=EXCLUDED.expires_at,custom_values=EXCLUDED.custom_values,
 		draft_status='editing',updated_by=EXCLUDED.updated_by,updated_at=now()
 		WHERE inventory_asset_drafts.draft_status IN ('editing','returned') RETURNING id::text
-	`, taskID, organizationID, operation, sourceAssetID, current.Type, current.Value, normalizedValue, current.Name, current.Environment, current.NetworkScope, current.NetworkAreaID, current.BusinessSystemID, current.Status, current.Importance, current.OwnerUserID, current.OwnerName, current.Notes, current.ExpiresAt, principal.UserID).Scan(&id)
+	`, taskID, organizationID, operation, sourceAssetID, current.Type, current.Value, normalizedValue, current.Name, current.Environment, current.NetworkScope, current.NetworkAreaID, current.BusinessSystemID, current.Status, current.Importance, current.OwnerUserID, current.OwnerName, current.Notes, current.ExpiresAt, customValues, principal.UserID).Scan(&id)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return AssetDraft{}, ErrState
 	}
@@ -244,6 +271,10 @@ func (s *Service) UpdateAssetDraft(ctx context.Context, principal auth.Principal
 	if err != nil {
 		return AssetDraft{}, mapAssetError(err)
 	}
+	customValues, err := s.validateAssetDraftCustomValues(ctx, input.CustomValues)
+	if err != nil {
+		return AssetDraft{}, err
+	}
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return AssetDraft{}, fmt.Errorf("begin inventory asset draft update: %w", err)
@@ -270,11 +301,11 @@ func (s *Service) UpdateAssetDraft(ctx context.Context, principal auth.Principal
 		UPDATE inventory_asset_drafts SET asset_type=$5,asset_value=$6,normalized_value=$7,asset_name=NULLIF($8,''),
 		       environment=$9,network_scope=$10,network_area_id=NULLIF($11,'')::uuid,business_system_id=NULLIF($12,'')::uuid,
 		       status=$13,importance=$14,owner_user_id=NULLIF($15,'')::uuid,owner_name=NULLIF($16,''),notes=NULLIF($17,''),
-		       expires_at=$18,draft_status='editing',updated_by=$19::uuid,updated_at=now()
+		       expires_at=$18,custom_values=$19::jsonb,draft_status='editing',updated_by=$20::uuid,updated_at=now()
 		WHERE id::text=$4 AND task_id::text=$1 AND organization_id::text=$2 AND operation IN ('create','update') AND draft_status IN ('editing','returned')
 	`, taskID, organizationID, principal.UserID, draftID, input.Type, input.Value, normalizedValue, input.Name,
 		input.Environment, input.NetworkScope, input.NetworkAreaID, input.BusinessSystemID, input.Status, input.Importance,
-		input.OwnerUserID, input.OwnerName, input.Notes, input.ExpiresAt, principal.UserID)
+		input.OwnerUserID, input.OwnerName, input.Notes, input.ExpiresAt, customValues, principal.UserID)
 	if err != nil {
 		return AssetDraft{}, mapDraftDatabaseError(err)
 	}
@@ -306,7 +337,10 @@ func (s *Service) DeleteAssetDraft(ctx context.Context, principal auth.Principal
 	if _, err := s.loadDraftAssignment(ctx, tx, principal, taskID, organizationID, true, "network_assets"); err != nil {
 		return err
 	}
-	result, err := tx.Exec(ctx, `DELETE FROM inventory_asset_drafts WHERE id::text=$1 AND task_id::text=$2 AND organization_id::text=$3 AND draft_status IN ('editing','returned')`, draftID, taskID, organizationID)
+	result, err := tx.Exec(ctx, `UPDATE inventory_asset_drafts SET task_id=NULL,selected_at=NULL,updated_by=$4::uuid,updated_at=now() WHERE id::text=$1 AND task_id::text=$2 AND organization_id::text=$3 AND selected_at IS NOT NULL AND draft_status IN ('editing','returned')`, draftID, taskID, organizationID, principal.UserID)
+	if err == nil && result.RowsAffected() == 0 {
+		result, err = tx.Exec(ctx, `DELETE FROM inventory_asset_drafts WHERE id::text=$1 AND task_id::text=$2 AND organization_id::text=$3 AND draft_status IN ('editing','returned')`, draftID, taskID, organizationID)
+	}
 	if err != nil {
 		return fmt.Errorf("delete inventory asset draft: %w", err)
 	}
@@ -412,7 +446,7 @@ func loadAssetDraft(ctx context.Context, q queryRower, draftID string) (AssetDra
 		       draft.environment, draft.network_scope, COALESCE(area.id::text, ''), COALESCE(area.area_name, ''),
 		       draft.status, draft.importance, 'manual', COALESCE(draft.owner_user_id::text, ''),
 		       COALESCE(owner.username, ''), COALESCE(owner.display_name, ''), COALESCE(draft.owner_name, ''),
-		       COALESCE(draft.notes, ''), draft.expires_at, draft.created_at, draft.updated_at
+		       COALESCE(draft.notes, ''), draft.expires_at, draft.created_at, draft.updated_at, draft.custom_values
 		FROM inventory_asset_drafts draft JOIN organizations organization ON organization.id=draft.organization_id
 		LEFT JOIN business_systems system ON system.id=draft.business_system_id AND system.deleted_at IS NULL
 		LEFT JOIN asset_network_areas area ON area.id=draft.network_area_id LEFT JOIN users owner ON owner.id=draft.owner_user_id
@@ -423,18 +457,22 @@ func loadAssetDraft(ctx context.Context, q queryRower, draftID string) (AssetDra
 
 func scanAssetDraft(row rowScanner) (AssetDraft, error) {
 	var item AssetDraft
+	var customValues []byte
 	err := row.Scan(&item.ID, &item.TaskID, &item.SourceAssetID, &item.Operation, &item.DraftStatus,
 		&item.Type, &item.Value, &item.NormalizedValue, &item.Name,
 		&item.OrganizationID, &item.OrganizationCode, &item.OrganizationName,
 		&item.BusinessSystemID, &item.BusinessSystemCode, &item.BusinessSystemName,
 		&item.Environment, &item.NetworkScope, &item.NetworkAreaID, &item.NetworkAreaName,
 		&item.Status, &item.Importance, &item.Source, &item.OwnerUserID, &item.OwnerUsername,
-		&item.OwnerUserDisplayName, &item.OwnerName, &item.Notes, &item.ExpiresAt, &item.CreatedAt, &item.UpdatedAt)
+		&item.OwnerUserDisplayName, &item.OwnerName, &item.Notes, &item.ExpiresAt, &item.CreatedAt, &item.UpdatedAt, &customValues)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return AssetDraft{}, ErrNotFound
 	}
 	if err != nil {
 		return AssetDraft{}, fmt.Errorf("scan inventory asset draft: %w", err)
+	}
+	if err := json.Unmarshal(customValues, &item.CustomValues); err != nil {
+		return AssetDraft{}, fmt.Errorf("decode inventory asset custom values: %w", err)
 	}
 	item.IsDraft = true
 	return item, nil
@@ -470,20 +508,26 @@ func mapDraftDatabaseError(err error) error {
 }
 
 func publishAssetDrafts(ctx context.Context, tx pgx.Tx, principal auth.Principal, taskID, organizationID, requestID, ipAddress string) error {
-	rows, err := tx.Query(ctx, `SELECT id::text,operation,COALESCE(source_asset_id::text,''),asset_type,asset_value,normalized_value,COALESCE(asset_name,''),environment,network_scope,COALESCE(network_area_id::text,''),COALESCE(business_system_id::text,''),status,importance,COALESCE(owner_user_id::text,''),COALESCE(owner_name,''),COALESCE(notes,''),expires_at FROM inventory_asset_drafts WHERE task_id::text=$1 AND organization_id::text=$2 AND draft_status='submitted' ORDER BY created_at FOR UPDATE`, taskID, organizationID)
+	rows, err := tx.Query(ctx, `SELECT id::text,operation,COALESCE(source_asset_id::text,''),asset_type,asset_value,normalized_value,COALESCE(asset_name,''),environment,network_scope,COALESCE(network_area_id::text,''),COALESCE(business_system_id::text,''),status,importance,COALESCE(owner_user_id::text,''),COALESCE(owner_name,''),COALESCE(notes,''),expires_at,custom_values FROM inventory_asset_drafts WHERE task_id::text=$1 AND organization_id::text=$2 AND draft_status='submitted' ORDER BY created_at FOR UPDATE`, taskID, organizationID)
 	if err != nil {
 		return fmt.Errorf("load submitted asset drafts: %w", err)
 	}
 	type draft struct {
 		id, operation, sourceID, typ, value, normalized, name, environment, scope, areaID, systemID, status, importance, ownerUserID, ownerName, notes string
 		expiresAt                                                                                                                                      *time.Time
+		customValues                                                                                                                                   []customfield.Value
 	}
 	items := make([]draft, 0)
 	for rows.Next() {
 		var item draft
-		if err := rows.Scan(&item.id, &item.operation, &item.sourceID, &item.typ, &item.value, &item.normalized, &item.name, &item.environment, &item.scope, &item.areaID, &item.systemID, &item.status, &item.importance, &item.ownerUserID, &item.ownerName, &item.notes, &item.expiresAt); err != nil {
+		var raw []byte
+		if err := rows.Scan(&item.id, &item.operation, &item.sourceID, &item.typ, &item.value, &item.normalized, &item.name, &item.environment, &item.scope, &item.areaID, &item.systemID, &item.status, &item.importance, &item.ownerUserID, &item.ownerName, &item.notes, &item.expiresAt, &raw); err != nil {
 			rows.Close()
 			return fmt.Errorf("scan submitted asset draft: %w", err)
+		}
+		if err := json.Unmarshal(raw, &item.customValues); err != nil {
+			rows.Close()
+			return fmt.Errorf("decode submitted asset custom values: %w", err)
 		}
 		items = append(items, item)
 	}
@@ -492,6 +536,10 @@ func publishAssetDrafts(ctx context.Context, tx pgx.Tx, principal auth.Principal
 		return fmt.Errorf("iterate submitted asset drafts: %w", err)
 	}
 	rows.Close()
+	definitions, err := customfield.EnabledDefinitionsInTx(ctx, tx, "asset")
+	if err != nil {
+		return err
+	}
 	for _, item := range items {
 		resourceID := item.id
 		action, summary := "asset.create", "审核发布填报网络资产"
@@ -543,6 +591,10 @@ func publishAssetDrafts(ctx context.Context, tx pgx.Tx, principal auth.Principal
 				if _, err := tx.Exec(ctx, `INSERT INTO system_assets(business_system_id,asset_id,relationship_type,is_primary,created_by) VALUES($1::uuid,$2::uuid,'uses',true,$3::uuid)`, item.systemID, resourceID, principal.UserID); err != nil {
 					return fmt.Errorf("attach published asset system: %w", err)
 				}
+			}
+
+			if err := customfield.SaveImportedValuesInTx(ctx, tx, "asset", resourceID, definitions, item.customValues, principal.UserID); err != nil {
+				return err
 			}
 		}
 		if _, err := tx.Exec(ctx, `INSERT INTO audit_logs(user_id,organization_id,action,resource_type,resource_id,summary,details,request_ip,request_id) VALUES($1::uuid,$2::uuid,$3,'asset',$4,$5,jsonb_build_object('task_id',$6::text,'type',$7::text,'value',$8::text,'source','inventory_task'),NULLIF($9,'')::inet,NULLIF($10,''))`, principal.UserID, organizationID, action, resourceID, summary, taskID, item.typ, item.value, ipAddress, requestID); err != nil {

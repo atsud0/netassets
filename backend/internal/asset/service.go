@@ -39,49 +39,57 @@ var (
 const MaxImportRows = 5000
 
 type Asset struct {
-	ID                   string     `json:"id"`
-	Type                 string     `json:"type"`
-	Value                string     `json:"value"`
-	NormalizedValue      string     `json:"normalized_value"`
-	Name                 string     `json:"name,omitempty"`
-	OrganizationID       string     `json:"organization_id"`
-	OrganizationCode     string     `json:"organization_code"`
-	OrganizationName     string     `json:"organization_name"`
-	BusinessSystemID     string     `json:"business_system_id,omitempty"`
-	BusinessSystemCode   string     `json:"business_system_code,omitempty"`
-	BusinessSystemName   string     `json:"business_system_name,omitempty"`
-	Environment          string     `json:"environment"`
-	NetworkScope         string     `json:"network_scope"`
-	NetworkAreaID        string     `json:"network_area_id,omitempty"`
-	NetworkAreaName      string     `json:"network_area_name,omitempty"`
-	Status               string     `json:"status"`
-	Importance           string     `json:"importance"`
-	Source               string     `json:"source"`
-	OwnerUserID          string     `json:"owner_user_id,omitempty"`
-	OwnerUsername        string     `json:"owner_username,omitempty"`
-	OwnerUserDisplayName string     `json:"owner_user_display_name,omitempty"`
-	OwnerName            string     `json:"owner_name,omitempty"`
-	Notes                string     `json:"notes,omitempty"`
-	ExpiresAt            *time.Time `json:"expires_at,omitempty"`
-	CreatedAt            time.Time  `json:"created_at"`
-	UpdatedAt            time.Time  `json:"updated_at"`
+	ID                   string              `json:"id"`
+	Type                 string              `json:"type"`
+	Value                string              `json:"value"`
+	NormalizedValue      string              `json:"normalized_value"`
+	Name                 string              `json:"name,omitempty"`
+	OrganizationID       string              `json:"organization_id"`
+	OrganizationCode     string              `json:"organization_code"`
+	OrganizationName     string              `json:"organization_name"`
+	BusinessSystemID     string              `json:"business_system_id,omitempty"`
+	BusinessSystemCode   string              `json:"business_system_code,omitempty"`
+	BusinessSystemName   string              `json:"business_system_name,omitempty"`
+	Environment          string              `json:"environment"`
+	NetworkScope         string              `json:"network_scope"`
+	NetworkAreaID        string              `json:"network_area_id,omitempty"`
+	NetworkAreaName      string              `json:"network_area_name,omitempty"`
+	Status               string              `json:"status"`
+	Importance           string              `json:"importance"`
+	Source               string              `json:"source"`
+	OwnerUserID          string              `json:"owner_user_id,omitempty"`
+	OwnerUsername        string              `json:"owner_username,omitempty"`
+	OwnerUserDisplayName string              `json:"owner_user_display_name,omitempty"`
+	OwnerName            string              `json:"owner_name,omitempty"`
+	Notes                string              `json:"notes,omitempty"`
+	ExpiresAt            *time.Time          `json:"expires_at,omitempty"`
+	CreatedAt            time.Time           `json:"created_at"`
+	UpdatedAt            time.Time           `json:"updated_at"`
+	ReportingStatus      string              `json:"reporting_status"`
+	IsWorkingCopy        bool                `json:"is_working_copy"`
+	PublishedID          string              `json:"published_id,omitempty"`
+	TaskID               string              `json:"task_id,omitempty"`
+	DraftStatus          string              `json:"draft_status,omitempty"`
+	Operation            string              `json:"operation,omitempty"`
+	CustomValues         []customfield.Value `json:"custom_values,omitempty"`
 }
 
 type CreateInput struct {
-	Type             string     `json:"type"`
-	Value            string     `json:"value"`
-	Name             string     `json:"name"`
-	OrganizationID   string     `json:"organization_id"`
-	BusinessSystemID string     `json:"business_system_id"`
-	Environment      string     `json:"environment"`
-	NetworkScope     string     `json:"network_scope"`
-	NetworkAreaID    string     `json:"network_area_id"`
-	Status           string     `json:"status"`
-	Importance       string     `json:"importance"`
-	OwnerUserID      string     `json:"owner_user_id"`
-	OwnerName        string     `json:"owner_name"`
-	Notes            string     `json:"notes"`
-	ExpiresAt        *time.Time `json:"expires_at"`
+	Type             string              `json:"type"`
+	Value            string              `json:"value"`
+	Name             string              `json:"name"`
+	OrganizationID   string              `json:"organization_id"`
+	BusinessSystemID string              `json:"business_system_id"`
+	Environment      string              `json:"environment"`
+	NetworkScope     string              `json:"network_scope"`
+	NetworkAreaID    string              `json:"network_area_id"`
+	Status           string              `json:"status"`
+	Importance       string              `json:"importance"`
+	OwnerUserID      string              `json:"owner_user_id"`
+	OwnerName        string              `json:"owner_name"`
+	Notes            string              `json:"notes"`
+	ExpiresAt        *time.Time          `json:"expires_at"`
+	CustomValues     []customfield.Value `json:"custom_values,omitempty"`
 }
 
 type ImportError struct {
@@ -149,6 +157,10 @@ type fieldChange struct {
 func NewService(pool *pgxpool.Pool) *Service { return &Service{pool: pool} }
 
 func (s *Service) List(ctx context.Context, principal auth.Principal) ([]Asset, error) {
+	if usesWorkingInventory(principal) {
+		result, err := s.searchWorkingCreates(ctx, principal, SearchFilter{Page: pagination.Query{Page: 1, PageSize: pagination.MaxPageSize}})
+		return result.Items, err
+	}
 	if !principal.HasPermission("asset.manage") {
 		return nil, ErrForbidden
 	}
@@ -288,6 +300,9 @@ func (s *Service) SearchOwnerOptions(ctx context.Context, principal auth.Princip
 // applied in SQL before count(*) OVER(), so total always represents the real
 // number of records visible to the caller under the active filters.
 func (s *Service) SearchWithFilter(ctx context.Context, principal auth.Principal, filter SearchFilter) (pagination.Result[Asset], error) {
+	if usesWorkingInventory(principal) {
+		return s.searchWorkingCreates(ctx, principal, filter)
+	}
 	if !principal.HasPermission("asset.manage") {
 		return pagination.Result[Asset]{}, ErrForbidden
 	}
@@ -732,6 +747,9 @@ func PrepareCreateInput(input *CreateInput) (string, error) {
 }
 
 func (s *Service) Create(ctx context.Context, principal auth.Principal, input CreateInput, source, requestID, ipAddress string) (Asset, error) {
+	if usesWorkingInventory(principal) {
+		return s.createUnreported(ctx, principal, input, requestID, ipAddress)
+	}
 	return s.create(ctx, principal, input, source, requestID, ipAddress, nil)
 }
 
@@ -854,6 +872,11 @@ func createInTx(ctx context.Context, tx pgx.Tx, principal auth.Principal, input 
 }
 
 func (s *Service) Get(ctx context.Context, principal auth.Principal, assetID string) (Asset, error) {
+	if usesWorkingInventory(principal) {
+		if item, err := s.getWorking(ctx, principal, assetID); err == nil {
+			return item, nil
+		}
+	}
 	if !principal.HasPermission("asset.manage") {
 		return Asset{}, ErrForbidden
 	}
@@ -864,12 +887,20 @@ func (s *Service) Get(ctx context.Context, principal auth.Principal, assetID str
 }
 
 func (s *Service) Update(ctx context.Context, principal auth.Principal, assetID string, input CreateInput, requestID, ipAddress string) (Asset, error) {
+	if usesWorkingInventory(principal) {
+		if _, err := s.getWorking(ctx, principal, assetID); err == nil {
+			return s.updateWorking(ctx, principal, assetID, input, requestID, ipAddress)
+		}
+	}
 	if !principal.HasPermission("asset.manage") {
 		return Asset{}, ErrForbidden
 	}
 	current, err := s.Get(ctx, principal, assetID)
 	if err != nil {
 		return Asset{}, err
+	}
+	if usesWorkingInventory(principal) {
+		return s.createWorkingUpdate(ctx, principal, current, input, requestID, ipAddress)
 	}
 	normalizeInput(&input)
 	normalizedValue, err := normalizeValue(input.Type, input.Value)
@@ -1012,12 +1043,20 @@ func (s *Service) Update(ctx context.Context, principal auth.Principal, assetID 
 }
 
 func (s *Service) Delete(ctx context.Context, principal auth.Principal, assetID, requestID, ipAddress string) error {
+	if usesWorkingInventory(principal) {
+		if _, err := s.getWorking(ctx, principal, assetID); err == nil {
+			return s.deleteWorking(ctx, principal, assetID, requestID, ipAddress)
+		}
+	}
 	if !principal.HasPermission("asset.manage") {
 		return ErrForbidden
 	}
 	current, err := s.Get(ctx, principal, assetID)
 	if err != nil {
 		return err
+	}
+	if usesWorkingInventory(principal) {
+		return s.createWorkingDelete(ctx, principal, current, requestID, ipAddress)
 	}
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {

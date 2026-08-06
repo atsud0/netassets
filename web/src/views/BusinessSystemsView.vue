@@ -19,6 +19,7 @@ interface BusinessSystem {
   asset_count?: number; created_at: string; updated_at: string
   task_id?: string; draft_status?: string; operation?: 'create' | 'update' | 'delete'; is_draft?: boolean; source_system_id?: string
   custom_values?: Array<{ field_key: string; value: unknown }>
+  reporting_status?: 'unreported' | 'pending_review' | 'reported' | 'changed' | 'returned' | 'pending_offline'; is_working_copy?: boolean; published_id?: string
 }
 interface FieldChange { field: string; label: string; before: string; after: string }
 interface ChangeHistoryItem {
@@ -81,6 +82,7 @@ const inventoryMode = computed(() => route.query.mode === 'inventory' && Boolean
 const inventoryOrganizationName = computed(() => organizations.value.find((item) => item.id === inventoryOrganizationID.value)?.name || '当前填报组织')
 const draftStatusLabels: Record<string, string> = { editing: '编辑中', returned: '已退回', submitted: '已提交', published: '已发布' }
 const draftOperationLabels: Record<string, string> = { create: '新增', update: '修改', delete: '删除' }
+const reportingStatusLabels: Record<string, string> = { unreported: '未上报', pending_review: '待审核', reported: '已上报', changed: '有变更待上报', returned: '已退回', pending_offline: '待下线' }
 const form = reactive<FormData>(emptyForm())
 const importDialogVisible = ref(false)
 const historyDialogVisible = ref(false)
@@ -128,8 +130,8 @@ const statusLabels: Record<string, string> = { planning: '规划中', running: '
 const levelLabels: Record<string, string> = { normal: '一般', important: '重要', core: '核心' }
 const assetTypeLabels: Record<string, string> = { domain: '域名', ip: 'IP', url: 'URL', service: '服务', other: '其他' }
 const assetStatusLabels: Record<string, string> = { active: '正常', pending: '待确认', disabled: '已停用', archived: '已归档' }
-const dialogTitle = computed(() => editingID.value ? (inventoryMode.value ? '编辑业务系统草稿' : '编辑业务系统') : (inventoryMode.value ? '新增业务系统草稿' : '新增业务系统'))
-const submitLabel = computed(() => editingID.value ? '保存修改' : (inventoryMode.value ? '保存任务草稿' : '确认新增'))
+const dialogTitle = computed(() => editingID.value ? '编辑业务系统' : '新增业务系统')
+const submitLabel = computed(() => editingID.value ? '保存修改' : (inventoryMode.value ? '保存待提交' : '确认新增'))
 
 watch(() => form.personal_information_record_count, (value) => {
   if (typeof value === 'number') form.data_volume_over_100k = value >= 100000 ? 'yes' : 'no'
@@ -167,7 +169,7 @@ async function loadDraftSystems() {
     const response = await apiClient.get<ListResponse<BusinessSystem>>(`/inventory-tasks/${inventoryTaskID.value}/organizations/${inventoryOrganizationID.value}/business-system-drafts`, { params: { page: draftPage.value, page_size: draftPageSize.value } })
     draftSystems.value = response.data.items
     draftTotal.value = response.data.total
-  } catch (error) { ElMessage.error(getAPIErrorMessage(error, '读取业务系统任务草稿失败')) }
+  } catch (error) { ElMessage.error(getAPIErrorMessage(error, '读取本次上报业务系统失败')) }
 }
 
 async function load() {
@@ -235,7 +237,7 @@ function openCreateDialog() {
 }
 
 async function openEditDialog(row: BusinessSystem) {
-  if (inventoryMode.value && row.is_draft) {
+  if ((inventoryMode.value && row.is_draft) || row.is_working_copy) {
     Object.assign(form, {
       code: row.code, name: row.name, short_name: row.short_name ?? '', organization_id: row.organization_id,
       owner_name: row.owner_name ?? '', owner_contact: row.owner_contact ?? '', status: row.status, level: row.level,
@@ -247,7 +249,7 @@ async function openEditDialog(row: BusinessSystem) {
     defaultCustomValues()
     row.custom_values?.forEach((item) => { customValues[item.field_key] = item.value })
     editingID.value = row.id
-    editingIsDraft.value = true
+    editingIsDraft.value = Boolean(inventoryMode.value && row.task_id === inventoryTaskID.value)
     dialogVisible.value = true
     return
   }
@@ -284,21 +286,31 @@ async function submit() {
       const base = `/inventory-tasks/${inventoryTaskID.value}/organizations/${inventoryOrganizationID.value}/business-system-drafts`
       const payload = { ...form, organization_id: inventoryOrganizationID.value, custom_values: customPayload }
       if (editingID.value && editingIsDraft.value) response = await apiClient.patch<{ item: BusinessSystem }>(`${base}/${editingID.value}`, payload)
-      else if (editingID.value) response = await apiClient.post<{ item: BusinessSystem }>(`/inventory-tasks/${inventoryTaskID.value}/organizations/${inventoryOrganizationID.value}/business-systems/${editingID.value}/update-draft`, payload)
-      else response = await apiClient.post<{ item: BusinessSystem }>(base, payload)
+      else response = editingID.value
+        ? await apiClient.patch<{ item: BusinessSystem }>(`/business-systems/${editingID.value}`, payload)
+        : await apiClient.post<{ item: BusinessSystem }>('/business-systems', payload)
     } else {
+      const payload = { ...form, custom_values: customPayload }
       response = editingID.value
-        ? await apiClient.patch<{ item: BusinessSystem }>(`/business-systems/${editingID.value}`, form)
-        : await apiClient.post<{ item: BusinessSystem }>('/business-systems', form)
+        ? await apiClient.patch<{ item: BusinessSystem }>(`/business-systems/${editingID.value}`, payload)
+        : await apiClient.post<{ item: BusinessSystem }>('/business-systems', payload)
     }
     const id = editingID.value || response.data.item.id
-    if (!inventoryMode.value && customFields.value.length) await apiClient.put(`/business-systems/${id}/custom-fields`, { values: customPayload })
-    ElMessage.success(inventoryMode.value ? (editingID.value ? '业务系统变更已保存为任务草稿，提交前不会改变正式台账' : '业务系统草稿已保存，集团审核前不会进入正式台账') : (editingID.value ? '业务系统已更新' : '业务系统已新增'))
+    if (!inventoryMode.value && customFields.value.length && !response.data.item.is_working_copy) await apiClient.put(`/business-systems/${id}/custom-fields`, { values: customPayload })
+    ElMessage.success(inventoryMode.value ? (editingIsDraft.value ? '本次上报内容已更新' : (editingID.value ? '系统变更已保存，请选择后纳入本次上报' : '系统已保存为未上报状态，请选择后纳入本次上报')) : (response.data.item.is_working_copy ? (editingID.value ? '业务系统已更新，当前仍为未上报状态' : '业务系统已新增，默认未上报') : (editingID.value ? '业务系统已更新' : '业务系统已新增')))
     dialogVisible.value = false
     await refreshAfterMutation()
     if (detailVisible.value && detail.value?.id === id) await openDetail(detail.value as BusinessSystem)
   } catch (error) { ElMessage.error(getAPIErrorMessage(error, editingID.value ? '编辑业务系统失败' : '新增业务系统失败')) }
   finally { submitting.value = false }
+}
+
+async function selectWorkspaceBusinessSystem(row: BusinessSystem) {
+  try {
+    await apiClient.post(`/inventory-tasks/${inventoryTaskID.value}/organizations/${inventoryOrganizationID.value}/business-system-drafts/${row.id}/select`)
+    ElMessage.success('已选择该业务系统纳入本次上报')
+    await refreshAfterMutation()
+  } catch (error) { ElMessage.error(getAPIErrorMessage(error, '选择上报业务系统失败')) }
 }
 
 async function removeDraft(row: BusinessSystem) {
@@ -343,6 +355,12 @@ async function openDetail(row: BusinessSystem) {
   detailAssets.value = []
   detailAssetTotal.value = 0
   try {
+    if (row.is_draft || row.is_working_copy) {
+      detail.value = row
+      detailCustomFields.value = customFields.value
+      detailCustomValues.value = Object.fromEntries((row.custom_values || []).map((item) => [item.field_key, item.value]))
+      return
+    }
     const [response, customResponse] = await Promise.all([
       apiClient.get<DetailResponse>(`/business-systems/${row.id}`),
       apiClient.get<{ definitions: CustomField[]; values: Array<{ field_key: string; value: unknown }> }>(`/business-systems/${row.id}/custom-fields`),
@@ -609,10 +627,10 @@ onMounted(load)
 
 <template>
   <section>
-    <el-alert v-if="inventoryMode" :title="`正在填报：${inventoryTaskName} · ${inventoryOrganizationName}`" description="本页面新增的业务系统先保存为任务草稿，提交前不会进入集团正式台账；审核通过后自动发布。" type="warning" :closable="false" show-icon class="inventory-draft-alert" />
+    <el-alert v-if="inventoryMode" :title="`正在填报：${inventoryTaskName} · ${inventoryOrganizationName}`" description="这里展示组织工作台账。新增或修改先保存为未上报版本，选择纳入本次任务并提交审核后，才会发布到集团正式台账。" type="warning" :closable="false" show-icon class="inventory-draft-alert" />
     <div class="page-heading">
       <div><span class="eyebrow">BUSINESS SYSTEMS</span><h1>业务系统</h1><p>登记子公司的业务系统、负责人、系统等级以及个人信息和重要数据属性。</p></div>
-      <div class="button-row ledger-page-actions business-system-page-actions"><el-dropdown v-if="!inventoryMode"><el-button :loading="exporting">导出台账</el-button><template #dropdown><el-dropdown-menu><el-dropdown-item @click="exportLedger('xlsx')">导出 XLSX</el-dropdown-item><el-dropdown-item @click="exportLedger('csv')">导出 CSV</el-dropdown-item><el-dropdown-item divided @click="queueXLSXExport">后台生成 XLSX</el-dropdown-item></el-dropdown-menu></template></el-dropdown><el-button v-if="!inventoryMode" @click="openImportHistory">导入记录</el-button><el-button v-if="!inventoryMode" @click="openImportDialog">批量导入</el-button><el-button v-if="!inventoryMode || !auth.isGroupAdmin" type="primary" :disabled="eligibleOrganizations.length === 0" @click="openCreateDialog">{{ inventoryMode ? '新增任务草稿' : '新增业务系统' }}</el-button></div>
+      <div class="button-row ledger-page-actions business-system-page-actions"><el-dropdown v-if="!inventoryMode"><el-button :loading="exporting">导出台账</el-button><template #dropdown><el-dropdown-menu><el-dropdown-item @click="exportLedger('xlsx')">导出 XLSX</el-dropdown-item><el-dropdown-item @click="exportLedger('csv')">导出 CSV</el-dropdown-item><el-dropdown-item divided @click="queueXLSXExport">后台生成 XLSX</el-dropdown-item></el-dropdown-menu></template></el-dropdown><el-button v-if="!inventoryMode" @click="openImportHistory">导入记录</el-button><el-button v-if="!inventoryMode" @click="openImportDialog">批量导入</el-button><el-button v-if="!inventoryMode || !auth.isGroupAdmin" type="primary" :disabled="eligibleOrganizations.length === 0" @click="openCreateDialog">{{ '新增业务系统' }}</el-button></div>
     </div>
     <div class="organization-summary">
       <div><span>符合条件系统</span><strong>{{ total }}</strong></div>
@@ -632,15 +650,15 @@ onMounted(load)
       <span class="asset-filter-count">共 {{ total }} 条</span>
     </div>
     <div v-if="inventoryMode" class="panel data-table-panel inventory-draft-panel" v-loading="loading">
-      <div class="table-panel-heading"><div><strong>本次任务变更草稿</strong><span>共 {{ draftTotal }} 个；新增、修改和删除均在提交发布后影响正式台账</span></div><el-tag type="warning" effect="plain">任务草稿</el-tag></div>
-      <el-table :data="draftSystems" row-key="id" empty-text="当前任务尚无业务系统变更草稿">
+      <div class="table-panel-heading"><div><strong>本次上报内容</strong><span>共 {{ draftTotal }} 个；首次上报、变更上报和下线申请均在审核发布后影响集团正式台账</span></div><el-tag type="warning" effect="plain">待提交</el-tag></div>
+      <el-table :data="draftSystems" row-key="id" empty-text="尚未选择需要上报的业务系统">
         <el-table-column label="系统名称" min-width="190"><template #default="scope"><el-button link type="primary" class="table-link" :disabled="scope.row.draft_status === 'submitted' || scope.row.operation === 'delete'" @click="openEditDialog(scope.row)">{{ scope.row.name }}</el-button></template></el-table-column>
         <el-table-column label="系统编码" min-width="145"><template #default="scope"><span class="mono-text">{{ scope.row.code }}</span></template></el-table-column>
         <el-table-column prop="organization_name" label="所属组织" min-width="180" />
         <el-table-column label="状态/等级" min-width="150"><template #default="scope"><el-tag effect="plain">{{ statusLabel(scope.row.status) }}</el-tag><span class="inline-note">{{ levelLabel(scope.row.level) }}</span></template></el-table-column>
         <el-table-column label="变更类型" width="90"><template #default="scope"><el-tag :type="scope.row.operation === 'delete' ? 'danger' : scope.row.operation === 'update' ? 'warning' : 'success'" effect="plain">{{ draftOperationLabels[scope.row.operation || 'create'] }}</el-tag></template></el-table-column>
         <el-table-column label="草稿状态" width="105"><template #default="scope"><el-tag type="warning" effect="plain">{{ draftStatusLabels[scope.row.draft_status || 'editing'] || scope.row.draft_status }}</el-tag></template></el-table-column>
-        <el-table-column label="操作" width="160" fixed="right"><template #default="scope"><el-button v-if="scope.row.operation !== 'delete'" link type="primary" :disabled="scope.row.draft_status === 'submitted'" @click="openEditDialog(scope.row)">编辑</el-button><el-button link type="danger" :disabled="scope.row.draft_status === 'submitted'" @click="removeDraft(scope.row)">取消变更</el-button></template></el-table-column>
+        <el-table-column label="操作" width="160" fixed="right"><template #default="scope"><el-button v-if="scope.row.operation !== 'delete'" link type="primary" :disabled="scope.row.draft_status === 'submitted'" @click="openEditDialog(scope.row)">编辑</el-button><el-button link type="danger" :disabled="scope.row.draft_status === 'submitted'" @click="removeDraft(scope.row)">取消上报</el-button></template></el-table-column>
       </el-table>
       <div v-if="draftTotal > 0" class="table-pagination"><el-pagination background layout="total, sizes, prev, pager, next" :total="draftTotal" :current-page="draftPage" :page-size="draftPageSize" :page-sizes="[20, 50, 100]" @current-change="handleDraftPageChange" @size-change="handleDraftPageSizeChange" /></div>
     </div>
@@ -650,7 +668,7 @@ onMounted(load)
         <div class="button-row"><el-button :disabled="selectedSystems.length === 0" :loading="batchLoading" @click="runBatchArchive(false)">批量恢复</el-button><el-button type="warning" plain :disabled="selectedSystems.length === 0" :loading="batchLoading" @click="runBatchArchive(true)">批量归档</el-button></div>
       </div>
       <el-table v-loading="loading" :data="systems" row-key="id" empty-text="暂无业务系统" @selection-change="handleSelectionChange">
-        <el-table-column v-if="!inventoryMode" type="selection" width="46" />
+        <el-table-column v-if="!inventoryMode" type="selection" width="46" :selectable="(row: BusinessSystem) => !row.is_working_copy" />
         <el-table-column label="系统名称" min-width="190">
           <template #default="scope"><el-button link type="primary" class="table-link" @click="openDetail(scope.row)">{{ scope.row.name }}</el-button></template>
         </el-table-column>
@@ -663,7 +681,8 @@ onMounted(load)
         <el-table-column label="敏感个人信息" min-width="140"><template #default="scope"><el-tag :type="scope.row.contains_sensitive_personal_information === 'yes' ? 'danger' : 'info'">{{ yesNo(scope.row.contains_sensitive_personal_information) }}</el-tag></template></el-table-column>
         <el-table-column label="数据量超 10 万" min-width="135"><template #default="scope">{{ yesNo(scope.row.data_volume_over_100k) }}</template></el-table-column>
         <el-table-column prop="owner_name" label="负责人" min-width="110"><template #default="scope">{{ scope.row.owner_name || '—' }}</template></el-table-column>
-        <el-table-column label="操作" fixed="right" width="280"><template #default="scope"><template v-if="!inventoryMode"><el-button link type="primary" @click="openChangeHistory(scope.row)">历史</el-button><el-button link type="primary" @click="openEditDialog(scope.row)">编辑</el-button><el-button link :type="scope.row.status === 'archived' ? 'success' : 'warning'" @click="changeArchive(scope.row, scope.row.status !== 'archived')">{{ scope.row.status === 'archived' ? '恢复' : '归档' }}</el-button><el-button link type="danger" @click="remove(scope.row)">删除</el-button></template><template v-else><el-button link type="primary" @click="openEditDialog(scope.row)">修改</el-button><el-button link type="danger" @click="requestSystemDeletion(scope.row)">申请删除</el-button></template></template></el-table-column>
+        <el-table-column v-if="!auth.isGroupAdmin && !inventoryMode" label="上报状态" width="130"><template #default="scope"><el-tag :type="scope.row.reporting_status === 'reported' ? 'success' : 'warning'" effect="plain">{{ reportingStatusLabels[scope.row.reporting_status || 'reported'] }}</el-tag></template></el-table-column>
+        <el-table-column label="操作" fixed="right" width="280"><template #default="scope"><template v-if="!inventoryMode"><template v-if="scope.row.is_working_copy"><el-button link type="primary" @click="openEditDialog(scope.row)">编辑</el-button><el-button link type="danger" @click="remove(scope.row)">删除</el-button></template><template v-else><el-button link type="primary" @click="openChangeHistory(scope.row)">历史</el-button><el-button link type="primary" @click="openEditDialog(scope.row)">编辑</el-button><el-button link :type="scope.row.status === 'archived' ? 'success' : 'warning'" @click="changeArchive(scope.row, scope.row.status !== 'archived')">{{ scope.row.status === 'archived' ? '恢复' : '归档' }}</el-button><el-button link type="danger" @click="remove(scope.row)">删除</el-button></template></template><template v-else><template v-if="scope.row.is_working_copy"><el-button v-if="!scope.row.task_id" link type="primary" @click="selectWorkspaceBusinessSystem(scope.row)">选择上报</el-button><el-tag v-else-if="scope.row.task_id === inventoryTaskID" type="success" effect="plain">已纳入本次上报</el-tag><el-tag v-else type="info" effect="plain">已纳入其他任务</el-tag></template><template v-else><el-button link type="primary" @click="openEditDialog(scope.row)">修改后上报</el-button><el-button link type="danger" @click="requestSystemDeletion(scope.row)">申请下线</el-button></template></template></template></el-table-column>
       </el-table>
       <div class="table-pagination">
         <el-pagination background layout="total, sizes, prev, pager, next" :total="total" :current-page="page" :page-size="pageSize" :page-sizes="[20, 50, 100]" @current-change="handlePageChange" @size-change="handlePageSizeChange" />
@@ -683,7 +702,7 @@ onMounted(load)
     </el-dialog>
 
     <el-dialog v-model="dialogVisible" :title="dialogTitle" width="800px" destroy-on-close>
-      <el-alert v-if="inventoryMode" title="此处保存的是任务草稿，不会立即进入集团正式台账。任务审核通过后系统会自动发布。" type="info" :closable="false" show-icon class="dialog-context-alert" /><el-form ref="formRef" :model="form" :rules="rules" label-position="top">
+      <el-alert v-if="inventoryMode" title="这里保存的是组织工作版本；只有选择纳入本次上报并通过审核后，才会更新集团正式台账。" type="info" :closable="false" show-icon class="dialog-context-alert" /><el-form ref="formRef" :model="form" :rules="rules" label-position="top">
         <div class="form-section-title">基本信息</div>
         <div class="form-grid two-columns">
           <el-form-item label="所属组织" prop="organization_id"><el-select v-model="form.organization_id" :disabled="inventoryMode || !auth.isGroupAdmin" style="width:100%"><el-option v-for="item in eligibleOrganizations" :key="item.id" :label="item.name" :value="item.id" /></el-select></el-form-item>

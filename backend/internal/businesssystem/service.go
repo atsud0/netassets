@@ -38,53 +38,61 @@ var (
 )
 
 type BusinessSystem struct {
-	ID                                   string    `json:"id"`
-	Code                                 string    `json:"code"`
-	Name                                 string    `json:"name"`
-	ShortName                            string    `json:"short_name,omitempty"`
-	OrganizationID                       string    `json:"organization_id"`
-	OrganizationCode                     string    `json:"organization_code"`
-	OrganizationName                     string    `json:"organization_name"`
-	OwnerName                            string    `json:"owner_name,omitempty"`
-	OwnerContact                         string    `json:"owner_contact,omitempty"`
-	Status                               string    `json:"status"`
-	Level                                string    `json:"level"`
-	DeploymentType                       string    `json:"deployment_type,omitempty"`
-	InternetExposure                     string    `json:"internet_exposure"`
-	Description                          string    `json:"description,omitempty"`
-	ContainsPersonalInformation          string    `json:"contains_personal_information"`
-	ContainsSensitivePersonalInformation string    `json:"contains_sensitive_personal_information"`
-	PersonalInformationRecordCount       *int64    `json:"personal_information_record_count"`
-	DataVolumeOver100K                   string    `json:"data_volume_over_100k"`
-	ContainsImportantData                string    `json:"contains_important_data"`
-	ContainsCoreData                     string    `json:"contains_core_data"`
-	DataStorageLocation                  string    `json:"data_storage_location,omitempty"`
-	SecurityNotes                        string    `json:"security_notes,omitempty"`
-	AssetCount                           int       `json:"asset_count,omitempty"`
-	CreatedAt                            time.Time `json:"created_at"`
-	UpdatedAt                            time.Time `json:"updated_at"`
+	ID                                   string              `json:"id"`
+	Code                                 string              `json:"code"`
+	Name                                 string              `json:"name"`
+	ShortName                            string              `json:"short_name,omitempty"`
+	OrganizationID                       string              `json:"organization_id"`
+	OrganizationCode                     string              `json:"organization_code"`
+	OrganizationName                     string              `json:"organization_name"`
+	OwnerName                            string              `json:"owner_name,omitempty"`
+	OwnerContact                         string              `json:"owner_contact,omitempty"`
+	Status                               string              `json:"status"`
+	Level                                string              `json:"level"`
+	DeploymentType                       string              `json:"deployment_type,omitempty"`
+	InternetExposure                     string              `json:"internet_exposure"`
+	Description                          string              `json:"description,omitempty"`
+	ContainsPersonalInformation          string              `json:"contains_personal_information"`
+	ContainsSensitivePersonalInformation string              `json:"contains_sensitive_personal_information"`
+	PersonalInformationRecordCount       *int64              `json:"personal_information_record_count"`
+	DataVolumeOver100K                   string              `json:"data_volume_over_100k"`
+	ContainsImportantData                string              `json:"contains_important_data"`
+	ContainsCoreData                     string              `json:"contains_core_data"`
+	DataStorageLocation                  string              `json:"data_storage_location,omitempty"`
+	SecurityNotes                        string              `json:"security_notes,omitempty"`
+	AssetCount                           int                 `json:"asset_count,omitempty"`
+	CreatedAt                            time.Time           `json:"created_at"`
+	UpdatedAt                            time.Time           `json:"updated_at"`
+	ReportingStatus                      string              `json:"reporting_status"`
+	IsWorkingCopy                        bool                `json:"is_working_copy"`
+	PublishedID                          string              `json:"published_id,omitempty"`
+	TaskID                               string              `json:"task_id,omitempty"`
+	DraftStatus                          string              `json:"draft_status,omitempty"`
+	Operation                            string              `json:"operation,omitempty"`
+	CustomValues                         []customfield.Value `json:"custom_values,omitempty"`
 }
 
 type CreateInput struct {
-	Code                                 string `json:"code"`
-	Name                                 string `json:"name"`
-	ShortName                            string `json:"short_name"`
-	OrganizationID                       string `json:"organization_id"`
-	OwnerName                            string `json:"owner_name"`
-	OwnerContact                         string `json:"owner_contact"`
-	Status                               string `json:"status"`
-	Level                                string `json:"level"`
-	DeploymentType                       string `json:"deployment_type"`
-	InternetExposure                     string `json:"internet_exposure"`
-	Description                          string `json:"description"`
-	ContainsPersonalInformation          string `json:"contains_personal_information"`
-	ContainsSensitivePersonalInformation string `json:"contains_sensitive_personal_information"`
-	PersonalInformationRecordCount       *int64 `json:"personal_information_record_count"`
-	DataVolumeOver100K                   string `json:"data_volume_over_100k"`
-	ContainsImportantData                string `json:"contains_important_data"`
-	ContainsCoreData                     string `json:"contains_core_data"`
-	DataStorageLocation                  string `json:"data_storage_location"`
-	SecurityNotes                        string `json:"security_notes"`
+	Code                                 string              `json:"code"`
+	Name                                 string              `json:"name"`
+	ShortName                            string              `json:"short_name"`
+	OrganizationID                       string              `json:"organization_id"`
+	OwnerName                            string              `json:"owner_name"`
+	OwnerContact                         string              `json:"owner_contact"`
+	Status                               string              `json:"status"`
+	Level                                string              `json:"level"`
+	DeploymentType                       string              `json:"deployment_type"`
+	InternetExposure                     string              `json:"internet_exposure"`
+	Description                          string              `json:"description"`
+	ContainsPersonalInformation          string              `json:"contains_personal_information"`
+	ContainsSensitivePersonalInformation string              `json:"contains_sensitive_personal_information"`
+	PersonalInformationRecordCount       *int64              `json:"personal_information_record_count"`
+	DataVolumeOver100K                   string              `json:"data_volume_over_100k"`
+	ContainsImportantData                string              `json:"contains_important_data"`
+	ContainsCoreData                     string              `json:"contains_core_data"`
+	DataStorageLocation                  string              `json:"data_storage_location"`
+	SecurityNotes                        string              `json:"security_notes"`
+	CustomValues                         []customfield.Value `json:"custom_values,omitempty"`
 }
 
 type ImportError struct {
@@ -137,6 +145,10 @@ type fieldChange struct {
 func NewService(pool *pgxpool.Pool) *Service { return &Service{pool: pool} }
 
 func (s *Service) List(ctx context.Context, principal auth.Principal) ([]BusinessSystem, error) {
+	if usesWorkingInventory(principal) {
+		result, err := s.searchWorkingCreates(ctx, principal, SearchFilter{Page: pagination.Query{Page: 1, PageSize: pagination.MaxPageSize}})
+		return result.Items, err
+	}
 	if !principal.HasPermission("system.manage") {
 		return nil, ErrForbidden
 	}
@@ -208,6 +220,9 @@ func (s *Service) Search(ctx context.Context, principal auth.Principal, query pa
 // SearchWithFilter returns only one filtered database page of systems while
 // retaining the real count for the caller's visible data scope.
 func (s *Service) SearchWithFilter(ctx context.Context, principal auth.Principal, filter SearchFilter) (pagination.Result[BusinessSystem], error) {
+	if usesWorkingInventory(principal) {
+		return s.searchWorkingCreates(ctx, principal, filter)
+	}
 	if !principal.HasPermission("system.manage") {
 		return pagination.Result[BusinessSystem]{}, ErrForbidden
 	}
@@ -569,6 +584,9 @@ func formatExportTime(value time.Time) string {
 }
 
 func (s *Service) Create(ctx context.Context, principal auth.Principal, input CreateInput, requestID, ipAddress string) (BusinessSystem, error) {
+	if usesWorkingInventory(principal) {
+		return s.createUnreported(ctx, principal, input, requestID, ipAddress)
+	}
 	return s.create(ctx, principal, input, requestID, ipAddress, nil)
 }
 
@@ -680,6 +698,11 @@ type Detail struct {
 }
 
 func (s *Service) Get(ctx context.Context, principal auth.Principal, systemID string) (Detail, error) {
+	if usesWorkingInventory(principal) {
+		if item, err := s.getWorking(ctx, principal, systemID); err == nil {
+			return Detail{BusinessSystem: item}, nil
+		}
+	}
 	if !principal.HasPermission("system.manage") {
 		return Detail{}, ErrForbidden
 	}
@@ -702,6 +725,11 @@ func (s *Service) Get(ctx context.Context, principal auth.Principal, systemID st
 }
 
 func (s *Service) Update(ctx context.Context, principal auth.Principal, systemID string, input CreateInput, requestID, ipAddress string) (BusinessSystem, error) {
+	if usesWorkingInventory(principal) {
+		if _, err := s.getWorking(ctx, principal, systemID); err == nil {
+			return s.updateWorking(ctx, principal, systemID, input, requestID, ipAddress)
+		}
+	}
 	if !principal.HasPermission("system.manage") {
 		return BusinessSystem{}, ErrForbidden
 	}
@@ -723,6 +751,9 @@ func (s *Service) Update(ctx context.Context, principal auth.Principal, systemID
 	current, err := queryBusinessSystem(ctx, s.pool, systemID, false)
 	if err != nil {
 		return BusinessSystem{}, err
+	}
+	if usesWorkingInventory(principal) {
+		return s.createWorkingUpdate(ctx, principal, current, input, requestID, ipAddress)
 	}
 	allowed, err := access.CanOperateOrganization(ctx, s.pool, principal, current.OrganizationID, "system.manage")
 	if err != nil {
@@ -882,6 +913,11 @@ func (s *Service) SetArchived(ctx context.Context, principal auth.Principal, sys
 }
 
 func (s *Service) Delete(ctx context.Context, principal auth.Principal, systemID, requestID, ipAddress string) error {
+	if usesWorkingInventory(principal) {
+		if _, err := s.getWorking(ctx, principal, systemID); err == nil {
+			return s.deleteWorking(ctx, principal, systemID)
+		}
+	}
 	if !principal.HasPermission("system.manage") {
 		return ErrForbidden
 	}
@@ -892,6 +928,9 @@ func (s *Service) Delete(ctx context.Context, principal auth.Principal, systemID
 	current, err := queryBusinessSystem(ctx, s.pool, systemID, false)
 	if err != nil {
 		return err
+	}
+	if usesWorkingInventory(principal) {
+		return s.createWorkingDelete(ctx, principal, current)
 	}
 	allowed, err := access.CanOperateOrganization(ctx, s.pool, principal, current.OrganizationID, "system.manage")
 	if err != nil {

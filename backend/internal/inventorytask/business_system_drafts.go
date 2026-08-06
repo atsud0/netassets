@@ -144,8 +144,6 @@ func (s *Service) createBusinessSystemChangeDraft(ctx context.Context, principal
 			return BusinessSystemDraft{}, err
 		}
 		rawValues = raw
-	} else {
-		rawValues = []byte("[]")
 	}
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
@@ -185,6 +183,15 @@ func (s *Service) createBusinessSystemChangeDraft(ctx context.Context, principal
 	}
 	if operation == "update" {
 		current = input
+	} else {
+		current.CustomValues, err = customfield.ValuesInTx(ctx, tx, "business_system", sourceSystemID)
+		if err != nil {
+			return BusinessSystemDraft{}, fmt.Errorf("load formal business system custom values: %w", err)
+		}
+		_, rawValues, err = s.validateBusinessSystemDraftCustomValues(ctx, current.CustomValues)
+		if err != nil {
+			return BusinessSystemDraft{}, err
+		}
 	}
 	var id string
 	err = tx.QueryRow(ctx, `
@@ -196,7 +203,7 @@ func (s *Service) createBusinessSystemChangeDraft(ctx context.Context, principal
 			custom_values,created_by,updated_by
 		) VALUES($1::uuid,$2::uuid,$3,$4::uuid,$5,$6,NULLIF($7,''),NULLIF($8,''),NULLIF($9,''),$10,$11,
 			NULLIF($12,''),$13,NULLIF($14,''),$15,$16,$17,$18,$19,$20,NULLIF($21,''),NULLIF($22,''),$23::jsonb,$24::uuid,$24::uuid)
-		ON CONFLICT(task_id,organization_id,source_system_id) WHERE source_system_id IS NOT NULL DO UPDATE SET
+		ON CONFLICT(organization_id,source_system_id) WHERE source_system_id IS NOT NULL AND draft_status IN ('editing','submitted','returned') DO UPDATE SET
 			operation=EXCLUDED.operation,system_code=EXCLUDED.system_code,system_name=EXCLUDED.system_name,
 			short_name=EXCLUDED.short_name,owner_name=EXCLUDED.owner_name,owner_contact=EXCLUDED.owner_contact,
 			system_status=EXCLUDED.system_status,system_level=EXCLUDED.system_level,deployment_type=EXCLUDED.deployment_type,
@@ -208,7 +215,7 @@ func (s *Service) createBusinessSystemChangeDraft(ctx context.Context, principal
 			contains_core_data=EXCLUDED.contains_core_data,data_storage_location=EXCLUDED.data_storage_location,
 			security_notes=EXCLUDED.security_notes,custom_values=EXCLUDED.custom_values,draft_status='editing',
 			updated_by=EXCLUDED.updated_by,updated_at=now()
-		WHERE inventory_business_system_drafts.draft_status IN ('editing','returned','discarded')
+		WHERE inventory_business_system_drafts.draft_status IN ('editing','returned')
 		RETURNING id::text
 	`, taskID, organizationID, operation, sourceSystemID, current.Code, current.Name, current.ShortName,
 		current.OwnerName, current.OwnerContact, current.Status, current.Level, current.DeploymentType,
@@ -306,7 +313,15 @@ func (s *Service) DeleteBusinessSystemDraft(ctx context.Context, principal auth.
 		return err
 	}
 	var code string
-	if err := tx.QueryRow(ctx, `UPDATE inventory_business_system_drafts SET draft_status='discarded',updated_by=$4::uuid,updated_at=now() WHERE id::text=$1 AND task_id::text=$2 AND organization_id::text=$3 AND draft_status IN ('editing','returned') RETURNING system_code`, draftID, taskID, organizationID, principal.UserID).Scan(&code); errors.Is(err, pgx.ErrNoRows) {
+	if err := tx.QueryRow(ctx, `UPDATE inventory_business_system_drafts SET task_id=NULL,selected_at=NULL,updated_by=$4::uuid,updated_at=now() WHERE id::text=$1 AND task_id::text=$2 AND organization_id::text=$3 AND selected_at IS NOT NULL AND draft_status IN ('editing','returned') RETURNING system_code`, draftID, taskID, organizationID, principal.UserID).Scan(&code); errors.Is(err, pgx.ErrNoRows) {
+		err = tx.QueryRow(ctx, `UPDATE inventory_business_system_drafts SET draft_status='discarded',updated_by=$4::uuid,updated_at=now() WHERE id::text=$1 AND task_id::text=$2 AND organization_id::text=$3 AND draft_status IN ('editing','returned') RETURNING system_code`, draftID, taskID, organizationID, principal.UserID).Scan(&code)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return ErrNotFound
+		}
+		if err != nil {
+			return fmt.Errorf("discard inventory business system draft: %w", err)
+		}
+	} else if err != nil {
 		return ErrNotFound
 	} else if err != nil {
 		return fmt.Errorf("discard inventory business system draft: %w", err)
@@ -426,29 +441,10 @@ func publishBusinessSystemDrafts(ctx context.Context, tx pgx.Tx, principal auth.
 		return fmt.Errorf("iterate submitted business system drafts: %w", err)
 	}
 	rows.Close()
-	definitionRows, err := tx.Query(ctx, `SELECT id::text,resource_type,field_key,field_name,COALESCE(description,''),field_type,options,is_required,is_enabled,sort_order,created_at,updated_at FROM custom_field_definitions WHERE resource_type='business_system' AND is_enabled ORDER BY sort_order,created_at`)
+	definitions, err := customfield.EnabledDefinitionsInTx(ctx, tx, "business_system")
 	if err != nil {
 		return fmt.Errorf("load publication custom fields: %w", err)
 	}
-	definitions := make([]customfield.Definition, 0)
-	for definitionRows.Next() {
-		var d customfield.Definition
-		var options []byte
-		if err := definitionRows.Scan(&d.ID, &d.ResourceType, &d.FieldKey, &d.FieldName, &d.Description, &d.FieldType, &options, &d.IsRequired, &d.IsEnabled, &d.SortOrder, &d.CreatedAt, &d.UpdatedAt); err != nil {
-			definitionRows.Close()
-			return err
-		}
-		if err := json.Unmarshal(options, &d.Options); err != nil {
-			definitionRows.Close()
-			return err
-		}
-		definitions = append(definitions, d)
-	}
-	if err := definitionRows.Err(); err != nil {
-		definitionRows.Close()
-		return fmt.Errorf("iterate publication custom fields: %w", err)
-	}
-	definitionRows.Close()
 	for _, item := range items {
 		resourceID := item.ID
 		action, summary := "business_system.create", "审核发布填报业务系统"

@@ -59,6 +59,13 @@ func registerInventoryTaskRoutes(api *gin.RouterGroup, requireAuth gin.HandlerFu
 		}
 		c.JSON(http.StatusCreated, gin.H{"item": item})
 	})
+	group.POST("/:taskID/organizations/:organizationID/business-system-drafts/:draftID/select", func(c *gin.Context) {
+		item, err := service.SelectWorkspaceBusinessSystem(c.Request.Context(), mustPrincipal(c), c.Param("taskID"), c.Param("organizationID"), c.Param("draftID"), c.GetString("request_id"), c.ClientIP())
+		if writeInventoryBusinessSystemDraftError(c, logger, "select workspace business system", err) {
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"item": item})
+	})
 	group.POST("/:taskID/organizations/:organizationID/business-system-drafts", func(c *gin.Context) {
 		var input inventorytask.BusinessSystemDraftInput
 		if err := c.ShouldBindJSON(&input); err != nil {
@@ -117,6 +124,13 @@ func registerInventoryTaskRoutes(api *gin.RouterGroup, requireAuth gin.HandlerFu
 			return
 		}
 		c.JSON(http.StatusCreated, gin.H{"item": item})
+	})
+	group.POST("/:taskID/organizations/:organizationID/asset-drafts/:draftID/select", func(c *gin.Context) {
+		item, err := service.SelectWorkspaceAsset(c.Request.Context(), mustPrincipal(c), c.Param("taskID"), c.Param("organizationID"), c.Param("draftID"), c.GetString("request_id"), c.ClientIP())
+		if writeInventoryAssetDraftError(c, logger, "select workspace asset", err) {
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"item": item})
 	})
 	group.POST("/:taskID/organizations/:organizationID/asset-drafts", func(c *gin.Context) {
 		var input asset.CreateInput

@@ -1020,7 +1020,7 @@ onMounted(async () => {
         <div class="inventory-guide-actions">
           <span>填报任务以系统中当前的业务系统和网络资产为准。请先维护数据，再回到本页面提交。</span>
           <el-button size="small" @click="router.push('/systems')">维护日常业务系统台账</el-button>
-          <el-button size="small" @click="router.push('/inventory-tasks')">从具体任务进入资产草稿</el-button>
+          <el-button size="small" @click="router.push('/inventory-tasks')">从具体任务进入上报内容</el-button>
         </div>
       </template>
     </el-alert>
@@ -1174,7 +1174,7 @@ onMounted(async () => {
             <el-descriptions-item label="快照规模">{{ submissionDiff.submission.system_count }} 个系统 / {{ submissionDiff.submission.asset_count }} 项资产</el-descriptions-item>
           </el-descriptions>
 
-          <el-alert v-if="!submissionDiff.previous_submission" title="这是该组织的首次提交；正式存量数据计为首次纳入，本次任务草稿仍会按新增、修改、删除准确分类。" type="info" :closable="false" show-icon />
+          <el-alert v-if="!submissionDiff.previous_submission" title="这是该组织的首次提交；正式存量数据计为首次纳入，本次选择上报的内容仍会按首次上报、变更上报、下线申请准确分类。" type="info" :closable="false" show-icon />
           <el-alert title="带“本次新增 / 本次修改 / 本次删除”标记的是子公司在本任务内发起、尚待发布的台账变更；其他记录是与上一次可比提交之间的范围或内容差异。" type="warning" :closable="false" show-icon />
           <div class="submission-diff-summary">
             <div class="added"><span>新增</span><strong>{{ submissionDiff.summary.added }}</strong></div>
@@ -1316,8 +1316,8 @@ onMounted(async () => {
           </li>
         </ul>
         <div v-if="qualityCheck && !qualityCheck.passed" class="quality-actions">
-          <el-button size="small" @click="openSelectedInventoryBusinessSystems">维护业务系统草稿</el-button>
-          <el-button size="small" @click="openSelectedInventoryAssets">维护网络资产草稿</el-button>
+          <el-button size="small" @click="openSelectedInventoryBusinessSystems">选择上报业务系统</el-button>
+          <el-button size="small" @click="openSelectedInventoryAssets">选择上报网络资产</el-button>
         </div>
       </div>
       <el-form label-position="top">

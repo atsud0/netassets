@@ -50,8 +50,25 @@ func (s *Service) EnabledDefinitions(ctx context.Context, typ string) ([]Definit
 	return s.activeDefinitions(ctx, typ)
 }
 
+type definitionQuerier interface {
+	Query(context.Context, string, ...any) (pgx.Rows, error)
+}
+
 func (s *Service) activeDefinitions(ctx context.Context, typ string) ([]Definition, error) {
-	rows, err := s.pool.Query(ctx, `SELECT id::text,resource_type,field_key,field_name,COALESCE(description,''),field_type,options,is_required,is_enabled,sort_order,created_at,updated_at FROM custom_field_definitions WHERE resource_type=$1 AND is_enabled ORDER BY sort_order,created_at`, typ)
+	return enabledDefinitions(ctx, s.pool, typ)
+}
+
+// EnabledDefinitionsInTx loads enabled definitions through the caller's transaction,
+// keeping draft publication and custom-field validation on one consistent snapshot.
+func EnabledDefinitionsInTx(ctx context.Context, tx pgx.Tx, typ string) ([]Definition, error) {
+	if typ != "asset" && typ != "business_system" {
+		return nil, ErrInvalid
+	}
+	return enabledDefinitions(ctx, tx, typ)
+}
+
+func enabledDefinitions(ctx context.Context, q definitionQuerier, typ string) ([]Definition, error) {
+	rows, err := q.Query(ctx, `SELECT id::text,resource_type,field_key,field_name,COALESCE(description,''),field_type,options,is_required,is_enabled,sort_order,created_at,updated_at FROM custom_field_definitions WHERE resource_type=$1 AND is_enabled ORDER BY sort_order,created_at`, typ)
 	if err != nil {
 		return nil, err
 	}
@@ -247,6 +264,32 @@ func (s *Service) ValuesForResources(ctx context.Context, typ string, resourceID
 		result[resourceID][fieldKey] = value
 	}
 	return result, rows.Err()
+}
+
+// ValuesInTx loads enabled custom-field values through the caller's transaction.
+// It is used when a formal resource is copied into a working/reporting version.
+func ValuesInTx(ctx context.Context, tx pgx.Tx, typ, resourceID string) ([]Value, error) {
+	if typ != "asset" && typ != "business_system" {
+		return nil, ErrInvalid
+	}
+	rows, err := tx.Query(ctx, `SELECT d.field_key,v.value FROM custom_field_values v JOIN custom_field_definitions d ON d.id=v.field_definition_id WHERE v.resource_type=$1 AND v.resource_id=$2::uuid AND d.is_enabled ORDER BY d.sort_order,d.created_at`, typ, resourceID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	values := make([]Value, 0)
+	for rows.Next() {
+		var value Value
+		var raw []byte
+		if err := rows.Scan(&value.FieldKey, &raw); err != nil {
+			return nil, err
+		}
+		if err := json.Unmarshal(raw, &value.Value); err != nil {
+			return nil, err
+		}
+		values = append(values, value)
+	}
+	return values, rows.Err()
 }
 
 // SaveImportedValuesInTx writes already-normalized values while the caller's
