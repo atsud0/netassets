@@ -488,7 +488,7 @@ async function runImport(preview = false) {
     if (preview) {
       ElMessage.success('文件预检完成，尚未写入台账')
     } else {
-      ElMessage.success('导入处理完成')
+      ElMessage.success(auth.isGroupAdmin ? `成功导入 ${response.data.result.success_count} 个业务系统到正式台账` : `成功导入 ${response.data.result.success_count} 个，已保存为未上报工作版本`)
       await refreshAfterMutation()
     }
   } catch (error) { ElMessage.error(getAPIErrorMessage(error, preview ? '导入文件预检失败' : '批量导入业务系统失败')) }
@@ -747,14 +747,14 @@ onMounted(load)
     </el-dialog>
 
     <el-dialog v-model="importDialogVisible" title="批量导入业务系统" width="720px" destroy-on-close>
-      <el-alert title="所属组织由当前表单统一指定，导入文件不需要填写组织列；请先选择所属组织再下载模板，模板会包含当前启用的集团自定义字段；系统编码已存在的行会跳过，不覆盖原记录。" type="info" :closable="false" show-icon />
+      <el-alert :title="auth.isGroupAdmin ? '所属组织由当前表单统一指定；成功项直接进入集团正式台账。请先选择所属组织再下载模板，模板会包含当前启用的集团自定义字段；系统编码已存在的行会跳过，不覆盖原记录。' : '所属组织固定为当前组织；成功项保存为未上报工作版本，集团暂不可见，后续需在填报任务中选择并提交上报。系统编码已存在的行会跳过，不覆盖正式记录或现有工作版本。'" type="info" :closable="false" show-icon />
       <div class="import-toolbar"><el-button link type="primary" :loading="downloading" @click="downloadTemplate('xlsx')">下载 XLSX 模板</el-button><el-button link type="primary" :loading="downloading" @click="downloadTemplate('csv')">下载 CSV 模板</el-button></div>
       <el-form label-position="top">
         <el-form-item label="导入到所属组织" required><el-select v-model="importForm.organization_id" filterable :disabled="!auth.isGroupAdmin" @change="resetImportPreview" style="width: 100%"><el-option v-for="item in eligibleOrganizations" :key="item.id" :label="item.name" :value="item.id" /></el-select></el-form-item>
         <el-form-item label="CSV / XLSX 文件" required><el-upload drag :auto-upload="false" :limit="1" accept=".csv,.xlsx" :on-change="handleImportFileChange" :on-remove="handleImportFileRemove"><el-icon><UploadFilled /></el-icon><div class="el-upload__text">拖入文件，或<em>点击选择</em></div><template #tip><div class="el-upload__tip">文件不超过 10 MB，单次最多 5000 行；允许部分成功。</div></template></el-upload></el-form-item>
       </el-form>
       <div v-if="importResult" class="import-result" data-testid="business-system-import-result">
-        <el-alert :title="importResultMode === 'preview' ? '预检结果：尚未写入台账，请确认后执行正式导入' : '正式导入结果'" :type="importResultMode === 'preview' ? 'info' : 'success'" :closable="false" show-icon />
+        <el-alert :title="importResultMode === 'preview' ? '预检结果：尚未写入台账，请确认后执行导入' : (auth.isGroupAdmin ? '正式台账导入结果' : '组织工作台账导入结果：成功项当前为未上报')" :type="importResultMode === 'preview' ? 'info' : 'success'" :closable="false" show-icon />
         <div class="import-result-summary"><div><span>总行数</span><strong>{{ importResult.total_count }}</strong></div><div class="success"><span>{{ importResultMode === 'preview' ? '可导入' : '成功' }}</span><strong>{{ importResult.success_count }}</strong></div><div class="duplicate"><span>重复</span><strong>{{ importResult.duplicate_count }}</strong></div><div class="failure"><span>失败</span><strong>{{ importResult.failure_count }}</strong></div></div>
         <el-table v-if="importResult.errors.length" :data="importResult.errors" size="small" max-height="220"><el-table-column prop="row" label="行号" width="70" /><el-table-column prop="code" label="错误代码" width="150" /><el-table-column prop="message" label="处理说明" min-width="260" /></el-table>
       </div>

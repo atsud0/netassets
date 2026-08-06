@@ -1269,7 +1269,9 @@ func (s *Service) PreviewImport(ctx context.Context, principal auth.Principal, o
 		var duplicateInLedger bool
 		if !duplicateInFile {
 			if err := s.pool.QueryRow(ctx, `SELECT EXISTS (
-				SELECT 1 FROM business_systems WHERE system_code = $1
+				SELECT 1 FROM business_systems WHERE system_code = $1 AND deleted_at IS NULL
+			) OR EXISTS (
+				SELECT 1 FROM inventory_business_system_drafts WHERE system_code = $1 AND draft_status IN ('editing','submitted','returned')
 			)`, input.Code).Scan(&duplicateInLedger); err != nil {
 				return ImportResult{}, fmt.Errorf("check preview business system duplicate: %w", err)
 			}
@@ -1331,9 +1333,8 @@ func (s *Service) Import(ctx context.Context, principal auth.Principal, organiza
 			result.Errors = append(result.Errors, ImportError{Row: rowNumber, Code: "invalid_custom_field", Message: customErr.Error()})
 			continue
 		}
-		_, err := s.create(ctx, principal, input, requestID, ipAddress, func(tx pgx.Tx, item BusinessSystem) error {
-			return customfield.SaveImportedValuesInTx(ctx, tx, "business_system", item.ID, definitions, customValues, principal.UserID)
-		})
+		input.CustomValues = customValues
+		_, err := s.createImported(ctx, principal, input, definitions, customValues, requestID, ipAddress)
 		switch {
 		case err == nil:
 			result.SuccessCount++
@@ -1364,6 +1365,27 @@ func (s *Service) Import(ctx context.Context, principal auth.Principal, organiza
 	}
 	result.ID = importID
 	return result, nil
+}
+
+func (s *Service) createImported(ctx context.Context, principal auth.Principal, input CreateInput, definitions []customfield.Definition, customValues []customfield.Value, requestID, ipAddress string) (BusinessSystem, error) {
+	if usesWorkingInventory(principal) {
+		input.CustomValues = customValues
+		return s.createUnreported(ctx, principal, input, requestID, ipAddress)
+	}
+
+	if err := PrepareCreateInput(&input); err != nil {
+		return BusinessSystem{}, err
+	}
+	var workingDuplicate bool
+	if err := s.pool.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM inventory_business_system_drafts WHERE system_code=$1 AND draft_status IN ('editing','submitted','returned'))`, input.Code).Scan(&workingDuplicate); err != nil {
+		return BusinessSystem{}, fmt.Errorf("check imported business system working duplicate: %w", err)
+	}
+	if workingDuplicate {
+		return BusinessSystem{}, ErrConflict
+	}
+	return s.create(ctx, principal, input, requestID, ipAddress, func(tx pgx.Tx, item BusinessSystem) error {
+		return customfield.SaveImportedValuesInTx(ctx, tx, "business_system", item.ID, definitions, customValues, principal.UserID)
+	})
 }
 
 func (s *Service) saveImportResult(ctx context.Context, principal auth.Principal, organizationID string, result ImportResult, requestID, ipAddress string) (string, error) {

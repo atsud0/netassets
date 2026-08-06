@@ -10,6 +10,7 @@ import (
 
 	"github.com/xuri/excelize/v2"
 
+	"netassets/internal/auth"
 	"netassets/internal/exportfile"
 )
 
@@ -26,6 +27,18 @@ func validBusinessSystemInput() CreateInput {
 		DataVolumeOver100K:                   "unknown",
 		ContainsImportantData:                "unknown",
 		ContainsCoreData:                     "unknown",
+	}
+}
+
+func TestImportsUseWorkingInventoryOutsideGroupAdmin(t *testing.T) {
+	if !usesWorkingInventory(auth.Principal{Roles: []string{"organization_admin"}}) {
+		t.Fatal("organization administrator import must use the organization working inventory")
+	}
+	if !usesWorkingInventory(auth.Principal{Roles: []string{"organization_editor"}}) {
+		t.Fatal("organization editor import must use the organization working inventory")
+	}
+	if usesWorkingInventory(auth.Principal{Roles: []string{"group_admin"}}) {
+		t.Fatal("group administrator import must continue writing the formal ledger")
 	}
 }
 

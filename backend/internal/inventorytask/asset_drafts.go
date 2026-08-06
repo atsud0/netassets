@@ -508,20 +508,20 @@ func mapDraftDatabaseError(err error) error {
 }
 
 func publishAssetDrafts(ctx context.Context, tx pgx.Tx, principal auth.Principal, taskID, organizationID, requestID, ipAddress string) error {
-	rows, err := tx.Query(ctx, `SELECT id::text,operation,COALESCE(source_asset_id::text,''),asset_type,asset_value,normalized_value,COALESCE(asset_name,''),environment,network_scope,COALESCE(network_area_id::text,''),COALESCE(business_system_id::text,''),status,importance,COALESCE(owner_user_id::text,''),COALESCE(owner_name,''),COALESCE(notes,''),expires_at,custom_values FROM inventory_asset_drafts WHERE task_id::text=$1 AND organization_id::text=$2 AND draft_status='submitted' ORDER BY created_at FOR UPDATE`, taskID, organizationID)
+	rows, err := tx.Query(ctx, `SELECT id::text,operation,COALESCE(source_asset_id::text,''),asset_type,asset_value,normalized_value,COALESCE(asset_name,''),environment,network_scope,COALESCE(network_area_id::text,''),COALESCE(business_system_id::text,''),status,importance,source,COALESCE(owner_user_id::text,''),COALESCE(owner_name,''),COALESCE(notes,''),expires_at,custom_values FROM inventory_asset_drafts WHERE task_id::text=$1 AND organization_id::text=$2 AND draft_status='submitted' ORDER BY created_at FOR UPDATE`, taskID, organizationID)
 	if err != nil {
 		return fmt.Errorf("load submitted asset drafts: %w", err)
 	}
 	type draft struct {
-		id, operation, sourceID, typ, value, normalized, name, environment, scope, areaID, systemID, status, importance, ownerUserID, ownerName, notes string
-		expiresAt                                                                                                                                      *time.Time
-		customValues                                                                                                                                   []customfield.Value
+		id, operation, sourceID, typ, value, normalized, name, environment, scope, areaID, systemID, status, importance, source, ownerUserID, ownerName, notes string
+		expiresAt                                                                                                                                              *time.Time
+		customValues                                                                                                                                           []customfield.Value
 	}
 	items := make([]draft, 0)
 	for rows.Next() {
 		var item draft
 		var raw []byte
-		if err := rows.Scan(&item.id, &item.operation, &item.sourceID, &item.typ, &item.value, &item.normalized, &item.name, &item.environment, &item.scope, &item.areaID, &item.systemID, &item.status, &item.importance, &item.ownerUserID, &item.ownerName, &item.notes, &item.expiresAt, &raw); err != nil {
+		if err := rows.Scan(&item.id, &item.operation, &item.sourceID, &item.typ, &item.value, &item.normalized, &item.name, &item.environment, &item.scope, &item.areaID, &item.systemID, &item.status, &item.importance, &item.source, &item.ownerUserID, &item.ownerName, &item.notes, &item.expiresAt, &raw); err != nil {
 			rows.Close()
 			return fmt.Errorf("scan submitted asset draft: %w", err)
 		}
@@ -545,7 +545,7 @@ func publishAssetDrafts(ctx context.Context, tx pgx.Tx, principal auth.Principal
 		action, summary := "asset.create", "审核发布填报网络资产"
 		switch item.operation {
 		case "create":
-			if _, err := tx.Exec(ctx, `INSERT INTO assets (id,asset_type,asset_value,normalized_value,asset_name,environment,network_scope,network_area_id,status,importance,source,notes,expires_at,created_by,updated_by,first_seen_at,last_seen_at) VALUES ($1::uuid,$2,$3,$4,NULLIF($5,''),$6,$7,NULLIF($8,'')::uuid,$9,$10,'manual',NULLIF($11,''),$12,$13::uuid,$13::uuid,now(),now())`, item.id, item.typ, item.value, item.normalized, item.name, item.environment, item.scope, item.areaID, item.status, item.importance, item.notes, item.expiresAt, principal.UserID); err != nil {
+			if _, err := tx.Exec(ctx, `INSERT INTO assets (id,asset_type,asset_value,normalized_value,asset_name,environment,network_scope,network_area_id,status,importance,source,notes,expires_at,created_by,updated_by,first_seen_at,last_seen_at) VALUES ($1::uuid,$2,$3,$4,NULLIF($5,''),$6,$7,NULLIF($8,'')::uuid,$9,$10,$11,NULLIF($12,''),$13,$14::uuid,$14::uuid,now(),now())`, item.id, item.typ, item.value, item.normalized, item.name, item.environment, item.scope, item.areaID, item.status, item.importance, item.source, item.notes, item.expiresAt, principal.UserID); err != nil {
 				return mapDraftDatabaseError(err)
 			}
 		case "update":

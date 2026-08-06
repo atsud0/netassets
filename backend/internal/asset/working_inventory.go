@@ -61,7 +61,7 @@ func (s *Service) searchWorkingCreates(ctx context.Context, p auth.Principal, f 
  UNION ALL
  SELECT d.id::text,d.asset_type,d.asset_value,d.normalized_value,COALESCE(d.asset_name,''),o.id::text,o.organization_code,o.organization_name,
  COALESCE(wb.id::text,b.id::text,''),COALESCE(wb.system_code,b.system_code,''),COALESCE(wb.system_name,b.system_name,''),d.environment,d.network_scope,
- COALESCE(na.id::text,''),COALESCE(na.area_name,''),d.status,d.importance,'manual',COALESCE(d.owner_user_id::text,''),COALESCE(u.username,''),COALESCE(u.display_name,''),
+ COALESCE(na.id::text,''),COALESCE(na.area_name,''),d.status,d.importance,d.source,COALESCE(d.owner_user_id::text,''),COALESCE(u.username,''),COALESCE(u.display_name,''),
  COALESCE(d.owner_name,''),COALESCE(d.notes,''),d.expires_at,d.created_at,d.updated_at,
  CASE WHEN d.draft_status='submitted' THEN 'pending_review' WHEN d.draft_status='returned' THEN 'returned' WHEN d.operation='delete' THEN 'pending_offline' WHEN d.operation='update' THEN 'changed' ELSE 'unreported' END,
  true,COALESCE(d.source_asset_id::text,''),COALESCE(d.task_id::text,''),d.draft_status,d.operation,d.custom_values
@@ -106,7 +106,7 @@ func (s *Service) getWorking(ctx context.Context, p auth.Principal, id string) (
 	row := s.pool.QueryRow(ctx, assetWorkingAccessibleCTE+`
 SELECT d.id::text,d.asset_type,d.asset_value,d.normalized_value,COALESCE(d.asset_name,''),o.id::text,o.organization_code,o.organization_name,
  COALESCE(wb.id::text,b.id::text,''),COALESCE(wb.system_code,b.system_code,''),COALESCE(wb.system_name,b.system_name,''),d.environment,d.network_scope,
- COALESCE(na.id::text,''),COALESCE(na.area_name,''),d.status,d.importance,'manual',COALESCE(d.owner_user_id::text,''),COALESCE(u.username,''),COALESCE(u.display_name,''),
+ COALESCE(na.id::text,''),COALESCE(na.area_name,''),d.status,d.importance,d.source,COALESCE(d.owner_user_id::text,''),COALESCE(u.username,''),COALESCE(u.display_name,''),
  COALESCE(d.owner_name,''),COALESCE(d.notes,''),d.expires_at,d.created_at,d.updated_at,
  CASE WHEN d.draft_status='submitted' THEN 'pending_review' WHEN d.draft_status='returned' THEN 'returned' WHEN d.operation='delete' THEN 'pending_offline' WHEN d.operation='update' THEN 'changed' ELSE 'unreported' END,
  true,COALESCE(d.source_asset_id::text,''),COALESCE(d.task_id::text,''),d.draft_status,d.operation,d.custom_values
@@ -141,8 +141,15 @@ func (s *Service) validateWorkingValues(ctx context.Context, values []customfiel
 }
 
 func (s *Service) createUnreported(ctx context.Context, p auth.Principal, in CreateInput, requestID, ip string) (Asset, error) {
+	return s.createUnreportedWithSource(ctx, p, in, "manual", requestID, ip)
+}
+
+func (s *Service) createUnreportedWithSource(ctx context.Context, p auth.Principal, in CreateInput, source, requestID, ip string) (Asset, error) {
 	if !p.HasPermission("asset.manage") {
 		return Asset{}, ErrForbidden
+	}
+	if source != "manual" && source != "import" && source != "api" && source != "plugin" {
+		return Asset{}, ErrInvalid
 	}
 	normalized, e := PrepareCreateInput(&in)
 	if e != nil {
@@ -177,11 +184,11 @@ func (s *Service) createUnreported(ctx context.Context, p auth.Principal, in Cre
 		return Asset{}, ErrConflict
 	}
 	var id string
-	e = tx.QueryRow(ctx, `INSERT INTO inventory_asset_drafts(task_id,organization_id,operation,asset_type,asset_value,normalized_value,asset_name,environment,network_scope,network_area_id,business_system_id,business_system_draft_id,status,importance,owner_user_id,owner_name,notes,expires_at,custom_values,draft_status,created_by,updated_by) VALUES(NULL,$1::uuid,'create',$2,$3,$4,NULLIF($5,''),$6,$7,NULLIF($8,'')::uuid,NULLIF($9,'')::uuid,NULLIF($10,'')::uuid,$11,$12,NULLIF($13,'')::uuid,NULLIF($14,''),NULLIF($15,''),$16,$17::jsonb,'editing',$18::uuid,$18::uuid) RETURNING id::text`, in.OrganizationID, in.Type, in.Value, normalized, in.Name, in.Environment, in.NetworkScope, in.NetworkAreaID, bs, bsd, in.Status, in.Importance, in.OwnerUserID, in.OwnerName, in.Notes, in.ExpiresAt, raw, p.UserID).Scan(&id)
+	e = tx.QueryRow(ctx, `INSERT INTO inventory_asset_drafts(task_id,organization_id,operation,asset_type,asset_value,normalized_value,asset_name,environment,network_scope,network_area_id,business_system_id,business_system_draft_id,status,importance,source,owner_user_id,owner_name,notes,expires_at,custom_values,draft_status,created_by,updated_by) VALUES(NULL,$1::uuid,'create',$2,$3,$4,NULLIF($5,''),$6,$7,NULLIF($8,'')::uuid,NULLIF($9,'')::uuid,NULLIF($10,'')::uuid,$11,$12,$13,NULLIF($14,'')::uuid,NULLIF($15,''),NULLIF($16,''),$17,$18::jsonb,'editing',$19::uuid,$19::uuid) RETURNING id::text`, in.OrganizationID, in.Type, in.Value, normalized, in.Name, in.Environment, in.NetworkScope, in.NetworkAreaID, bs, bsd, in.Status, in.Importance, source, in.OwnerUserID, in.OwnerName, in.Notes, in.ExpiresAt, raw, p.UserID).Scan(&id)
 	if e != nil {
 		return Asset{}, mapUnreportedDB(e)
 	}
-	if _, e = tx.Exec(ctx, `INSERT INTO audit_logs(user_id,organization_id,action,resource_type,resource_id,summary,details,request_ip,request_id) VALUES($1::uuid,$2::uuid,'asset.working_create','asset',$3,'新增未上报网络资产',jsonb_build_object('reporting_status','unreported'),NULLIF($4,'')::inet,NULLIF($5,''))`, p.UserID, in.OrganizationID, id, ip, requestID); e != nil {
+	if _, e = tx.Exec(ctx, `INSERT INTO audit_logs(user_id,organization_id,action,resource_type,resource_id,summary,details,request_ip,request_id) VALUES($1::uuid,$2::uuid,'asset.working_create','asset',$3,'新增未上报网络资产',jsonb_build_object('reporting_status','unreported','source',$6::text),NULLIF($4,'')::inet,NULLIF($5,''))`, p.UserID, in.OrganizationID, id, ip, requestID, source); e != nil {
 		return Asset{}, e
 	}
 	if e = tx.Commit(ctx); e != nil {
@@ -256,7 +263,7 @@ func (s *Service) createWorkingUpdate(ctx context.Context, p auth.Principal, cur
 		return Asset{}, e
 	}
 	var id string
-	e = tx.QueryRow(ctx, `INSERT INTO inventory_asset_drafts(task_id,organization_id,operation,source_asset_id,asset_type,asset_value,normalized_value,asset_name,environment,network_scope,network_area_id,business_system_id,business_system_draft_id,status,importance,owner_user_id,owner_name,notes,expires_at,custom_values,draft_status,created_by,updated_by) VALUES(NULL,$1::uuid,'update',$2::uuid,$3,$4,$5,NULLIF($6,''),$7,$8,NULLIF($9,'')::uuid,NULLIF($10,'')::uuid,NULLIF($11,'')::uuid,$12,$13,NULLIF($14,'')::uuid,NULLIF($15,''),NULLIF($16,''),$17,$18::jsonb,'editing',$19::uuid,$19::uuid) RETURNING id::text`, in.OrganizationID, current.ID, in.Type, in.Value, normalized, in.Name, in.Environment, in.NetworkScope, in.NetworkAreaID, bs, bsd, in.Status, in.Importance, in.OwnerUserID, in.OwnerName, in.Notes, in.ExpiresAt, raw, p.UserID).Scan(&id)
+	e = tx.QueryRow(ctx, `INSERT INTO inventory_asset_drafts(task_id,organization_id,operation,source_asset_id,asset_type,asset_value,normalized_value,asset_name,environment,network_scope,network_area_id,business_system_id,business_system_draft_id,status,importance,source,owner_user_id,owner_name,notes,expires_at,custom_values,draft_status,created_by,updated_by) VALUES(NULL,$1::uuid,'update',$2::uuid,$3,$4,$5,NULLIF($6,''),$7,$8,NULLIF($9,'')::uuid,NULLIF($10,'')::uuid,NULLIF($11,'')::uuid,$12,$13,$14,NULLIF($15,'')::uuid,NULLIF($16,''),NULLIF($17,''),$18,$19::jsonb,'editing',$20::uuid,$20::uuid) RETURNING id::text`, in.OrganizationID, current.ID, in.Type, in.Value, normalized, in.Name, in.Environment, in.NetworkScope, in.NetworkAreaID, bs, bsd, in.Status, in.Importance, current.Source, in.OwnerUserID, in.OwnerName, in.Notes, in.ExpiresAt, raw, p.UserID).Scan(&id)
 	if e != nil {
 		return Asset{}, mapUnreportedDB(e)
 	}
@@ -326,7 +333,7 @@ func (s *Service) createWorkingDelete(ctx context.Context, p auth.Principal, cur
 		return err
 	}
 	var id string
-	err = tx.QueryRow(ctx, `INSERT INTO inventory_asset_drafts(task_id,organization_id,operation,source_asset_id,asset_type,asset_value,normalized_value,asset_name,environment,network_scope,network_area_id,business_system_id,status,importance,owner_user_id,owner_name,notes,expires_at,custom_values,draft_status,created_by,updated_by) VALUES(NULL,$1::uuid,'delete',$2::uuid,$3,$4,$5,NULLIF($6,''),$7,$8,NULLIF($9,'')::uuid,NULLIF($10,'')::uuid,$11,$12,NULLIF($13,'')::uuid,NULLIF($14,''),NULLIF($15,''),$16,$17::jsonb,'editing',$18::uuid,$18::uuid) RETURNING id::text`, current.OrganizationID, current.ID, current.Type, current.Value, current.NormalizedValue, current.Name, current.Environment, current.NetworkScope, current.NetworkAreaID, current.BusinessSystemID, current.Status, current.Importance, current.OwnerUserID, current.OwnerName, current.Notes, current.ExpiresAt, raw, p.UserID).Scan(&id)
+	err = tx.QueryRow(ctx, `INSERT INTO inventory_asset_drafts(task_id,organization_id,operation,source_asset_id,asset_type,asset_value,normalized_value,asset_name,environment,network_scope,network_area_id,business_system_id,status,importance,source,owner_user_id,owner_name,notes,expires_at,custom_values,draft_status,created_by,updated_by) VALUES(NULL,$1::uuid,'delete',$2::uuid,$3,$4,$5,NULLIF($6,''),$7,$8,NULLIF($9,'')::uuid,NULLIF($10,'')::uuid,$11,$12,$13,NULLIF($14,'')::uuid,NULLIF($15,''),NULLIF($16,''),$17,$18::jsonb,'editing',$19::uuid,$19::uuid) RETURNING id::text`, current.OrganizationID, current.ID, current.Type, current.Value, current.NormalizedValue, current.Name, current.Environment, current.NetworkScope, current.NetworkAreaID, current.BusinessSystemID, current.Status, current.Importance, current.Source, current.OwnerUserID, current.OwnerName, current.Notes, current.ExpiresAt, raw, p.UserID).Scan(&id)
 	if err != nil {
 		return mapUnreportedDB(err)
 	}

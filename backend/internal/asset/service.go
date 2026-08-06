@@ -1431,12 +1431,8 @@ func (s *Service) PreviewImport(ctx context.Context, principal auth.Principal, o
 			continue
 		}
 		if input.BusinessSystemID != "" {
-			var systemID string
-			err := s.pool.QueryRow(ctx, `
-				SELECT id::text FROM business_systems
-				WHERE lower(system_code) = lower($1) AND owner_organization_id = $2::uuid AND deleted_at IS NULL
-			`, input.BusinessSystemID, organizationID).Scan(&systemID)
-			if errors.Is(err, pgx.ErrNoRows) {
+			systemID, err := s.resolveImportBusinessSystem(ctx, organizationID, input.BusinessSystemID, usesWorkingInventory(principal))
+			if errors.Is(err, ErrNotFound) {
 				result.FailureCount++
 				result.Errors = append(result.Errors, ImportError{Row: rowNumber, Code: "system_not_found", Message: "业务系统编码不存在或不属于当前组织"})
 				continue
@@ -1488,6 +1484,8 @@ func (s *Service) PreviewImport(ctx context.Context, principal auth.Principal, o
 		if !duplicateInFile {
 			if err := s.pool.QueryRow(ctx, `SELECT EXISTS (
 				SELECT 1 FROM assets WHERE asset_type = $1 AND normalized_value = $2 AND deleted_at IS NULL
+			) OR EXISTS (
+				SELECT 1 FROM inventory_asset_drafts WHERE asset_type = $1 AND normalized_value = $2 AND draft_status IN ('editing','submitted','returned')
 			)`, input.Type, normalizedValue).Scan(&duplicateInLedger); err != nil {
 				return ImportResult{}, fmt.Errorf("check preview asset duplicate: %w", err)
 			}
@@ -1554,12 +1552,8 @@ func (s *Service) Import(ctx context.Context, principal auth.Principal, organiza
 			continue
 		}
 		if input.BusinessSystemID != "" {
-			var systemID string
-			err := s.pool.QueryRow(ctx, `
-				SELECT id::text FROM business_systems
-				WHERE lower(system_code) = lower($1) AND owner_organization_id = $2::uuid AND deleted_at IS NULL
-			`, input.BusinessSystemID, organizationID).Scan(&systemID)
-			if errors.Is(err, pgx.ErrNoRows) {
+			systemID, err := s.resolveImportBusinessSystem(ctx, organizationID, input.BusinessSystemID, usesWorkingInventory(principal))
+			if errors.Is(err, ErrNotFound) {
 				result.FailureCount++
 				result.Errors = append(result.Errors, ImportError{Row: rowNumber, Code: "system_not_found", Message: "业务系统编码不存在或不属于当前组织"})
 				continue
@@ -1597,9 +1591,8 @@ func (s *Service) Import(ctx context.Context, principal auth.Principal, organiza
 			}
 			input.OwnerUserID = ownerUserID
 		}
-		_, err := s.create(ctx, principal, input, "import", requestID, ipAddress, func(tx pgx.Tx, item Asset) error {
-			return customfield.SaveImportedValuesInTx(ctx, tx, "asset", item.ID, definitions, customValues, principal.UserID)
-		})
+		input.CustomValues = customValues
+		_, err := s.createImported(ctx, principal, input, definitions, customValues, requestID, ipAddress)
 		switch {
 		case err == nil:
 			result.SuccessCount++
@@ -1630,6 +1623,63 @@ func (s *Service) Import(ctx context.Context, principal auth.Principal, organiza
 	}
 	result.ID = importID
 	return result, nil
+}
+
+func (s *Service) createImported(ctx context.Context, principal auth.Principal, input CreateInput, definitions []customfield.Definition, customValues []customfield.Value, requestID, ipAddress string) (Asset, error) {
+	if usesWorkingInventory(principal) {
+		input.CustomValues = customValues
+		return s.createUnreportedWithSource(ctx, principal, input, "import", requestID, ipAddress)
+	}
+
+	// A headquarters import must not create a formal record that collides with
+	// an organization's active, not-yet-reported working version. Cross-table
+	// uniqueness cannot be enforced by PostgreSQL, so guard it here as well as
+	// in preview.
+	normalized, err := PrepareCreateInput(&input)
+	if err != nil {
+		return Asset{}, err
+	}
+	var workingDuplicate bool
+	if err := s.pool.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM inventory_asset_drafts WHERE asset_type=$1 AND normalized_value=$2 AND draft_status IN ('editing','submitted','returned'))`, input.Type, normalized).Scan(&workingDuplicate); err != nil {
+		return Asset{}, fmt.Errorf("check imported asset working duplicate: %w", err)
+	}
+	if workingDuplicate {
+		return Asset{}, ErrConflict
+	}
+	return s.create(ctx, principal, input, "import", requestID, ipAddress, func(tx pgx.Tx, item Asset) error {
+		return customfield.SaveImportedValuesInTx(ctx, tx, "asset", item.ID, definitions, customValues, principal.UserID)
+	})
+}
+
+func (s *Service) resolveImportBusinessSystem(ctx context.Context, organizationID, systemCode string, includeWorking bool) (string, error) {
+	systemCode = strings.TrimSpace(systemCode)
+	if includeWorking {
+		var draftID string
+		err := s.pool.QueryRow(ctx, `
+			SELECT id::text
+			FROM inventory_business_system_drafts
+			WHERE lower(system_code)=lower($1) AND organization_id=$2::uuid
+			  AND operation<>'delete' AND draft_status IN ('editing','submitted','returned')
+			ORDER BY CASE WHEN source_system_id IS NULL THEN 0 ELSE 1 END, updated_at DESC
+			LIMIT 1
+		`, systemCode, organizationID).Scan(&draftID)
+		if err == nil {
+			return draftID, nil
+		}
+		if !errors.Is(err, pgx.ErrNoRows) {
+			return "", err
+		}
+	}
+
+	var systemID string
+	err := s.pool.QueryRow(ctx, `
+		SELECT id::text FROM business_systems
+		WHERE lower(system_code)=lower($1) AND owner_organization_id=$2::uuid AND deleted_at IS NULL
+	`, systemCode, organizationID).Scan(&systemID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return "", ErrNotFound
+	}
+	return systemID, err
 }
 
 func (s *Service) saveImportResult(ctx context.Context, principal auth.Principal, organizationID string, result ImportResult, requestID, ipAddress string) (string, error) {

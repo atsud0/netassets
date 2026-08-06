@@ -595,7 +595,7 @@ async function runImport(preview = false) {
     if (preview) {
       ElMessage.success('文件预检完成，尚未写入台账')
     } else {
-      ElMessage.success('导入处理完成')
+      ElMessage.success(auth.isGroupAdmin ? `成功导入 ${response.data.result.success_count} 条网络资产到正式台账` : `成功导入 ${response.data.result.success_count} 条，已保存为未上报工作版本`)
       await refreshAfterMutation()
     }
   } catch (error) {
@@ -1004,14 +1004,14 @@ onMounted(() => {
     </el-dialog>
 
     <el-dialog v-model="importDialogVisible" title="批量导入网络资产" width="760px" destroy-on-close>
-      <el-alert title="单次最多导入 5000 行，资产类型和值在集团范围内去重；允许部分成功。请先选择所属组织再下载模板，模板会包含当前启用的集团自定义字段。网络区域按所属组织已配置的名称填写；有效期支持 YYYY-MM-DD、YYYY-MM-DD HH:mm:ss 或 RFC3339；无时区值按 UTC+8 解释，留空表示长期有效。" type="info" :closable="false" show-icon />
+      <el-alert :title="auth.isGroupAdmin ? '单次最多导入 5000 行，成功项直接进入集团正式台账；资产类型和值在集团范围内去重，允许部分成功。请先选择所属组织再下载模板，模板会包含当前启用的集团自定义字段。网络区域按所属组织已配置的名称填写；有效期支持 YYYY-MM-DD、YYYY-MM-DD HH:mm:ss 或 RFC3339。' : '单次最多导入 5000 行，成功项保存为本组织未上报工作版本，集团暂不可见；后续需在填报任务中选择并提交上报。可关联本组织尚未上报或已经发布的业务系统；资产类型和值在集团范围内去重，允许部分成功。'" type="info" :closable="false" show-icon />
       <div class="import-toolbar"><el-button link type="primary" :loading="downloading" @click="downloadTemplate('xlsx')">下载 XLSX 模板</el-button><el-button link type="primary" :loading="downloading" @click="downloadTemplate('csv')">下载 CSV 模板</el-button></div>
       <el-form label-position="top">
         <el-form-item label="导入到所属组织" required><el-select v-model="importForm.organization_id" filterable :disabled="!auth.isGroupAdmin" @change="resetImportPreview" style="width: 100%"><el-option v-for="item in enabledOrganizations" :key="item.id" :label="item.name" :value="item.id" /></el-select></el-form-item>
         <el-form-item label="CSV / XLSX 文件" required><el-upload drag :auto-upload="false" :limit="1" accept=".csv,.xlsx" :on-change="handleFileChange" :on-remove="handleFileRemove"><div class="el-upload__text">拖入文件，或<em>点击选择</em></div><template #tip><div class="el-upload__tip">文件不超过 10 MB；业务系统使用同组织内的系统编码匹配；责任人账号按所属组织内的启用用户名匹配；有效期格式错误会在预检中逐行提示。</div></template></el-upload></el-form-item>
       </el-form>
       <div v-if="importResult" class="import-result" data-testid="import-result">
-        <el-alert :title="importResultMode === 'preview' ? '预检结果：尚未写入台账，请确认后执行正式导入' : '正式导入结果'" :type="importResultMode === 'preview' ? 'info' : 'success'" :closable="false" show-icon />
+        <el-alert :title="importResultMode === 'preview' ? '预检结果：尚未写入台账，请确认后执行导入' : (auth.isGroupAdmin ? '正式台账导入结果' : '组织工作台账导入结果：成功项当前为未上报')" :type="importResultMode === 'preview' ? 'info' : 'success'" :closable="false" show-icon />
         <div class="import-result-summary"><div><span>总行数</span><strong>{{ importResult.total_count }}</strong></div><div class="success"><span>{{ importResultMode === 'preview' ? '可导入' : '成功' }}</span><strong>{{ importResult.success_count }}</strong></div><div class="duplicate"><span>重复</span><strong>{{ importResult.duplicate_count }}</strong></div><div class="failure"><span>失败</span><strong>{{ importResult.failure_count }}</strong></div></div>
         <el-table v-if="importResult.errors.length" :data="importResult.errors" max-height="220" size="small"><el-table-column prop="row" label="行号" width="75" /><el-table-column prop="message" label="处理结果" /></el-table>
       </div>
