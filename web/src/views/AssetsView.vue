@@ -6,6 +6,7 @@ import { apiClient, getAPIErrorMessage, getDownloadAPIError } from '../api/clien
 import { createExportJob } from '../api/export-jobs'
 import { useAuthStore } from '../stores/auth'
 import SavedFilterViews from '../components/SavedFilterViews.vue'
+import { assetDraftEndpoint } from '../utils/inventory-drafts'
 
 interface Organization { id: string; code: string; name: string; type: string; status: string }
 interface BusinessSystem { id: string; code: string; name: string; organization_id: string; organization_name: string }
@@ -84,6 +85,8 @@ const draftTotal = ref(0)
 const draftPage = ref(1)
 const draftPageSize = ref(20)
 const editingIsDraft = ref(false)
+const editingDraftTaskID = ref('')
+const editingDraftOrganizationID = ref('')
 const page = ref(1)
 const pageSize = ref(20)
 const total = ref(0)
@@ -348,13 +351,18 @@ function resetForm() {
 function openCreateDialog() {
   editingAssetID.value = ''
   editingIsDraft.value = false
+  editingDraftTaskID.value = ''
+  editingDraftOrganizationID.value = ''
   resetForm()
   editDialogVisible.value = true
   void loadOwnerOptions()
 }
 function openEditDialog(item: Asset) {
   editingAssetID.value = item.id
-  editingIsDraft.value = Boolean(inventoryMode.value && item.task_id === inventoryTaskID.value)
+  const draftTaskID = item.task_id || (inventoryMode.value && item.is_draft ? inventoryTaskID.value : '')
+  editingIsDraft.value = Boolean(draftTaskID)
+  editingDraftTaskID.value = draftTaskID
+  editingDraftOrganizationID.value = draftTaskID ? item.organization_id : ''
   Object.assign(form, {
     type: item.type, value: item.value, name: item.name ?? '', organization_id: item.organization_id,
     business_system_id: item.business_system_id ?? '', network_area_id: item.network_area_id ?? '', environment: item.environment, network_scope: item.network_scope,
@@ -427,15 +435,18 @@ async function submit() {
     const payload = { ...form, organization_id: inventoryMode.value ? inventoryOrganizationID.value : form.organization_id, expires_at: form.expires_at?.toISOString() ?? null, custom_values: customPayload }
     let response
     if (inventoryMode.value) {
-      const base = `/inventory-tasks/${inventoryTaskID.value}/organizations/${inventoryOrganizationID.value}/asset-drafts`
-      if (editingAssetID.value && editingIsDraft.value) response = await apiClient.patch<{ item: Asset }>(`${base}/${editingAssetID.value}`, payload)
+      const draftTaskID = editingDraftTaskID.value || inventoryTaskID.value
+      const draftOrganizationID = editingDraftOrganizationID.value || inventoryOrganizationID.value
+      if (editingAssetID.value && editingIsDraft.value) response = await apiClient.patch<{ item: Asset }>(assetDraftEndpoint(draftTaskID, draftOrganizationID, editingAssetID.value), payload)
       else response = editingAssetID.value
         ? await apiClient.patch<{ item: Asset }>(`/assets/${editingAssetID.value}`, payload)
         : await apiClient.post<{ item: Asset }>('/assets', payload)
     } else {
-      response = editingAssetID.value
-        ? await apiClient.patch<{ item: Asset }>(`/assets/${editingAssetID.value}`, payload)
-        : await apiClient.post<{ item: Asset }>('/assets', payload)
+      response = editingAssetID.value && editingIsDraft.value
+        ? await apiClient.patch<{ item: Asset }>(assetDraftEndpoint(editingDraftTaskID.value, editingDraftOrganizationID.value, editingAssetID.value), payload)
+        : editingAssetID.value
+          ? await apiClient.patch<{ item: Asset }>(`/assets/${editingAssetID.value}`, payload)
+          : await apiClient.post<{ item: Asset }>('/assets', payload)
     }
     const id = editingAssetID.value || response.data.item.id
     if (!inventoryMode.value && customFields.value.length && !response.data.item.is_working_copy) await apiClient.put(`/assets/${id}/custom-fields`, { values: customFields.value.map((field) => ({ field_key: field.field_key, value: customValues[field.field_key] })) })
@@ -580,7 +591,11 @@ async function removeAsset(item: Asset) {
     await ElMessageBox.confirm(`删除后资产将不再出现在列表中，确定删除“${item.name || item.value}”吗？`, '删除网络资产', {
       confirmButtonText: '删除', cancelButtonText: '取消', type: 'error',
     })
-    await apiClient.delete(`/assets/${item.id}`)
+    if (item.is_working_copy && item.task_id) {
+      await apiClient.delete(assetDraftEndpoint(item.task_id, item.organization_id, item.id))
+    } else {
+      await apiClient.delete(`/assets/${item.id}`)
+    }
     ElMessage.success('网络资产已删除')
     await refreshAfterMutation()
   } catch (error) {
