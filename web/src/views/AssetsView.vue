@@ -6,7 +6,7 @@ import { apiClient, getAPIErrorMessage, getDownloadAPIError } from '../api/clien
 import { createExportJob } from '../api/export-jobs'
 import { useAuthStore } from '../stores/auth'
 import SavedFilterViews from '../components/SavedFilterViews.vue'
-import { assetDraftEndpoint } from '../utils/inventory-drafts'
+import { assetDraftEndpoint, batchAssetUpdateSuccessMessage } from '../utils/inventory-drafts'
 
 interface Organization { id: string; code: string; name: string; type: string; status: string }
 interface BusinessSystem { id: string; code: string; name: string; organization_id: string; organization_name: string }
@@ -547,7 +547,7 @@ async function runBatchUpdate(payload: { status?: string; network_area_id?: stri
     }
     batchResultTitle.value = `批量${action}结果`
     batchResultVisible.value = true
-    if (response.data.result.failure_count === 0) ElMessage.success(`已成功更新 ${response.data.result.success_count} 个网络资产`)
+    if (response.data.result.failure_count === 0) ElMessage.success(batchAssetUpdateSuccessMessage(response.data.result))
     await refreshAfterMutation()
     selectedAssets.value = []
   } catch (error) {

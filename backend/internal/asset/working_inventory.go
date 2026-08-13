@@ -100,6 +100,19 @@ ORDER BY organization_code,asset_type,normalized_value LIMIT $6 OFFSET $7`, p.Us
 }
 
 func (s *Service) getWorking(ctx context.Context, p auth.Principal, id string) (Asset, error) {
+	return s.getWorkingWithPredicate(ctx, p, "d.id::text=$2", id)
+}
+
+// getWorkingBySource resolves the active organization work version for a
+// published asset. The list API normally returns the draft ID, but accepting a
+// published ID here makes batch operations idempotent when the client has a
+// stale row or submits a selection captured before the working ledger replaced
+// the published row.
+func (s *Service) getWorkingBySource(ctx context.Context, p auth.Principal, sourceAssetID string) (Asset, error) {
+	return s.getWorkingWithPredicate(ctx, p, "d.source_asset_id::text=$2", sourceAssetID)
+}
+
+func (s *Service) getWorkingWithPredicate(ctx context.Context, p auth.Principal, predicate, id string) (Asset, error) {
 	if p.HasRole("group_admin") || !p.HasPermission("asset.manage") {
 		return Asset{}, ErrNotFound
 	}
@@ -113,7 +126,7 @@ SELECT d.id::text,d.asset_type,d.asset_value,d.normalized_value,COALESCE(d.asset
 FROM inventory_asset_drafts d JOIN organizations o ON o.id=d.organization_id LEFT JOIN users u ON u.id=d.owner_user_id
 LEFT JOIN asset_network_areas na ON na.id=d.network_area_id LEFT JOIN business_systems b ON b.id=d.business_system_id AND b.deleted_at IS NULL
 LEFT JOIN inventory_business_system_drafts wb ON wb.id=d.business_system_draft_id AND wb.draft_status IN ('editing','submitted','returned')
-WHERE d.id::text=$2 AND d.organization_id IN (SELECT id FROM accessible) AND d.draft_status IN ('editing','submitted','returned')`, p.UserID, id)
+WHERE `+predicate+` AND d.organization_id IN (SELECT id FROM accessible) AND d.draft_status IN ('editing','submitted','returned')`, p.UserID, id)
 	var a Asset
 	var raw []byte
 	err := row.Scan(&a.ID, &a.Type, &a.Value, &a.NormalizedValue, &a.Name, &a.OrganizationID, &a.OrganizationCode, &a.OrganizationName, &a.BusinessSystemID, &a.BusinessSystemCode, &a.BusinessSystemName, &a.Environment, &a.NetworkScope, &a.NetworkAreaID, &a.NetworkAreaName, &a.Status, &a.Importance, &a.Source, &a.OwnerUserID, &a.OwnerUsername, &a.OwnerUserDisplayName, &a.OwnerName, &a.Notes, &a.ExpiresAt, &a.CreatedAt, &a.UpdatedAt, &a.ReportingStatus, &a.IsWorkingCopy, &a.PublishedID, &a.TaskID, &a.DraftStatus, &a.Operation, &raw)

@@ -33,6 +33,7 @@ var (
 	ErrNotFound       = errors.New("not found")
 	ErrConflict       = errors.New("conflict")
 	ErrInvalid        = errors.New("invalid input")
+	ErrTaskBound      = errors.New("asset is bound to an inventory task")
 	ErrExportTooLarge = errors.New("synchronous xlsx export too large")
 )
 

@@ -11,6 +11,7 @@ import (
 	"github.com/xuri/excelize/v2"
 
 	"netassets/internal/auth"
+	"netassets/internal/customfield"
 	"netassets/internal/exportfile"
 )
 
@@ -266,14 +267,22 @@ func TestNormalizeBatchUpdateInputRejectsMissingOrInvalidChanges(t *testing.T) {
 }
 
 func TestCreateInputFromAssetPreservesEditableFields(t *testing.T) {
+	customValues := []customfield.Value{{FieldKey: "data_level", Value: "important"}}
 	item := Asset{
 		Type: "url", Value: "https://portal.example.com", Name: "门户", OrganizationID: "org-a",
 		BusinessSystemID: "system-a", Environment: "production", NetworkScope: "public", NetworkAreaID: "area-a",
-		Status: "active", Importance: "core", OwnerUserID: "user-a", OwnerName: "张三", Notes: "备注", ExpiresAt: timePtr(time.Date(2027, 12, 31, 15, 59, 59, 0, time.UTC)),
+		Status: "active", Importance: "core", OwnerUserID: "user-a", OwnerName: "张三", Notes: "备注", ExpiresAt: timePtr(time.Date(2027, 12, 31, 15, 59, 59, 0, time.UTC)), CustomValues: customValues,
 	}
 	input := createInputFromAsset(item)
-	if input.Type != item.Type || input.Value != item.Value || input.OrganizationID != item.OrganizationID || input.NetworkAreaID != item.NetworkAreaID || input.Status != item.Status || input.OwnerUserID != item.OwnerUserID || input.Notes != item.Notes || input.ExpiresAt != item.ExpiresAt {
+	if input.Type != item.Type || input.Value != item.Value || input.OrganizationID != item.OrganizationID || input.NetworkAreaID != item.NetworkAreaID || input.Status != item.Status || input.OwnerUserID != item.OwnerUserID || input.Notes != item.Notes || input.ExpiresAt != item.ExpiresAt || len(input.CustomValues) != 1 || input.CustomValues[0].FieldKey != "data_level" {
 		t.Fatalf("unexpected input: %#v", input)
+	}
+}
+
+func TestAssetBatchErrorForTaskBoundDraft(t *testing.T) {
+	code, message := assetBatchError(ErrTaskBound)
+	if code != "task_bound" || message != "该资产已纳入填报任务，请在对应任务内处理" {
+		t.Fatalf("assetBatchError(ErrTaskBound) = %q, %q", code, message)
 	}
 }
 
