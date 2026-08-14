@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -13,6 +14,7 @@ import (
 	"netassets/internal/asset"
 	"netassets/internal/auth"
 	"netassets/internal/customfield"
+	"netassets/internal/notification"
 	"netassets/internal/pagination"
 )
 
@@ -30,6 +32,13 @@ type draftAssignment struct {
 	OrganizationName  string
 	ProgressStatus    string
 	AssetNetworkScope string
+}
+
+func assetDraftLabel(input asset.CreateInput) string {
+	if label := strings.TrimSpace(input.Name); label != "" {
+		return label
+	}
+	return strings.TrimSpace(input.Value)
 }
 
 func (s *Service) SearchAssetDrafts(ctx context.Context, principal auth.Principal, taskID, organizationID string, page pagination.Query) (pagination.Result[AssetDraft], error) {
@@ -147,6 +156,14 @@ func (s *Service) CreateAssetDraft(ctx context.Context, principal auth.Principal
 	if err := writeDraftAudit(ctx, tx, principal, organizationID, taskID, id, "inventory_asset_draft.create", "新增填报资产草稿", input.Value, requestID, ipAddress); err != nil {
 		return AssetDraft{}, err
 	}
+	if err := notification.WriteEvent(ctx, tx, notification.EventInput{
+		EventType: notification.EventAssetWorkingVersionCreated, Category: notification.CategoryWorkingVersion,
+		TargetOrganizationID: organizationID, ActorUserID: principal.UserID, RequiredPermission: "asset.manage",
+		ResourceType: "asset", ResourceID: id, ResourceLabel: assetDraftLabel(input), BatchKey: requestID,
+		Details: map[string]any{"operation": "create", "task_id": taskID},
+	}); err != nil {
+		return AssetDraft{}, err
+	}
 	item, err := loadAssetDraft(ctx, tx, id)
 	if err != nil {
 		return AssetDraft{}, err
@@ -252,6 +269,14 @@ func (s *Service) createAssetChangeDraft(ctx context.Context, principal auth.Pri
 	if err := writeDraftAudit(ctx, tx, principal, organizationID, taskID, id, "inventory_asset_draft."+operation, summary, current.Value, requestID, ipAddress); err != nil {
 		return AssetDraft{}, err
 	}
+	if err := notification.WriteEvent(ctx, tx, notification.EventInput{
+		EventType: notification.EventAssetWorkingVersionCreated, Category: notification.CategoryWorkingVersion,
+		TargetOrganizationID: organizationID, ActorUserID: principal.UserID, RequiredPermission: "asset.manage",
+		ResourceType: "asset", ResourceID: id, ResourceLabel: assetDraftLabel(current), BatchKey: requestID,
+		Details: map[string]any{"operation": operation, "task_id": taskID, "published_id": sourceAssetID},
+	}); err != nil {
+		return AssetDraft{}, err
+	}
 	item, err := loadAssetDraft(ctx, tx, id)
 	if err != nil {
 		return AssetDraft{}, err
@@ -337,18 +362,34 @@ func (s *Service) DeleteAssetDraft(ctx context.Context, principal auth.Principal
 	if _, err := s.loadDraftAssignment(ctx, tx, principal, taskID, organizationID, true, "network_assets"); err != nil {
 		return err
 	}
-	result, err := tx.Exec(ctx, `UPDATE inventory_asset_drafts SET task_id=NULL,selected_at=NULL,updated_by=$4::uuid,updated_at=now() WHERE id::text=$1 AND task_id::text=$2 AND organization_id::text=$3 AND selected_at IS NOT NULL AND draft_status IN ('editing','returned')`, draftID, taskID, organizationID, principal.UserID)
-	if err == nil && result.RowsAffected() == 0 {
-		result, err = tx.Exec(ctx, `DELETE FROM inventory_asset_drafts WHERE id::text=$1 AND task_id::text=$2 AND organization_id::text=$3 AND draft_status IN ('editing','returned')`, draftID, taskID, organizationID)
-	}
-	if err != nil {
-		return fmt.Errorf("delete inventory asset draft: %w", err)
-	}
-	if result.RowsAffected() == 0 {
-		return ErrState
+	var label string
+	unselected := false
+	err = tx.QueryRow(ctx, `UPDATE inventory_asset_drafts SET task_id=NULL,selected_at=NULL,updated_by=$4::uuid,updated_at=now() WHERE id::text=$1 AND task_id::text=$2 AND organization_id::text=$3 AND selected_at IS NOT NULL AND draft_status IN ('editing','returned') RETURNING COALESCE(NULLIF(asset_name,''),asset_value)`, draftID, taskID, organizationID, principal.UserID).Scan(&label)
+	if err == nil {
+		unselected = true
+	} else if errors.Is(err, pgx.ErrNoRows) {
+		result, deleteErr := tx.Exec(ctx, `DELETE FROM inventory_asset_drafts WHERE id::text=$1 AND task_id::text=$2 AND organization_id::text=$3 AND draft_status IN ('editing','returned')`, draftID, taskID, organizationID)
+		if deleteErr != nil {
+			return fmt.Errorf("delete inventory asset draft: %w", deleteErr)
+		}
+		if result.RowsAffected() == 0 {
+			return ErrState
+		}
+	} else {
+		return fmt.Errorf("unselect inventory asset draft: %w", err)
 	}
 	if err := writeDraftAudit(ctx, tx, principal, organizationID, taskID, draftID, "inventory_asset_draft.delete", "删除填报资产草稿", "", requestID, ipAddress); err != nil {
 		return err
+	}
+	if unselected {
+		if err := notification.WriteEvent(ctx, tx, notification.EventInput{
+			EventType: notification.EventAssetWorkingVersionUnselected, Category: notification.CategoryWorkingVersion,
+			TargetOrganizationID: organizationID, ActorUserID: principal.UserID, RequiredPermission: "asset.manage",
+			ResourceType: "asset", ResourceID: draftID, ResourceLabel: label, BatchKey: requestID,
+			Details: map[string]any{"task_id": taskID},
+		}); err != nil {
+			return err
+		}
 	}
 	return tx.Commit(ctx)
 }

@@ -166,6 +166,13 @@ func TestLedgerEventNotificationScopeAndAggregation(t *testing.T) {
 		}
 	}
 	if err := WriteEvent(ctx, pool, EventInput{
+		EventType: EventAssetWorkingVersionCreated, Category: CategoryWorkingVersion,
+		TargetOrganizationID: organizationID, ActorUserID: actorID, RequiredPermission: "asset.manage",
+		ResourceType: "asset", ResourceID: "dddddddd-dddd-dddd-dddd-dddddddddddd", ResourceLabel: "未上报资产", BatchKey: "working-version-private-1",
+	}); err != nil {
+		t.Fatalf("write private working-version event: %v", err)
+	}
+	if err := WriteEvent(ctx, pool, EventInput{
 		EventType: EventAssetDeleted, Category: CategoryAssetChange,
 		TargetOrganizationID: childID, ActorUserID: actorID, RequiredPermission: "asset.manage",
 		ResourceType: "asset", ResourceID: "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb", ResourceLabel: "办事处资产", BatchKey: "ledger-child-1", Level: "danger",
@@ -245,5 +252,22 @@ func TestLedgerEventNotificationScopeAndAggregation(t *testing.T) {
 	}
 	if groupResult.Total != 3 {
 		t.Fatalf("group administrator notifications = %d, want organization and targeted events", groupResult.Total)
+	}
+	workingResult, _, err := service.Search(ctx, recipient, SearchInput{Category: CategoryWorkingVersion, Page: page})
+	if err != nil {
+		t.Fatalf("Search(recipient working versions) error = %v", err)
+	}
+	if workingResult.Total != 1 || len(workingResult.Items) != 1 {
+		t.Fatalf("recipient working-version notifications = total %d items %d, want 1", workingResult.Total, len(workingResult.Items))
+	}
+	if !strings.Contains(workingResult.Items[0].Message, "尚未上报集团") {
+		t.Fatalf("working-version message = %q, want unreported explanation", workingResult.Items[0].Message)
+	}
+	groupWorkingResult, _, err := service.Search(ctx, groupAdmin, SearchInput{Category: CategoryWorkingVersion, Page: page})
+	if err != nil {
+		t.Fatalf("Search(group admin working versions) error = %v", err)
+	}
+	if groupWorkingResult.Total != 0 {
+		t.Fatalf("group administrator working-version notifications = %d, want private events hidden", groupWorkingResult.Total)
 	}
 }

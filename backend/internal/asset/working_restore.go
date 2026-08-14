@@ -6,6 +6,7 @@ import (
 
 	"netassets/internal/access"
 	"netassets/internal/auth"
+	"netassets/internal/notification"
 )
 
 // RestorePublishedVersion creates or replaces the organization-side daily
@@ -101,6 +102,14 @@ func (s *Service) restoreWorking(ctx context.Context, principal auth.Principal, 
 	`, principal.UserID, input.OrganizationID, current.ID, current.PublishedID, ipAddress, requestID); err != nil {
 		return Asset{}, err
 	}
+	if err = notification.WriteEvent(ctx, tx, notification.EventInput{
+		EventType: notification.EventAssetWorkingVersionRestored, Category: notification.CategoryWorkingVersion,
+		TargetOrganizationID: input.OrganizationID, ActorUserID: principal.UserID, RequiredPermission: "asset.manage",
+		ResourceType: "asset", ResourceID: current.ID, ResourceLabel: workingAssetLabel(input), BatchKey: requestID,
+		Details: map[string]any{"published_id": current.PublishedID},
+	}); err != nil {
+		return Asset{}, err
+	}
 	if err = tx.Commit(ctx); err != nil {
 		return Asset{}, err
 	}
@@ -158,6 +167,14 @@ func (s *Service) createRestoredWorking(ctx context.Context, principal auth.Prin
 		       '以历史版本恢复网络资产工作版本',
 		       jsonb_build_object('published_id',$4::text),NULLIF($5,'')::inet,NULLIF($6,''))
 	`, principal.UserID, input.OrganizationID, id, current.ID, ipAddress, requestID); err != nil {
+		return Asset{}, err
+	}
+	if err = notification.WriteEvent(ctx, tx, notification.EventInput{
+		EventType: notification.EventAssetWorkingVersionRestored, Category: notification.CategoryWorkingVersion,
+		TargetOrganizationID: input.OrganizationID, ActorUserID: principal.UserID, RequiredPermission: "asset.manage",
+		ResourceType: "asset", ResourceID: id, ResourceLabel: workingAssetLabel(input), BatchKey: requestID,
+		Details: map[string]any{"published_id": current.ID},
+	}); err != nil {
 		return Asset{}, err
 	}
 	if err = tx.Commit(ctx); err != nil {

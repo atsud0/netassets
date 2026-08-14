@@ -12,6 +12,7 @@ import (
 	"netassets/internal/access"
 	"netassets/internal/auth"
 	"netassets/internal/customfield"
+	"netassets/internal/notification"
 	"netassets/internal/pagination"
 )
 
@@ -204,6 +205,14 @@ func (s *Service) createUnreportedWithSource(ctx context.Context, p auth.Princip
 	if _, e = tx.Exec(ctx, `INSERT INTO audit_logs(user_id,organization_id,action,resource_type,resource_id,summary,details,request_ip,request_id) VALUES($1::uuid,$2::uuid,'asset.working_create','asset',$3,'新增未上报网络资产',jsonb_build_object('reporting_status','unreported','source',$6::text),NULLIF($4,'')::inet,NULLIF($5,''))`, p.UserID, in.OrganizationID, id, ip, requestID, source); e != nil {
 		return Asset{}, e
 	}
+	if e = notification.WriteEvent(ctx, tx, notification.EventInput{
+		EventType: notification.EventAssetWorkingVersionCreated, Category: notification.CategoryWorkingVersion,
+		TargetOrganizationID: in.OrganizationID, ActorUserID: p.UserID, RequiredPermission: "asset.manage",
+		ResourceType: "asset", ResourceID: id, ResourceLabel: workingAssetLabel(in), BatchKey: requestID,
+		Details: map[string]any{"operation": "create", "source": source},
+	}); e != nil {
+		return Asset{}, e
+	}
 	if e = tx.Commit(ctx); e != nil {
 		return Asset{}, e
 	}
@@ -283,6 +292,14 @@ func (s *Service) createWorkingUpdate(ctx context.Context, p auth.Principal, cur
 	if _, e = tx.Exec(ctx, `INSERT INTO audit_logs(user_id,organization_id,action,resource_type,resource_id,summary,details,request_ip,request_id) VALUES($1::uuid,$2::uuid,'asset.working_change','asset',$3,'创建网络资产待上报变更',jsonb_build_object('published_id',$4::text),NULLIF($5,'')::inet,NULLIF($6,''))`, p.UserID, in.OrganizationID, id, current.ID, ip, requestID); e != nil {
 		return Asset{}, e
 	}
+	if e = notification.WriteEvent(ctx, tx, notification.EventInput{
+		EventType: notification.EventAssetWorkingVersionCreated, Category: notification.CategoryWorkingVersion,
+		TargetOrganizationID: in.OrganizationID, ActorUserID: p.UserID, RequiredPermission: "asset.manage",
+		ResourceType: "asset", ResourceID: id, ResourceLabel: workingAssetLabel(in), BatchKey: requestID,
+		Details: map[string]any{"operation": "update", "published_id": current.ID},
+	}); e != nil {
+		return Asset{}, e
+	}
 	if e = tx.Commit(ctx); e != nil {
 		return Asset{}, e
 	}
@@ -353,7 +370,22 @@ func (s *Service) createWorkingDelete(ctx context.Context, p auth.Principal, cur
 	if _, err = tx.Exec(ctx, `INSERT INTO audit_logs(user_id,organization_id,action,resource_type,resource_id,summary,details,request_ip,request_id) VALUES($1::uuid,$2::uuid,'asset.working_delete','asset',$3,'创建网络资产下线申请',jsonb_build_object('published_id',$4::text),NULLIF($5,'')::inet,NULLIF($6,''))`, p.UserID, current.OrganizationID, id, current.ID, ip, requestID); err != nil {
 		return err
 	}
+	if err = notification.WriteEvent(ctx, tx, notification.EventInput{
+		EventType: notification.EventAssetWorkingVersionCreated, Category: notification.CategoryWorkingVersion,
+		TargetOrganizationID: current.OrganizationID, ActorUserID: p.UserID, RequiredPermission: "asset.manage",
+		ResourceType: "asset", ResourceID: id, ResourceLabel: workingAssetLabel(CreateInput{Name: current.Name, Value: current.Value}), BatchKey: requestID,
+		Details: map[string]any{"operation": "delete", "published_id": current.ID},
+	}); err != nil {
+		return err
+	}
 	return tx.Commit(ctx)
+}
+
+func workingAssetLabel(input CreateInput) string {
+	if label := strings.TrimSpace(input.Name); label != "" {
+		return label
+	}
+	return strings.TrimSpace(input.Value)
 }
 
 func validateUnreportedReferences(ctx context.Context, q interface {

@@ -12,6 +12,7 @@ import (
 	"netassets/internal/access"
 	"netassets/internal/auth"
 	"netassets/internal/customfield"
+	"netassets/internal/notification"
 	"netassets/internal/pagination"
 )
 
@@ -171,6 +172,14 @@ func (s *Service) createUnreported(ctx context.Context, p auth.Principal, in Cre
 	if _, err = tx.Exec(ctx, `INSERT INTO audit_logs(user_id,organization_id,action,resource_type,resource_id,summary,details,request_ip,request_id) VALUES($1::uuid,$2::uuid,'business_system.working_create','business_system',$3,'新增未上报业务系统',jsonb_build_object('reporting_status','unreported'),NULLIF($4,'')::inet,NULLIF($5,''))`, p.UserID, in.OrganizationID, id, ip, requestID); err != nil {
 		return BusinessSystem{}, err
 	}
+	if err = notification.WriteEvent(ctx, tx, notification.EventInput{
+		EventType: notification.EventBusinessSystemWorkingVersionCreated, Category: notification.CategoryWorkingVersion,
+		TargetOrganizationID: in.OrganizationID, ActorUserID: p.UserID, RequiredPermission: "system.manage",
+		ResourceType: "business_system", ResourceID: id, ResourceLabel: workingBusinessSystemLabel(in), BatchKey: requestID,
+		Details: map[string]any{"operation": "create"},
+	}); err != nil {
+		return BusinessSystem{}, err
+	}
 	if err = tx.Commit(ctx); err != nil {
 		return BusinessSystem{}, err
 	}
@@ -216,10 +225,26 @@ func (s *Service) createWorkingUpdate(ctx context.Context, p auth.Principal, cur
 	if err != nil {
 		return BusinessSystem{}, err
 	}
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return BusinessSystem{}, err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
 	var id string
-	err = s.pool.QueryRow(ctx, `INSERT INTO inventory_business_system_drafts(task_id,organization_id,operation,source_system_id,system_code,system_name,short_name,owner_name,owner_contact,system_status,system_level,deployment_type,internet_exposure,description,contains_personal_information,contains_sensitive_personal_information,personal_information_record_count,data_volume_over_100k,contains_important_data,contains_core_data,data_storage_location,security_notes,custom_values,draft_status,created_by,updated_by) VALUES(NULL,$1::uuid,'update',$2::uuid,$3,$4,NULLIF($5,''),NULLIF($6,''),NULLIF($7,''),$8,$9,NULLIF($10,''),$11,NULLIF($12,''),$13,$14,$15,$16,$17,$18,NULLIF($19,''),NULLIF($20,''),$21::jsonb,'editing',$22::uuid,$22::uuid) RETURNING id::text`, in.OrganizationID, current.ID, in.Code, in.Name, in.ShortName, in.OwnerName, in.OwnerContact, in.Status, in.Level, in.DeploymentType, in.InternetExposure, in.Description, in.ContainsPersonalInformation, in.ContainsSensitivePersonalInformation, in.PersonalInformationRecordCount, in.DataVolumeOver100K, in.ContainsImportantData, in.ContainsCoreData, in.DataStorageLocation, in.SecurityNotes, raw, p.UserID).Scan(&id)
+	err = tx.QueryRow(ctx, `INSERT INTO inventory_business_system_drafts(task_id,organization_id,operation,source_system_id,system_code,system_name,short_name,owner_name,owner_contact,system_status,system_level,deployment_type,internet_exposure,description,contains_personal_information,contains_sensitive_personal_information,personal_information_record_count,data_volume_over_100k,contains_important_data,contains_core_data,data_storage_location,security_notes,custom_values,draft_status,created_by,updated_by) VALUES(NULL,$1::uuid,'update',$2::uuid,$3,$4,NULLIF($5,''),NULLIF($6,''),NULLIF($7,''),$8,$9,NULLIF($10,''),$11,NULLIF($12,''),$13,$14,$15,$16,$17,$18,NULLIF($19,''),NULLIF($20,''),$21::jsonb,'editing',$22::uuid,$22::uuid) RETURNING id::text`, in.OrganizationID, current.ID, in.Code, in.Name, in.ShortName, in.OwnerName, in.OwnerContact, in.Status, in.Level, in.DeploymentType, in.InternetExposure, in.Description, in.ContainsPersonalInformation, in.ContainsSensitivePersonalInformation, in.PersonalInformationRecordCount, in.DataVolumeOver100K, in.ContainsImportantData, in.ContainsCoreData, in.DataStorageLocation, in.SecurityNotes, raw, p.UserID).Scan(&id)
 	if err != nil {
 		return BusinessSystem{}, mapWorkingDB(err)
+	}
+	if err = notification.WriteEvent(ctx, tx, notification.EventInput{
+		EventType: notification.EventBusinessSystemWorkingVersionCreated, Category: notification.CategoryWorkingVersion,
+		TargetOrganizationID: in.OrganizationID, ActorUserID: p.UserID, RequiredPermission: "system.manage",
+		ResourceType: "business_system", ResourceID: id, ResourceLabel: workingBusinessSystemLabel(in), BatchKey: requestID,
+		Details: map[string]any{"operation": "update", "published_id": current.ID},
+	}); err != nil {
+		return BusinessSystem{}, err
+	}
+	if err = tx.Commit(ctx); err != nil {
+		return BusinessSystem{}, err
 	}
 	return s.getWorking(ctx, p, id)
 }
@@ -294,10 +319,26 @@ func (s *Service) createWorkingDelete(ctx context.Context, p auth.Principal, cur
 	if err != nil {
 		return err
 	}
-	if _, err = tx.Exec(ctx, `INSERT INTO inventory_business_system_drafts(task_id,organization_id,operation,source_system_id,system_code,system_name,short_name,owner_name,owner_contact,system_status,system_level,deployment_type,internet_exposure,description,contains_personal_information,contains_sensitive_personal_information,personal_information_record_count,data_volume_over_100k,contains_important_data,contains_core_data,data_storage_location,security_notes,custom_values,draft_status,created_by,updated_by) VALUES(NULL,$1::uuid,'delete',$2::uuid,$3,$4,NULLIF($5,''),NULLIF($6,''),NULLIF($7,''),$8,$9,NULLIF($10,''),$11,NULLIF($12,''),$13,$14,$15,$16,$17,$18,NULLIF($19,''),NULLIF($20,''),$21::jsonb,'editing',$22::uuid,$22::uuid)`, current.OrganizationID, current.ID, current.Code, current.Name, current.ShortName, current.OwnerName, current.OwnerContact, current.Status, current.Level, current.DeploymentType, current.InternetExposure, current.Description, current.ContainsPersonalInformation, current.ContainsSensitivePersonalInformation, current.PersonalInformationRecordCount, current.DataVolumeOver100K, current.ContainsImportantData, current.ContainsCoreData, current.DataStorageLocation, current.SecurityNotes, raw, p.UserID); err != nil {
+	var id string
+	if err = tx.QueryRow(ctx, `INSERT INTO inventory_business_system_drafts(task_id,organization_id,operation,source_system_id,system_code,system_name,short_name,owner_name,owner_contact,system_status,system_level,deployment_type,internet_exposure,description,contains_personal_information,contains_sensitive_personal_information,personal_information_record_count,data_volume_over_100k,contains_important_data,contains_core_data,data_storage_location,security_notes,custom_values,draft_status,created_by,updated_by) VALUES(NULL,$1::uuid,'delete',$2::uuid,$3,$4,NULLIF($5,''),NULLIF($6,''),NULLIF($7,''),$8,$9,NULLIF($10,''),$11,NULLIF($12,''),$13,$14,$15,$16,$17,$18,NULLIF($19,''),NULLIF($20,''),$21::jsonb,'editing',$22::uuid,$22::uuid) RETURNING id::text`, current.OrganizationID, current.ID, current.Code, current.Name, current.ShortName, current.OwnerName, current.OwnerContact, current.Status, current.Level, current.DeploymentType, current.InternetExposure, current.Description, current.ContainsPersonalInformation, current.ContainsSensitivePersonalInformation, current.PersonalInformationRecordCount, current.DataVolumeOver100K, current.ContainsImportantData, current.ContainsCoreData, current.DataStorageLocation, current.SecurityNotes, raw, p.UserID).Scan(&id); err != nil {
 		return mapWorkingDB(err)
 	}
+	if err = notification.WriteEvent(ctx, tx, notification.EventInput{
+		EventType: notification.EventBusinessSystemWorkingVersionCreated, Category: notification.CategoryWorkingVersion,
+		TargetOrganizationID: current.OrganizationID, ActorUserID: p.UserID, RequiredPermission: "system.manage",
+		ResourceType: "business_system", ResourceID: id, ResourceLabel: strings.TrimSpace(current.Name),
+		Details: map[string]any{"operation": "delete", "published_id": current.ID},
+	}); err != nil {
+		return err
+	}
 	return tx.Commit(ctx)
+}
+
+func workingBusinessSystemLabel(input CreateInput) string {
+	if label := strings.TrimSpace(input.Name); label != "" {
+		return label
+	}
+	return strings.TrimSpace(input.Code)
 }
 func mapWorkingDB(err error) error {
 	var pe *pgconn.PgError

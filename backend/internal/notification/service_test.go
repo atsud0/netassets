@@ -1,6 +1,7 @@
 package notification
 
 import (
+	"strings"
 	"testing"
 
 	"netassets/internal/auth"
@@ -12,7 +13,7 @@ func TestValidateCategory(t *testing.T) {
 		"risk_review", "quality_review", "quality_received", "quality_returned", "quality_exemption",
 		CategoryAssetChange, CategoryBusinessSystemChange, CategoryFindingReceived,
 		CategoryInventoryTaskReview, CategoryInventoryTaskReceived, CategoryInventoryTaskReturned,
-		CategoryInventoryTaskDueSoon, CategoryInventoryTaskOverdue,
+		CategoryInventoryTaskDueSoon, CategoryInventoryTaskOverdue, CategoryWorkingVersion,
 	} {
 		if !ValidateCategory(category) {
 			t.Fatalf("ValidateCategory(%q) = false", category)
@@ -21,6 +22,18 @@ func TestValidateCategory(t *testing.T) {
 	for _, category := range []string{"unknown", "risk", "work_order"} {
 		if ValidateCategory(category) {
 			t.Fatalf("ValidateCategory(%q) = true", category)
+		}
+	}
+}
+
+func TestWorkingVersionNotificationsExcludeGroupAdministrators(t *testing.T) {
+	for _, fragment := range []string{
+		"ne.category <> 'working_version' OR NOT $2::boolean",
+		"WHEN 'working_version.published' THEN '工作版本已发布'",
+		"WHEN ne.event_type='working_version.published' THEN '/inventory-tasks?task_id='",
+	} {
+		if !strings.Contains(notificationCandidatesCTE, fragment) {
+			t.Fatalf("notification candidate SQL does not contain %q", fragment)
 		}
 	}
 }

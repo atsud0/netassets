@@ -19,6 +19,7 @@ const (
 	CategoryInventoryTaskReturned = "inventory_task_returned"
 	CategoryInventoryTaskDueSoon  = "inventory_task_due_soon"
 	CategoryInventoryTaskOverdue  = "inventory_task_overdue"
+	CategoryWorkingVersion        = "working_version"
 
 	EventAssetStatusChanged      = "asset.status_changed"
 	EventAssetNetworkAreaChanged = "asset.network_area_changed"
@@ -32,6 +33,14 @@ const (
 
 	EventFindingCreatedOnAsset  = "security_finding.created_on_asset"
 	EventFindingCreatedOnSystem = "security_finding.created_on_system"
+
+	EventAssetWorkingVersionCreated             = "working_version.asset_created"
+	EventBusinessSystemWorkingVersionCreated    = "working_version.business_system_created"
+	EventAssetWorkingVersionRestored            = "working_version.asset_restored"
+	EventBusinessSystemWorkingVersionRestored   = "working_version.business_system_restored"
+	EventAssetWorkingVersionUnselected          = "working_version.asset_unselected"
+	EventBusinessSystemWorkingVersionUnselected = "working_version.business_system_unselected"
+	EventWorkingVersionsPublished               = "working_version.published"
 )
 
 type eventExecer interface {

@@ -159,6 +159,13 @@ WHERE child.status='enabled' AND child.deleted_at IS NULL
 			WHEN 'business_system.deleted' THEN CASE WHEN ne.item_count>1 THEN '业务系统已批量删除' ELSE '业务系统已删除' END
 			WHEN 'security_finding.created_on_asset' THEN CASE WHEN ne.item_count>1 THEN '网络资产新增多项安全发现' ELSE '网络资产新增安全发现' END
 			WHEN 'security_finding.created_on_system' THEN CASE WHEN ne.item_count>1 THEN '业务系统新增多项安全发现' ELSE '业务系统新增安全发现' END
+			WHEN 'working_version.asset_created' THEN CASE WHEN ne.item_count>1 THEN '新增多项网络资产工作版本' ELSE '新增网络资产工作版本' END
+			WHEN 'working_version.business_system_created' THEN CASE WHEN ne.item_count>1 THEN '新增多个业务系统工作版本' ELSE '新增业务系统工作版本' END
+			WHEN 'working_version.asset_restored' THEN '网络资产历史版本已恢复'
+			WHEN 'working_version.business_system_restored' THEN '业务系统历史版本已恢复'
+			WHEN 'working_version.asset_unselected' THEN '网络资产已取消纳入填报'
+			WHEN 'working_version.business_system_unselected' THEN '业务系统已取消纳入填报'
+			WHEN 'working_version.published' THEN '工作版本已发布'
 			ELSE '台账发生变更'
 		END::text AS title,
 		CASE ne.event_type
@@ -192,6 +199,17 @@ WHERE child.status='enabled' AND child.deleted_at IS NULL
 			WHEN 'security_finding.created_on_system' THEN CASE WHEN ne.item_count>1
 				THEN format('%s 已在本组织业务系统上登记 %s 项安全发现，请及时查看和跟进。', COALESCE(NULLIF(actor.display_name,''),actor.username,'安全运营人员'),ne.item_count)
 				ELSE format('%s 已在本组织业务系统上登记安全发现 %s，请及时查看和跟进。', COALESCE(NULLIF(actor.display_name,''),actor.username,'安全运营人员'),ne.resource_label) END
+			WHEN 'working_version.asset_created' THEN CASE WHEN ne.item_count>1
+				THEN format('%s 已新增本组织 %s 项网络资产工作版本，当前尚未上报集团。', COALESCE(NULLIF(actor.display_name,''),actor.username,'组织用户'),ne.item_count)
+				ELSE format('%s 已新增网络资产工作版本“%s”，当前尚未上报集团。', COALESCE(NULLIF(actor.display_name,''),actor.username,'组织用户'),ne.resource_label) END
+			WHEN 'working_version.business_system_created' THEN CASE WHEN ne.item_count>1
+				THEN format('%s 已新增本组织 %s 个业务系统工作版本，当前尚未上报集团。', COALESCE(NULLIF(actor.display_name,''),actor.username,'组织用户'),ne.item_count)
+				ELSE format('%s 已新增业务系统工作版本“%s”，当前尚未上报集团。', COALESCE(NULLIF(actor.display_name,''),actor.username,'组织用户'),ne.resource_label) END
+			WHEN 'working_version.asset_restored' THEN format('%s 已将网络资产“%s”的历史版本恢复为未上报工作版本。', COALESCE(NULLIF(actor.display_name,''),actor.username,'组织用户'),ne.resource_label)
+			WHEN 'working_version.business_system_restored' THEN format('%s 已将业务系统“%s”的历史版本恢复为未上报工作版本。', COALESCE(NULLIF(actor.display_name,''),actor.username,'组织用户'),ne.resource_label)
+			WHEN 'working_version.asset_unselected' THEN format('%s 已将网络资产“%s”从当前填报任务取消纳入，资源已回到未上报工作区。', COALESCE(NULLIF(actor.display_name,''),actor.username,'组织用户'),ne.resource_label)
+			WHEN 'working_version.business_system_unselected' THEN format('%s 已将业务系统“%s”从当前填报任务取消纳入，资源已回到未上报工作区。', COALESCE(NULLIF(actor.display_name,''),actor.username,'组织用户'),ne.resource_label)
+			WHEN 'working_version.published' THEN format('填报任务《%s》中 %s 个工作版本已通过审核并发布到集团正式台账。',ne.resource_label,COALESCE(NULLIF(ne.details->>'item_count',''),'0'))
 			ELSE '本组织台账发生变更，请及时查看。'
 		END::text AS message,
 		ne.level::text AS level,
@@ -203,6 +221,9 @@ WHERE child.status='enabled' AND child.deleted_at IS NULL
 			WHEN ne.event_type='business_system.deleted' THEN '/recycle-bin?resource_type=business_system&organization_id=' || ne.target_organization_id::text
 			WHEN ne.event_type LIKE 'business_system.%' THEN '/business-systems?organization_id=' || ne.target_organization_id::text || CASE WHEN ne.resource_id IS NOT NULL THEN '&system_id=' || ne.resource_id ELSE '' END
 			WHEN ne.event_type LIKE 'security_finding.%' THEN '/security-work-orders?tab=findings&organization_id=' || ne.target_organization_id::text || CASE WHEN ne.resource_id IS NOT NULL THEN '&finding_id=' || ne.resource_id ELSE '' END
+			WHEN ne.event_type IN ('working_version.asset_created','working_version.asset_restored','working_version.asset_unselected') THEN '/assets?organization_id=' || ne.target_organization_id::text || CASE WHEN ne.resource_id IS NOT NULL THEN '&asset_id=' || ne.resource_id ELSE '' END
+			WHEN ne.event_type IN ('working_version.business_system_created','working_version.business_system_restored','working_version.business_system_unselected') THEN '/business-systems?organization_id=' || ne.target_organization_id::text || CASE WHEN ne.resource_id IS NOT NULL THEN '&system_id=' || ne.resource_id ELSE '' END
+			WHEN ne.event_type='working_version.published' THEN '/inventory-tasks?task_id=' || COALESCE(ne.resource_id,'') || '&organization_id=' || ne.target_organization_id::text
 			ELSE ''
 		END::text AS action_path,
 		ne.updated_at AS occurred_at,
@@ -210,6 +231,7 @@ WHERE child.status='enabled' AND child.deleted_at IS NULL
 		FROM notification_events ne
 		LEFT JOIN users actor ON actor.id=ne.actor_user_id
 		WHERE ne.actor_user_id IS DISTINCT FROM $1::uuid
+		  AND (ne.category <> 'working_version' OR NOT $2::boolean)
 		  AND (
 			$2::boolean
 			OR ne.target_user_id=$1::uuid
@@ -702,7 +724,7 @@ func ValidateCategory(category string) bool {
 		return true
 	}
 	switch strings.TrimSpace(category) {
-	case "export_job", "work_order_review", "work_order_received", "work_order_returned", "work_order_overdue", "work_order_due_soon", "risk_review", "quality_review", "quality_received", "quality_returned", "quality_exemption", CategoryAssetChange, CategoryBusinessSystemChange, CategoryFindingReceived, CategoryInventoryTaskReview, CategoryInventoryTaskReceived, CategoryInventoryTaskReturned, CategoryInventoryTaskDueSoon, CategoryInventoryTaskOverdue:
+	case "export_job", "work_order_review", "work_order_received", "work_order_returned", "work_order_overdue", "work_order_due_soon", "risk_review", "quality_review", "quality_received", "quality_returned", "quality_exemption", CategoryAssetChange, CategoryBusinessSystemChange, CategoryFindingReceived, CategoryInventoryTaskReview, CategoryInventoryTaskReceived, CategoryInventoryTaskReturned, CategoryInventoryTaskDueSoon, CategoryInventoryTaskOverdue, CategoryWorkingVersion:
 		return true
 	default:
 		return false

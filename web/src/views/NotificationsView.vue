@@ -31,6 +31,7 @@ const categoryOptions = [
   { value: 'inventory_task_returned', label: '填报退回' },
   { value: 'inventory_task_due_soon', label: '填报临期' },
   { value: 'inventory_task_overdue', label: '填报逾期' },
+  { value: 'working_version', label: '工作版本' },
   { value: 'work_order_review', label: '待集团复测' },
   { value: 'work_order_received', label: '新工单' },
   { value: 'work_order_returned', label: '退回整改' },

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
@@ -12,6 +13,7 @@ import (
 	"netassets/internal/auth"
 	"netassets/internal/businesssystem"
 	"netassets/internal/customfield"
+	"netassets/internal/notification"
 	"netassets/internal/pagination"
 )
 
@@ -28,6 +30,13 @@ type BusinessSystemDraft struct {
 	Operation      string              `json:"operation"`
 	IsDraft        bool                `json:"is_draft"`
 	CustomValues   []customfield.Value `json:"custom_values"`
+}
+
+func businessSystemDraftLabel(input businesssystem.CreateInput) string {
+	if label := strings.TrimSpace(input.Name); label != "" {
+		return label
+	}
+	return strings.TrimSpace(input.Code)
 }
 
 func (s *Service) SearchBusinessSystemDrafts(ctx context.Context, principal auth.Principal, taskID, organizationID string, page pagination.Query) (pagination.Result[BusinessSystemDraft], error) {
@@ -113,6 +122,14 @@ func (s *Service) CreateBusinessSystemDraft(ctx context.Context, principal auth.
 		return BusinessSystemDraft{}, mapBusinessSystemDraftDatabaseError(err)
 	}
 	if err := writeBusinessSystemDraftAudit(ctx, tx, principal, organizationID, taskID, id, "inventory.business_system_draft.create", "新增填报业务系统草稿", input.Code, requestID, ipAddress); err != nil {
+		return BusinessSystemDraft{}, err
+	}
+	if err := notification.WriteEvent(ctx, tx, notification.EventInput{
+		EventType: notification.EventBusinessSystemWorkingVersionCreated, Category: notification.CategoryWorkingVersion,
+		TargetOrganizationID: organizationID, ActorUserID: principal.UserID, RequiredPermission: "system.manage",
+		ResourceType: "business_system", ResourceID: id, ResourceLabel: businessSystemDraftLabel(input.CreateInput), BatchKey: requestID,
+		Details: map[string]any{"operation": "create", "task_id": taskID},
+	}); err != nil {
 		return BusinessSystemDraft{}, err
 	}
 	if err := tx.Commit(ctx); err != nil {
@@ -236,6 +253,14 @@ func (s *Service) createBusinessSystemChangeDraft(ctx context.Context, principal
 	if err := writeBusinessSystemDraftAudit(ctx, tx, principal, organizationID, taskID, id, "inventory.business_system_draft."+operation, summary, current.Code, requestID, ipAddress); err != nil {
 		return BusinessSystemDraft{}, err
 	}
+	if err := notification.WriteEvent(ctx, tx, notification.EventInput{
+		EventType: notification.EventBusinessSystemWorkingVersionCreated, Category: notification.CategoryWorkingVersion,
+		TargetOrganizationID: organizationID, ActorUserID: principal.UserID, RequiredPermission: "system.manage",
+		ResourceType: "business_system", ResourceID: id, ResourceLabel: businessSystemDraftLabel(current.CreateInput), BatchKey: requestID,
+		Details: map[string]any{"operation": operation, "task_id": taskID, "published_id": sourceSystemID},
+	}); err != nil {
+		return BusinessSystemDraft{}, err
+	}
 	item, err := loadBusinessSystemDraft(ctx, tx, id)
 	if err != nil {
 		return BusinessSystemDraft{}, err
@@ -312,8 +337,9 @@ func (s *Service) DeleteBusinessSystemDraft(ctx context.Context, principal auth.
 	if _, err := s.loadDraftAssignment(ctx, tx, principal, taskID, organizationID, true, "business_systems"); err != nil {
 		return err
 	}
-	var code string
-	if err := tx.QueryRow(ctx, `UPDATE inventory_business_system_drafts SET task_id=NULL,selected_at=NULL,updated_by=$4::uuid,updated_at=now() WHERE id::text=$1 AND task_id::text=$2 AND organization_id::text=$3 AND selected_at IS NOT NULL AND draft_status IN ('editing','returned') RETURNING system_code`, draftID, taskID, organizationID, principal.UserID).Scan(&code); errors.Is(err, pgx.ErrNoRows) {
+	var code, label string
+	unselected := false
+	if err := tx.QueryRow(ctx, `UPDATE inventory_business_system_drafts SET task_id=NULL,selected_at=NULL,updated_by=$4::uuid,updated_at=now() WHERE id::text=$1 AND task_id::text=$2 AND organization_id::text=$3 AND selected_at IS NOT NULL AND draft_status IN ('editing','returned') RETURNING system_code,system_name`, draftID, taskID, organizationID, principal.UserID).Scan(&code, &label); errors.Is(err, pgx.ErrNoRows) {
 		err = tx.QueryRow(ctx, `UPDATE inventory_business_system_drafts SET draft_status='discarded',updated_by=$4::uuid,updated_at=now() WHERE id::text=$1 AND task_id::text=$2 AND organization_id::text=$3 AND draft_status IN ('editing','returned') RETURNING system_code`, draftID, taskID, organizationID, principal.UserID).Scan(&code)
 		if errors.Is(err, pgx.ErrNoRows) {
 			return ErrNotFound
@@ -322,12 +348,22 @@ func (s *Service) DeleteBusinessSystemDraft(ctx context.Context, principal auth.
 			return fmt.Errorf("discard inventory business system draft: %w", err)
 		}
 	} else if err != nil {
-		return ErrNotFound
-	} else if err != nil {
-		return fmt.Errorf("discard inventory business system draft: %w", err)
+		return fmt.Errorf("unselect inventory business system draft: %w", err)
+	} else {
+		unselected = true
 	}
 	if err := writeBusinessSystemDraftAudit(ctx, tx, principal, organizationID, taskID, draftID, "inventory.business_system_draft.delete", "删除填报业务系统草稿", code, requestID, ipAddress); err != nil {
 		return err
+	}
+	if unselected {
+		if err := notification.WriteEvent(ctx, tx, notification.EventInput{
+			EventType: notification.EventBusinessSystemWorkingVersionUnselected, Category: notification.CategoryWorkingVersion,
+			TargetOrganizationID: organizationID, ActorUserID: principal.UserID, RequiredPermission: "system.manage",
+			ResourceType: "business_system", ResourceID: draftID, ResourceLabel: label, BatchKey: requestID,
+			Details: map[string]any{"task_id": taskID},
+		}); err != nil {
+			return err
+		}
 	}
 	return tx.Commit(ctx)
 }

@@ -16,6 +16,7 @@ import (
 	"netassets/internal/auth"
 	"netassets/internal/dataquality"
 	"netassets/internal/exportfile"
+	"netassets/internal/notification"
 	"netassets/internal/pagination"
 )
 
@@ -976,6 +977,10 @@ func (s *Service) Submit(ctx context.Context, principal auth.Principal, taskID, 
 		return OrganizationProgress{}, err
 	}
 	if item.Status == "approved" {
+		publication, err := loadWorkingVersionPublication(ctx, tx, taskID, organizationID)
+		if err != nil {
+			return OrganizationProgress{}, err
+		}
 		if err := updateSubmissionReviewStatus(ctx, tx, snapshot.ID, "approved", "", ""); err != nil {
 			return OrganizationProgress{}, err
 		}
@@ -983,6 +988,9 @@ func (s *Service) Submit(ctx context.Context, principal auth.Principal, taskID, 
 			return OrganizationProgress{}, err
 		}
 		if err := publishAssetDrafts(ctx, tx, principal, taskID, organizationID, requestID, ipAddress); err != nil {
+			return OrganizationProgress{}, err
+		}
+		if err := writeWorkingVersionPublication(ctx, tx, principal, organizationID, taskID, snapshot.ID, publication); err != nil {
 			return OrganizationProgress{}, err
 		}
 	}
@@ -1014,7 +1022,12 @@ func (s *Service) Review(ctx context.Context, principal auth.Principal, taskID, 
 	if err := insertReviewComments(ctx, tx, principal, taskID, organizationID, input.Comments); err != nil {
 		return OrganizationProgress{}, err
 	}
+	var publication workingVersionPublication
 	if input.Decision == "approved" {
+		publication, err = loadWorkingVersionPublication(ctx, tx, taskID, organizationID)
+		if err != nil {
+			return OrganizationProgress{}, err
+		}
 		if err := publishBusinessSystemDrafts(ctx, tx, principal, taskID, organizationID, requestID, ipAddress); err != nil {
 			return OrganizationProgress{}, err
 		}
@@ -1053,6 +1066,11 @@ func (s *Service) Review(ctx context.Context, principal auth.Principal, taskID, 
 	}
 	if err := updateSubmissionReviewStatus(ctx, tx, latestSubmissionID, input.Decision, principal.UserID, input.ReturnReason); err != nil {
 		return OrganizationProgress{}, err
+	}
+	if input.Decision == "approved" {
+		if err := writeWorkingVersionPublication(ctx, tx, principal, organizationID, taskID, latestSubmissionID, publication); err != nil {
+			return OrganizationProgress{}, err
+		}
 	}
 	if input.Decision == "returned" {
 		if _, err := tx.Exec(ctx, `UPDATE inventory_business_system_drafts SET draft_status='returned',updated_by=$3::uuid,updated_at=now() WHERE task_id::text=$1 AND organization_id::text=$2 AND draft_status='submitted'`, taskID, organizationID, principal.UserID); err != nil {
@@ -1338,6 +1356,44 @@ func completeIfApproved(ctx context.Context, tx pgx.Tx, taskID string) error {
 		return fmt.Errorf("complete inventory task: %w", err)
 	}
 	return nil
+}
+
+type workingVersionPublication struct {
+	TaskName    string
+	SystemCount int64
+	AssetCount  int64
+}
+
+func (item workingVersionPublication) total() int64 { return item.SystemCount + item.AssetCount }
+
+func loadWorkingVersionPublication(ctx context.Context, tx pgx.Tx, taskID, organizationID string) (workingVersionPublication, error) {
+	var item workingVersionPublication
+	err := tx.QueryRow(ctx, `
+		SELECT t.task_name,
+		       (SELECT count(*) FROM inventory_business_system_drafts d WHERE d.task_id=t.id AND d.organization_id=$2::uuid AND d.draft_status='submitted'),
+		       (SELECT count(*) FROM inventory_asset_drafts d WHERE d.task_id=t.id AND d.organization_id=$2::uuid AND d.draft_status='submitted')
+		FROM inventory_tasks t
+		WHERE t.id::text=$1
+	`, taskID, organizationID).Scan(&item.TaskName, &item.SystemCount, &item.AssetCount)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return workingVersionPublication{}, ErrNotFound
+	}
+	if err != nil {
+		return workingVersionPublication{}, fmt.Errorf("load working version publication: %w", err)
+	}
+	return item, nil
+}
+
+func writeWorkingVersionPublication(ctx context.Context, tx pgx.Tx, principal auth.Principal, organizationID, taskID, batchKey string, item workingVersionPublication) error {
+	if item.total() == 0 {
+		return nil
+	}
+	return notification.WriteEvent(ctx, tx, notification.EventInput{
+		EventType: notification.EventWorkingVersionsPublished, Category: notification.CategoryWorkingVersion,
+		TargetOrganizationID: organizationID, ActorUserID: principal.UserID, RequiredPermission: "inventory.manage",
+		ResourceType: "inventory_task", ResourceID: taskID, ResourceLabel: item.TaskName, BatchKey: batchKey,
+		Details: map[string]any{"item_count": item.total(), "system_count": item.SystemCount, "asset_count": item.AssetCount},
+	})
 }
 
 func writeAudit(ctx context.Context, tx pgx.Tx, principal auth.Principal, organizationID, action, resourceID, summary, note, status, reason string, targetCount int, assetNetworkScope, requestID, ipAddress string) error {
