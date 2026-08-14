@@ -30,7 +30,7 @@ interface ChangeHistoryItem {
 }
 interface ListResponse<T> { items: T[]; total: number; page: number; page_size: number }
 interface ImportError { row: number; code: string; message: string }
-interface ImportResult { id: string; file_name: string; file_type: string; status: string; total_count: number; success_count: number; failure_count: number; duplicate_count: number; errors: ImportError[] }
+interface ImportResult { id: string; file_name: string; file_type: string; import_mode: 'skip_duplicates' | 'update_working'; status: string; total_count: number; success_count: number; created_count: number; updated_count: number; failure_count: number; duplicate_count: number; errors: ImportError[] }
 interface ImportHistory extends ImportResult { organization_id: string; organization_code: string; organization_name: string; created_by_name?: string; created_at: string }
 interface DetailResponse { item: BusinessSystem }
 interface BatchOperationItem { id: string; success: boolean; code?: string; message: string; item?: BusinessSystem; resource_name?: string }
@@ -109,7 +109,7 @@ const importHistory = ref<ImportHistory[]>([])
 const importPage = ref(1)
 const importPageSize = ref(20)
 const importTotal = ref(0)
-const importForm = reactive({ organization_id: '' })
+const importForm = reactive<{ organization_id: string; import_mode: 'skip_duplicates' | 'update_working' }>({ organization_id: '', import_mode: 'skip_duplicates' })
 const selectedSystems = ref<BusinessSystem[]>([])
 const batchLoading = ref(false)
 const batchResultVisible = ref(false)
@@ -500,6 +500,7 @@ function resetImportPreview() {
 }
 function openImportDialog() {
   importForm.organization_id = auth.user?.organization?.id ?? eligibleOrganizations.value[0]?.id ?? ''
+  importForm.import_mode = 'skip_duplicates'
   importFile.value = undefined
   resetImportPreview()
   importDialogVisible.value = true
@@ -522,6 +523,7 @@ async function runImport(preview = false) {
   try {
     const data = new FormData()
     data.append('organization_id', importForm.organization_id)
+    data.append('import_mode', importForm.import_mode)
     data.append('file', importFile.value)
     const endpoint = preview ? '/business-systems/import/preview' : '/business-systems/import'
     const response = await apiClient.post<{ result: ImportResult }>(endpoint, data, { headers: { 'Content-Type': 'multipart/form-data' }, timeout: 60_000 })
@@ -530,7 +532,9 @@ async function runImport(preview = false) {
     if (preview) {
       ElMessage.success('文件预检完成，尚未写入台账')
     } else {
-      ElMessage.success(auth.isGroupAdmin ? `成功导入 ${response.data.result.success_count} 个业务系统到正式台账` : `成功导入 ${response.data.result.success_count} 个，已保存为未上报工作版本`)
+      ElMessage.success(auth.isGroupAdmin
+        ? `成功导入 ${response.data.result.success_count} 个业务系统到正式台账`
+        : `已新增 ${response.data.result.created_count} 个、更新 ${response.data.result.updated_count} 个未上报工作版本`)
       await refreshAfterMutation()
     }
   } catch (error) { ElMessage.error(getAPIErrorMessage(error, preview ? '导入文件预检失败' : '批量导入业务系统失败')) }
@@ -809,18 +813,25 @@ onMounted(load)
       <div class="import-toolbar"><el-button link type="primary" :loading="downloading" @click="downloadTemplate('xlsx')">下载 XLSX 模板</el-button><el-button link type="primary" :loading="downloading" @click="downloadTemplate('csv')">下载 CSV 模板</el-button></div>
       <el-form label-position="top">
         <el-form-item label="导入到所属组织" required><el-select v-model="importForm.organization_id" filterable :disabled="!auth.isGroupAdmin" @change="resetImportPreview" style="width: 100%"><el-option v-for="item in eligibleOrganizations" :key="item.id" :label="item.name" :value="item.id" /></el-select></el-form-item>
+        <el-form-item v-if="!auth.isGroupAdmin" label="重复记录处理方式">
+          <div class="import-mode-field">
+            <el-radio-group v-model="importForm.import_mode" @change="resetImportPreview"><el-radio value="skip_duplicates">重复记录跳过（默认）</el-radio><el-radio value="update_working">覆盖为未上报工作版本</el-radio></el-radio-group>
+            <p class="muted-text">覆盖模式不会直接修改集团正式台账：已上报系统会生成更新工作版本，已有可编辑工作版本会被文件内容更新；已纳入任务、已提交或待下线版本不可覆盖，导入后仍需通过填报任务提交上报。</p>
+          </div>
+        </el-form-item>
         <el-form-item label="CSV / XLSX 文件" required><el-upload drag :auto-upload="false" :limit="1" accept=".csv,.xlsx" :on-change="handleImportFileChange" :on-remove="handleImportFileRemove"><el-icon><UploadFilled /></el-icon><div class="el-upload__text">拖入文件，或<em>点击选择</em></div><template #tip><div class="el-upload__tip">文件不超过 10 MB，单次最多 5000 行；允许部分成功。</div></template></el-upload></el-form-item>
       </el-form>
       <div v-if="importResult" class="import-result" data-testid="business-system-import-result">
         <el-alert :title="importResultMode === 'preview' ? '预检结果：尚未写入台账，请确认后执行导入' : (auth.isGroupAdmin ? '正式台账导入结果' : '组织工作台账导入结果：成功项当前为未上报')" :type="importResultMode === 'preview' ? 'info' : 'success'" :closable="false" show-icon />
         <div class="import-result-summary"><div><span>总行数</span><strong>{{ importResult.total_count }}</strong></div><div class="success"><span>{{ importResultMode === 'preview' ? '可导入' : '成功' }}</span><strong>{{ importResult.success_count }}</strong></div><div class="duplicate"><span>重复</span><strong>{{ importResult.duplicate_count }}</strong></div><div class="failure"><span>失败</span><strong>{{ importResult.failure_count }}</strong></div></div>
+        <p class="muted-text import-result-breakdown">成功项：新增 {{ importResult.created_count }} 个，更新 {{ importResult.updated_count }} 个。</p>
         <el-table v-if="importResult.errors.length" :data="importResult.errors" size="small" max-height="220"><el-table-column prop="row" label="行号" width="70" /><el-table-column prop="code" label="错误代码" width="150" /><el-table-column prop="message" label="处理说明" min-width="260" /></el-table>
       </div>
       <template #footer><el-button @click="importDialogVisible=false">关闭</el-button><el-button :loading="importLoading" @click="runImport(true)">预检文件</el-button><el-button type="primary" :loading="importLoading" :disabled="importResultMode !== 'preview' || !importResult?.success_count" @click="runImport(false)">确认导入</el-button></template>
     </el-dialog>
 
     <el-dialog v-model="historyDialogVisible" title="业务系统导入记录" width="980px">
-      <el-table v-loading="historyLoading" :data="importHistory" size="small" empty-text="暂无导入记录" max-height="520"><el-table-column prop="created_at" label="时间" width="175" /><el-table-column prop="organization_name" label="所属组织" min-width="150" /><el-table-column prop="file_name" label="文件名" min-width="190" /><el-table-column label="结果" width="230"><template #default="scope">总数 {{ scope.row.total_count }} · 成功 {{ scope.row.success_count }} · 重复 {{ scope.row.duplicate_count }} · 失败 {{ scope.row.failure_count }}</template></el-table-column><el-table-column prop="created_by_name" label="操作人" width="110" /></el-table>
+      <el-table v-loading="historyLoading" :data="importHistory" size="small" empty-text="暂无导入记录" max-height="520"><el-table-column prop="created_at" label="时间" width="175" /><el-table-column prop="organization_name" label="所属组织" min-width="150" /><el-table-column prop="file_name" label="文件名" min-width="190" /><el-table-column label="模式" width="130"><template #default="scope">{{ scope.row.import_mode === 'update_working' ? '覆盖为工作版本' : '重复跳过' }}</template></el-table-column><el-table-column label="结果" min-width="280"><template #default="scope">总数 {{ scope.row.total_count }} · 成功 {{ scope.row.success_count }}（新增 {{ scope.row.created_count }} / 更新 {{ scope.row.updated_count }}）· 重复 {{ scope.row.duplicate_count }} · 失败 {{ scope.row.failure_count }}</template></el-table-column><el-table-column prop="created_by_name" label="操作人" width="110" /></el-table>
       <div class="table-pagination dialog-pagination">
         <el-pagination background layout="total, sizes, prev, pager, next" :total="importTotal" :current-page="importPage" :page-size="importPageSize" :page-sizes="[20, 50, 100]" @current-change="handleImportPageChange" @size-change="handleImportPageSizeChange" />
       </div>

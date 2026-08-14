@@ -105,9 +105,12 @@ type ImportResult struct {
 	ID             string        `json:"id"`
 	FileName       string        `json:"file_name"`
 	FileType       string        `json:"file_type"`
+	ImportMode     string        `json:"import_mode"`
 	Status         string        `json:"status"`
 	TotalCount     int           `json:"total_count"`
 	SuccessCount   int           `json:"success_count"`
+	CreatedCount   int           `json:"created_count"`
+	UpdatedCount   int           `json:"updated_count"`
 	FailureCount   int           `json:"failure_count"`
 	DuplicateCount int           `json:"duplicate_count"`
 	Errors         []ImportError `json:"errors"`
@@ -123,6 +126,11 @@ type ImportHistory struct {
 }
 
 const MaxImportRows = 5000
+
+const (
+	ImportModeSkipDuplicates = "skip_duplicates"
+	ImportModeUpdateWorking  = "update_working"
+)
 
 // SearchFilter describes the supported ledger filters. Page is always bounded
 // by the common pagination contract.
@@ -1223,8 +1231,57 @@ func customFieldTemplateHint(definition customfield.Definition) string {
 	return definition.Description
 }
 
+type importUpdateTarget struct{ ID, Kind, DraftStatus, TaskID, Operation string }
+
+func normalizeImportMode(principal auth.Principal, mode string) (string, error) {
+	mode = strings.TrimSpace(mode)
+	if mode == "" {
+		mode = ImportModeSkipDuplicates
+	}
+	if mode != ImportModeSkipDuplicates && mode != ImportModeUpdateWorking {
+		return "", ErrInvalid
+	}
+	if mode == ImportModeUpdateWorking && !usesWorkingInventory(principal) {
+		return "", ErrInvalid
+	}
+	return mode, nil
+}
+
+func (s *Service) findImportUpdateTarget(ctx context.Context, organizationID, code string) (importUpdateTarget, bool, error) {
+	var target importUpdateTarget
+	err := s.pool.QueryRow(ctx, `SELECT id::text,'draft',draft_status,COALESCE(task_id::text,''),operation FROM inventory_business_system_drafts WHERE organization_id=$1::uuid AND system_code=$2 AND draft_status IN('editing','submitted','returned') ORDER BY updated_at DESC LIMIT 1`, organizationID, code).Scan(&target.ID, &target.Kind, &target.DraftStatus, &target.TaskID, &target.Operation)
+	if err == nil {
+		return target, true, nil
+	}
+	if !errors.Is(err, pgx.ErrNoRows) {
+		return target, false, err
+	}
+	var formalID string
+	err = s.pool.QueryRow(ctx, `SELECT id::text FROM business_systems WHERE owner_organization_id=$1::uuid AND system_code=$2 AND deleted_at IS NULL LIMIT 1`, organizationID, code).Scan(&formalID)
+	if err == nil {
+		err = s.pool.QueryRow(ctx, `SELECT id::text,'draft',draft_status,COALESCE(task_id::text,''),operation FROM inventory_business_system_drafts WHERE source_system_id=$1::uuid AND draft_status IN('editing','submitted','returned') ORDER BY updated_at DESC LIMIT 1`, formalID).Scan(&target.ID, &target.Kind, &target.DraftStatus, &target.TaskID, &target.Operation)
+		if err == nil {
+			return target, true, nil
+		}
+		if !errors.Is(err, pgx.ErrNoRows) {
+			return target, false, err
+		}
+		return importUpdateTarget{ID: formalID, Kind: "formal"}, true, nil
+	}
+	if !errors.Is(err, pgx.ErrNoRows) {
+		return target, false, err
+	}
+	var duplicate bool
+	err = s.pool.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM business_systems WHERE system_code=$1 AND deleted_at IS NULL) OR EXISTS(SELECT 1 FROM inventory_business_system_drafts WHERE system_code=$1 AND draft_status IN('editing','submitted','returned'))`, code).Scan(&duplicate)
+	return target, duplicate, err
+}
+
+func importTargetMutable(target importUpdateTarget) bool {
+	return target.Kind != "draft" || (target.TaskID == "" && target.DraftStatus != "submitted" && target.Operation != "delete")
+}
+
 // PreviewImport validates a business-system import without writing ledger rows, import history, or audit records.
-func (s *Service) PreviewImport(ctx context.Context, principal auth.Principal, organizationID, fileName string, reader io.Reader) (ImportResult, error) {
+func (s *Service) PreviewImport(ctx context.Context, principal auth.Principal, organizationID, fileName string, reader io.Reader, rawMode string) (ImportResult, error) {
 	if !principal.HasPermission("system.manage") {
 		return ImportResult{}, ErrForbidden
 	}
@@ -1235,6 +1292,10 @@ func (s *Service) PreviewImport(ctx context.Context, principal auth.Principal, o
 	}
 	if !allowed {
 		return ImportResult{}, ErrForbidden
+	}
+	mode, err := normalizeImportMode(principal, rawMode)
+	if err != nil {
+		return ImportResult{}, err
 	}
 	rows, fileType, err := readImportRows(fileName, reader)
 	if err != nil || len(rows) < 2 || len(rows)-1 > MaxImportRows {
@@ -1249,7 +1310,7 @@ func (s *Service) PreviewImport(ctx context.Context, principal auth.Principal, o
 	if err != nil {
 		return ImportResult{}, err
 	}
-	result := ImportResult{FileName: filepath.Base(fileName), FileType: fileType, Errors: make([]ImportError, 0), TotalCount: len(rows) - 1}
+	result := ImportResult{FileName: filepath.Base(fileName), FileType: fileType, ImportMode: mode, Errors: make([]ImportError, 0), TotalCount: len(rows) - 1}
 	seen := make(map[string]struct{}, result.TotalCount)
 	for index, row := range rows[1:] {
 		rowNumber := index + 2
@@ -1266,8 +1327,38 @@ func (s *Service) PreviewImport(ctx context.Context, principal auth.Principal, o
 		}
 		key := input.Code
 		_, duplicateInFile := seen[key]
+		if duplicateInFile {
+			result.DuplicateCount++
+			result.Errors = append(result.Errors, ImportError{Row: rowNumber, Code: "duplicate_in_file", Message: "文件内系统编码重复"})
+			continue
+		}
+		seen[key] = struct{}{}
+		if mode == ImportModeUpdateWorking {
+			target, duplicate, err := s.findImportUpdateTarget(ctx, organizationID, input.Code)
+			if err != nil {
+				return ImportResult{}, fmt.Errorf("resolve preview business system import target: %w", err)
+			}
+			if target.ID != "" {
+				if !importTargetMutable(target) {
+					result.FailureCount++
+					result.Errors = append(result.Errors, ImportError{Row: rowNumber, Code: "working_version_locked", Message: "已有工作版本已纳入任务或提交审核，暂不能覆盖"})
+					continue
+				}
+				result.SuccessCount++
+				result.UpdatedCount++
+				continue
+			}
+			if duplicate {
+				result.DuplicateCount++
+				result.Errors = append(result.Errors, ImportError{Row: rowNumber, Code: "duplicate", Message: "系统编码已被其他组织使用，不能覆盖"})
+				continue
+			}
+			result.SuccessCount++
+			result.CreatedCount++
+			continue
+		}
 		var duplicateInLedger bool
-		if !duplicateInFile {
+		{
 			if err := s.pool.QueryRow(ctx, `SELECT EXISTS (
 				SELECT 1 FROM business_systems WHERE system_code = $1 AND deleted_at IS NULL
 			) OR EXISTS (
@@ -1276,13 +1367,13 @@ func (s *Service) PreviewImport(ctx context.Context, principal auth.Principal, o
 				return ImportResult{}, fmt.Errorf("check preview business system duplicate: %w", err)
 			}
 		}
-		if duplicateInFile || duplicateInLedger {
+		if duplicateInLedger {
 			result.DuplicateCount++
 			result.Errors = append(result.Errors, ImportError{Row: rowNumber, Code: "duplicate", Message: "系统编码已存在，未覆盖原记录"})
 			continue
 		}
-		seen[key] = struct{}{}
 		result.SuccessCount++
+		result.CreatedCount++
 	}
 	result.Status = "ready"
 	if result.SuccessCount == 0 {
@@ -1293,7 +1384,7 @@ func (s *Service) PreviewImport(ctx context.Context, principal auth.Principal, o
 	return result, nil
 }
 
-func (s *Service) Import(ctx context.Context, principal auth.Principal, organizationID, fileName string, reader io.Reader, requestID, ipAddress string) (ImportResult, error) {
+func (s *Service) Import(ctx context.Context, principal auth.Principal, organizationID, fileName string, reader io.Reader, rawMode, requestID, ipAddress string) (ImportResult, error) {
 	if !principal.HasPermission("system.manage") {
 		return ImportResult{}, ErrForbidden
 	}
@@ -1304,6 +1395,10 @@ func (s *Service) Import(ctx context.Context, principal auth.Principal, organiza
 	}
 	if !allowed {
 		return ImportResult{}, ErrForbidden
+	}
+	mode, err := normalizeImportMode(principal, rawMode)
+	if err != nil {
+		return ImportResult{}, err
 	}
 	rows, fileType, err := readImportRows(fileName, reader)
 	if err != nil || len(rows) < 2 || len(rows)-1 > MaxImportRows {
@@ -1318,7 +1413,8 @@ func (s *Service) Import(ctx context.Context, principal auth.Principal, organiza
 	if err != nil {
 		return ImportResult{}, err
 	}
-	result := ImportResult{FileName: filepath.Base(fileName), FileType: fileType, Errors: make([]ImportError, 0), TotalCount: len(rows) - 1}
+	result := ImportResult{FileName: filepath.Base(fileName), FileType: fileType, ImportMode: mode, Errors: make([]ImportError, 0), TotalCount: len(rows) - 1}
+	seen := make(map[string]struct{}, result.TotalCount)
 	for index, row := range rows[1:] {
 		rowNumber := index + 2
 		input, rowErr := importInput(row, headers, organizationID)
@@ -1334,10 +1430,49 @@ func (s *Service) Import(ctx context.Context, principal auth.Principal, organiza
 			continue
 		}
 		input.CustomValues = customValues
-		_, err := s.createImported(ctx, principal, input, definitions, customValues, requestID, ipAddress)
+		if err := PrepareCreateInput(&input); err != nil {
+			result.FailureCount++
+			result.Errors = append(result.Errors, ImportError{Row: rowNumber, Code: "invalid", Message: "业务系统字段格式不正确"})
+			continue
+		}
+		if _, exists := seen[input.Code]; exists {
+			result.DuplicateCount++
+			result.Errors = append(result.Errors, ImportError{Row: rowNumber, Code: "duplicate_in_file", Message: "文件内系统编码重复"})
+			continue
+		}
+		seen[input.Code] = struct{}{}
+		var operation string
+		if mode == ImportModeUpdateWorking {
+			target, duplicate, targetErr := s.findImportUpdateTarget(ctx, organizationID, input.Code)
+			if targetErr != nil {
+				return ImportResult{}, targetErr
+			}
+			if target.ID != "" && !importTargetMutable(target) {
+				result.FailureCount++
+				result.Errors = append(result.Errors, ImportError{Row: rowNumber, Code: "working_version_locked", Message: "已有工作版本已纳入任务或提交审核，暂不能覆盖"})
+				continue
+			}
+			if target.ID != "" {
+				_, err = s.Update(ctx, principal, target.ID, input, requestID, ipAddress)
+				operation = "update"
+			} else if duplicate {
+				err = ErrConflict
+			} else {
+				_, err = s.createImported(ctx, principal, input, definitions, customValues, requestID, ipAddress)
+				operation = "create"
+			}
+		} else {
+			_, err = s.createImported(ctx, principal, input, definitions, customValues, requestID, ipAddress)
+			operation = "create"
+		}
 		switch {
 		case err == nil:
 			result.SuccessCount++
+			if operation == "update" {
+				result.UpdatedCount++
+			} else {
+				result.CreatedCount++
+			}
 		case errors.Is(err, ErrConflict):
 			result.DuplicateCount++
 			result.Errors = append(result.Errors, ImportError{Row: rowNumber, Code: "duplicate", Message: "系统编码已存在，未覆盖原记录"})
@@ -1400,16 +1535,18 @@ func (s *Service) saveImportResult(ctx context.Context, principal auth.Principal
 	defer func() { _ = tx.Rollback(ctx) }()
 	var importID string
 	if err := tx.QueryRow(ctx, `
-		INSERT INTO business_system_imports (organization_id, file_name, file_type, status, total_count, success_count, failure_count, duplicate_count, errors, created_by)
-		VALUES ($1::uuid, $2, $3, $4, $5, $6, $7, $8, $9::jsonb, $10::uuid) RETURNING id::text
-	`, organizationID, result.FileName, result.FileType, result.Status, result.TotalCount, result.SuccessCount, result.FailureCount, result.DuplicateCount, string(errorsJSON), principal.UserID).Scan(&importID); err != nil {
+		INSERT INTO business_system_imports (organization_id, file_name, file_type, import_mode, status, total_count, success_count, created_count, updated_count, failure_count, duplicate_count, errors, created_by)
+		VALUES ($1::uuid, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12::jsonb, $13::uuid) RETURNING id::text
+	`, organizationID, result.FileName, result.FileType, result.ImportMode, result.Status, result.TotalCount, result.SuccessCount, result.CreatedCount, result.UpdatedCount, result.FailureCount, result.DuplicateCount, string(errorsJSON), principal.UserID).Scan(&importID); err != nil {
 		return "", fmt.Errorf("save business system import result: %w", err)
 	}
 	if _, err := tx.Exec(ctx, `
 		INSERT INTO audit_logs (user_id, organization_id, action, resource_type, resource_id, summary, details, request_ip, request_id)
 		VALUES ($1::uuid, $2::uuid, 'business_system.import', 'business_system_import', $3, '批量导入业务系统',
-		        jsonb_build_object('file_name', $4::text, 'total', $5::int, 'success', $6::int, 'failure', $7::int, 'duplicate', $8::int), NULLIF($9, '')::inet, NULLIF($10, ''))
-	`, principal.UserID, organizationID, importID, result.FileName, result.TotalCount, result.SuccessCount, result.FailureCount, result.DuplicateCount, ipAddress, requestID); err != nil {
+		        jsonb_build_object('file_name', $4::text, 'import_mode', $5::text, 'total', $6::int,
+		                           'success', $7::int, 'created', $8::int, 'updated', $9::int,
+		                           'failure', $10::int, 'duplicate', $11::int), NULLIF($12, '')::inet, NULLIF($13, ''))
+	`, principal.UserID, organizationID, importID, result.FileName, result.ImportMode, result.TotalCount, result.SuccessCount, result.CreatedCount, result.UpdatedCount, result.FailureCount, result.DuplicateCount, ipAddress, requestID); err != nil {
 		return "", fmt.Errorf("write business system import audit: %w", err)
 	}
 	if err := tx.Commit(ctx); err != nil {
@@ -1441,7 +1578,7 @@ func (s *Service) SearchImports(ctx context.Context, principal auth.Principal, p
 			WHERE ur.user_id=$1::uuid AND ur.organization_id IS NOT NULL AND ur.data_scope IN ('organization','organization_and_descendants')
 			UNION SELECT id FROM descendants
 		)
-		SELECT i.id::text,i.file_name,i.file_type,i.status,i.total_count,i.success_count,i.failure_count,i.duplicate_count,i.errors::text,
+		SELECT i.id::text,i.file_name,i.file_type,i.import_mode,i.status,i.total_count,i.success_count,i.created_count,i.updated_count,i.failure_count,i.duplicate_count,i.errors::text,
 		       o.id::text,o.organization_code,o.organization_name,COALESCE(u.display_name,''),i.created_at,count(*) OVER ()
 		FROM business_system_imports i JOIN organizations o ON o.id=i.organization_id LEFT JOIN users u ON u.id=i.created_by
 		WHERE $2::boolean OR o.id IN (SELECT id FROM accessible) ORDER BY i.created_at DESC LIMIT $3 OFFSET $4`, principal.UserID, principal.HasRole("group_admin"), page.PageSize, page.Offset())
@@ -1454,7 +1591,7 @@ func (s *Service) SearchImports(ctx context.Context, principal auth.Principal, p
 	for rows.Next() {
 		var item ImportHistory
 		var errorsText string
-		if err := rows.Scan(&item.ID, &item.FileName, &item.FileType, &item.Status, &item.TotalCount, &item.SuccessCount, &item.FailureCount, &item.DuplicateCount, &errorsText, &item.OrganizationID, &item.OrganizationCode, &item.OrganizationName, &item.CreatedByName, &item.CreatedAt, &total); err != nil {
+		if err := rows.Scan(&item.ID, &item.FileName, &item.FileType, &item.ImportMode, &item.Status, &item.TotalCount, &item.SuccessCount, &item.CreatedCount, &item.UpdatedCount, &item.FailureCount, &item.DuplicateCount, &errorsText, &item.OrganizationID, &item.OrganizationCode, &item.OrganizationName, &item.CreatedByName, &item.CreatedAt, &total); err != nil {
 			return pagination.Result[ImportHistory]{}, fmt.Errorf("scan import: %w", err)
 		}
 		item.Errors = make([]ImportError, 0)

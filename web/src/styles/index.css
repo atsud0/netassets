@@ -120,6 +120,8 @@ button, input { font: inherit; }
 .network-asset-filter-controls .asset-filter-count { justify-self: end; }
 .muted-text { color: var(--muted); font-size: 13px; }
 .import-toolbar { display: flex; justify-content: flex-end; margin: 8px 0 4px; }
+.import-mode-field { display: flex; width: 100%; flex-direction: column; gap: 8px; }
+.import-mode-field .muted-text, .import-result-breakdown { margin: 0; line-height: 1.6; }
 .import-result { margin-top: 18px; padding: 16px; background: #f6f9fb; border: 1px solid var(--line); border-radius: 12px; }
 .import-result > .el-alert { margin-bottom: 14px; }
 .import-result-summary { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; margin-bottom: 14px; }

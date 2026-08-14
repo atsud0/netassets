@@ -33,8 +33,8 @@ interface NetworkArea {
 interface CustomField { id: string; field_key: string; field_name: string; description?: string; field_type: string; options: string[]; is_required: boolean }
 interface ImportError { row: number; code: string; message: string }
 interface ImportResult {
-  id: string; file_name: string; file_type: string; status: string; total_count: number
-  success_count: number; failure_count: number; duplicate_count: number; errors: ImportError[]
+  id: string; file_name: string; file_type: string; import_mode: 'skip_duplicates' | 'update_working'; status: string; total_count: number
+  success_count: number; created_count: number; updated_count: number; failure_count: number; duplicate_count: number; errors: ImportError[]
 }
 interface ImportHistory extends ImportResult {
   organization_id: string; organization_code: string; organization_name: string
@@ -126,7 +126,7 @@ const form = reactive({
   environment: 'production', network_scope: 'public', status: 'active', importance: 'normal', owner_user_id: '', owner_name: '', notes: '', expires_at: null as Date | null,
 })
 const networkAreaForm = reactive({ organization_id: '', name: '', code: '', status: 'enabled', sort_order: 0, notes: '' })
-const importForm = reactive({ organization_id: '' })
+const importForm = reactive<{ organization_id: string; import_mode: 'skip_duplicates' | 'update_working' }>({ organization_id: '', import_mode: 'skip_duplicates' })
 const rules: FormRules = {
   type: [{ required: true, message: '请选择资产类型', trigger: 'change' }],
   value: [{ required: true, message: '请输入资产值', trigger: 'blur' }],
@@ -621,6 +621,7 @@ function resetImportPreview() {
 }
 function openImportDialog() {
   importForm.organization_id = defaultOrganizationID()
+  importForm.import_mode = 'skip_duplicates'
   importFile.value = undefined
   resetImportPreview()
   importDialogVisible.value = true
@@ -643,6 +644,7 @@ async function runImport(preview = false) {
   try {
     const data = new FormData()
     data.append('organization_id', importForm.organization_id)
+    data.append('import_mode', importForm.import_mode)
     data.append('file', importFile.value)
     const endpoint = preview ? '/assets/import/preview' : '/assets/import'
     const response = await apiClient.post<{ result: ImportResult }>(endpoint, data, {
@@ -653,7 +655,9 @@ async function runImport(preview = false) {
     if (preview) {
       ElMessage.success('文件预检完成，尚未写入台账')
     } else {
-      ElMessage.success(auth.isGroupAdmin ? `成功导入 ${response.data.result.success_count} 条网络资产到正式台账` : `成功导入 ${response.data.result.success_count} 条，已保存为未上报工作版本`)
+      ElMessage.success(auth.isGroupAdmin
+        ? `成功导入 ${response.data.result.success_count} 条网络资产到正式台账`
+        : `已新增 ${response.data.result.created_count} 条、更新 ${response.data.result.updated_count} 条未上报工作版本`)
       await refreshAfterMutation()
     }
   } catch (error) {
@@ -1082,11 +1086,18 @@ onMounted(() => {
       <div class="import-toolbar"><el-button link type="primary" :loading="downloading" @click="downloadTemplate('xlsx')">下载 XLSX 模板</el-button><el-button link type="primary" :loading="downloading" @click="downloadTemplate('csv')">下载 CSV 模板</el-button></div>
       <el-form label-position="top">
         <el-form-item label="导入到所属组织" required><el-select v-model="importForm.organization_id" filterable :disabled="!auth.isGroupAdmin" @change="resetImportPreview" style="width: 100%"><el-option v-for="item in enabledOrganizations" :key="item.id" :label="item.name" :value="item.id" /></el-select></el-form-item>
+        <el-form-item v-if="!auth.isGroupAdmin" label="重复记录处理方式">
+          <div class="import-mode-field">
+            <el-radio-group v-model="importForm.import_mode" @change="resetImportPreview"><el-radio value="skip_duplicates">重复记录跳过（默认）</el-radio><el-radio value="update_working">覆盖为未上报工作版本</el-radio></el-radio-group>
+            <p class="muted-text">覆盖模式不会直接修改集团正式台账：已上报资产会生成更新工作版本，已有可编辑工作版本会被文件内容更新；已纳入任务、已提交或待下线版本不可覆盖，导入后仍需通过填报任务提交上报。</p>
+          </div>
+        </el-form-item>
         <el-form-item label="CSV / XLSX 文件" required><el-upload drag :auto-upload="false" :limit="1" accept=".csv,.xlsx" :on-change="handleFileChange" :on-remove="handleFileRemove"><div class="el-upload__text">拖入文件，或<em>点击选择</em></div><template #tip><div class="el-upload__tip">文件不超过 10 MB；业务系统使用同组织内的系统编码匹配；责任人账号按所属组织内的启用用户名匹配；有效期格式错误会在预检中逐行提示。</div></template></el-upload></el-form-item>
       </el-form>
       <div v-if="importResult" class="import-result" data-testid="import-result">
         <el-alert :title="importResultMode === 'preview' ? '预检结果：尚未写入台账，请确认后执行导入' : (auth.isGroupAdmin ? '正式台账导入结果' : '组织工作台账导入结果：成功项当前为未上报')" :type="importResultMode === 'preview' ? 'info' : 'success'" :closable="false" show-icon />
         <div class="import-result-summary"><div><span>总行数</span><strong>{{ importResult.total_count }}</strong></div><div class="success"><span>{{ importResultMode === 'preview' ? '可导入' : '成功' }}</span><strong>{{ importResult.success_count }}</strong></div><div class="duplicate"><span>重复</span><strong>{{ importResult.duplicate_count }}</strong></div><div class="failure"><span>失败</span><strong>{{ importResult.failure_count }}</strong></div></div>
+        <p class="muted-text import-result-breakdown">成功项：新增 {{ importResult.created_count }} 条，更新 {{ importResult.updated_count }} 条。</p>
         <el-table v-if="importResult.errors.length" :data="importResult.errors" max-height="220" size="small"><el-table-column prop="row" label="行号" width="75" /><el-table-column prop="message" label="处理结果" /></el-table>
       </div>
       <template #footer><el-button @click="importDialogVisible = false">关闭</el-button><el-button :loading="importing" @click="runImport(true)">预检文件</el-button><el-button type="primary" :loading="importing" :disabled="importResultMode !== 'preview' || !importResult?.success_count" @click="runImport(false)">确认导入</el-button></template>
@@ -1096,8 +1107,9 @@ onMounted(() => {
       <el-table v-loading="historyLoading" :data="importHistory" empty-text="暂无导入记录" max-height="560">
         <el-table-column label="文件" min-width="190"><template #default="scope"><div class="organization-name-cell"><strong>{{ scope.row.file_name }}</strong><span>{{ scope.row.file_type.toUpperCase() }}</span></div></template></el-table-column>
         <el-table-column prop="organization_name" label="所属组织" min-width="170" />
+        <el-table-column label="模式" width="130"><template #default="scope">{{ scope.row.import_mode === 'update_working' ? '覆盖为工作版本' : '重复跳过' }}</template></el-table-column>
         <el-table-column label="状态" width="105"><template #default="scope"><el-tag :type="importStatusTag(scope.row.status)" effect="plain">{{ importStatusLabels[scope.row.status] ?? scope.row.status }}</el-tag></template></el-table-column>
-        <el-table-column prop="total_count" label="总数" width="70" /><el-table-column prop="success_count" label="成功" width="70" /><el-table-column prop="duplicate_count" label="重复" width="70" /><el-table-column prop="failure_count" label="失败" width="70" />
+        <el-table-column prop="total_count" label="总数" width="70" /><el-table-column label="成功" width="130"><template #default="scope"><div class="organization-name-cell"><strong>{{ scope.row.success_count }}</strong><span>新增 {{ scope.row.created_count }} / 更新 {{ scope.row.updated_count }}</span></div></template></el-table-column><el-table-column prop="duplicate_count" label="重复" width="70" /><el-table-column prop="failure_count" label="失败" width="70" />
         <el-table-column label="导入人 / 时间" min-width="160"><template #default="scope"><div class="organization-name-cell"><strong>{{ scope.row.created_by_name || '-' }}</strong><span>{{ formatDate(scope.row.created_at) }}</span></div></template></el-table-column>
       </el-table>
       <div class="table-pagination dialog-pagination">

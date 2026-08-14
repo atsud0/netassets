@@ -262,6 +262,50 @@ func TestBuildBusinessSystemExportRejectsOversizedSynchronousXLSX(t *testing.T) 
 	}
 }
 
+func TestNormalizeImportMode(t *testing.T) {
+	organizationUser := auth.Principal{Roles: []string{"organization_admin"}}
+	groupAdmin := auth.Principal{Roles: []string{"group_admin"}}
+
+	for _, input := range []string{"", "  " + ImportModeSkipDuplicates + "  "} {
+		mode, err := normalizeImportMode(organizationUser, input)
+		if err != nil || mode != ImportModeSkipDuplicates {
+			t.Fatalf("normalizeImportMode(%q) = %q, %v; want %q", input, mode, err, ImportModeSkipDuplicates)
+		}
+	}
+	mode, err := normalizeImportMode(organizationUser, ImportModeUpdateWorking)
+	if err != nil || mode != ImportModeUpdateWorking {
+		t.Fatalf("organization update mode = %q, %v; want %q", mode, err, ImportModeUpdateWorking)
+	}
+	if _, err := normalizeImportMode(groupAdmin, ImportModeUpdateWorking); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("group administrator update mode error = %v, want ErrInvalid", err)
+	}
+	if _, err := normalizeImportMode(organizationUser, "replace_formal"); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("invalid import mode error = %v, want ErrInvalid", err)
+	}
+}
+
+func TestImportTargetMutable(t *testing.T) {
+	tests := []struct {
+		name   string
+		target importUpdateTarget
+		want   bool
+	}{
+		{name: "formal system", target: importUpdateTarget{Kind: "formal"}, want: true},
+		{name: "unbound create working version", target: importUpdateTarget{Kind: "draft", DraftStatus: "editing", Operation: "create"}, want: true},
+		{name: "unbound update working version", target: importUpdateTarget{Kind: "draft", DraftStatus: "editing", Operation: "update"}, want: true},
+		{name: "task working version", target: importUpdateTarget{Kind: "draft", DraftStatus: "editing", TaskID: "task-1", Operation: "update"}, want: false},
+		{name: "submitted working version", target: importUpdateTarget{Kind: "draft", DraftStatus: "submitted", Operation: "update"}, want: false},
+		{name: "pending deletion", target: importUpdateTarget{Kind: "draft", DraftStatus: "editing", Operation: "delete"}, want: false},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := importTargetMutable(test.target); got != test.want {
+				t.Fatalf("importTargetMutable(%#v) = %t, want %t", test.target, got, test.want)
+			}
+		})
+	}
+}
+
 func TestPrepareCreateInputNormalizesAndDerivesDataVolume(t *testing.T) {
 	count := int64(100000)
 	input := validBusinessSystemInput()

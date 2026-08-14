@@ -104,6 +104,7 @@ func registerBusinessSystemRoutes(api *gin.RouterGroup, requireAuth gin.HandlerF
 	group.POST("/import/preview", func(c *gin.Context) {
 		c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, maxAssetImportBytes)
 		organizationID := strings.TrimSpace(c.PostForm("organization_id"))
+		importMode := strings.TrimSpace(c.PostForm("import_mode"))
 		fileHeader, err := c.FormFile("file")
 		if err != nil || organizationID == "" {
 			writeAPIError(c, http.StatusBadRequest, "invalid_request", "请选择所属组织并上传 CSV 或 XLSX 文件")
@@ -119,7 +120,7 @@ func registerBusinessSystemRoutes(api *gin.RouterGroup, requireAuth gin.HandlerF
 			return
 		}
 		defer file.Close()
-		result, err := service.PreviewImport(c.Request.Context(), mustPrincipal(c), organizationID, fileHeader.Filename, file)
+		result, err := service.PreviewImport(c.Request.Context(), mustPrincipal(c), organizationID, fileHeader.Filename, file, importMode)
 		switch {
 		case errors.Is(err, businesssystem.ErrForbidden):
 			writeAPIError(c, http.StatusForbidden, "forbidden", "当前账号无权预检该组织的业务系统导入文件")
@@ -135,6 +136,7 @@ func registerBusinessSystemRoutes(api *gin.RouterGroup, requireAuth gin.HandlerF
 	group.POST("/import", func(c *gin.Context) {
 		c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, maxAssetImportBytes)
 		organizationID := strings.TrimSpace(c.PostForm("organization_id"))
+		importMode := strings.TrimSpace(c.PostForm("import_mode"))
 		fileHeader, err := c.FormFile("file")
 		if err != nil || organizationID == "" {
 			writeAPIError(c, http.StatusBadRequest, "invalid_request", "请选择所属组织并上传 CSV 或 XLSX 文件")
@@ -150,7 +152,7 @@ func registerBusinessSystemRoutes(api *gin.RouterGroup, requireAuth gin.HandlerF
 			return
 		}
 		defer file.Close()
-		result, err := service.Import(c.Request.Context(), mustPrincipal(c), organizationID, fileHeader.Filename, file, c.GetString("request_id"), c.ClientIP())
+		result, err := service.Import(c.Request.Context(), mustPrincipal(c), organizationID, fileHeader.Filename, file, importMode, c.GetString("request_id"), c.ClientIP())
 		switch {
 		case errors.Is(err, businesssystem.ErrForbidden):
 			writeAPIError(c, http.StatusForbidden, "forbidden", "当前账号无权向该组织导入业务系统")
