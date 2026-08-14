@@ -11,6 +11,7 @@ import (
 	"net"
 	"net/url"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -38,6 +39,9 @@ var (
 )
 
 const MaxImportRows = 5000
+const MaxSelectedExportRows = 200
+
+var assetUUIDPattern = regexp.MustCompile(`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$`)
 
 const (
 	ImportModeSkipDuplicates = "skip_duplicates"
@@ -133,6 +137,7 @@ type ExportFilter struct {
 	Type           string
 	Status         string
 	Keyword        string
+	SelectedIDs    []string
 }
 
 // SearchFilter describes the server-side filters available on the asset ledger.
@@ -143,6 +148,7 @@ type SearchFilter struct {
 	Type           string
 	Status         string
 	Keyword        string
+	SelectedIDs    []string
 	Page           pagination.Query
 }
 
@@ -360,9 +366,10 @@ func (s *Service) SearchWithFilter(ctx context.Context, principal auth.Principal
 		  AND ($4 = '' OR a.status = $4)
 		  AND ($5 = '' OR o.id::text = $5)
 		  AND ($6 = '' OR concat_ws(' ', a.asset_value, a.asset_name, o.organization_name, bs.system_name, bs.system_code, na.area_name, ao.owner_name, owner_user.username, owner_user.display_name) ILIKE '%' || $6 || '%')
+		  AND (COALESCE(cardinality($7::uuid[]), 0) = 0 OR a.id = ANY($7::uuid[]))
 		ORDER BY o.organization_code, a.asset_type, a.normalized_value
-		LIMIT $7 OFFSET $8
-	`, principal.UserID, principal.HasRole("group_admin"), strings.TrimSpace(filter.Type), strings.TrimSpace(filter.Status), strings.TrimSpace(filter.OrganizationID), strings.TrimSpace(filter.Keyword), query.PageSize, query.Offset())
+		LIMIT $8 OFFSET $9
+	`, principal.UserID, principal.HasRole("group_admin"), strings.TrimSpace(filter.Type), strings.TrimSpace(filter.Status), strings.TrimSpace(filter.OrganizationID), strings.TrimSpace(filter.Keyword), filter.SelectedIDs, query.PageSize, query.Offset())
 	if err != nil {
 		return pagination.Result[Asset]{}, fmt.Errorf("search assets: %w", err)
 	}
@@ -418,11 +425,12 @@ func (s *Service) SearchWithFilter(ctx context.Context, principal auth.Principal
                 ORDER BY sa.is_primary DESC, sa.created_at LIMIT 1
             ) bs ON true
             WHERE a.deleted_at IS NULL AND ($2::boolean OR o.id IN (SELECT id FROM accessible))
-              AND ($3 = '' OR a.asset_type = $3)
-              AND ($4 = '' OR a.status = $4)
-              AND ($5 = '' OR o.id::text = $5)
-              AND ($6 = '' OR concat_ws(' ', a.asset_value, a.asset_name, o.organization_name, bs.system_name, bs.system_code, na.area_name, ao.owner_name, owner_user.username, owner_user.display_name) ILIKE '%' || $6 || '%')
-        `, principal.UserID, principal.HasRole("group_admin"), strings.TrimSpace(filter.Type), strings.TrimSpace(filter.Status), strings.TrimSpace(filter.OrganizationID), strings.TrimSpace(filter.Keyword)).Scan(&total); err != nil {
+	              AND ($3 = '' OR a.asset_type = $3)
+	              AND ($4 = '' OR a.status = $4)
+	              AND ($5 = '' OR o.id::text = $5)
+	              AND ($6 = '' OR concat_ws(' ', a.asset_value, a.asset_name, o.organization_name, bs.system_name, bs.system_code, na.area_name, ao.owner_name, owner_user.username, owner_user.display_name) ILIKE '%' || $6 || '%')
+	              AND (COALESCE(cardinality($7::uuid[]), 0) = 0 OR a.id = ANY($7::uuid[]))
+	        `, principal.UserID, principal.HasRole("group_admin"), strings.TrimSpace(filter.Type), strings.TrimSpace(filter.Status), strings.TrimSpace(filter.OrganizationID), strings.TrimSpace(filter.Keyword), filter.SelectedIDs).Scan(&total); err != nil {
 			return pagination.Result[Asset]{}, fmt.Errorf("count assets: %w", err)
 		}
 	}
@@ -430,16 +438,44 @@ func (s *Service) SearchWithFilter(ctx context.Context, principal auth.Principal
 }
 
 func (s *Service) Export(ctx context.Context, principal auth.Principal, filter ExportFilter, format, requestID, ipAddress string) ([]byte, string, string, int, error) {
-	items, err := s.List(ctx, principal)
+	selectedIDs, err := normalizeSelectedExportIDs(filter.SelectedIDs)
+	if err != nil {
+		return nil, "", "", 0, ErrInvalid
+	}
+	filter.SelectedIDs = selectedIDs
+	page := pagination.Query{Page: 1, PageSize: pagination.MaxPageSize}
+	result, err := s.SearchWithFilter(ctx, principal, SearchFilter{
+		OrganizationID: filter.OrganizationID,
+		Type:           filter.Type,
+		Status:         filter.Status,
+		Keyword:        filter.Keyword,
+		SelectedIDs:    filter.SelectedIDs,
+		Page:           page,
+	})
 	if err != nil {
 		return nil, "", "", 0, err
 	}
-	items = filterExportAssets(items, filter)
-	if err := exportfile.ValidateSynchronousExport(format, len(items)); err != nil {
+	if err := exportfile.ValidateSynchronousExport(format, result.Total); err != nil {
 		if errors.Is(err, exportfile.ErrSynchronousXLSXTooLarge) {
 			return nil, "", "", 0, ErrExportTooLarge
 		}
 		return nil, "", "", 0, ErrInvalid
+	}
+	items := append([]Asset(nil), result.Items...)
+	for len(items) < result.Total && len(result.Items) == page.PageSize {
+		page.Page++
+		result, err = s.SearchWithFilter(ctx, principal, SearchFilter{
+			OrganizationID: filter.OrganizationID,
+			Type:           filter.Type,
+			Status:         filter.Status,
+			Keyword:        filter.Keyword,
+			SelectedIDs:    filter.SelectedIDs,
+			Page:           page,
+		})
+		if err != nil {
+			return nil, "", "", 0, err
+		}
+		items = append(items, result.Items...)
 	}
 	customService := customfield.NewService(s.pool)
 	definitions, err := customService.EnabledDefinitions(ctx, "asset")
@@ -465,9 +501,10 @@ func (s *Service) Export(ctx context.Context, principal auth.Principal, filter E
 	if _, err := s.pool.Exec(ctx, `
 		INSERT INTO audit_logs (user_id, organization_id, action, resource_type, summary, details, request_ip, request_id)
 		VALUES ($1::uuid, NULLIF($2, '')::uuid, 'asset.export', 'asset', '生成网络资产导出文件',
-		        jsonb_build_object('format', $3::text, 'count', $4::int, 'organization_id', $5::text, 'type', $6::text, 'status', $7::text, 'keyword', $8::text, 'result', 'generated', 'delivery_state', 'unconfirmed'),
-		        NULLIF($9, '')::inet, NULLIF($10, ''))
-	`, principal.UserID, organizationID, strings.ToLower(strings.TrimPrefix(format, ".")), len(items), filter.OrganizationID, filter.Type, filter.Status, filter.Keyword, ipAddress, requestID); err != nil {
+		        jsonb_build_object('format', $3::text, 'count', $4::int, 'organization_id', $5::text, 'type', $6::text, 'status', $7::text, 'keyword', $8::text,
+		                           'selected_count', $9::int, 'result', 'generated', 'delivery_state', 'unconfirmed'),
+		        NULLIF($10, '')::inet, NULLIF($11, ''))
+	`, principal.UserID, organizationID, strings.ToLower(strings.TrimPrefix(format, ".")), len(items), filter.OrganizationID, filter.Type, filter.Status, filter.Keyword, len(filter.SelectedIDs), ipAddress, requestID); err != nil {
 		return nil, "", "", 0, fmt.Errorf("write asset export audit: %w", err)
 	}
 	return data, contentType, fileName, len(items), nil
@@ -476,6 +513,11 @@ func (s *Service) Export(ctx context.Context, principal auth.Principal, filter E
 // StreamCSVExport writes the scoped asset ledger page by page. Only one bounded
 // database page and its custom-field values are retained at a time.
 func (s *Service) StreamCSVExport(ctx context.Context, principal auth.Principal, filter ExportFilter, output io.Writer, ready exportfile.ReadyFunc, requestID, ipAddress string) (int, error) {
+	selectedIDs, err := normalizeSelectedExportIDs(filter.SelectedIDs)
+	if err != nil {
+		return 0, ErrInvalid
+	}
+	filter.SelectedIDs = selectedIDs
 	customService := customfield.NewService(s.pool)
 	definitions, err := customService.EnabledDefinitions(ctx, "asset")
 	if err != nil {
@@ -488,6 +530,7 @@ func (s *Service) StreamCSVExport(ctx context.Context, principal auth.Principal,
 		Type:           filter.Type,
 		Status:         filter.Status,
 		Keyword:        filter.Keyword,
+		SelectedIDs:    filter.SelectedIDs,
 		Page:           page,
 	})
 	if err != nil {
@@ -532,6 +575,7 @@ func (s *Service) StreamCSVExport(ctx context.Context, principal auth.Principal,
 			Type:           filter.Type,
 			Status:         filter.Status,
 			Keyword:        filter.Keyword,
+			SelectedIDs:    filter.SelectedIDs,
 			Page:           page,
 		})
 		if err != nil {
@@ -546,9 +590,10 @@ func (s *Service) StreamCSVExport(ctx context.Context, principal auth.Principal,
 	if _, err := s.pool.Exec(ctx, `
 		INSERT INTO audit_logs (user_id, organization_id, action, resource_type, summary, details, request_ip, request_id)
 		VALUES ($1::uuid, NULLIF($2, '')::uuid, 'asset.export', 'asset', '生成网络资产导出文件',
-		        jsonb_build_object('format', 'csv', 'count', $3::int, 'organization_id', $4::text, 'type', $5::text, 'status', $6::text, 'keyword', $7::text, 'result', 'generated', 'delivery_state', 'response_written_unconfirmed'),
-		        NULLIF($8, '')::inet, NULLIF($9, ''))
-	`, principal.UserID, organizationID, written, filter.OrganizationID, filter.Type, filter.Status, filter.Keyword, ipAddress, requestID); err != nil {
+		        jsonb_build_object('format', 'csv', 'count', $3::int, 'organization_id', $4::text, 'type', $5::text, 'status', $6::text, 'keyword', $7::text,
+		                           'selected_count', $8::int, 'result', 'generated', 'delivery_state', 'response_written_unconfirmed'),
+		        NULLIF($9, '')::inet, NULLIF($10, ''))
+	`, principal.UserID, organizationID, written, filter.OrganizationID, filter.Type, filter.Status, filter.Keyword, len(filter.SelectedIDs), ipAddress, requestID); err != nil {
 		return written, fmt.Errorf("write asset export audit: %w", err)
 	}
 	return written, nil
@@ -557,11 +602,17 @@ func (s *Service) StreamCSVExport(ctx context.Context, principal auth.Principal,
 // ExportRowCount validates the frozen authorization/filter scope and returns the
 // number of rows a background spreadsheet job will generate.
 func (s *Service) ExportRowCount(ctx context.Context, principal auth.Principal, filter ExportFilter) (int, error) {
+	selectedIDs, err := normalizeSelectedExportIDs(filter.SelectedIDs)
+	if err != nil {
+		return 0, ErrInvalid
+	}
+	filter.SelectedIDs = selectedIDs
 	result, err := s.SearchWithFilter(ctx, principal, SearchFilter{
 		OrganizationID: filter.OrganizationID,
 		Type:           filter.Type,
 		Status:         filter.Status,
 		Keyword:        filter.Keyword,
+		SelectedIDs:    filter.SelectedIDs,
 		Page:           pagination.Query{Page: 1, PageSize: 1},
 	})
 	if err != nil {
@@ -572,6 +623,11 @@ func (s *Service) ExportRowCount(ctx context.Context, principal auth.Principal, 
 
 // WriteXLSXExport generates an authorization-scoped workbook page by page.
 func (s *Service) WriteXLSXExport(ctx context.Context, principal auth.Principal, filter ExportFilter, outputPath string, progress exportfile.ProgressFunc) (exportfile.Metadata, error) {
+	selectedIDs, err := normalizeSelectedExportIDs(filter.SelectedIDs)
+	if err != nil {
+		return exportfile.Metadata{}, ErrInvalid
+	}
+	filter.SelectedIDs = selectedIDs
 	customService := customfield.NewService(s.pool)
 	definitions, err := customService.EnabledDefinitions(ctx, "asset")
 	if err != nil {
@@ -583,6 +639,7 @@ func (s *Service) WriteXLSXExport(ctx context.Context, principal auth.Principal,
 		Type:           filter.Type,
 		Status:         filter.Status,
 		Keyword:        filter.Keyword,
+		SelectedIDs:    filter.SelectedIDs,
 		Page:           page,
 	})
 	if err != nil {
@@ -631,6 +688,7 @@ func (s *Service) WriteXLSXExport(ctx context.Context, principal auth.Principal,
 			Type:           filter.Type,
 			Status:         filter.Status,
 			Keyword:        filter.Keyword,
+			SelectedIDs:    filter.SelectedIDs,
 			Page:           page,
 		})
 		if err != nil {
@@ -645,8 +703,17 @@ func (s *Service) WriteXLSXExport(ctx context.Context, principal auth.Principal,
 
 func filterExportAssets(items []Asset, filter ExportFilter) []Asset {
 	keyword := strings.ToLower(strings.TrimSpace(filter.Keyword))
+	selected := make(map[string]struct{}, len(filter.SelectedIDs))
+	for _, id := range filter.SelectedIDs {
+		selected[strings.TrimSpace(id)] = struct{}{}
+	}
 	result := make([]Asset, 0, len(items))
 	for _, item := range items {
+		if len(selected) > 0 {
+			if _, ok := selected[item.ID]; !ok {
+				continue
+			}
+		}
 		if filter.OrganizationID != "" && item.OrganizationID != filter.OrganizationID {
 			continue
 		}
@@ -672,6 +739,29 @@ func filterExportAssets(items []Asset, filter ExportFilter) []Asset {
 		result = append(result, item)
 	}
 	return result
+}
+
+func normalizeSelectedExportIDs(ids []string) ([]string, error) {
+	if len(ids) == 0 {
+		return nil, nil
+	}
+	result := make([]string, 0, len(ids))
+	seen := make(map[string]struct{}, len(ids))
+	for _, rawID := range ids {
+		id := strings.TrimSpace(rawID)
+		if !assetUUIDPattern.MatchString(id) {
+			return nil, ErrInvalid
+		}
+		if _, exists := seen[id]; exists {
+			continue
+		}
+		seen[id] = struct{}{}
+		result = append(result, id)
+		if len(result) > MaxSelectedExportRows {
+			return nil, ErrInvalid
+		}
+	}
+	return result, nil
 }
 
 func buildExport(items []Asset, format string) ([]byte, string, string, error) {

@@ -58,6 +58,7 @@ const submitting = ref(false)
 const importing = ref(false)
 const downloading = ref(false)
 const exporting = ref(false)
+const selectedExporting = ref(false)
 const historyLoading = ref(false)
 const editDialogVisible = ref(false)
 const detailVisible = ref(false)
@@ -803,6 +804,33 @@ async function exportLedger(format: 'csv' | 'xlsx') {
   }
 }
 
+async function exportSelectedAssets(format: 'csv' | 'xlsx') {
+  if (!selectedAssets.value.length) return ElMessage.warning('请先选择需要导出的网络资产')
+  if (selectedAssets.value.length > 200) return ElMessage.warning('单次最多导出 200 个网络资产')
+  selectedExporting.value = true
+  try {
+    const selectedIDs = selectedAssets.value.map((item) => item.id)
+    const response = await apiClient.get('/assets/export', {
+      params: { format, selected_ids: selectedIDs.join(',') },
+      responseType: 'blob',
+      timeout: 60_000,
+    })
+    const href = URL.createObjectURL(response.data)
+    const link = document.createElement('a')
+    link.href = href
+    link.download = `网络资产选中项.${format}`
+    link.click()
+    URL.revokeObjectURL(href)
+    const count = response.headers['x-export-count'] ?? selectedIDs.length
+    ElMessage.success(`已生成并开始下载 ${count} 条选中网络资产`)
+  } catch (error) {
+    const detail = await getDownloadAPIError(error, '导出选中网络资产失败')
+    ElMessage.error(detail.message)
+  } finally {
+    selectedExporting.value = false
+  }
+}
+
 async function queueXLSXExport() {
   await createExportJob('asset', {
     q: search.value.trim() || undefined,
@@ -963,6 +991,15 @@ onMounted(() => {
             <el-option label="清除网络区域" value="__clear__" />
             <el-option v-for="item in selectedNetworkAreas" :key="item.id" :label="item.code ? `${item.name}（${item.code}）` : item.name" :value="item.id" />
           </el-select>
+          <el-dropdown :disabled="selectedAssets.length === 0 || selectedExporting">
+            <el-button :loading="selectedExporting" :disabled="selectedAssets.length === 0">导出选中</el-button>
+            <template #dropdown>
+              <el-dropdown-menu>
+                <el-dropdown-item @click="exportSelectedAssets('xlsx')">导出选中 XLSX</el-dropdown-item>
+                <el-dropdown-item @click="exportSelectedAssets('csv')">导出选中 CSV</el-dropdown-item>
+              </el-dropdown-menu>
+            </template>
+          </el-dropdown>
         </div>
       </div>
       <el-table :data="assets" row-key="id" empty-text="暂无网络资产" @selection-change="handleSelectionChange">

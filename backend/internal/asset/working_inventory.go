@@ -76,7 +76,8 @@ SELECT id,asset_type,asset_value,normalized_value,asset_name,organization_id,org
  reporting_status,is_working_copy,published_id,task_id,draft_status,operation,custom_values,count(*) OVER()
 FROM ledger WHERE ($2='' OR asset_type=$2) AND ($3='' OR status=$3) AND ($4='' OR organization_id=$4)
  AND ($5='' OR concat_ws(' ',asset_value,asset_name,organization_name,business_system_name,business_system_code,network_area_name,owner_name,owner_username,owner_display_name) ILIKE '%'||$5||'%')
-ORDER BY organization_code,asset_type,normalized_value LIMIT $6 OFFSET $7`, p.UserID, strings.TrimSpace(f.Type), strings.TrimSpace(f.Status), strings.TrimSpace(f.OrganizationID), strings.TrimSpace(f.Keyword), page.PageSize, page.Offset())
+ AND (COALESCE(cardinality($6::text[]),0)=0 OR id=ANY($6::text[]))
+ORDER BY organization_code,asset_type,normalized_value LIMIT $7 OFFSET $8`, p.UserID, strings.TrimSpace(f.Type), strings.TrimSpace(f.Status), strings.TrimSpace(f.OrganizationID), strings.TrimSpace(f.Keyword), f.SelectedIDs, page.PageSize, page.Offset())
 	if err != nil {
 		return pagination.Result[Asset]{}, fmt.Errorf("search organization working assets: %w", err)
 	}
