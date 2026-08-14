@@ -144,6 +144,18 @@ WHERE child.status='enabled' AND child.deleted_at IS NULL
 	JOIN organizations event_direct ON event_direct.id=ur.organization_id AND event_direct.status='enabled' AND event_direct.deleted_at IS NULL
 	WHERE ur.user_id=$1::uuid AND ur.organization_id IS NOT NULL AND ur.data_scope IN ('organization','organization_and_descendants')
 	UNION SELECT permission_key,id FROM event_permission_descendants
+), stale_working_version_items AS (
+	SELECT organization_id, 'asset'::text AS resource_kind, updated_at
+	FROM inventory_asset_drafts
+	WHERE NOT $2::boolean AND task_id IS NULL AND draft_status='editing' AND updated_at < now()-interval '7 days'
+	UNION ALL
+	SELECT organization_id, 'business_system'::text AS resource_kind, updated_at
+	FROM inventory_business_system_drafts
+	WHERE NOT $2::boolean AND task_id IS NULL AND draft_status='editing' AND updated_at < now()-interval '7 days'
+), stale_working_versions AS (
+	SELECT organization_id, resource_kind, count(*)::bigint AS item_count, min(updated_at) AS oldest_updated_at
+	FROM stale_working_version_items
+	GROUP BY organization_id, resource_kind
 ), notification_candidates AS (
 	SELECT
 		'ledger_event:' || ne.id::text AS notification_key,
@@ -244,6 +256,40 @@ WHERE child.status='enabled' AND child.deleted_at IS NULL
 			)
 		  )
 
+
+	UNION ALL
+
+	SELECT
+		'working_version:stale:' || stale.resource_kind || ':' || stale.organization_id::text || ':' || to_char(date_trunc('week',now()),'IYYY-IW') || ':' || stale.item_count::text AS notification_key,
+		'working_version'::text AS category,
+		CASE stale.resource_kind WHEN 'asset' THEN '网络资产工作版本长期未上报' ELSE '业务系统工作版本长期未上报' END::text AS title,
+		format(
+			CASE stale.resource_kind
+				WHEN 'asset' THEN '本组织有 %s 项网络资产工作版本已超过 7 天未上报，最早已停留 %s 天，请及时纳入填报任务或清理无效版本。'
+				ELSE '本组织有 %s 个业务系统工作版本已超过 7 天未上报，最早已停留 %s 天，请及时纳入填报任务或清理无效版本。'
+			END,
+			stale.item_count,
+			floor(extract(epoch FROM (now()-stale.oldest_updated_at))/86400)::bigint
+		)::text AS message,
+		'warning'::text AS level,
+		'working_version'::text AS resource_type,
+		stale.organization_id::text AS resource_id,
+		CASE stale.resource_kind
+			WHEN 'asset' THEN '/assets?organization_id=' || stale.organization_id::text
+			ELSE '/business-systems?organization_id=' || stale.organization_id::text
+		END::text AS action_path,
+		date_trunc('week',now()) AS occurred_at,
+		NULL::timestamptz AS due_at
+	FROM stale_working_versions stale
+	WHERE NOT $2::boolean
+	  AND EXISTS (
+		SELECT 1 FROM event_permission_accessible visible
+		WHERE visible.id=stale.organization_id
+		  AND visible.permission_key IN (
+			'inventory.manage',
+			CASE stale.resource_kind WHEN 'asset' THEN 'asset.manage' ELSE 'system.manage' END
+		  )
+	  )
 
 	UNION ALL
 

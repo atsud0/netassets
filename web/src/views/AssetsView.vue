@@ -296,6 +296,7 @@ async function load(applyDefaultView = false) {
     const defaultFilters = await savedFilterViews.value?.initialize()
     if (defaultFilters) setAssetFilters(defaultFilters)
   }
+  if (!inventoryMode.value && inventoryOrganizationID.value) organizationFilter.value = inventoryOrganizationID.value
   await loadAssets()
 }
 
@@ -851,6 +852,15 @@ function expiryTag(value?: string) {
   const remaining = new Date(value).getTime() - Date.now()
   return remaining < 0 ? 'danger' : remaining <= 30 * 86400000 ? 'warning' : 'success'
 }
+
+watch(() => route.query.organization_id, (value) => {
+  if (inventoryMode.value) return
+  const nextOrganizationID = typeof value === 'string' ? value : ''
+  if (organizationFilter.value === nextOrganizationID) return
+  organizationFilter.value = nextOrganizationID
+  page.value = 1
+  void loadAssets()
+})
 
 onMounted(() => {
   if (inventoryMode.value) organizationFilter.value = inventoryOrganizationID.value

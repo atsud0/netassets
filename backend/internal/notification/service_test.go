@@ -31,6 +31,9 @@ func TestWorkingVersionNotificationsExcludeGroupAdministrators(t *testing.T) {
 		"ne.category <> 'working_version' OR NOT $2::boolean",
 		"WHEN 'working_version.published' THEN '工作版本已发布'",
 		"WHEN ne.event_type='working_version.published' THEN '/inventory-tasks?task_id='",
+		"task_id IS NULL AND draft_status='editing' AND updated_at < now()-interval '7 days'",
+		"'working_version:stale:' || stale.resource_kind",
+		"visible.permission_key IN (",
 	} {
 		if !strings.Contains(notificationCandidatesCTE, fragment) {
 			t.Fatalf("notification candidate SQL does not contain %q", fragment)

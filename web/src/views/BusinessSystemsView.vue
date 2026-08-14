@@ -188,7 +188,7 @@ async function load() {
       customFields.value = []
     }
   } catch (error) { ElMessage.error(getAPIErrorMessage(error, '读取业务系统基础数据失败')) }
-  if (inventoryMode.value) organizationFilter.value = inventoryOrganizationID.value
+  if (inventoryMode.value || inventoryOrganizationID.value) organizationFilter.value = inventoryOrganizationID.value
   await Promise.all([loadSystems(), loadDraftSystems()])
 }
 
@@ -664,6 +664,15 @@ function statusLabel(value: string) { return statusLabels[value] ?? value }
 function levelLabel(value: string) { return levelLabels[value] ?? value }
 function assetTypeLabel(value: string) { return assetTypeLabels[value] ?? value }
 function assetStatusLabel(value: string) { return assetStatusLabels[value] ?? value }
+watch(() => route.query.organization_id, (value) => {
+  if (inventoryMode.value) return
+  const nextOrganizationID = typeof value === 'string' ? value : ''
+  if (organizationFilter.value === nextOrganizationID) return
+  organizationFilter.value = nextOrganizationID
+  page.value = 1
+  void loadSystems()
+})
+
 onMounted(load)
 </script>
 
