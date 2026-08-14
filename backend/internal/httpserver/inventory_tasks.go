@@ -38,6 +38,18 @@ func registerInventoryTaskRoutes(api *gin.RouterGroup, requireAuth gin.HandlerFu
 		}
 		c.JSON(http.StatusOK, gin.H{"working_version_diff": item})
 	})
+	group.GET("/resource-submissions/:resourceType/:resourceID", func(c *gin.Context) {
+		page, err := parsePageQuery(c)
+		if err != nil {
+			writeAPIError(c, http.StatusBadRequest, "invalid_query", "分页参数不正确，page_size 最大为 100")
+			return
+		}
+		result, err := service.ResourceSubmissionHistory(c.Request.Context(), mustPrincipal(c), c.Param("resourceType"), c.Param("resourceID"), page)
+		if writeResourceSubmissionHistoryError(c, logger, err) {
+			return
+		}
+		c.JSON(http.StatusOK, result)
+	})
 	group.GET("/:taskID/organizations/:organizationID/business-system-drafts", func(c *gin.Context) {
 		page, err := parsePageQuery(c)
 		if err != nil {
@@ -437,6 +449,23 @@ func registerInventoryTaskRoutes(api *gin.RouterGroup, requireAuth gin.HandlerFu
 			c.JSON(http.StatusOK, gin.H{"status": input.Status})
 		}
 	})
+}
+
+func writeResourceSubmissionHistoryError(c *gin.Context, logger *slog.Logger, err error) bool {
+	switch {
+	case err == nil:
+		return false
+	case errors.Is(err, inventorytask.ErrForbidden):
+		writeAPIError(c, http.StatusForbidden, "forbidden", "当前账号无权查看该资源的上报历史")
+	case errors.Is(err, inventorytask.ErrInvalid):
+		writeAPIError(c, http.StatusBadRequest, "invalid_resource", "资源类型、资源标识或分页参数不正确")
+	case errors.Is(err, inventorytask.ErrNotFound):
+		writeAPIError(c, http.StatusNotFound, "resource_not_found", "资源不存在或已不可访问")
+	default:
+		logger.Error("load resource submission history", "error", err, "request_id", c.GetString("request_id"))
+		writeAPIError(c, http.StatusInternalServerError, "internal_error", "读取资源上报历史失败")
+	}
+	return true
 }
 
 func writeWorkingVersionDiffError(c *gin.Context, logger *slog.Logger, err error) bool {

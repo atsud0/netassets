@@ -7,6 +7,7 @@ import { createExportJob } from '../api/export-jobs'
 import { useAuthStore } from '../stores/auth'
 import SavedFilterViews from '../components/SavedFilterViews.vue'
 import WorkingVersionDiffDrawer from '../components/WorkingVersionDiffDrawer.vue'
+import ResourceSubmissionHistoryDrawer from '../components/ResourceSubmissionHistoryDrawer.vue'
 import { assetDraftEndpoint, batchAssetUpdateSuccessMessage } from '../utils/inventory-drafts'
 
 interface Organization { id: string; code: string; name: string; type: string; status: string }
@@ -68,6 +69,7 @@ const importDialogVisible = ref(false)
 const historyDialogVisible = ref(false)
 const changeHistoryVisible = ref(false)
 const workingVersionDiffRef = ref<InstanceType<typeof WorkingVersionDiffDrawer>>()
+const resourceSubmissionHistoryRef = ref<InstanceType<typeof ResourceSubmissionHistoryDrawer>>()
 const changeHistoryLoading = ref(false)
 const changeHistoryItems = ref<ChangeHistoryItem[]>([])
 const changeHistoryTitle = ref('')
@@ -361,6 +363,9 @@ function openCreateDialog() {
 }
 function openWorkingVersionDiff(row: { id: string }) {
   void workingVersionDiffRef.value?.open(row.id)
+}
+function openResourceSubmissionHistory(row: { id: string }) {
+  void resourceSubmissionHistoryRef.value?.open(row.id)
 }
 
 function openEditDialog(item: Asset) {
@@ -1002,12 +1007,13 @@ onMounted(() => {
             <div class="detail-grid"><div v-for="field in detailCustomFields" :key="field.id"><span>{{ field.field_name }}</span><strong>{{ customValueLabel(detailCustomValues[field.field_key]) }}</strong></div></div>
           </template>
           <div class="form-section-title">备注</div><p class="detail-description">{{ detail.notes || '暂无备注' }}</p>
-          <div class="detail-actions"><el-button @click="openChangeHistory(detail)">变更历史</el-button><el-button @click="openEditDialog(detail)">编辑资产</el-button><el-button :type="detail.status === 'archived' ? 'success' : 'warning'" @click="toggleArchive(detail)">{{ detail.status === 'archived' ? '启用资产' : '归档资产' }}</el-button></div>
+          <div class="detail-actions"><el-button type="primary" plain @click="openResourceSubmissionHistory(detail)">上报历史</el-button><el-button v-if="!detail.is_working_copy" @click="openChangeHistory(detail)">变更历史</el-button><el-button @click="openEditDialog(detail)">编辑资产</el-button><el-button v-if="!detail.is_working_copy" :type="detail.status === 'archived' ? 'success' : 'warning'" @click="toggleArchive(detail)">{{ detail.status === 'archived' ? '启用资产' : '归档资产' }}</el-button></div>
         </template>
       </div>
     </el-drawer>
 
     <WorkingVersionDiffDrawer ref="workingVersionDiffRef" resource-type="network_asset" />
+    <ResourceSubmissionHistoryDrawer ref="resourceSubmissionHistoryRef" resource-type="network_asset" />
 
     <el-dialog v-model="editDialogVisible" :title="dialogTitle" width="720px" destroy-on-close>
       <el-alert v-if="inventoryMode" title="这里保存的是组织工作版本；只有选择纳入本次上报并通过审核后，才会更新集团正式台账。" type="info" :closable="false" show-icon class="dialog-context-alert" /><el-form ref="formRef" :model="form" :rules="rules" label-position="top">

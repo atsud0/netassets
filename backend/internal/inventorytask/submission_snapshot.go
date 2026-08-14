@@ -1029,3 +1029,24 @@ func stringValue(value *string) string {
 	}
 	return *value
 }
+
+func updateSubmissionReviewStatus(ctx context.Context, tx pgx.Tx, submissionID, status, reviewerID, returnReason string) error {
+	if status != "approved" && status != "returned" {
+		return ErrInvalid
+	}
+	result, err := tx.Exec(ctx, `
+		UPDATE inventory_submissions
+		SET review_status=$2,
+		    reviewed_at=now(),
+		    reviewed_by=NULLIF($3, '')::uuid,
+		    return_reason=CASE WHEN $2='returned' THEN NULLIF($4, '') ELSE NULL END
+		WHERE id::text=$1
+	`, submissionID, status, reviewerID, strings.TrimSpace(returnReason))
+	if err != nil {
+		return fmt.Errorf("update inventory submission review status: %w", err)
+	}
+	if result.RowsAffected() == 0 {
+		return ErrNotFound
+	}
+	return nil
+}

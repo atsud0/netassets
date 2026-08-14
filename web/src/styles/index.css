@@ -318,3 +318,18 @@ button, input { font: inherit; }
   .working-version-diff-heading { flex-direction: column; }
   .working-version-diff-tags { justify-content: flex-start; }
 }
+.resource-submission-history { min-height: 280px; }
+.resource-submission-history > .el-alert { margin-bottom: 18px; }
+.resource-submission-timeline { display: flex; flex-direction: column; gap: 14px; }
+.resource-submission-card { padding: 18px; border: 1px solid var(--line); border-radius: 12px; background: var(--surface); }
+.resource-submission-card header { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; margin-bottom: 10px; }
+.resource-submission-card header > div:first-child { display: flex; min-width: 0; flex-direction: column; gap: 5px; }
+.resource-submission-card header strong { color: var(--navy); font-size: 15px; }
+.resource-submission-card header span, .resource-submission-meta { color: var(--muted); font-size: 13px; }
+.resource-submission-tags, .resource-submission-meta { display: flex; flex-wrap: wrap; gap: 8px 16px; }
+.resource-submission-meta { margin-bottom: 12px; }
+.resource-submission-note { margin: 12px 0; padding: 10px 12px; border-radius: 8px; background: #f7f9fc; color: var(--text); font-size: 13px; }
+.resource-submission-card .el-empty { padding: 8px 0 0; }
+@media (max-width: 720px) {
+  .resource-submission-card header { flex-direction: column; }
+}

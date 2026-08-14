@@ -7,6 +7,7 @@ import { apiClient, getAPIErrorMessage, getDownloadAPIError } from '../api/clien
 import { createExportJob } from '../api/export-jobs'
 import { useAuthStore } from '../stores/auth'
 import WorkingVersionDiffDrawer from '../components/WorkingVersionDiffDrawer.vue'
+import ResourceSubmissionHistoryDrawer from '../components/ResourceSubmissionHistoryDrawer.vue'
 
 interface Organization { id: string; code: string; name: string; type: string; status: string }
 interface CustomField { id: string; field_key: string; field_name: string; description?: string; field_type: string; options: string[]; is_required: boolean }
@@ -89,6 +90,7 @@ const importDialogVisible = ref(false)
 const historyDialogVisible = ref(false)
 const changeHistoryVisible = ref(false)
 const workingVersionDiffRef = ref<InstanceType<typeof WorkingVersionDiffDrawer>>()
+const resourceSubmissionHistoryRef = ref<InstanceType<typeof ResourceSubmissionHistoryDrawer>>()
 const changeHistoryLoading = ref(false)
 const changeHistoryItems = ref<ChangeHistoryItem[]>([])
 const changeHistoryTitle = ref('')
@@ -232,6 +234,9 @@ async function loadCustomValues(id: string) {
 }
 function openWorkingVersionDiff(row: { id: string }) {
   void workingVersionDiffRef.value?.open(row.id)
+}
+function openResourceSubmissionHistory(row: { id: string }) {
+  void resourceSubmissionHistoryRef.value?.open(row.id)
 }
 
 function openCreateDialog() {
@@ -743,6 +748,7 @@ onMounted(load)
     </el-dialog>
 
     <WorkingVersionDiffDrawer ref="workingVersionDiffRef" resource-type="business_system" />
+    <ResourceSubmissionHistoryDrawer ref="resourceSubmissionHistoryRef" resource-type="business_system" />
 
     <el-dialog v-model="dialogVisible" :title="dialogTitle" width="800px" destroy-on-close>
       <el-alert v-if="inventoryMode" title="这里保存的是组织工作版本；只有选择纳入本次上报并通过审核后，才会更新集团正式台账。" type="info" :closable="false" show-icon class="dialog-context-alert" /><el-form ref="formRef" :model="form" :rules="rules" label-position="top">
@@ -825,7 +831,7 @@ onMounted(load)
           <div class="form-section-title">关联网络资产（{{ detailAssetTotal }}）</div>
           <el-table v-loading="detailAssetLoading" :data="detailAssets" size="small" empty-text="暂未关联网络资产" max-height="360"><el-table-column label="资产" min-width="210"><template #default="scope"><div class="organization-name-cell"><strong>{{ scope.row.value }}</strong><span>{{ scope.row.name || assetTypeLabel(scope.row.type) }}</span></div></template></el-table-column><el-table-column label="范围" width="80"><template #default="scope">{{ scope.row.network_scope === 'public' ? '公网' : scope.row.network_scope === 'private' ? '内网' : '待确认' }}</template></el-table-column><el-table-column label="状态" width="90"><template #default="scope">{{ assetStatusLabel(scope.row.status) }}</template></el-table-column><el-table-column prop="owner_name" label="负责人" min-width="90" /></el-table>
           <div v-if="detailAssetTotal > 0" class="table-pagination dialog-pagination"><el-pagination background small layout="total, sizes, prev, pager, next" :total="detailAssetTotal" :current-page="detailAssetPage" :page-size="detailAssetPageSize" :page-sizes="[20, 50, 100]" @current-change="handleDetailAssetPageChange" @size-change="handleDetailAssetPageSizeChange" /></div>
-          <div v-if="!inventoryMode" class="detail-actions"><el-button @click="openChangeHistory(detail as BusinessSystem)">变更历史</el-button><el-button @click="openEditDialog(detail as BusinessSystem)">编辑系统</el-button><el-button :type="detail.status === 'archived' ? 'success' : 'warning'" @click="changeArchive(detail, detail.status !== 'archived')">{{ detail.status === 'archived' ? '恢复系统' : '归档系统' }}</el-button></div>
+          <div class="detail-actions"><el-button type="primary" plain @click="openResourceSubmissionHistory(detail as BusinessSystem)">上报历史</el-button><template v-if="!inventoryMode"><el-button v-if="!detail.is_working_copy" @click="openChangeHistory(detail as BusinessSystem)">变更历史</el-button><el-button @click="openEditDialog(detail as BusinessSystem)">编辑系统</el-button><el-button v-if="!detail.is_working_copy" :type="detail.status === 'archived' ? 'success' : 'warning'" @click="changeArchive(detail, detail.status !== 'archived')">{{ detail.status === 'archived' ? '恢复系统' : '归档系统' }}</el-button></template></div>
         </template>
       </div>
     </el-drawer>

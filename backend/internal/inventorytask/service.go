@@ -976,6 +976,9 @@ func (s *Service) Submit(ctx context.Context, principal auth.Principal, taskID, 
 		return OrganizationProgress{}, err
 	}
 	if item.Status == "approved" {
+		if err := updateSubmissionReviewStatus(ctx, tx, snapshot.ID, "approved", "", ""); err != nil {
+			return OrganizationProgress{}, err
+		}
 		if err := publishBusinessSystemDrafts(ctx, tx, principal, taskID, organizationID, requestID, ipAddress); err != nil {
 			return OrganizationProgress{}, err
 		}
@@ -1036,6 +1039,20 @@ func (s *Service) Review(ctx context.Context, principal auth.Principal, taskID, 
 	}
 	if result.RowsAffected() == 0 {
 		return OrganizationProgress{}, ErrState
+	}
+	var latestSubmissionID string
+	if err := tx.QueryRow(ctx, `
+		SELECT COALESCE(latest_submission_id::text, '')
+		FROM inventory_task_organizations
+		WHERE task_id::text=$1 AND organization_id::text=$2
+	`, taskID, organizationID).Scan(&latestSubmissionID); err != nil {
+		return OrganizationProgress{}, fmt.Errorf("load reviewed inventory submission: %w", err)
+	}
+	if latestSubmissionID == "" {
+		return OrganizationProgress{}, ErrState
+	}
+	if err := updateSubmissionReviewStatus(ctx, tx, latestSubmissionID, input.Decision, principal.UserID, input.ReturnReason); err != nil {
+		return OrganizationProgress{}, err
 	}
 	if input.Decision == "returned" {
 		if _, err := tx.Exec(ctx, `UPDATE inventory_business_system_drafts SET draft_status='returned',updated_by=$3::uuid,updated_at=now() WHERE task_id::text=$1 AND organization_id::text=$2 AND draft_status='submitted'`, taskID, organizationID, principal.UserID); err != nil {

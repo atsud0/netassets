@@ -13,6 +13,7 @@ import (
 
 	"netassets/internal/auth"
 	"netassets/internal/exportfile"
+	"netassets/internal/pagination"
 )
 
 func TestNormalizeCreateInput(t *testing.T) {
@@ -538,5 +539,71 @@ func TestWorkingVersionDiffRejectsMissingResourcePermissionBeforeDatabaseAccess(
 	_, err := service.WorkingVersionDiff(context.Background(), auth.Principal{Roles: []string{"organization_user"}}, "network_asset", "draft-1")
 	if !errors.Is(err, ErrForbidden) {
 		t.Fatalf("WorkingVersionDiff() error = %v, want ErrForbidden", err)
+	}
+}
+
+func TestResourceSubmissionHistoryRejectsInvalidResourceBeforeDatabaseAccess(t *testing.T) {
+	service := &Service{}
+	page := pagination.Query{Page: 1, PageSize: 20}
+	principal := auth.Principal{Roles: []string{"group_admin"}}
+	if _, err := service.ResourceSubmissionHistory(context.Background(), principal, "server", "not-a-uuid", page); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("ResourceSubmissionHistory() error = %v, want ErrInvalid", err)
+	}
+}
+
+func TestResourceSubmissionHistoryChecksPermissionBeforeDatabaseAccess(t *testing.T) {
+	service := &Service{}
+	page := pagination.Query{Page: 1, PageSize: 20}
+	principal := auth.Principal{Roles: []string{"organization_viewer"}}
+	if _, err := service.ResourceSubmissionHistory(context.Background(), principal, "network_asset", "2cf486e9-71c8-4a48-82e4-17e3ab76b53d", page); !errors.Is(err, ErrForbidden) {
+		t.Fatalf("ResourceSubmissionHistory() error = %v, want ErrForbidden", err)
+	}
+}
+
+func TestBuildResourceSubmissionChangesUsesFrozenBeforeSnapshot(t *testing.T) {
+	snapshot := map[string]any{
+		"asset_name":       "新名称",
+		inventoryBeforeKey: map[string]any{"asset_name": "旧名称"},
+	}
+	operation, changes := buildResourceSubmissionChanges("network_asset", "update", snapshot, map[string]any{"asset_name": "更早名称"})
+	if operation != "update" || len(changes) != 1 {
+		t.Fatalf("operation=%q changes=%+v", operation, changes)
+	}
+	if changes[0].Before != "旧名称" || changes[0].After != "新名称" {
+		t.Fatalf("change=%+v, want frozen submit-time values", changes[0])
+	}
+}
+
+func TestBuildResourceSubmissionChangesIncludesCustomFields(t *testing.T) {
+	snapshot := map[string]any{
+		"system_name":          "客户系统",
+		"custom:data_class":    "敏感",
+		"_custom_field_labels": map[string]any{"custom:data_class": "数据分类"},
+	}
+	operation, changes := buildResourceSubmissionChanges("business_system", "create", snapshot, nil)
+	if operation != "create" {
+		t.Fatalf("operation=%q, want create", operation)
+	}
+	found := false
+	for _, change := range changes {
+		if change.Field == "custom:data_class" && change.Label == "自定义字段：数据分类" && change.After == "敏感" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("custom field change missing: %+v", changes)
+	}
+}
+
+func TestBuildResourceSubmissionChangesClassifiesUnchangedSnapshots(t *testing.T) {
+	current := map[string]any{"system_name": "统一门户"}
+	operation, changes := buildResourceSubmissionChanges("business_system", "", current, map[string]any{"system_name": "统一门户"})
+	if operation != "confirmed" || len(changes) != 0 {
+		t.Fatalf("operation=%q changes=%+v, want confirmed without changes", operation, changes)
+	}
+
+	operation, changes = buildResourceSubmissionChanges("business_system", "", current, nil)
+	if operation != "first_report" || len(changes) != 1 {
+		t.Fatalf("operation=%q changes=%+v, want first_report", operation, changes)
 	}
 }
