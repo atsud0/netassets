@@ -305,3 +305,16 @@ button, input { font: inherit; }
 }
 
 .work-organization-switcher { width: 210px; }
+
+.working-version-diff { min-height: 240px; }
+.working-version-diff-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; padding-bottom: 14px; }
+.working-version-diff-heading > div:first-child { display: flex; min-width: 0; flex-direction: column; gap: 5px; }
+.working-version-diff-heading span { color: var(--muted); font-size: 13px; }
+.working-version-diff-heading strong { overflow-wrap: anywhere; color: var(--navy); font-size: 16px; }
+.working-version-diff-tags { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; }
+.working-version-diff-alert { margin-bottom: 18px; }
+.working-version-change-list { display: flex; flex-direction: column; gap: 8px; }
+@media (max-width: 800px) {
+  .working-version-diff-heading { flex-direction: column; }
+  .working-version-diff-tags { justify-content: flex-start; }
+}

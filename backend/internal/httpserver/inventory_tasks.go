@@ -31,6 +31,13 @@ func registerInventoryTaskRoutes(api *gin.RouterGroup, requireAuth gin.HandlerFu
 		}
 		c.JSON(http.StatusOK, result)
 	})
+	group.GET("/working-versions/:resourceType/:draftID/diff", func(c *gin.Context) {
+		item, err := service.WorkingVersionDiff(c.Request.Context(), mustPrincipal(c), c.Param("resourceType"), c.Param("draftID"))
+		if writeWorkingVersionDiffError(c, logger, err) {
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"working_version_diff": item})
+	})
 	group.GET("/:taskID/organizations/:organizationID/business-system-drafts", func(c *gin.Context) {
 		page, err := parsePageQuery(c)
 		if err != nil {
@@ -430,6 +437,23 @@ func registerInventoryTaskRoutes(api *gin.RouterGroup, requireAuth gin.HandlerFu
 			c.JSON(http.StatusOK, gin.H{"status": input.Status})
 		}
 	})
+}
+
+func writeWorkingVersionDiffError(c *gin.Context, logger *slog.Logger, err error) bool {
+	switch {
+	case err == nil:
+		return false
+	case errors.Is(err, inventorytask.ErrForbidden):
+		writeAPIError(c, http.StatusForbidden, "forbidden", "当前账号无权查看该工作版本的变更内容")
+	case errors.Is(err, inventorytask.ErrInvalid):
+		writeAPIError(c, http.StatusBadRequest, "invalid_working_version", "工作版本类型或标识不正确")
+	case errors.Is(err, inventorytask.ErrNotFound):
+		writeAPIError(c, http.StatusNotFound, "working_version_not_found", "工作版本或对应集团正式版本不存在")
+	default:
+		logger.Error("load working version diff", "error", err, "request_id", c.GetString("request_id"))
+		writeAPIError(c, http.StatusInternalServerError, "internal_error", "读取工作版本变更内容失败")
+	}
+	return true
 }
 
 func writeInventoryProgressResult(c *gin.Context, logger *slog.Logger, operation, fallback string, item inventorytask.OrganizationProgress, err error) {

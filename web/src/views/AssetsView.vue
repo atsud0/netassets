@@ -6,6 +6,7 @@ import { apiClient, getAPIErrorMessage, getDownloadAPIError } from '../api/clien
 import { createExportJob } from '../api/export-jobs'
 import { useAuthStore } from '../stores/auth'
 import SavedFilterViews from '../components/SavedFilterViews.vue'
+import WorkingVersionDiffDrawer from '../components/WorkingVersionDiffDrawer.vue'
 import { assetDraftEndpoint, batchAssetUpdateSuccessMessage } from '../utils/inventory-drafts'
 
 interface Organization { id: string; code: string; name: string; type: string; status: string }
@@ -66,6 +67,7 @@ const detailCustomValues = ref<Record<string, unknown>>({})
 const importDialogVisible = ref(false)
 const historyDialogVisible = ref(false)
 const changeHistoryVisible = ref(false)
+const workingVersionDiffRef = ref<InstanceType<typeof WorkingVersionDiffDrawer>>()
 const changeHistoryLoading = ref(false)
 const changeHistoryItems = ref<ChangeHistoryItem[]>([])
 const changeHistoryTitle = ref('')
@@ -357,6 +359,10 @@ function openCreateDialog() {
   editDialogVisible.value = true
   void loadOwnerOptions()
 }
+function openWorkingVersionDiff(row: { id: string }) {
+  void workingVersionDiffRef.value?.open(row.id)
+}
+
 function openEditDialog(item: Asset) {
   editingAssetID.value = item.id
   const draftTaskID = item.task_id || (inventoryMode.value && item.is_draft ? inventoryTaskID.value : '')
@@ -916,7 +922,7 @@ onMounted(() => {
         <el-table-column label="暴露范围" width="105"><template #default="scope">{{ scopeLabel(scope.row.network_scope) }}</template></el-table-column>
         <el-table-column label="变更类型" width="90"><template #default="scope"><el-tag :type="scope.row.operation === 'delete' ? 'danger' : scope.row.operation === 'update' ? 'warning' : 'success'" effect="plain">{{ draftOperationLabels[scope.row.operation || 'create'] }}</el-tag></template></el-table-column>
         <el-table-column label="上报状态" width="105"><template #default="scope"><el-tag type="warning" effect="plain">{{ draftStatusLabels[scope.row.draft_status || 'editing'] || scope.row.draft_status }}</el-tag></template></el-table-column>
-        <el-table-column label="操作" width="160" fixed="right"><template #default="scope"><el-button v-if="scope.row.operation !== 'delete'" link type="primary" :disabled="scope.row.draft_status === 'submitted'" @click="openEditDialog(scope.row)">编辑</el-button><el-button link type="danger" :disabled="scope.row.draft_status === 'submitted'" @click="removeDraft(scope.row)">取消上报</el-button></template></el-table-column>
+        <el-table-column label="操作" width="230" fixed="right"><template #default="scope"><el-button link type="primary" @click="openWorkingVersionDiff(scope.row)">查看变更</el-button><el-button v-if="scope.row.operation !== 'delete'" link type="primary" :disabled="scope.row.draft_status === 'submitted'" @click="openEditDialog(scope.row)">编辑</el-button><el-button link type="danger" :disabled="scope.row.draft_status === 'submitted'" @click="removeDraft(scope.row)">取消上报</el-button></template></el-table-column>
       </el-table>
       <div v-if="draftTotal > 0" class="table-pagination">
         <el-pagination background layout="total, sizes, prev, pager, next" :total="draftTotal" :current-page="draftPage" :page-size="draftPageSize" :page-sizes="[20, 50, 100]" @current-change="handleDraftPageChange" @size-change="handleDraftPageSizeChange" />
@@ -959,13 +965,13 @@ onMounted(() => {
         <el-table-column v-if="!auth.isGroupAdmin && !inventoryMode" label="上报状态" width="130"><template #default="scope"><el-tag :type="scope.row.reporting_status === 'reported' ? 'success' : 'warning'" effect="plain">{{ reportingStatusLabels[scope.row.reporting_status || 'reported'] }}</el-tag></template></el-table-column>
         <el-table-column label="重要程度" width="95"><template #default="scope"><el-tag :type="importanceTag(scope.row.importance)" effect="plain">{{ importanceLabel(scope.row.importance) }}</el-tag></template></el-table-column>
         <el-table-column label="来源" width="75"><template #default="scope">{{ sourceLabel(scope.row.source) }}</template></el-table-column>
-        <el-table-column label="操作" width="235" fixed="right">
+        <el-table-column label="操作" width="305" fixed="right">
           <template #default="scope">
             <template v-if="!inventoryMode">
-              <template v-if="scope.row.is_working_copy"><el-button link type="primary" @click="openEditDialog(scope.row)">编辑</el-button><el-button link type="danger" @click="removeAsset(scope.row)">删除</el-button></template>
+              <template v-if="scope.row.is_working_copy"><el-button link type="primary" @click="openWorkingVersionDiff(scope.row)">查看变更</el-button><el-button link type="primary" @click="openEditDialog(scope.row)">编辑</el-button><el-button link type="danger" @click="removeAsset(scope.row)">删除</el-button></template>
               <template v-else><el-button link type="primary" @click="openChangeHistory(scope.row)">历史</el-button><el-button link type="primary" @click="openEditDialog(scope.row)">编辑</el-button><el-button link :type="scope.row.status === 'archived' ? 'success' : 'warning'" @click="toggleArchive(scope.row)">{{ scope.row.status === 'archived' ? '启用' : '归档' }}</el-button><el-button link type="danger" @click="removeAsset(scope.row)">删除</el-button></template>
             </template>
-            <template v-else><template v-if="scope.row.is_working_copy"><el-button v-if="!scope.row.task_id" link type="primary" @click="selectWorkspaceAsset(scope.row)">选择上报</el-button><el-tag v-else-if="scope.row.task_id === inventoryTaskID" type="success" effect="plain">已纳入本次上报</el-tag><el-tag v-else type="info" effect="plain">已纳入其他任务</el-tag></template><template v-else><el-button link type="primary" @click="openEditDialog(scope.row)">修改后上报</el-button><el-button link type="danger" @click="requestAssetDeletion(scope.row)">申请下线</el-button></template></template>
+            <template v-else><template v-if="scope.row.is_working_copy"><el-button link type="primary" @click="openWorkingVersionDiff(scope.row)">查看变更</el-button><el-button v-if="!scope.row.task_id" link type="primary" @click="selectWorkspaceAsset(scope.row)">选择上报</el-button><el-tag v-else-if="scope.row.task_id === inventoryTaskID" type="success" effect="plain">已纳入本次上报</el-tag><el-tag v-else type="info" effect="plain">已纳入其他任务</el-tag></template><template v-else><el-button link type="primary" @click="openEditDialog(scope.row)">修改后上报</el-button><el-button link type="danger" @click="requestAssetDeletion(scope.row)">申请下线</el-button></template></template>
           </template>
         </el-table-column>
       </el-table>
@@ -1000,6 +1006,8 @@ onMounted(() => {
         </template>
       </div>
     </el-drawer>
+
+    <WorkingVersionDiffDrawer ref="workingVersionDiffRef" resource-type="network_asset" />
 
     <el-dialog v-model="editDialogVisible" :title="dialogTitle" width="720px" destroy-on-close>
       <el-alert v-if="inventoryMode" title="这里保存的是组织工作版本；只有选择纳入本次上报并通过审核后，才会更新集团正式台账。" type="info" :closable="false" show-icon class="dialog-context-alert" /><el-form ref="formRef" :model="form" :rules="rules" label-position="top">

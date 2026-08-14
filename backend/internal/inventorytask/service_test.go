@@ -524,3 +524,19 @@ func TestBuildInventoryTaskExportRejectsOversizedSynchronousXLSX(t *testing.T) {
 		t.Fatalf("buildExport oversized xlsx error = %v, want ErrExportTooLarge", err)
 	}
 }
+
+func TestWorkingVersionDiffRejectsInvalidResourceTypeBeforeDatabaseAccess(t *testing.T) {
+	service := &Service{}
+	_, err := service.WorkingVersionDiff(context.Background(), auth.Principal{Roles: []string{"group_admin"}}, "certificate", "draft-1")
+	if !errors.Is(err, ErrInvalid) {
+		t.Fatalf("WorkingVersionDiff() error = %v, want ErrInvalid", err)
+	}
+}
+
+func TestWorkingVersionDiffRejectsMissingResourcePermissionBeforeDatabaseAccess(t *testing.T) {
+	service := &Service{}
+	_, err := service.WorkingVersionDiff(context.Background(), auth.Principal{Roles: []string{"organization_user"}}, "network_asset", "draft-1")
+	if !errors.Is(err, ErrForbidden) {
+		t.Fatalf("WorkingVersionDiff() error = %v, want ErrForbidden", err)
+	}
+}

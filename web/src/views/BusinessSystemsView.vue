@@ -6,6 +6,7 @@ import { UploadFilled } from '@element-plus/icons-vue'
 import { apiClient, getAPIErrorMessage, getDownloadAPIError } from '../api/client'
 import { createExportJob } from '../api/export-jobs'
 import { useAuthStore } from '../stores/auth'
+import WorkingVersionDiffDrawer from '../components/WorkingVersionDiffDrawer.vue'
 
 interface Organization { id: string; code: string; name: string; type: string; status: string }
 interface CustomField { id: string; field_key: string; field_name: string; description?: string; field_type: string; options: string[]; is_required: boolean }
@@ -87,6 +88,7 @@ const form = reactive<FormData>(emptyForm())
 const importDialogVisible = ref(false)
 const historyDialogVisible = ref(false)
 const changeHistoryVisible = ref(false)
+const workingVersionDiffRef = ref<InstanceType<typeof WorkingVersionDiffDrawer>>()
 const changeHistoryLoading = ref(false)
 const changeHistoryItems = ref<ChangeHistoryItem[]>([])
 const changeHistoryTitle = ref('')
@@ -228,6 +230,10 @@ async function loadCustomValues(id: string) {
   defaultCustomValues()
   data.values.forEach((item) => { customValues[item.field_key] = item.value })
 }
+function openWorkingVersionDiff(row: { id: string }) {
+  void workingVersionDiffRef.value?.open(row.id)
+}
+
 function openCreateDialog() {
   Object.assign(form, emptyForm(), { organization_id: inventoryMode.value ? inventoryOrganizationID.value : (auth.user?.organization?.id ?? eligibleOrganizations.value[0]?.id ?? '') })
   defaultCustomValues()
@@ -689,7 +695,7 @@ onMounted(load)
         <el-table-column label="状态/等级" min-width="150"><template #default="scope"><el-tag effect="plain">{{ statusLabel(scope.row.status) }}</el-tag><span class="inline-note">{{ levelLabel(scope.row.level) }}</span></template></el-table-column>
         <el-table-column label="变更类型" width="90"><template #default="scope"><el-tag :type="scope.row.operation === 'delete' ? 'danger' : scope.row.operation === 'update' ? 'warning' : 'success'" effect="plain">{{ draftOperationLabels[scope.row.operation || 'create'] }}</el-tag></template></el-table-column>
         <el-table-column label="草稿状态" width="105"><template #default="scope"><el-tag type="warning" effect="plain">{{ draftStatusLabels[scope.row.draft_status || 'editing'] || scope.row.draft_status }}</el-tag></template></el-table-column>
-        <el-table-column label="操作" width="160" fixed="right"><template #default="scope"><el-button v-if="scope.row.operation !== 'delete'" link type="primary" :disabled="scope.row.draft_status === 'submitted'" @click="openEditDialog(scope.row)">编辑</el-button><el-button link type="danger" :disabled="scope.row.draft_status === 'submitted'" @click="removeDraft(scope.row)">取消上报</el-button></template></el-table-column>
+        <el-table-column label="操作" width="230" fixed="right"><template #default="scope"><el-button link type="primary" @click="openWorkingVersionDiff(scope.row)">查看变更</el-button><el-button v-if="scope.row.operation !== 'delete'" link type="primary" :disabled="scope.row.draft_status === 'submitted'" @click="openEditDialog(scope.row)">编辑</el-button><el-button link type="danger" :disabled="scope.row.draft_status === 'submitted'" @click="removeDraft(scope.row)">取消上报</el-button></template></el-table-column>
       </el-table>
       <div v-if="draftTotal > 0" class="table-pagination"><el-pagination background layout="total, sizes, prev, pager, next" :total="draftTotal" :current-page="draftPage" :page-size="draftPageSize" :page-sizes="[20, 50, 100]" @current-change="handleDraftPageChange" @size-change="handleDraftPageSizeChange" /></div>
     </div>
@@ -717,7 +723,7 @@ onMounted(load)
         <el-table-column label="数据量超 10 万" min-width="135"><template #default="scope">{{ yesNo(scope.row.data_volume_over_100k) }}</template></el-table-column>
         <el-table-column prop="owner_name" label="负责人" min-width="110"><template #default="scope">{{ scope.row.owner_name || '—' }}</template></el-table-column>
         <el-table-column v-if="!auth.isGroupAdmin && !inventoryMode" label="上报状态" width="130"><template #default="scope"><el-tag :type="scope.row.reporting_status === 'reported' ? 'success' : 'warning'" effect="plain">{{ reportingStatusLabels[scope.row.reporting_status || 'reported'] }}</el-tag></template></el-table-column>
-        <el-table-column label="操作" fixed="right" width="280"><template #default="scope"><template v-if="!inventoryMode"><template v-if="scope.row.is_working_copy"><el-button link type="primary" @click="openEditDialog(scope.row)">编辑</el-button><el-button link type="danger" @click="remove(scope.row)">删除</el-button></template><template v-else><el-button link type="primary" @click="openChangeHistory(scope.row)">历史</el-button><el-button link type="primary" @click="openEditDialog(scope.row)">编辑</el-button><el-button link :type="scope.row.status === 'archived' ? 'success' : 'warning'" @click="changeArchive(scope.row, scope.row.status !== 'archived')">{{ scope.row.status === 'archived' ? '恢复' : '归档' }}</el-button><el-button link type="danger" @click="remove(scope.row)">删除</el-button></template></template><template v-else><template v-if="scope.row.is_working_copy"><el-button v-if="!scope.row.task_id" link type="primary" @click="selectWorkspaceBusinessSystem(scope.row)">选择上报</el-button><el-tag v-else-if="scope.row.task_id === inventoryTaskID" type="success" effect="plain">已纳入本次上报</el-tag><el-tag v-else type="info" effect="plain">已纳入其他任务</el-tag></template><template v-else><el-button link type="primary" @click="openEditDialog(scope.row)">修改后上报</el-button><el-button link type="danger" @click="requestSystemDeletion(scope.row)">申请下线</el-button></template></template></template></el-table-column>
+        <el-table-column label="操作" fixed="right" width="350"><template #default="scope"><template v-if="!inventoryMode"><template v-if="scope.row.is_working_copy"><el-button link type="primary" @click="openWorkingVersionDiff(scope.row)">查看变更</el-button><el-button link type="primary" @click="openEditDialog(scope.row)">编辑</el-button><el-button link type="danger" @click="remove(scope.row)">删除</el-button></template><template v-else><el-button link type="primary" @click="openChangeHistory(scope.row)">历史</el-button><el-button link type="primary" @click="openEditDialog(scope.row)">编辑</el-button><el-button link :type="scope.row.status === 'archived' ? 'success' : 'warning'" @click="changeArchive(scope.row, scope.row.status !== 'archived')">{{ scope.row.status === 'archived' ? '恢复' : '归档' }}</el-button><el-button link type="danger" @click="remove(scope.row)">删除</el-button></template></template><template v-else><template v-if="scope.row.is_working_copy"><el-button link type="primary" @click="openWorkingVersionDiff(scope.row)">查看变更</el-button><el-button v-if="!scope.row.task_id" link type="primary" @click="selectWorkspaceBusinessSystem(scope.row)">选择上报</el-button><el-tag v-else-if="scope.row.task_id === inventoryTaskID" type="success" effect="plain">已纳入本次上报</el-tag><el-tag v-else type="info" effect="plain">已纳入其他任务</el-tag></template><template v-else><el-button link type="primary" @click="openEditDialog(scope.row)">修改后上报</el-button><el-button link type="danger" @click="requestSystemDeletion(scope.row)">申请下线</el-button></template></template></template></el-table-column>
       </el-table>
       <div class="table-pagination">
         <el-pagination background layout="total, sizes, prev, pager, next" :total="total" :current-page="page" :page-size="pageSize" :page-sizes="[20, 50, 100]" @current-change="handlePageChange" @size-change="handlePageSizeChange" />
@@ -735,6 +741,8 @@ onMounted(load)
       </template>
       <template #footer><el-button type="primary" @click="batchResultVisible = false">关闭</el-button></template>
     </el-dialog>
+
+    <WorkingVersionDiffDrawer ref="workingVersionDiffRef" resource-type="business_system" />
 
     <el-dialog v-model="dialogVisible" :title="dialogTitle" width="800px" destroy-on-close>
       <el-alert v-if="inventoryMode" title="这里保存的是组织工作版本；只有选择纳入本次上报并通过审核后，才会更新集团正式台账。" type="info" :closable="false" show-icon class="dialog-context-alert" /><el-form ref="formRef" :model="form" :rules="rules" label-position="top">
