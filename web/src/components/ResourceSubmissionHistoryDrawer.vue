@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, ref } from 'vue'
-import { ElMessage } from 'element-plus'
+import { ElMessage, ElMessageBox } from 'element-plus'
 import { apiClient, getAPIErrorMessage } from '../api/client'
 
 interface FieldChange {
@@ -36,7 +36,8 @@ interface HistoryResponse {
   page_size: number
 }
 
-const props = defineProps<{ resourceType: 'network_asset' | 'business_system' }>()
+const props = withDefaults(defineProps<{ resourceType: 'network_asset' | 'business_system'; allowRestore?: boolean }>(), { allowRestore: false })
+const emit = defineEmits<{ restored: [workingVersionID: string] }>()
 const visible = ref(false)
 const loading = ref(false)
 const resourceID = ref('')
@@ -44,6 +45,7 @@ const items = ref<SubmissionHistoryItem[]>([])
 const total = ref(0)
 const page = ref(1)
 const pageSize = ref(20)
+const restoringSubmissionID = ref('')
 
 const operationLabels: Record<string, string> = {
   create: '首次新增上报', update: '变更上报', delete: '下线申请', first_report: '首次随任务确认', confirmed: '随任务确认',
@@ -113,7 +115,41 @@ function handlePageSizeChange(value: number) {
   void load()
 }
 
-defineExpose({ open })
+function canRestore(item: SubmissionHistoryItem) {
+  return props.allowRestore && item.status === 'approved' && item.operation !== 'delete'
+}
+
+async function restoreSubmission(item: SubmissionHistoryItem) {
+  if (!resourceID.value || !canRestore(item) || restoringSubmissionID.value) return
+  try {
+    await ElMessageBox.confirm(
+      '该操作不会修改集团正式台账，而会将此历史版本生成新的未上报工作版本。当前已有未上报工作版本时，其内容将被替换。是否继续？',
+      '恢复历史版本',
+      { confirmButtonText: '恢复为工作版本', cancelButtonText: '取消', type: 'warning' },
+    )
+  } catch (error) {
+    if (error === 'cancel' || error === 'close') return
+    throw error
+  }
+
+  restoringSubmissionID.value = item.submission_id
+  try {
+    const response = await apiClient.post<{ result: { working_version_id: string; warnings?: string[] } }>(
+      `/inventory-tasks/resource-submissions/${props.resourceType}/${resourceID.value}/${item.submission_id}/restore`,
+    )
+    ElMessage.success('已恢复为未上报工作版本，请在台账页面复核后选择纳入填报任务')
+    if (response.data.result.warnings?.length) {
+      ElMessage.warning(response.data.result.warnings.join('；'))
+    }
+    emit('restored', response.data.result.working_version_id)
+  } catch (error) {
+    ElMessage.error(getAPIErrorMessage(error, '恢复资源历史版本失败'))
+  } finally {
+    restoringSubmissionID.value = ''
+  }
+}
+
+defineExpose({ open, restoreSubmission })
 </script>
 
 <template>
@@ -127,9 +163,12 @@ defineExpose({ open })
               <strong>{{ item.task_name }}</strong>
               <span>第 {{ item.version }} 次提交 · {{ formatDateTime(item.submitted_at) }}</span>
             </div>
-            <div class="resource-submission-tags">
-              <el-tag :type="operationTagTypes[item.operation]" effect="plain">{{ operationLabels[item.operation] || item.operation }}</el-tag>
-              <el-tag :type="statusTagTypes[item.status]" effect="plain">{{ statusLabels[item.status] || item.status }}</el-tag>
+            <div class="resource-submission-actions">
+              <div class="resource-submission-tags">
+                <el-tag :type="operationTagTypes[item.operation]" effect="plain">{{ operationLabels[item.operation] || item.operation }}</el-tag>
+                <el-tag :type="statusTagTypes[item.status]" effect="plain">{{ statusLabels[item.status] || item.status }}</el-tag>
+              </div>
+              <el-button v-if="canRestore(item)" link type="primary" :loading="restoringSubmissionID === item.submission_id" @click="restoreSubmission(item)">恢复为工作版本</el-button>
             </div>
           </header>
           <div class="resource-submission-meta">

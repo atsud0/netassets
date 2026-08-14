@@ -12,6 +12,7 @@ import (
 	"github.com/xuri/excelize/v2"
 
 	"netassets/internal/auth"
+	"netassets/internal/customfield"
 	"netassets/internal/exportfile"
 	"netassets/internal/pagination"
 )
@@ -605,5 +606,86 @@ func TestBuildResourceSubmissionChangesClassifiesUnchangedSnapshots(t *testing.T
 	operation, changes = buildResourceSubmissionChanges("business_system", "", current, nil)
 	if operation != "first_report" || len(changes) != 1 {
 		t.Fatalf("operation=%q changes=%+v, want first_report", operation, changes)
+	}
+}
+
+func TestRestoreResourceSubmissionRejectsInvalidIdentifiersBeforeDatabaseAccess(t *testing.T) {
+	service := &Service{}
+	principal := auth.Principal{Roles: []string{"organization_admin"}, Permissions: []string{"inventory.manage", "asset.manage"}}
+	_, err := service.RestoreResourceSubmission(context.Background(), principal, "network_asset", "invalid", "also-invalid", "", "")
+	if !errors.Is(err, ErrInvalid) {
+		t.Fatalf("RestoreResourceSubmission() error = %v, want ErrInvalid", err)
+	}
+}
+
+func TestRestoreResourceSubmissionRejectsGroupAdminBeforeDatabaseAccess(t *testing.T) {
+	service := &Service{}
+	principal := auth.Principal{Roles: []string{"group_admin"}, Permissions: []string{"inventory.manage", "asset.manage"}}
+	_, err := service.RestoreResourceSubmission(context.Background(), principal, "network_asset", "11111111-1111-4111-8111-111111111111", "22222222-2222-4222-8222-222222222222", "", "")
+	if !errors.Is(err, ErrForbidden) {
+		t.Fatalf("RestoreResourceSubmission() error = %v, want ErrForbidden", err)
+	}
+}
+
+func TestRestoreResourceSubmissionRequiresInventoryAndResourcePermissionsBeforeDatabaseAccess(t *testing.T) {
+	service := &Service{}
+	resourceID := "11111111-1111-4111-8111-111111111111"
+	submissionID := "22222222-2222-4222-8222-222222222222"
+	cases := []auth.Principal{
+		{Roles: []string{"organization_admin"}, Permissions: []string{"asset.manage"}},
+		{Roles: []string{"organization_admin"}, Permissions: []string{"inventory.manage"}},
+	}
+	for _, principal := range cases {
+		_, err := service.RestoreResourceSubmission(context.Background(), principal, "network_asset", resourceID, submissionID, "", "")
+		if !errors.Is(err, ErrForbidden) {
+			t.Fatalf("permissions=%v error=%v, want ErrForbidden", principal.Permissions, err)
+		}
+	}
+}
+
+func TestMergeRestoredCustomValuesUsesValidHistoryAndPreservesInvalidCurrentValue(t *testing.T) {
+	definitions := []customfield.Definition{
+		{FieldKey: "classification", FieldName: "数据分类", FieldType: "select", Options: []string{"一般", "敏感"}, IsRequired: true},
+		{FieldKey: "retention", FieldName: "保留期限", FieldType: "number"},
+	}
+	current := []customfield.Value{
+		{FieldKey: "classification", Value: "一般"},
+		{FieldKey: "retention", Value: float64(30)},
+	}
+	snapshot := map[string]any{
+		"custom:classification": "敏感",
+		"custom:retention":      "已失效的数字格式",
+		"custom:disabled":       "旧值",
+		customFieldLabelsKey: map[string]any{
+			"custom:disabled": "已停用字段",
+		},
+	}
+
+	values, warnings, err := mergeRestoredCustomValues(definitions, current, snapshot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(values) != 2 || values[0].FieldKey != "classification" || values[0].Value != "敏感" || values[1].Value != float64(30) {
+		t.Fatalf("unexpected merged values: %+v", values)
+	}
+	if len(warnings) != 2 {
+		t.Fatalf("warnings=%+v, want invalid and disabled warnings", warnings)
+	}
+}
+
+func TestMergeRestoredCustomValuesRejectsMissingCurrentRequiredField(t *testing.T) {
+	definitions := []customfield.Definition{{FieldKey: "required", FieldName: "当前必填", FieldType: "text", IsRequired: true}}
+	_, _, err := mergeRestoredCustomValues(definitions, nil, map[string]any{})
+	if !errors.Is(err, ErrConflict) {
+		t.Fatalf("mergeRestoredCustomValues() error = %v, want ErrConflict", err)
+	}
+}
+
+func TestRestoreInt64AcceptsWholeJSONNumbers(t *testing.T) {
+	if value, ok := restoreInt64(float64(100000)); !ok || value != 100000 {
+		t.Fatalf("restoreInt64() = %d, %v", value, ok)
+	}
+	if _, ok := restoreInt64(1.5); ok {
+		t.Fatal("fractional JSON number must be rejected")
 	}
 }

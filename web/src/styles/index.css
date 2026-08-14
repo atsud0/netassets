@@ -326,6 +326,7 @@ button, input { font: inherit; }
 .resource-submission-card header > div:first-child { display: flex; min-width: 0; flex-direction: column; gap: 5px; }
 .resource-submission-card header strong { color: var(--navy); font-size: 15px; }
 .resource-submission-card header span, .resource-submission-meta { color: var(--muted); font-size: 13px; }
+.resource-submission-actions { display: flex; align-items: flex-end; flex-direction: column; gap: 8px; }
 .resource-submission-tags, .resource-submission-meta { display: flex; flex-wrap: wrap; gap: 8px 16px; }
 .resource-submission-meta { margin-bottom: 12px; }
 .resource-submission-note { margin: 12px 0; padding: 10px 12px; border-radius: 8px; background: #f7f9fc; color: var(--text); font-size: 13px; }

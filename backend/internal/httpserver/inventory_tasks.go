@@ -50,6 +50,13 @@ func registerInventoryTaskRoutes(api *gin.RouterGroup, requireAuth gin.HandlerFu
 		}
 		c.JSON(http.StatusOK, result)
 	})
+	group.POST("/resource-submissions/:resourceType/:resourceID/:submissionID/restore", func(c *gin.Context) {
+		result, err := service.RestoreResourceSubmission(c.Request.Context(), mustPrincipal(c), c.Param("resourceType"), c.Param("resourceID"), c.Param("submissionID"), c.GetString("request_id"), c.ClientIP())
+		if writeResourceSubmissionRestoreError(c, logger, err) {
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"result": result})
+	})
 	group.GET("/:taskID/organizations/:organizationID/business-system-drafts", func(c *gin.Context) {
 		page, err := parsePageQuery(c)
 		if err != nil {
@@ -464,6 +471,27 @@ func writeResourceSubmissionHistoryError(c *gin.Context, logger *slog.Logger, er
 	default:
 		logger.Error("load resource submission history", "error", err, "request_id", c.GetString("request_id"))
 		writeAPIError(c, http.StatusInternalServerError, "internal_error", "读取资源上报历史失败")
+	}
+	return true
+}
+
+func writeResourceSubmissionRestoreError(c *gin.Context, logger *slog.Logger, err error) bool {
+	switch {
+	case err == nil:
+		return false
+	case errors.Is(err, inventorytask.ErrForbidden):
+		writeAPIError(c, http.StatusForbidden, "forbidden", "仅组织侧具有填报和资源管理权限的账号可以恢复历史版本")
+	case errors.Is(err, inventorytask.ErrInvalid):
+		writeAPIError(c, http.StatusBadRequest, "invalid_restore", "历史版本字段已不符合当前台账规则，无法自动恢复")
+	case errors.Is(err, inventorytask.ErrNotFound):
+		writeAPIError(c, http.StatusNotFound, "submission_not_found", "资源、上报版本或对应正式台账不存在")
+	case errors.Is(err, inventorytask.ErrState):
+		writeAPIError(c, http.StatusConflict, "invalid_submission_state", "仅已发布且非下线申请的历史版本可以恢复")
+	case errors.Is(err, inventorytask.ErrConflict):
+		writeAPIError(c, http.StatusConflict, "working_version_conflict", "当前工作版本已纳入填报任务、正在审核，或当前必填自定义字段无法满足，请处理后重试")
+	default:
+		logger.Error("restore resource submission", "error", err, "request_id", c.GetString("request_id"))
+		writeAPIError(c, http.StatusInternalServerError, "internal_error", "恢复资源历史版本失败")
 	}
 	return true
 }

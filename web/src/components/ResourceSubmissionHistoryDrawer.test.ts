@@ -1,9 +1,9 @@
 import { flushPromises, shallowMount } from '@vue/test-utils'
-import { ElMessage } from 'element-plus'
+import { ElMessage, ElMessageBox } from 'element-plus'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import ResourceSubmissionHistoryDrawer from './ResourceSubmissionHistoryDrawer.vue'
 
-const mocks = vi.hoisted(() => ({ get: vi.fn() }))
+const mocks = vi.hoisted(() => ({ get: vi.fn(), post: vi.fn() }))
 
 vi.mock('../api/client', () => ({
   apiClient: mocks,
@@ -22,9 +22,9 @@ const response = {
   page_size: 20,
 }
 
-function mountComponent(resourceType: 'network_asset' | 'business_system' = 'network_asset') {
+function mountComponent(resourceType: 'network_asset' | 'business_system' = 'network_asset', allowRestore = false) {
   return shallowMount(ResourceSubmissionHistoryDrawer, {
-    props: { resourceType },
+    props: { resourceType, allowRestore },
     global: {
       stubs: {
         ElDrawer: true,
@@ -42,6 +42,7 @@ describe('ResourceSubmissionHistoryDrawer', () => {
   beforeEach(() => {
     vi.clearAllMocks()
     mocks.get.mockResolvedValue({ data: response })
+    mocks.post.mockResolvedValue({ data: { result: { working_version_id: 'working-1', warnings: [] } } })
   })
 
   it('loads the first page of network asset submission history', async () => {
@@ -83,4 +84,60 @@ describe('ResourceSubmissionHistoryDrawer', () => {
     expect(message).toHaveBeenCalledWith('读取资源上报历史失败')
     message.mockRestore()
   })
+
+  it('restores an approved version through the resource-specific endpoint', async () => {
+    mocks.get.mockResolvedValue({
+      data: { ...response, items: [{ ...response.items[0], status: 'approved', operation: 'update' }] },
+    })
+    const confirm = vi.spyOn(ElMessageBox, 'confirm').mockResolvedValue({ action: 'confirm' } as never)
+    const success = vi.spyOn(ElMessage, 'success').mockImplementation(() => ({ close: () => undefined }))
+    const wrapper = mountComponent('network_asset', true)
+    await (wrapper.vm as unknown as { open: (id: string) => Promise<void> }).open('asset-1')
+
+    await (wrapper.vm as unknown as { restoreSubmission: (item: typeof response.items[number]) => Promise<void> }).restoreSubmission({
+      ...response.items[0], status: 'approved', operation: 'update',
+    })
+
+    expect(mocks.post).toHaveBeenCalledWith('/inventory-tasks/resource-submissions/network_asset/asset-1/submission-1/restore')
+    expect(success).toHaveBeenCalledWith('已恢复为未上报工作版本，请在台账页面复核后选择纳入填报任务')
+    expect(wrapper.emitted('restored')).toEqual([['working-1']])
+    confirm.mockRestore()
+    success.mockRestore()
+  })
+
+  it('does not restore unapproved, delete, or unauthorized history versions', async () => {
+    const confirm = vi.spyOn(ElMessageBox, 'confirm').mockResolvedValue({ action: 'confirm' } as never)
+    const wrapper = mountComponent('business_system', true)
+    await (wrapper.vm as unknown as { open: (id: string) => Promise<void> }).open('system-1')
+    const restore = (wrapper.vm as unknown as { restoreSubmission: (item: typeof response.items[number]) => Promise<void> }).restoreSubmission
+
+    await restore(response.items[0])
+    await restore({ ...response.items[0], status: 'approved', operation: 'delete' })
+    await wrapper.setProps({ allowRestore: false })
+    await restore({ ...response.items[0], status: 'approved', operation: 'update' })
+
+    expect(confirm).not.toHaveBeenCalled()
+    expect(mocks.post).not.toHaveBeenCalled()
+    confirm.mockRestore()
+  })
+
+  it('reports a readable restore API error', async () => {
+    mocks.get.mockResolvedValue({
+      data: { ...response, items: [{ ...response.items[0], status: 'approved', operation: 'update' }] },
+    })
+    mocks.post.mockRejectedValue(new Error('failed'))
+    const confirm = vi.spyOn(ElMessageBox, 'confirm').mockResolvedValue({ action: 'confirm' } as never)
+    const message = vi.spyOn(ElMessage, 'error').mockImplementation(() => ({ close: () => undefined }))
+    const wrapper = mountComponent('network_asset', true)
+    await (wrapper.vm as unknown as { open: (id: string) => Promise<void> }).open('asset-1')
+
+    await (wrapper.vm as unknown as { restoreSubmission: (item: typeof response.items[number]) => Promise<void> }).restoreSubmission({
+      ...response.items[0], status: 'approved', operation: 'update',
+    })
+
+    expect(message).toHaveBeenCalledWith('恢复资源历史版本失败')
+    confirm.mockRestore()
+    message.mockRestore()
+  })
+
 })

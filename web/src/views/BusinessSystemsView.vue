@@ -748,7 +748,7 @@ onMounted(load)
     </el-dialog>
 
     <WorkingVersionDiffDrawer ref="workingVersionDiffRef" resource-type="business_system" />
-    <ResourceSubmissionHistoryDrawer ref="resourceSubmissionHistoryRef" resource-type="business_system" />
+    <ResourceSubmissionHistoryDrawer ref="resourceSubmissionHistoryRef" resource-type="business_system" :allow-restore="!auth.isGroupAdmin && auth.hasPermission('inventory.manage') && auth.hasPermission('system.manage')" @restored="load()" />
 
     <el-dialog v-model="dialogVisible" :title="dialogTitle" width="800px" destroy-on-close>
       <el-alert v-if="inventoryMode" title="这里保存的是组织工作版本；只有选择纳入本次上报并通过审核后，才会更新集团正式台账。" type="info" :closable="false" show-icon class="dialog-context-alert" /><el-form ref="formRef" :model="form" :rules="rules" label-position="top">
