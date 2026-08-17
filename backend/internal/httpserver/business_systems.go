@@ -15,6 +15,18 @@ import (
 	"netassets/internal/exportfile"
 )
 
+func splitSelectedBusinessSystemIDs(raw string) []string {
+	if strings.TrimSpace(raw) == "" {
+		return nil
+	}
+	parts := strings.Split(raw, ",")
+	ids := make([]string, 0, len(parts))
+	for _, part := range parts {
+		ids = append(ids, strings.TrimSpace(part))
+	}
+	return ids
+}
+
 func registerBusinessSystemRoutes(api *gin.RouterGroup, requireAuth gin.HandlerFunc, service *businesssystem.Service, customFields *customfield.Service, logger *slog.Logger) {
 	group := api.Group("/business-systems", requireAuth)
 	group.GET("/imports", func(c *gin.Context) {
@@ -32,15 +44,26 @@ func registerBusinessSystemRoutes(api *gin.RouterGroup, requireAuth gin.HandlerF
 		c.JSON(http.StatusOK, result)
 	})
 	group.GET("/export", func(c *gin.Context) {
-		format := c.DefaultQuery("format", "xlsx")
+		format := strings.TrimPrefix(strings.ToLower(strings.TrimSpace(c.DefaultQuery("format", "xlsx"))), ".")
+		if format != "csv" && format != "xlsx" {
+			writeAPIError(c, http.StatusBadRequest, "invalid_format", "导出格式仅支持 csv 或 xlsx")
+			return
+		}
+		selectedIDs := splitSelectedBusinessSystemIDs(c.Query("selected_ids"))
 		filter := businesssystem.SearchFilter{
 			OrganizationID: strings.TrimSpace(c.Query("organization_id")),
 			Status:         strings.TrimSpace(c.Query("status")),
 			Keyword:        strings.TrimSpace(c.Query("q")),
+			SelectedIDs:    selectedIDs,
 		}
 		extendExportWriteDeadline(c, logger)
 		if isCSVExport(format) {
 			_, err := service.StreamCSVExport(c.Request.Context(), mustPrincipal(c), filter, c.Writer, func(meta exportfile.Metadata) {
+				if len(selectedIDs) > 0 {
+					meta.FileName = "业务系统选中项.csv"
+					setStreamingExportHeaders(c, "business-systems-selected.csv", meta)
+					return
+				}
 				setStreamingExportHeaders(c, "business-systems-ledger.csv", meta)
 			}, c.GetString("request_id"), c.ClientIP())
 			if err == nil {
@@ -56,6 +79,10 @@ func registerBusinessSystemRoutes(api *gin.RouterGroup, requireAuth gin.HandlerF
 				writeAPIError(c, http.StatusForbidden, "forbidden", "当前账号无权导出业务系统")
 				return
 			}
+			if errors.Is(err, businesssystem.ErrInvalid) {
+				writeAPIError(c, http.StatusBadRequest, "invalid_selection", "选中业务系统参数不正确，单次最多导出 200 条")
+				return
+			}
 			logger.Error("export business systems csv", "error", err, "request_id", c.GetString("request_id"))
 			writeAPIError(c, http.StatusInternalServerError, "internal_error", "导出业务系统台账失败")
 			return
@@ -67,7 +94,11 @@ func registerBusinessSystemRoutes(api *gin.RouterGroup, requireAuth gin.HandlerF
 			return
 		}
 		if errors.Is(err, businesssystem.ErrInvalid) {
-			writeAPIError(c, http.StatusBadRequest, "invalid_format", "导出格式仅支持 csv 或 xlsx")
+			if len(selectedIDs) > 0 {
+				writeAPIError(c, http.StatusBadRequest, "invalid_selection", "选中业务系统参数不正确，单次最多导出 200 条")
+			} else {
+				writeAPIError(c, http.StatusBadRequest, "invalid_format", "导出格式仅支持 csv 或 xlsx")
+			}
 			return
 		}
 		if err != nil {
@@ -75,7 +106,12 @@ func registerBusinessSystemRoutes(api *gin.RouterGroup, requireAuth gin.HandlerF
 			writeAPIError(c, http.StatusInternalServerError, "internal_error", "导出业务系统台账失败")
 			return
 		}
-		c.Header("Content-Disposition", fmt.Sprintf("attachment; filename=business-systems-ledger.%s; filename*=UTF-8''%s", strings.TrimPrefix(strings.ToLower(format), "."), url.PathEscape(fileName)))
+		downloadBaseName := "business-systems-ledger"
+		if len(selectedIDs) > 0 {
+			downloadBaseName = "business-systems-selected"
+			fileName = "业务系统选中项." + format
+		}
+		c.Header("Content-Disposition", fmt.Sprintf("attachment; filename=%s.%s; filename*=UTF-8''%s", downloadBaseName, format, url.PathEscape(fileName)))
 		c.Header("X-Export-Count", fmt.Sprintf("%d", count))
 		c.Data(http.StatusOK, contentType, data)
 	})

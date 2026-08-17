@@ -29,13 +29,14 @@ import (
 )
 
 var (
-	ErrForbidden      = errors.New("forbidden")
-	ErrNotFound       = errors.New("not found")
-	ErrConflict       = errors.New("conflict")
-	ErrInUse          = errors.New("in use")
-	ErrInvalid        = errors.New("invalid input")
-	ErrExportTooLarge = errors.New("synchronous xlsx export too large")
-	codePattern       = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_-]{1,63}$`)
+	ErrForbidden              = errors.New("forbidden")
+	ErrNotFound               = errors.New("not found")
+	ErrConflict               = errors.New("conflict")
+	ErrInUse                  = errors.New("in use")
+	ErrInvalid                = errors.New("invalid input")
+	ErrExportTooLarge         = errors.New("synchronous xlsx export too large")
+	codePattern               = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_-]{1,63}$`)
+	businessSystemUUIDPattern = regexp.MustCompile(`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$`)
 )
 
 type BusinessSystem struct {
@@ -130,6 +131,7 @@ type ImportHistory struct {
 }
 
 const MaxImportRows = 5000
+const MaxSelectedExportRows = 200
 
 const (
 	ImportModeSkipDuplicates = "skip_duplicates"
@@ -142,6 +144,7 @@ type SearchFilter struct {
 	OrganizationID string
 	Status         string
 	Keyword        string
+	SelectedIDs    []string
 	Page           pagination.Query
 }
 
@@ -275,9 +278,10 @@ func (s *Service) SearchWithFilter(ctx context.Context, principal auth.Principal
           AND ($3 = '' OR bs.owner_organization_id::text = $3)
           AND ($4 = '' OR bs.system_status = $4)
           AND ($5 = '' OR concat_ws(' ', bs.system_code, bs.system_name, bs.short_name, o.organization_name, bs.owner_name, bs.owner_contact) ILIKE '%' || $5 || '%')
+          AND (COALESCE(cardinality($6::uuid[]), 0) = 0 OR bs.id = ANY($6::uuid[]))
         ORDER BY o.organization_code, bs.system_code
-        LIMIT $6 OFFSET $7
-    `, principal.UserID, principal.HasRole("group_admin"), strings.TrimSpace(filter.OrganizationID), strings.TrimSpace(filter.Status), strings.TrimSpace(filter.Keyword), query.PageSize, query.Offset())
+        LIMIT $7 OFFSET $8
+    `, principal.UserID, principal.HasRole("group_admin"), strings.TrimSpace(filter.OrganizationID), strings.TrimSpace(filter.Status), strings.TrimSpace(filter.Keyword), filter.SelectedIDs, query.PageSize, query.Offset())
 	if err != nil {
 		return pagination.Result[BusinessSystem]{}, fmt.Errorf("search business systems: %w", err)
 	}
@@ -330,7 +334,8 @@ func (s *Service) SearchWithFilter(ctx context.Context, principal auth.Principal
               AND ($3 = '' OR bs.owner_organization_id::text = $3)
               AND ($4 = '' OR bs.system_status = $4)
               AND ($5 = '' OR concat_ws(' ', bs.system_code, bs.system_name, bs.short_name, o.organization_name, bs.owner_name, bs.owner_contact) ILIKE '%' || $5 || '%')
-        `, principal.UserID, principal.HasRole("group_admin"), strings.TrimSpace(filter.OrganizationID), strings.TrimSpace(filter.Status), strings.TrimSpace(filter.Keyword)).Scan(&total); err != nil {
+              AND (COALESCE(cardinality($6::uuid[]), 0) = 0 OR bs.id = ANY($6::uuid[]))
+        `, principal.UserID, principal.HasRole("group_admin"), strings.TrimSpace(filter.OrganizationID), strings.TrimSpace(filter.Status), strings.TrimSpace(filter.Keyword), filter.SelectedIDs).Scan(&total); err != nil {
 			return pagination.Result[BusinessSystem]{}, fmt.Errorf("count business systems: %w", err)
 		}
 	}
@@ -338,6 +343,11 @@ func (s *Service) SearchWithFilter(ctx context.Context, principal auth.Principal
 }
 
 func (s *Service) Export(ctx context.Context, principal auth.Principal, filter SearchFilter, format, requestID, ipAddress string) ([]byte, string, string, int, error) {
+	selectedIDs, err := normalizeSelectedExportIDs(filter.SelectedIDs)
+	if err != nil {
+		return nil, "", "", 0, err
+	}
+	filter.SelectedIDs = selectedIDs
 	filter.Page = pagination.Query{Page: 1, PageSize: pagination.MaxPageSize}
 	first, err := s.SearchWithFilter(ctx, principal, filter)
 	if err != nil {
@@ -383,8 +393,8 @@ func (s *Service) Export(ctx context.Context, principal auth.Principal, filter S
 	if _, err := s.pool.Exec(ctx, `
 		INSERT INTO audit_logs (user_id, organization_id, action, resource_type, summary, details, request_ip, request_id)
 		VALUES ($1::uuid, NULLIF($2, '')::uuid, 'business_system.export', 'business_system', '生成业务系统导出文件',
-		        jsonb_build_object('format', $3::text, 'count', $4::int, 'result', 'generated', 'delivery_state', 'unconfirmed'), NULLIF($5, '')::inet, NULLIF($6, ''))
-	`, principal.UserID, organizationID, strings.ToLower(strings.TrimPrefix(format, ".")), len(items), ipAddress, requestID); err != nil {
+		        jsonb_build_object('format', $3::text, 'count', $4::int, 'selected_count', $5::int, 'result', 'generated', 'delivery_state', 'unconfirmed'), NULLIF($6, '')::inet, NULLIF($7, ''))
+	`, principal.UserID, organizationID, strings.ToLower(strings.TrimPrefix(format, ".")), len(items), len(filter.SelectedIDs), ipAddress, requestID); err != nil {
 		return nil, "", "", 0, fmt.Errorf("write business system export audit: %w", err)
 	}
 	return data, contentType, fileName, len(items), nil
@@ -392,6 +402,11 @@ func (s *Service) Export(ctx context.Context, principal auth.Principal, filter S
 
 // StreamCSVExport writes the filtered, scoped business-system ledger in bounded pages.
 func (s *Service) StreamCSVExport(ctx context.Context, principal auth.Principal, filter SearchFilter, output io.Writer, ready exportfile.ReadyFunc, requestID, ipAddress string) (int, error) {
+	selectedIDs, err := normalizeSelectedExportIDs(filter.SelectedIDs)
+	if err != nil {
+		return 0, err
+	}
+	filter.SelectedIDs = selectedIDs
 	customService := customfield.NewService(s.pool)
 	definitions, err := customService.EnabledDefinitions(ctx, "business_system")
 	if err != nil {
@@ -450,8 +465,8 @@ func (s *Service) StreamCSVExport(ctx context.Context, principal auth.Principal,
 	if _, err := s.pool.Exec(ctx, `
 		INSERT INTO audit_logs (user_id, organization_id, action, resource_type, summary, details, request_ip, request_id)
 		VALUES ($1::uuid, NULLIF($2, '')::uuid, 'business_system.export', 'business_system', '流式导出业务系统台账',
-		        jsonb_build_object('format', 'csv', 'count', $3::int, 'result', 'generated', 'delivery_state', 'response_written_unconfirmed'), NULLIF($4, '')::inet, NULLIF($5, ''))
-	`, principal.UserID, organizationID, written, ipAddress, requestID); err != nil {
+		        jsonb_build_object('format', 'csv', 'count', $3::int, 'selected_count', $4::int, 'result', 'generated', 'delivery_state', 'response_written_unconfirmed'), NULLIF($5, '')::inet, NULLIF($6, ''))
+	`, principal.UserID, organizationID, written, len(filter.SelectedIDs), ipAddress, requestID); err != nil {
 		return written, fmt.Errorf("write business system export audit: %w", err)
 	}
 	return written, nil
@@ -459,6 +474,11 @@ func (s *Service) StreamCSVExport(ctx context.Context, principal auth.Principal,
 
 // ExportRowCount validates the frozen authorization and filter scope for a background job.
 func (s *Service) ExportRowCount(ctx context.Context, principal auth.Principal, filter SearchFilter) (int, error) {
+	selectedIDs, err := normalizeSelectedExportIDs(filter.SelectedIDs)
+	if err != nil {
+		return 0, err
+	}
+	filter.SelectedIDs = selectedIDs
 	filter.Page = pagination.Query{Page: 1, PageSize: 1}
 	result, err := s.SearchWithFilter(ctx, principal, filter)
 	if err != nil {
@@ -469,6 +489,11 @@ func (s *Service) ExportRowCount(ctx context.Context, principal auth.Principal, 
 
 // WriteXLSXExport generates the filtered, scoped business-system ledger page by page.
 func (s *Service) WriteXLSXExport(ctx context.Context, principal auth.Principal, filter SearchFilter, outputPath string, progress exportfile.ProgressFunc) (exportfile.Metadata, error) {
+	selectedIDs, err := normalizeSelectedExportIDs(filter.SelectedIDs)
+	if err != nil {
+		return exportfile.Metadata{}, err
+	}
+	filter.SelectedIDs = selectedIDs
 	customService := customfield.NewService(s.pool)
 	definitions, err := customService.EnabledDefinitions(ctx, "business_system")
 	if err != nil {
@@ -526,6 +551,29 @@ func (s *Service) WriteXLSXExport(ctx context.Context, principal auth.Principal,
 		return exportfile.Metadata{}, fmt.Errorf("finish business system xlsx export: %w", err)
 	}
 	return exportfile.Metadata{ContentType: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", FileName: "业务系统台账.xlsx", Count: written}, nil
+}
+
+func normalizeSelectedExportIDs(ids []string) ([]string, error) {
+	if len(ids) == 0 {
+		return nil, nil
+	}
+	result := make([]string, 0, len(ids))
+	seen := make(map[string]struct{}, len(ids))
+	for _, rawID := range ids {
+		id := strings.TrimSpace(rawID)
+		if !businessSystemUUIDPattern.MatchString(id) {
+			return nil, ErrInvalid
+		}
+		if _, exists := seen[id]; exists {
+			continue
+		}
+		seen[id] = struct{}{}
+		result = append(result, id)
+		if len(result) > MaxSelectedExportRows {
+			return nil, ErrInvalid
+		}
+	}
+	return result, nil
 }
 
 func buildExport(items []BusinessSystem, format string) ([]byte, string, string, error) {

@@ -61,7 +61,8 @@ SELECT id,system_code,system_name,short_name,organization_id,organization_code,o
  contains_personal_information,contains_sensitive_personal_information,personal_information_record_count,data_volume_over_100k,contains_important_data,contains_core_data,data_storage_location,security_notes,asset_count,
  created_at,updated_at,reporting_status,is_working_copy,published_id,task_id,draft_status,operation,custom_values,count(*) OVER()
 FROM ledger WHERE ($2='' OR organization_id=$2) AND ($3='' OR system_status=$3) AND ($4='' OR concat_ws(' ',system_code,system_name,short_name,organization_name,owner_name,owner_contact) ILIKE '%'||$4||'%')
-ORDER BY organization_code,system_code LIMIT $5 OFFSET $6`, p.UserID, strings.TrimSpace(f.OrganizationID), strings.TrimSpace(f.Status), strings.TrimSpace(f.Keyword), page.PageSize, page.Offset())
+ AND (COALESCE(cardinality($5::uuid[]),0)=0 OR id::uuid=ANY($5::uuid[]))
+ORDER BY organization_code,system_code LIMIT $6 OFFSET $7`, p.UserID, strings.TrimSpace(f.OrganizationID), strings.TrimSpace(f.Status), strings.TrimSpace(f.Keyword), f.SelectedIDs, page.PageSize, page.Offset())
 	if err != nil {
 		return pagination.Result[BusinessSystem]{}, fmt.Errorf("search organization working systems: %w", err)
 	}

@@ -367,3 +367,30 @@ func TestResolveBusinessSystemImportHeadersRejectsUnknownAndOutOfRangeMapping(t 
 		t.Fatal("expected out-of-range source column to fail")
 	}
 }
+
+func TestNormalizeSelectedExportIDs(t *testing.T) {
+	first := "11111111-1111-4111-8111-111111111111"
+	second := "22222222-2222-4222-8222-222222222222"
+
+	got, err := normalizeSelectedExportIDs([]string{"  " + first + "  ", first, second})
+	if err != nil {
+		t.Fatalf("normalize selected export IDs: %v", err)
+	}
+	if len(got) != 2 || got[0] != first || got[1] != second {
+		t.Fatalf("unexpected normalized IDs: %#v", got)
+	}
+	if got, err := normalizeSelectedExportIDs(nil); err != nil || got != nil {
+		t.Fatalf("normalize nil IDs = %#v, %v; want nil, nil", got, err)
+	}
+	if _, err := normalizeSelectedExportIDs([]string{"not-a-uuid"}); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("invalid UUID error = %v, want ErrInvalid", err)
+	}
+
+	tooMany := make([]string, 0, MaxSelectedExportRows+1)
+	for index := 0; index <= MaxSelectedExportRows; index++ {
+		tooMany = append(tooMany, fmt.Sprintf("00000000-0000-4000-8000-%012d", index))
+	}
+	if _, err := normalizeSelectedExportIDs(tooMany); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("oversized selection error = %v, want ErrInvalid", err)
+	}
+}

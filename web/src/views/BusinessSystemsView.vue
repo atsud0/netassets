@@ -102,6 +102,7 @@ const changeHistoryTotal = ref(0)
 const importLoading = ref(false)
 const downloading = ref(false)
 const exporting = ref(false)
+const selectedExporting = ref(false)
 const historyLoading = ref(false)
 const importFile = ref<File>()
 const importColumns = ref<ImportColumn[]>([])
@@ -619,6 +620,33 @@ async function exportLedger(format: 'csv' | 'xlsx') {
   }
 }
 
+async function exportSelectedSystems(format: 'csv' | 'xlsx') {
+  if (!selectedSystems.value.length) return ElMessage.warning('请先选择需要导出的业务系统')
+  if (selectedSystems.value.length > 200) return ElMessage.warning('单次最多导出 200 个业务系统')
+  selectedExporting.value = true
+  try {
+    const selectedIDs = selectedSystems.value.map((item) => item.id)
+    const response = await apiClient.get('/business-systems/export', {
+      params: { format, selected_ids: selectedIDs.join(',') },
+      responseType: 'blob',
+      timeout: 60_000,
+    })
+    const href = URL.createObjectURL(response.data)
+    const link = document.createElement('a')
+    link.href = href
+    link.download = `业务系统选中项.${format}`
+    link.click()
+    URL.revokeObjectURL(href)
+    const count = response.headers['x-export-count'] ?? selectedIDs.length
+    ElMessage.success(`已生成并开始下载 ${count} 个选中业务系统`)
+  } catch (error) {
+    const detail = await getDownloadAPIError(error, '导出选中业务系统失败')
+    ElMessage.error(detail.message)
+  } finally {
+    selectedExporting.value = false
+  }
+}
+
 async function queueXLSXExport() {
   await createExportJob('business_system', {
     q: search.value.trim() || undefined,
@@ -770,7 +798,19 @@ onMounted(load)
       </div>
       <div v-else class="batch-toolbar">
         <div><strong>批量操作</strong><span>已选择 {{ selectedSystems.length }} 个业务系统，单次最多 200 个</span></div>
-        <div class="button-row"><el-button :disabled="selectedSystems.length === 0" :loading="batchLoading" @click="runBatchArchive(false)">批量恢复</el-button><el-button type="warning" plain :disabled="selectedSystems.length === 0" :loading="batchLoading" @click="runBatchArchive(true)">批量归档</el-button></div>
+        <div class="batch-toolbar-actions">
+          <el-button :disabled="selectedSystems.length === 0" :loading="batchLoading" @click="runBatchArchive(false)">批量恢复</el-button>
+          <el-button type="warning" plain :disabled="selectedSystems.length === 0" :loading="batchLoading" @click="runBatchArchive(true)">批量归档</el-button>
+          <el-dropdown :disabled="selectedSystems.length === 0 || selectedExporting">
+            <el-button :loading="selectedExporting" :disabled="selectedSystems.length === 0">导出选中</el-button>
+            <template #dropdown>
+              <el-dropdown-menu>
+                <el-dropdown-item @click="exportSelectedSystems('xlsx')">导出选中 XLSX</el-dropdown-item>
+                <el-dropdown-item @click="exportSelectedSystems('csv')">导出选中 CSV</el-dropdown-item>
+              </el-dropdown-menu>
+            </template>
+          </el-dropdown>
+        </div>
       </div>
       <el-table v-loading="loading" :data="systems" row-key="id" empty-text="暂无业务系统" @selection-change="handleSelectionChange">
         <el-table-column type="selection" width="46" :selectable="canSelectBusinessSystem" />
