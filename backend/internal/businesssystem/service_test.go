@@ -11,6 +11,7 @@ import (
 	"github.com/xuri/excelize/v2"
 
 	"netassets/internal/auth"
+	"netassets/internal/customfield"
 	"netassets/internal/exportfile"
 )
 
@@ -342,5 +343,27 @@ func TestPrepareCreateInputRejectsInvalidCombination(t *testing.T) {
 	input.ContainsSensitivePersonalInformation = "yes"
 	if err := PrepareCreateInput(&input); !errors.Is(err, ErrInvalid) {
 		t.Fatalf("PrepareCreateInput() error = %v, want ErrInvalid", err)
+	}
+}
+
+func TestResolveBusinessSystemImportHeadersSupportsExplicitAndCustomMapping(t *testing.T) {
+	definitions := []customfield.Definition{{FieldKey: "security_owner", FieldName: "安全责任人", IsRequired: true}}
+	indexes, headers, err := resolveBusinessSystemImportHeaders([]string{"编号", "系统", "责任人"}, ColumnMapping{
+		"code": 0, "name": 1, "custom:security_owner": 2,
+	}, definitions)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if indexes["code"] != 0 || indexes["name"] != 1 || headers[2] != "custom:security_owner" {
+		t.Fatalf("unexpected mapping: %#v %#v", indexes, headers)
+	}
+}
+
+func TestResolveBusinessSystemImportHeadersRejectsUnknownAndOutOfRangeMapping(t *testing.T) {
+	if _, _, err := resolveBusinessSystemImportHeaders([]string{"编号", "系统"}, ColumnMapping{"code": 0, "name": 1, "unknown": 0}, nil); err == nil {
+		t.Fatal("expected unknown field mapping to fail")
+	}
+	if _, _, err := resolveBusinessSystemImportHeaders([]string{"编号", "系统"}, ColumnMapping{"code": 0, "name": 2}, nil); err == nil {
+		t.Fatal("expected out-of-range source column to fail")
 	}
 }

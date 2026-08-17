@@ -101,10 +101,9 @@ func registerBusinessSystemRoutes(api *gin.RouterGroup, requireAuth gin.HandlerF
 			c.Data(http.StatusOK, contentType, data)
 		}
 	})
-	group.POST("/import/preview", func(c *gin.Context) {
+	group.POST("/import/columns", func(c *gin.Context) {
 		c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, maxAssetImportBytes)
 		organizationID := strings.TrimSpace(c.PostForm("organization_id"))
-		importMode := strings.TrimSpace(c.PostForm("import_mode"))
 		fileHeader, err := c.FormFile("file")
 		if err != nil || organizationID == "" {
 			writeAPIError(c, http.StatusBadRequest, "invalid_request", "请选择所属组织并上传 CSV 或 XLSX 文件")
@@ -120,7 +119,44 @@ func registerBusinessSystemRoutes(api *gin.RouterGroup, requireAuth gin.HandlerF
 			return
 		}
 		defer file.Close()
-		result, err := service.PreviewImport(c.Request.Context(), mustPrincipal(c), organizationID, fileHeader.Filename, file, importMode)
+		analysis, err := service.AnalyzeImportColumns(c.Request.Context(), mustPrincipal(c), organizationID, fileHeader.Filename, file)
+		switch {
+		case errors.Is(err, businesssystem.ErrForbidden):
+			writeAPIError(c, http.StatusForbidden, "forbidden", "当前账号无权分析该组织的业务系统导入文件")
+		case errors.Is(err, businesssystem.ErrInvalid):
+			writeAPIError(c, http.StatusBadRequest, "invalid_import", "文件格式、列数或数据行数不符合要求（最多 200 列、5000 行）")
+		case err != nil:
+			logger.Error("analyze business system import columns", "error", err, "request_id", c.GetString("request_id"))
+			writeAPIError(c, http.StatusInternalServerError, "internal_error", "分析业务系统导入文件失败")
+		default:
+			c.JSON(http.StatusOK, analysis)
+		}
+	})
+	group.POST("/import/preview", func(c *gin.Context) {
+		c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, maxAssetImportBytes)
+		organizationID := strings.TrimSpace(c.PostForm("organization_id"))
+		importMode := strings.TrimSpace(c.PostForm("import_mode"))
+		columnMapping, mappingErr := parseImportColumnMapping(c.PostForm("column_mapping"))
+		if mappingErr != nil {
+			writeAPIError(c, http.StatusBadRequest, "invalid_column_mapping", "字段映射格式不正确")
+			return
+		}
+		fileHeader, err := c.FormFile("file")
+		if err != nil || organizationID == "" {
+			writeAPIError(c, http.StatusBadRequest, "invalid_request", "请选择所属组织并上传 CSV 或 XLSX 文件")
+			return
+		}
+		if fileHeader.Size > maxAssetImportBytes {
+			writeAPIError(c, http.StatusRequestEntityTooLarge, "file_too_large", "导入文件不能超过 10 MB")
+			return
+		}
+		file, err := fileHeader.Open()
+		if err != nil {
+			writeAPIError(c, http.StatusBadRequest, "invalid_file", "无法读取导入文件")
+			return
+		}
+		defer file.Close()
+		result, err := service.PreviewImport(c.Request.Context(), mustPrincipal(c), organizationID, fileHeader.Filename, file, importMode, businesssystem.ColumnMapping(columnMapping))
 		switch {
 		case errors.Is(err, businesssystem.ErrForbidden):
 			writeAPIError(c, http.StatusForbidden, "forbidden", "当前账号无权预检该组织的业务系统导入文件")
@@ -137,6 +173,11 @@ func registerBusinessSystemRoutes(api *gin.RouterGroup, requireAuth gin.HandlerF
 		c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, maxAssetImportBytes)
 		organizationID := strings.TrimSpace(c.PostForm("organization_id"))
 		importMode := strings.TrimSpace(c.PostForm("import_mode"))
+		columnMapping, mappingErr := parseImportColumnMapping(c.PostForm("column_mapping"))
+		if mappingErr != nil {
+			writeAPIError(c, http.StatusBadRequest, "invalid_column_mapping", "字段映射格式不正确")
+			return
+		}
 		fileHeader, err := c.FormFile("file")
 		if err != nil || organizationID == "" {
 			writeAPIError(c, http.StatusBadRequest, "invalid_request", "请选择所属组织并上传 CSV 或 XLSX 文件")
@@ -152,7 +193,7 @@ func registerBusinessSystemRoutes(api *gin.RouterGroup, requireAuth gin.HandlerF
 			return
 		}
 		defer file.Close()
-		result, err := service.Import(c.Request.Context(), mustPrincipal(c), organizationID, fileHeader.Filename, file, importMode, c.GetString("request_id"), c.ClientIP())
+		result, err := service.Import(c.Request.Context(), mustPrincipal(c), organizationID, fileHeader.Filename, file, importMode, c.GetString("request_id"), c.ClientIP(), businesssystem.ColumnMapping(columnMapping))
 		switch {
 		case errors.Is(err, businesssystem.ErrForbidden):
 			writeAPIError(c, http.StatusForbidden, "forbidden", "当前账号无权向该组织导入业务系统")

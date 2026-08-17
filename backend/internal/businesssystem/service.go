@@ -23,6 +23,7 @@ import (
 	"netassets/internal/auth"
 	"netassets/internal/customfield"
 	"netassets/internal/exportfile"
+	"netassets/internal/importmapping"
 	"netassets/internal/notification"
 	"netassets/internal/pagination"
 )
@@ -115,6 +116,9 @@ type ImportResult struct {
 	DuplicateCount int           `json:"duplicate_count"`
 	Errors         []ImportError `json:"errors"`
 }
+
+type ColumnMapping = importmapping.Mapping
+type ImportColumnAnalysis = importmapping.Analysis
 
 type ImportHistory struct {
 	ImportResult
@@ -1280,8 +1284,72 @@ func importTargetMutable(target importUpdateTarget) bool {
 	return target.Kind != "draft" || (target.TaskID == "" && target.DraftStatus != "submitted" && target.Operation != "delete")
 }
 
+func businessSystemImportFields(definitions []customfield.Definition) []importmapping.Field {
+	fields := []importmapping.Field{
+		{Key: "code", Name: "系统编码", Required: true, Aliases: []string{"系统编码", "code", "system_code"}},
+		{Key: "name", Name: "系统名称", Required: true, Aliases: []string{"系统名称", "name", "system_name"}},
+		{Key: "short_name", Name: "系统简称", Aliases: []string{"系统简称", "short_name"}},
+		{Key: "status", Name: "运行状态", Aliases: []string{"运行状态", "系统状态", "status"}},
+		{Key: "level", Name: "系统等级", Aliases: []string{"系统等级", "level"}},
+		{Key: "owner_name", Name: "负责人", Aliases: []string{"负责人", "系统负责人", "owner_name"}},
+		{Key: "owner_contact", Name: "联系方式", Aliases: []string{"联系方式", "owner_contact"}},
+		{Key: "internet_exposure", Name: "互联网暴露情况", Aliases: []string{"互联网暴露情况", "互联网暴露", "internet_exposure"}},
+		{Key: "deployment_type", Name: "部署方式", Aliases: []string{"部署方式", "deployment_type"}},
+		{Key: "description", Name: "系统说明", Aliases: []string{"系统说明", "系统描述", "description"}},
+		{Key: "contains_personal_information", Name: "是否包含个人信息", Aliases: []string{"是否包含个人信息", "contains_personal_information"}},
+		{Key: "contains_sensitive_personal_information", Name: "是否包含敏感个人信息", Aliases: []string{"是否包含敏感个人信息", "contains_sensitive_personal_information"}},
+		{Key: "personal_information_record_count", Name: "个人信息记录数", Aliases: []string{"个人信息记录数", "personal_information_record_count"}},
+		{Key: "data_volume_over_100k", Name: "数据量是否超过 10 万条", Aliases: []string{"数据量是否超过10万条", "数据量是否超过 10 万条", "data_volume_over_100k"}},
+		{Key: "contains_important_data", Name: "是否包含重要数据", Aliases: []string{"是否包含重要数据", "contains_important_data"}},
+		{Key: "contains_core_data", Name: "是否包含核心数据", Aliases: []string{"是否包含核心数据", "contains_core_data"}},
+		{Key: "data_storage_location", Name: "数据存储位置", Aliases: []string{"数据存储位置", "data_storage_location"}},
+		{Key: "security_notes", Name: "数据安全备注", Aliases: []string{"数据安全备注", "security_notes"}},
+	}
+	for _, definition := range definitions {
+		key := customfield.ImportHeaderPrefix + definition.FieldKey
+		fields = append(fields, importmapping.Field{
+			Key: key, Name: definition.FieldName, Required: definition.IsRequired, Custom: true,
+			Aliases: []string{key, definition.FieldKey, definition.FieldName},
+		})
+	}
+	return fields
+}
+
+func resolveBusinessSystemImportHeaders(headers []string, mapping ColumnMapping, definitions []customfield.Definition) (map[string]int, []string, error) {
+	return importmapping.Resolve(headers, mapping, businessSystemImportFields(definitions))
+}
+
+// AnalyzeImportColumns reads an import file without writing data and returns
+// source-column samples plus automatic mapping suggestions.
+func (s *Service) AnalyzeImportColumns(ctx context.Context, principal auth.Principal, organizationID, fileName string, reader io.Reader) (ImportColumnAnalysis, error) {
+	if !principal.HasPermission("system.manage") {
+		return ImportColumnAnalysis{}, ErrForbidden
+	}
+	organizationID = strings.TrimSpace(organizationID)
+	allowed, err := access.CanOperateOrganization(ctx, s.pool, principal, organizationID, "system.manage")
+	if err != nil {
+		return ImportColumnAnalysis{}, err
+	}
+	if !allowed {
+		return ImportColumnAnalysis{}, ErrForbidden
+	}
+	rows, _, err := readImportRows(fileName, reader)
+	if err != nil || len(rows) == 0 || len(rows)-1 > MaxImportRows {
+		return ImportColumnAnalysis{}, ErrInvalid
+	}
+	definitions, err := customfield.NewService(s.pool).ActiveDefinitionsForOrganization(ctx, principal, "business_system", organizationID)
+	if err != nil {
+		return ImportColumnAnalysis{}, err
+	}
+	analysis, err := importmapping.Analyze(rows, businessSystemImportFields(definitions))
+	if err != nil {
+		return ImportColumnAnalysis{}, ErrInvalid
+	}
+	return analysis, nil
+}
+
 // PreviewImport validates a business-system import without writing ledger rows, import history, or audit records.
-func (s *Service) PreviewImport(ctx context.Context, principal auth.Principal, organizationID, fileName string, reader io.Reader, rawMode string) (ImportResult, error) {
+func (s *Service) PreviewImport(ctx context.Context, principal auth.Principal, organizationID, fileName string, reader io.Reader, rawMode string, mapping ColumnMapping) (ImportResult, error) {
 	if !principal.HasPermission("system.manage") {
 		return ImportResult{}, ErrForbidden
 	}
@@ -1301,14 +1369,14 @@ func (s *Service) PreviewImport(ctx context.Context, principal auth.Principal, o
 	if err != nil || len(rows) < 2 || len(rows)-1 > MaxImportRows {
 		return ImportResult{}, ErrInvalid
 	}
-	headers := mapHeaders(rows[0])
-	if headers["code"] < 0 || headers["name"] < 0 {
-		return ImportResult{}, ErrInvalid
-	}
 	customService := customfield.NewService(s.pool)
 	definitions, err := customService.ActiveDefinitionsForOrganization(ctx, principal, "business_system", organizationID)
 	if err != nil {
 		return ImportResult{}, err
+	}
+	headers, mappedHeaders, err := resolveBusinessSystemImportHeaders(rows[0], mapping, definitions)
+	if err != nil {
+		return ImportResult{}, ErrInvalid
 	}
 	result := ImportResult{FileName: filepath.Base(fileName), FileType: fileType, ImportMode: mode, Errors: make([]ImportError, 0), TotalCount: len(rows) - 1}
 	seen := make(map[string]struct{}, result.TotalCount)
@@ -1320,7 +1388,7 @@ func (s *Service) PreviewImport(ctx context.Context, principal auth.Principal, o
 			result.Errors = append(result.Errors, ImportError{Row: rowNumber, Code: rowErr.code, Message: rowErr.message})
 			continue
 		}
-		if _, customErr := customfield.ImportValues(definitions, rows[0], row); customErr != nil {
+		if _, customErr := customfield.ImportValues(definitions, mappedHeaders, row); customErr != nil {
 			result.FailureCount++
 			result.Errors = append(result.Errors, ImportError{Row: rowNumber, Code: "invalid_custom_field", Message: customErr.Error()})
 			continue
@@ -1384,7 +1452,7 @@ func (s *Service) PreviewImport(ctx context.Context, principal auth.Principal, o
 	return result, nil
 }
 
-func (s *Service) Import(ctx context.Context, principal auth.Principal, organizationID, fileName string, reader io.Reader, rawMode, requestID, ipAddress string) (ImportResult, error) {
+func (s *Service) Import(ctx context.Context, principal auth.Principal, organizationID, fileName string, reader io.Reader, rawMode, requestID, ipAddress string, mapping ColumnMapping) (ImportResult, error) {
 	if !principal.HasPermission("system.manage") {
 		return ImportResult{}, ErrForbidden
 	}
@@ -1404,14 +1472,14 @@ func (s *Service) Import(ctx context.Context, principal auth.Principal, organiza
 	if err != nil || len(rows) < 2 || len(rows)-1 > MaxImportRows {
 		return ImportResult{}, ErrInvalid
 	}
-	headers := mapHeaders(rows[0])
-	if headers["code"] < 0 || headers["name"] < 0 {
-		return ImportResult{}, ErrInvalid
-	}
 	customService := customfield.NewService(s.pool)
 	definitions, err := customService.ActiveDefinitionsForOrganization(ctx, principal, "business_system", organizationID)
 	if err != nil {
 		return ImportResult{}, err
+	}
+	headers, mappedHeaders, err := resolveBusinessSystemImportHeaders(rows[0], mapping, definitions)
+	if err != nil {
+		return ImportResult{}, ErrInvalid
 	}
 	result := ImportResult{FileName: filepath.Base(fileName), FileType: fileType, ImportMode: mode, Errors: make([]ImportError, 0), TotalCount: len(rows) - 1}
 	seen := make(map[string]struct{}, result.TotalCount)
@@ -1423,7 +1491,7 @@ func (s *Service) Import(ctx context.Context, principal auth.Principal, organiza
 			result.Errors = append(result.Errors, ImportError{Row: rowNumber, Code: rowErr.code, Message: rowErr.message})
 			continue
 		}
-		customValues, customErr := customfield.ImportValues(definitions, rows[0], row)
+		customValues, customErr := customfield.ImportValues(definitions, mappedHeaders, row)
 		if customErr != nil {
 			result.FailureCount++
 			result.Errors = append(result.Errors, ImportError{Row: rowNumber, Code: "invalid_custom_field", Message: customErr.Error()})

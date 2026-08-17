@@ -25,6 +25,7 @@ import (
 	"netassets/internal/auth"
 	"netassets/internal/customfield"
 	"netassets/internal/exportfile"
+	"netassets/internal/importmapping"
 	"netassets/internal/notification"
 	"netassets/internal/pagination"
 )
@@ -122,6 +123,9 @@ type ImportResult struct {
 	DuplicateCount int           `json:"duplicate_count"`
 	Errors         []ImportError `json:"errors"`
 }
+
+type ColumnMapping = importmapping.Mapping
+type ImportColumnAnalysis = importmapping.Analysis
 
 type ImportHistory struct {
 	ImportResult
@@ -1538,8 +1542,66 @@ func importTargetMutable(target importUpdateTarget) bool {
 	return target.Kind != "draft" || (target.TaskID == "" && target.DraftStatus != "submitted" && target.Operation != "delete")
 }
 
+func assetImportFields(definitions []customfield.Definition) []importmapping.Field {
+	fields := []importmapping.Field{
+		{Key: "type", Name: "资产类型", Required: true, Aliases: []string{"资产类型", "type"}},
+		{Key: "value", Name: "资产值", Required: true, Aliases: []string{"资产值", "value"}},
+		{Key: "name", Name: "资产名称", Aliases: []string{"资产名称", "name"}},
+		{Key: "business_system_code", Name: "业务系统编码", Aliases: []string{"业务系统编码", "business_system_code"}},
+		{Key: "environment", Name: "环境", Aliases: []string{"环境", "environment"}},
+		{Key: "network_scope", Name: "网络范围", Aliases: []string{"网络范围", "网络暴露范围", "network_scope"}},
+		{Key: "network_area", Name: "网络区域", Aliases: []string{"网络区域", "网络归属", "network_area"}},
+		{Key: "importance", Name: "重要程度", Aliases: []string{"重要程度", "importance"}},
+		{Key: "owner_username", Name: "责任人账号", Aliases: []string{"责任人账号", "负责人账号", "owner_username"}},
+		{Key: "owner_name", Name: "负责人", Aliases: []string{"负责人", "owner_name"}},
+		{Key: "expires_at", Name: "有效期至", Aliases: []string{"有效期至", "到期时间", "expires_at"}},
+		{Key: "notes", Name: "备注", Aliases: []string{"备注", "notes"}},
+	}
+	for _, definition := range definitions {
+		key := customfield.ImportHeaderPrefix + definition.FieldKey
+		fields = append(fields, importmapping.Field{
+			Key: key, Name: definition.FieldName, Required: definition.IsRequired, Custom: true,
+			Aliases: []string{key, definition.FieldKey, definition.FieldName},
+		})
+	}
+	return fields
+}
+
+func resolveAssetImportHeaders(headers []string, mapping ColumnMapping, definitions []customfield.Definition) (map[string]int, []string, error) {
+	return importmapping.Resolve(headers, mapping, assetImportFields(definitions))
+}
+
+// AnalyzeImportColumns reads an import file without writing data and returns
+// source-column samples plus automatic mapping suggestions.
+func (s *Service) AnalyzeImportColumns(ctx context.Context, principal auth.Principal, organizationID, fileName string, reader io.Reader) (ImportColumnAnalysis, error) {
+	if !principal.HasPermission("asset.manage") {
+		return ImportColumnAnalysis{}, ErrForbidden
+	}
+	organizationID = strings.TrimSpace(organizationID)
+	allowed, err := access.CanOperateOrganization(ctx, s.pool, principal, organizationID, "asset.manage")
+	if err != nil {
+		return ImportColumnAnalysis{}, err
+	}
+	if !allowed {
+		return ImportColumnAnalysis{}, ErrForbidden
+	}
+	rows, _, err := readImportRows(fileName, reader)
+	if err != nil || len(rows) == 0 || len(rows)-1 > MaxImportRows {
+		return ImportColumnAnalysis{}, ErrInvalid
+	}
+	definitions, err := customfield.NewService(s.pool).ActiveDefinitionsForOrganization(ctx, principal, "asset", organizationID)
+	if err != nil {
+		return ImportColumnAnalysis{}, err
+	}
+	analysis, err := importmapping.Analyze(rows, assetImportFields(definitions))
+	if err != nil {
+		return ImportColumnAnalysis{}, ErrInvalid
+	}
+	return analysis, nil
+}
+
 // PreviewImport validates an asset import without writing ledger rows, import history, or audit records.
-func (s *Service) PreviewImport(ctx context.Context, principal auth.Principal, organizationID, fileName string, reader io.Reader, rawMode string) (ImportResult, error) {
+func (s *Service) PreviewImport(ctx context.Context, principal auth.Principal, organizationID, fileName string, reader io.Reader, rawMode string, mapping ColumnMapping) (ImportResult, error) {
 	if !principal.HasPermission("asset.manage") {
 		return ImportResult{}, ErrForbidden
 	}
@@ -1559,14 +1621,14 @@ func (s *Service) PreviewImport(ctx context.Context, principal auth.Principal, o
 	if err != nil || len(rows) < 2 || len(rows)-1 > MaxImportRows {
 		return ImportResult{}, ErrInvalid
 	}
-	headers := mapHeaders(rows[0])
-	if headers["type"] < 0 || headers["value"] < 0 {
-		return ImportResult{}, ErrInvalid
-	}
 	customService := customfield.NewService(s.pool)
 	definitions, err := customService.ActiveDefinitionsForOrganization(ctx, principal, "asset", organizationID)
 	if err != nil {
 		return ImportResult{}, err
+	}
+	headers, mappedHeaders, err := resolveAssetImportHeaders(rows[0], mapping, definitions)
+	if err != nil {
+		return ImportResult{}, ErrInvalid
 	}
 
 	result := ImportResult{FileName: filepath.Base(fileName), FileType: fileType, ImportMode: mode, Errors: make([]ImportError, 0), TotalCount: len(rows) - 1}
@@ -1579,7 +1641,7 @@ func (s *Service) PreviewImport(ctx context.Context, principal auth.Principal, o
 			result.Errors = append(result.Errors, ImportError{Row: rowNumber, Code: "invalid_expiry", Message: "有效期格式不正确，请使用 YYYY-MM-DD、YYYY-MM-DD HH:mm:ss 或 RFC3339"})
 			continue
 		}
-		if _, customErr := customfield.ImportValues(definitions, rows[0], row); customErr != nil {
+		if _, customErr := customfield.ImportValues(definitions, mappedHeaders, row); customErr != nil {
 			result.FailureCount++
 			result.Errors = append(result.Errors, ImportError{Row: rowNumber, Code: "invalid_custom_field", Message: customErr.Error()})
 			continue
@@ -1691,7 +1753,7 @@ func (s *Service) PreviewImport(ctx context.Context, principal auth.Principal, o
 	return result, nil
 }
 
-func (s *Service) Import(ctx context.Context, principal auth.Principal, organizationID, fileName string, reader io.Reader, rawMode, requestID, ipAddress string) (ImportResult, error) {
+func (s *Service) Import(ctx context.Context, principal auth.Principal, organizationID, fileName string, reader io.Reader, rawMode, requestID, ipAddress string, mapping ColumnMapping) (ImportResult, error) {
 	if !principal.HasPermission("asset.manage") {
 		return ImportResult{}, ErrForbidden
 	}
@@ -1714,14 +1776,14 @@ func (s *Service) Import(ctx context.Context, principal auth.Principal, organiza
 	if len(rows) < 2 || len(rows)-1 > MaxImportRows {
 		return ImportResult{}, ErrInvalid
 	}
-	headers := mapHeaders(rows[0])
-	if headers["type"] < 0 || headers["value"] < 0 {
-		return ImportResult{}, ErrInvalid
-	}
 	customService := customfield.NewService(s.pool)
 	definitions, err := customService.ActiveDefinitionsForOrganization(ctx, principal, "asset", organizationID)
 	if err != nil {
 		return ImportResult{}, err
+	}
+	headers, mappedHeaders, err := resolveAssetImportHeaders(rows[0], mapping, definitions)
+	if err != nil {
+		return ImportResult{}, ErrInvalid
 	}
 
 	result := ImportResult{FileName: filepath.Base(fileName), FileType: fileType, ImportMode: mode, Errors: make([]ImportError, 0), TotalCount: len(rows) - 1}
@@ -1734,7 +1796,7 @@ func (s *Service) Import(ctx context.Context, principal auth.Principal, organiza
 			result.Errors = append(result.Errors, ImportError{Row: rowNumber, Code: "invalid_expiry", Message: "有效期格式不正确，请使用 YYYY-MM-DD、YYYY-MM-DD HH:mm:ss 或 RFC3339"})
 			continue
 		}
-		customValues, customErr := customfield.ImportValues(definitions, rows[0], row)
+		customValues, customErr := customfield.ImportValues(definitions, mappedHeaders, row)
 		if customErr != nil {
 			result.FailureCount++
 			result.Errors = append(result.Errors, ImportError{Row: rowNumber, Code: "invalid_custom_field", Message: customErr.Error()})

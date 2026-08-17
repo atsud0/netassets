@@ -417,3 +417,25 @@ func TestBuildAssetExportRejectsOversizedSynchronousXLSX(t *testing.T) {
 		t.Fatalf("buildExport oversized xlsx error = %v, want ErrExportTooLarge", err)
 	}
 }
+
+func TestResolveAssetImportHeadersSupportsExplicitAndCustomMapping(t *testing.T) {
+	definitions := []customfield.Definition{{FieldKey: "security_level", FieldName: "安全等级", IsRequired: true}}
+	indexes, headers, err := resolveAssetImportHeaders([]string{"主机类别", "目标地址", "分级"}, ColumnMapping{
+		"type": 0, "value": 1, "custom:security_level": 2,
+	}, definitions)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if indexes["type"] != 0 || indexes["value"] != 1 || headers[2] != "custom:security_level" {
+		t.Fatalf("unexpected mapping: %#v %#v", indexes, headers)
+	}
+}
+
+func TestResolveAssetImportHeadersRejectsMissingOrDuplicateRequiredMapping(t *testing.T) {
+	if _, _, err := resolveAssetImportHeaders([]string{"a", "b"}, ColumnMapping{"type": 0}, nil); err == nil {
+		t.Fatal("expected missing asset value mapping to fail")
+	}
+	if _, _, err := resolveAssetImportHeaders([]string{"a", "b"}, ColumnMapping{"type": 0, "value": 0}, nil); err == nil {
+		t.Fatal("expected duplicate source column mapping to fail")
+	}
+}

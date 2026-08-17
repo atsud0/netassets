@@ -336,3 +336,19 @@ button, input { font: inherit; }
 @media (max-width: 720px) {
   .resource-submission-card header { flex-direction: column; }
 }
+
+.import-mapping-panel { width: 100%; min-height: 72px; max-height: 380px; overflow: auto; border: 1px solid var(--line); border-radius: 10px; background: #fff; }
+.import-mapping-header, .import-mapping-row { display: grid; grid-template-columns: minmax(180px, .75fr) minmax(300px, 1.25fr); gap: 16px; align-items: center; padding: 11px 14px; }
+.import-mapping-header { position: sticky; top: 0; z-index: 2; color: var(--muted); font-size: 12px; font-weight: 600; background: #f6f9fb; border-bottom: 1px solid var(--line); }
+.import-mapping-row { border-bottom: 1px solid #edf1f5; }
+.import-mapping-row:last-of-type { border-bottom: 0; }
+.import-mapping-row .el-select { width: 100%; }
+.import-mapping-field { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; min-width: 0; }
+.import-mapping-field strong { overflow: hidden; color: var(--navy); font-size: 13px; text-overflow: ellipsis; white-space: nowrap; }
+.import-mapping-panel > .el-alert { margin: 10px 14px 14px; width: auto; }
+.import-mapping-tip { margin: 10px 14px 14px; line-height: 1.6; }
+
+@media (max-width: 760px) {
+  .import-mapping-header { display: none; }
+  .import-mapping-row { grid-template-columns: 1fr; gap: 8px; }
+}

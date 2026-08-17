@@ -9,6 +9,7 @@ import SavedFilterViews from '../components/SavedFilterViews.vue'
 import WorkingVersionDiffDrawer from '../components/WorkingVersionDiffDrawer.vue'
 import ResourceSubmissionHistoryDrawer from '../components/ResourceSubmissionHistoryDrawer.vue'
 import { assetDraftEndpoint, batchAssetUpdateSuccessMessage } from '../utils/inventory-drafts'
+import { createSuggestedColumnMapping, getImportColumnMappingError, importColumnLabel, isImportColumnUsed, serializeImportColumnMapping, type ImportColumn, type ImportColumnMapping, type ImportField } from '../utils/import-column-mapping'
 
 interface Organization { id: string; code: string; name: string; type: string; status: string }
 interface BusinessSystem { id: string; code: string; name: string; organization_id: string; organization_name: string }
@@ -107,6 +108,10 @@ const importPage = ref(1)
 const importPageSize = ref(20)
 const importTotal = ref(0)
 const importFile = ref<File>()
+const importColumns = ref<ImportColumn[]>([])
+const importFields = ref<ImportField[]>([])
+const importColumnMapping = reactive<ImportColumnMapping>({})
+const importColumnsLoading = ref(false)
 const importResult = ref<ImportResult>()
 const importResultMode = ref<'preview' | 'completed'>()
 const search = ref('')
@@ -148,6 +153,7 @@ const availableSystems = computed(() => systems.value.filter((item) => item.orga
 const availableNetworkAreas = computed(() => networkAreas.value.filter((item) => item.organization_id === form.organization_id))
 const dialogTitle = computed(() => editingAssetID.value ? '编辑网络资产' : '新增网络资产')
 const submitLabel = computed(() => editingAssetID.value ? '保存修改' : '确认新增')
+const importMappingError = computed(() => getImportColumnMappingError(importFields.value, importColumnMapping))
 const selectedOrganizationID = computed(() => {
   const ids = new Set(selectedAssets.value.map((item) => item.organization_id))
   return ids.size === 1 ? [...ids][0] : ''
@@ -620,24 +626,63 @@ function resetImportPreview() {
   importResult.value = undefined
   importResultMode.value = undefined
 }
+function clearImportColumnMapping() {
+  importColumns.value = []
+  importFields.value = []
+  Object.keys(importColumnMapping).forEach((key) => delete importColumnMapping[key])
+}
+async function analyzeImportColumns() {
+  if (!importForm.organization_id || !importFile.value) return false
+  importColumnsLoading.value = true
+  resetImportPreview()
+  clearImportColumnMapping()
+  try {
+    const data = new FormData()
+    data.append('organization_id', importForm.organization_id)
+    data.append('file', importFile.value)
+    const response = await apiClient.post<{ columns: ImportColumn[]; fields: ImportField[] }>('/assets/import/columns', data, {
+      headers: { 'Content-Type': 'multipart/form-data' }, timeout: 60_000,
+    })
+    importColumns.value = response.data.columns
+    importFields.value = response.data.fields
+    Object.assign(importColumnMapping, createSuggestedColumnMapping(response.data.fields))
+    return true
+  } catch (error) {
+    ElMessage.error(getAPIErrorMessage(error, '读取文件列失败'))
+    return false
+  } finally {
+    importColumnsLoading.value = false
+  }
+}
 function openImportDialog() {
   importForm.organization_id = defaultOrganizationID()
   importForm.import_mode = 'skip_duplicates'
   importFile.value = undefined
+  clearImportColumnMapping()
   resetImportPreview()
   importDialogVisible.value = true
 }
-function handleFileChange(uploadFile: UploadFile, _uploadFiles: UploadFiles) {
+async function handleFileChange(uploadFile: UploadFile, _uploadFiles: UploadFiles) {
   importFile.value = uploadFile.raw
-  resetImportPreview()
+  await analyzeImportColumns()
 }
 function handleFileRemove() {
   importFile.value = undefined
+  clearImportColumnMapping()
+  resetImportPreview()
+}
+async function handleImportOrganizationChange() {
+  if (importFile.value) await analyzeImportColumns()
+  else resetImportPreview()
+}
+function handleImportMappingChange() {
   resetImportPreview()
 }
 async function runImport(preview = false) {
   if (!importForm.organization_id) return ElMessage.warning('请选择所属组织')
   if (!importFile.value) return ElMessage.warning('请选择 CSV 或 XLSX 文件')
+  if (!importFields.value.length && !await analyzeImportColumns()) return
+  if (importMappingError.value) return ElMessage.warning(importMappingError.value)
   if (!preview && (importResultMode.value !== 'preview' || !importResult.value?.success_count)) {
     return ElMessage.warning('请先完成预检，并确认至少有一行可以导入')
   }
@@ -646,6 +691,7 @@ async function runImport(preview = false) {
     const data = new FormData()
     data.append('organization_id', importForm.organization_id)
     data.append('import_mode', importForm.import_mode)
+    data.append('column_mapping', serializeImportColumnMapping(importFields.value, importColumnMapping))
     data.append('file', importFile.value)
     const endpoint = preview ? '/assets/import/preview' : '/assets/import'
     const response = await apiClient.post<{ result: ImportResult }>(endpoint, data, {
@@ -1118,11 +1164,11 @@ onMounted(() => {
       <template #footer><el-button @click="areaFormVisible = false">取消</el-button><el-button type="primary" :loading="areaSubmitting" @click="submitNetworkArea">保存</el-button></template>
     </el-dialog>
 
-    <el-dialog v-model="importDialogVisible" title="批量导入网络资产" width="760px" destroy-on-close>
+    <el-dialog v-model="importDialogVisible" title="批量导入网络资产" width="920px" destroy-on-close>
       <el-alert :title="auth.isGroupAdmin ? '单次最多导入 5000 行，成功项直接进入集团正式台账；资产类型和值在集团范围内去重，允许部分成功。请先选择所属组织再下载模板，模板会包含当前启用的集团自定义字段。网络区域按所属组织已配置的名称填写；有效期支持 YYYY-MM-DD、YYYY-MM-DD HH:mm:ss 或 RFC3339。' : '单次最多导入 5000 行，成功项保存为本组织未上报工作版本，集团暂不可见；后续需在填报任务中选择并提交上报。可关联本组织尚未上报或已经发布的业务系统；资产类型和值在集团范围内去重，允许部分成功。'" type="info" :closable="false" show-icon />
       <div class="import-toolbar"><el-button link type="primary" :loading="downloading" @click="downloadTemplate('xlsx')">下载 XLSX 模板</el-button><el-button link type="primary" :loading="downloading" @click="downloadTemplate('csv')">下载 CSV 模板</el-button></div>
       <el-form label-position="top">
-        <el-form-item label="导入到所属组织" required><el-select v-model="importForm.organization_id" filterable :disabled="!auth.isGroupAdmin" @change="resetImportPreview" style="width: 100%"><el-option v-for="item in enabledOrganizations" :key="item.id" :label="item.name" :value="item.id" /></el-select></el-form-item>
+        <el-form-item label="导入到所属组织" required><el-select v-model="importForm.organization_id" filterable :disabled="!auth.isGroupAdmin" @change="handleImportOrganizationChange" style="width: 100%"><el-option v-for="item in enabledOrganizations" :key="item.id" :label="item.name" :value="item.id" /></el-select></el-form-item>
         <el-form-item v-if="!auth.isGroupAdmin" label="重复记录处理方式">
           <div class="import-mode-field">
             <el-radio-group v-model="importForm.import_mode" @change="resetImportPreview"><el-radio value="skip_duplicates">重复记录跳过（默认）</el-radio><el-radio value="update_working">覆盖为未上报工作版本</el-radio></el-radio-group>
@@ -1130,6 +1176,19 @@ onMounted(() => {
           </div>
         </el-form-item>
         <el-form-item label="CSV / XLSX 文件" required><el-upload drag :auto-upload="false" :limit="1" accept=".csv,.xlsx" :on-change="handleFileChange" :on-remove="handleFileRemove"><div class="el-upload__text">拖入文件，或<em>点击选择</em></div><template #tip><div class="el-upload__tip">文件不超过 10 MB；业务系统使用同组织内的系统编码匹配；责任人账号按所属组织内的启用用户名匹配；有效期格式错误会在预检中逐行提示。</div></template></el-upload></el-form-item>
+        <el-form-item v-if="importFile" label="文件列映射" required>
+          <div v-loading="importColumnsLoading" class="import-mapping-panel">
+            <div class="import-mapping-header"><span>系统字段</span><span>文件列</span></div>
+            <div v-for="field in importFields" :key="field.key" class="import-mapping-row">
+              <div class="import-mapping-field"><strong>{{ field.name }}</strong><el-tag v-if="field.required" size="small" type="danger" effect="plain">必填</el-tag><el-tag v-if="field.custom" size="small" effect="plain">自定义</el-tag></div>
+              <el-select v-model="importColumnMapping[field.key]" clearable placeholder="不导入该字段" @change="handleImportMappingChange">
+                <el-option v-for="column in importColumns" :key="column.index" :label="importColumnLabel(column)" :value="column.index" :disabled="isImportColumnUsed(importColumnMapping, column.index, field.key)" />
+              </el-select>
+            </div>
+            <el-alert v-if="importMappingError" :title="importMappingError" type="warning" :closable="false" show-icon />
+            <p v-else-if="importFields.length" class="muted-text import-mapping-tip">已自动识别标准模板列；非标准文件可在此调整。未映射的可选字段不会导入，预检和正式导入使用同一份映射。</p>
+          </div>
+        </el-form-item>
       </el-form>
       <div v-if="importResult" class="import-result" data-testid="import-result">
         <el-alert :title="importResultMode === 'preview' ? '预检结果：尚未写入台账，请确认后执行导入' : (auth.isGroupAdmin ? '正式台账导入结果' : '组织工作台账导入结果：成功项当前为未上报')" :type="importResultMode === 'preview' ? 'info' : 'success'" :closable="false" show-icon />
@@ -1137,7 +1196,7 @@ onMounted(() => {
         <p class="muted-text import-result-breakdown">成功项：新增 {{ importResult.created_count }} 条，更新 {{ importResult.updated_count }} 条。</p>
         <el-table v-if="importResult.errors.length" :data="importResult.errors" max-height="220" size="small"><el-table-column prop="row" label="行号" width="75" /><el-table-column prop="message" label="处理结果" /></el-table>
       </div>
-      <template #footer><el-button @click="importDialogVisible = false">关闭</el-button><el-button :loading="importing" @click="runImport(true)">预检文件</el-button><el-button type="primary" :loading="importing" :disabled="importResultMode !== 'preview' || !importResult?.success_count" @click="runImport(false)">确认导入</el-button></template>
+      <template #footer><el-button @click="importDialogVisible = false">关闭</el-button><el-button :loading="importing || importColumnsLoading" :disabled="Boolean(importMappingError) || !importFields.length" @click="runImport(true)">预检文件</el-button><el-button type="primary" :loading="importing" :disabled="importResultMode !== 'preview' || !importResult?.success_count" @click="runImport(false)">确认导入</el-button></template>
     </el-dialog>
 
     <el-dialog v-model="historyDialogVisible" title="资产导入记录" width="980px">
