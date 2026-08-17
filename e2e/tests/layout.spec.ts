@@ -647,6 +647,47 @@ test('组织名称与编码独立展示且集团管理员可编辑已有组织',
   await expect(editableRow).toContainText(updatedContact)
 })
 
+test('消息中心使用统一列表卡片、内部滚动和卡片内分页', async ({ page }) => {
+  test.skip(!adminPassword, 'E2E_PASSWORD/BOOTSTRAP_ADMIN_PASSWORD 未配置')
+
+  await page.setViewportSize({ width: 1440, height: 900 })
+  await page.goto('/notifications')
+  await login(page, adminUsername, adminPassword!)
+  await expect(page.getByRole('heading', { name: '消息中心', exact: true })).toBeVisible()
+
+  const layout = await page.evaluate(() => {
+    const filters = document.querySelector<HTMLElement>('.notification-summary-panel')
+    const panel = document.querySelector<HTMLElement>('.notification-list-panel')
+    const scroll = document.querySelector<HTMLElement>('.notification-list-scroll')
+    const pagination = document.querySelector<HTMLElement>('.notification-list-panel > .table-pagination')
+    if (!filters || !panel || !scroll) throw new Error('消息中心统一列表布局节点不存在')
+    const filterRect = filters.getBoundingClientRect()
+    const panelRect = panel.getBoundingClientRect()
+    const panelStyle = getComputedStyle(panel)
+    const scrollStyle = getComputedStyle(scroll)
+    const paginationStyle = pagination ? getComputedStyle(pagination) : null
+    return {
+      cardGap: panelRect.top - filterRect.bottom,
+      panelRadius: panelStyle.borderTopLeftRadius,
+      panelBorderStyle: panelStyle.borderTopStyle,
+      scrollOverflowY: scrollStyle.overflowY,
+      scrollMaxHeight: scrollStyle.maxHeight,
+      scrollWithinPanel: scroll.getBoundingClientRect().right <= panelRect.right + 1,
+      paginationMarginTop: paginationStyle?.marginTop ?? null,
+      paginationWithinPanel: pagination ? panel.contains(pagination) : true,
+    }
+  })
+
+  expect(layout.cardGap).toBe(16)
+  expect(layout.panelRadius).toBe('14px')
+  expect(layout.panelBorderStyle).toBe('solid')
+  expect(layout.scrollOverflowY).toBe('auto')
+  expect(layout.scrollMaxHeight).toBe('520px')
+  expect(layout.scrollWithinPanel).toBe(true)
+  expect(layout.paginationWithinPanel).toBe(true)
+  if (layout.paginationMarginTop !== null) expect(layout.paginationMarginTop).toBe('18px')
+})
+
 test('集团工作台卡片操作对齐、零值图表语义正确并适配常用窄屏', async ({ page }) => {
   test.skip(!adminPassword, 'E2E_PASSWORD/BOOTSTRAP_ADMIN_PASSWORD 未配置')
 

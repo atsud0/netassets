@@ -45,6 +45,12 @@ const categoryOptions = [
 ]
 
 const displayedItems = computed(() => items.value)
+const displayedRange = computed(() => {
+  if (!total.value) return '暂无消息'
+  const start = (page.value - 1) * pageSize.value + 1
+  const end = Math.min(start + items.value.length - 1, total.value)
+  return `第 ${start}–${end} 条，共 ${total.value} 条`
+})
 const levelLabel: Record<string, string> = { info: '提醒', warning: '重要', danger: '紧急' }
 const categoryLabel = (value: string) => categoryOptions.find((item) => item.value === value)?.label ?? value
 
@@ -144,50 +150,57 @@ onMounted(load)
       </el-select>
     </div>
 
-    <div v-loading="loading" class="notification-list">
-      <div v-if="!displayedItems.length && !loading" class="panel empty-state">当前没有需要关注的消息。</div>
-      <article
-        v-for="item in displayedItems"
-        :key="item.key"
-        class="panel notification-card"
-        :class="[{ unread: !item.read }, `level-${item.level}`]"
-      >
-        <div class="notification-icon">{{ item.level === 'danger' ? '!' : item.level === 'warning' ? '!' : 'i' }}</div>
-        <div class="notification-body">
-          <div class="notification-card-heading">
-            <div>
-              <span class="notification-category">{{ categoryLabel(item.category) }}</span>
-              <h2>{{ item.title }}</h2>
+    <div v-loading="loading" class="panel data-table-panel notification-list-panel">
+      <div class="table-panel-heading">
+        <div><strong>消息列表</strong><span>{{ displayedRange }}</span></div>
+      </div>
+      <div class="notification-list-scroll">
+        <div v-if="!displayedItems.length && !loading" class="notification-empty-state">当前没有需要关注的消息。</div>
+        <div v-else class="notification-list">
+          <article
+            v-for="item in displayedItems"
+            :key="item.key"
+            class="notification-card"
+            :class="[{ unread: !item.read }, `level-${item.level}`]"
+          >
+            <div class="notification-icon">{{ item.level === 'danger' ? '!' : item.level === 'warning' ? '!' : 'i' }}</div>
+            <div class="notification-body">
+              <div class="notification-card-heading">
+                <div>
+                  <span class="notification-category">{{ categoryLabel(item.category) }}</span>
+                  <h2>{{ item.title }}</h2>
+                </div>
+                <el-tag :type="item.level === 'danger' ? 'danger' : item.level === 'warning' ? 'warning' : 'info'" effect="plain">
+                  {{ levelLabel[item.level] }}
+                </el-tag>
+              </div>
+              <p>{{ item.message }}</p>
+              <div class="notification-meta">
+                <span>{{ formatTime(item.occurred_at) }}</span>
+                <span v-if="item.due_at">{{ formatDue(item.due_at) }}</span>
+                <span v-if="item.read" class="read-label">已读</span>
+                <span v-else class="unread-label">未读</span>
+              </div>
             </div>
-            <el-tag :type="item.level === 'danger' ? 'danger' : item.level === 'warning' ? 'warning' : 'info'" effect="plain">
-              {{ levelLabel[item.level] }}
-            </el-tag>
-          </div>
-          <p>{{ item.message }}</p>
-          <div class="notification-meta">
-            <span>{{ formatTime(item.occurred_at) }}</span>
-            <span v-if="item.due_at">{{ formatDue(item.due_at) }}</span>
-            <span v-if="item.read" class="read-label">已读</span>
-            <span v-else class="unread-label">未读</span>
-          </div>
+            <div class="notification-actions">
+              <el-button v-if="!item.read" link @click="markRead(item)">标记已读</el-button>
+              <el-button type="primary" link @click="openItem(item)">查看处理</el-button>
+            </div>
+          </article>
         </div>
-        <div class="notification-actions">
-          <el-button v-if="!item.read" link @click="markRead(item)">标记已读</el-button>
-          <el-button type="primary" link @click="openItem(item)">查看处理</el-button>
-        </div>
-      </article>
-    </div>
-    <div class="table-pagination" v-if="total > 0">
-      <el-pagination
-        background
-        layout="total, sizes, prev, pager, next"
-        :total="total"
-        :current-page="page"
-        :page-size="pageSize"
-        :page-sizes="[20, 50, 100]"
-        @current-change="changePage"
-        @size-change="changePageSize"
-      />
+      </div>
+      <div v-if="total > 0" class="table-pagination notification-pagination">
+        <el-pagination
+          background
+          layout="total, sizes, prev, pager, next"
+          :total="total"
+          :current-page="page"
+          :page-size="pageSize"
+          :page-sizes="[20, 50, 100]"
+          @current-change="changePage"
+          @size-change="changePageSize"
+        />
+      </div>
     </div>
   </section>
 </template>

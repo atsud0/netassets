@@ -206,9 +206,13 @@ button, input { font: inherit; }
 .notification-stat strong { color: var(--navy); font-size: 22px; }
 .notification-stat.unread strong { color: #c45656; }
 .notification-summary-panel .el-select { width: 180px; margin-left: auto; }
-.notification-list { display: flex; flex-direction: column; gap: 12px; }
-.notification-card { display: grid; grid-template-columns: 34px minmax(0, 1fr) auto; gap: 14px; align-items: flex-start; padding: 17px 20px; border-left: 3px solid transparent; }
-.notification-card.unread { box-shadow: 0 8px 24px rgba(38, 53, 72, .08); }
+.notification-list-panel { min-width: 0; padding-top: 14px; }
+.notification-list-scroll { max-height: 520px; min-height: 180px; overflow-y: auto; overscroll-behavior: contain; scrollbar-gutter: stable; border-top: 1px solid #edf0f3; border-bottom: 1px solid #edf0f3; }
+.notification-list { display: flex; flex-direction: column; }
+.notification-card { display: grid; grid-template-columns: 34px minmax(0, 1fr) auto; gap: 14px; align-items: flex-start; padding: 17px 14px; border-left: 3px solid transparent; border-bottom: 1px solid #edf0f3; background: white; transition: background-color .15s ease; }
+.notification-card:last-child { border-bottom: 0; }
+.notification-card.unread { background: #f8fbff; }
+.notification-card:hover { background: #f7fafc; }
 .notification-card.level-info { border-left-color: #5b8def; }
 .notification-card.level-warning { border-left-color: #e6a23c; }
 .notification-card.level-danger { border-left-color: #f56c6c; }
@@ -224,7 +228,7 @@ button, input { font: inherit; }
 .read-label { color: var(--muted); }
 .unread-label { color: #c45656; font-weight: 650; }
 .notification-actions { display: flex; align-items: center; gap: 3px; white-space: nowrap; }
-.empty-state { padding: 45px 20px; color: var(--muted); text-align: center; }
+.notification-empty-state { min-height: 178px; display: grid; place-items: center; padding: 30px; color: var(--muted); text-align: center; }
 @media (max-width: 1100px) {
   .topbar { padding: 0 18px; }
   .topbar-context { gap: 10px; }
