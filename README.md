@@ -131,6 +131,36 @@ curl http://127.0.0.1:8080/health/live
 curl http://127.0.0.1:8080/health/ready
 ```
 
+## GitHub Actions 镜像构建
+
+仓库通过 [`.github/workflows/container-image.yml`](.github/workflows/container-image.yml) 构建多架构应用镜像，目标仓库为：
+
+```text
+ghcr.io/atsud0/netassets
+```
+
+工作流规则：
+
+- Pull Request 修改后端、前端或容器构建文件时，只执行镜像构建验证，不推送镜像。
+- 推送到 `main` 时，发布 `latest`、`main` 和 `sha-<短提交哈希>` 标签。
+- 推送 `v*` 版本标签（例如 `v1.2.3`）时，发布 `1.2.3`、`1.2`、`1` 和提交哈希标签。
+- 支持在 GitHub Actions 页面通过 `workflow_dispatch` 手动运行。
+- 同时构建 `linux/amd64` 与 `linux/arm64`，并附带 OCI 元数据、构建来源证明和 SBOM。
+
+拉取默认分支的最新镜像：
+
+```bash
+podman pull ghcr.io/atsud0/netassets:latest
+```
+
+如果镜像包是私有的，需要先使用具备 `read:packages` 权限的 GitHub Token 登录 GHCR：
+
+```bash
+printf '%s' "$GITHUB_TOKEN" | podman login ghcr.io --username YOUR_GITHUB_USERNAME --password-stdin
+```
+
+工作流使用 GitHub 自动提供的 `GITHUB_TOKEN` 发布镜像，不需要另行保存仓库密码。若组织策略限制 Actions 写入 Packages，需要在仓库或组织的 Actions 设置中允许工作流具备包写入权限。
+
 ## 备份与恢复
 
 备份同时包含 PostgreSQL 数据库和 `/data` 附件卷。为保证数据库记录与附件一致，备份期间会短暂停止应用容器，完成后自动恢复；所有容器操作均通过 `podman compose` 执行。
