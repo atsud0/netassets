@@ -1,311 +1,255 @@
 # NetAssets
 
-集团级轻量网络资产管理与填报平台。集团统一维护组织与数据标准，子公司按权限登记业务系统及网络资产，后续通过填报任务完成提交、审核和汇总。
+集团级轻量网络资产管理、数据填报与安全运营平台。
 
-## 当前已实现
+NetAssets 面向集团总部与下属子公司、办事处等多组织场景：集团统一维护组织、权限和数据治理规则，组织用户维护本组织业务系统及网络资产，通过填报任务选择上报内容，经集团审核后形成集团可见台账；集团安全运营人员可基于已上报的互联网资产开展安全测试、漏洞登记和安全工单闭环。
 
-- Go + Gin 模块化单体后端
-- Vue 3 + TypeScript 管理端
-- PostgreSQL 17 数据库与 Goose 迁移
-- 集团根组织及集团管理员首次启动初始化
-- 基于服务端 Session Cookie 的登录、会话恢复和退出
-- 个人 API Token：在账户设置中创建、分页查看和撤销，明文仅展示一次、数据库仅保存 SHA-256 摘要；支持 Bearer 认证，固定绑定创建时的当前工作组织并实时继承账号角色与数据权限
-- 集团管理员查看组织、新增子公司/部门，并在线维护集团名称、简称、负责人和联系方式
-- 集团管理员创建子公司管理员或填报员账号
-- 子公司账号按所属组织隔离数据，禁止跨组织访问
-- 业务系统详情、新增、编辑、归档/恢复、软删除及关联网络资产查看；支持单次 1～200 个系统批量归档或恢复，并返回逐项处理结果
-- 业务系统个人信息、敏感个人信息、重要数据、核心数据属性
-- 个人信息记录数与“数据量是否超过 10 万条”自动联动
-- 网络资产在线新增、编辑、状态维护、归档/重新启用和软删除；支持单次 1～200 个资产批量调整状态或设置/清除网络区域；子公司批量维护生成或更新未上报工作版本，集团管理员批量维护正式台账
-- 集团管理员回收站：统一查看已删除网络资产和业务系统；恢复资产时防止与在用台账重复，恢复业务系统后保持“已归档”并记录统一审计
-- 网络暴露范围固定为公网、内网、未知；集团管理员可按组织维护网络区域，子公司可选择本组织已启用的办事处、园区、云 VPC 或网络分区
-- 业务系统与网络资产 CSV/XLSX 批量导入、标准模板、集团级重复检测、逐行错误反馈、部分成功和导入历史
-- 业务系统与网络资产台账 CSV/XLSX 导出；两类台账导出均沿用当前组织、状态和关键字等筛选条件，子公司导出范围受服务端数据权限约束
-- 填报任务结果 CSV/XLSX 导出；一行对应一个目标组织，包含任务进度、提交数量快照、审核结果和填报说明
-- 大型 XLSX 支持后台导出任务：网络资产、业务系统和填报任务均按数据库分页、Excelize 流式写盘生成；任务创建时冻结筛选与授权快照，仅申请人可查看、下载和删除，完成/失败产生个人站内消息，文件保留 7 天并自动过期清理
-- 同步 XLSX 最多导出 5000 行，超限时前端自动转为后台任务；CSV 继续直接流式下载，并使用独立的有限导出写入超时
-- 资产按所属组织和关联业务系统管理，集团可统管、子公司仅可维护本组织数据
-- 集团管理员创建填报任务、选择目标组织并立即下发或保存草稿
-- 填报任务支持“全部网络资产、仅公网资产、仅内网资产”核查范围；范围同步作用于提交前质量检查、提交数量、不可变快照、审核明细、提交差异及结果导出，未选择的资源类型不检查、不统计、不进入快照
-- 集团创建填报任务时，可按目标组织、填报资源类型和网络资产核查范围预览当前台账规模，逐组织查看业务系统数与网络资产数并识别空范围组织；预览不固化数据，实际提交仍按届时最新台账重新计算
-- 填报任务已接入站内消息：集团接收子公司提交待审核提醒，子公司在 `inventory.manage` 授权组织范围内接收新任务、审核退回、3 日内截止和已逾期提醒；点击消息可自动定位并展开具体任务及目标组织
-- 子公司提交前自动检查必填台账、负责人、数据安全属性和公网资产关联情况；错误阻止提交、提醒项允许提交
-- 集团管理员可统一维护网络资产/业务系统自定义字段，并配置“字段必填”“长期未更新”和“资产到期”数据质量规则；系统按配置时间每日执行全集团巡检，多实例通过 PostgreSQL 事务级互斥锁保证同一天只生成一个自动批次
-- 数据质量规则支持最多 10 个白名单生效条件，多个条件按 AND 组合，可按组织、网络区域、资产类型、网络范围、环境、重要程度、业务系统状态、数据属性及自定义字段限定适用范围；必填规则在主动巡检与填报提交前复用同一判定语义
-- 数据质量问题支持单次 1～200 项批量指派负责人、批量开始整改和批量提交集团复核；服务端逐项执行组织权限与状态机校验，允许部分成功，并为每个成功项写入处理事件和审计日志
-- 网络资产、安全工单和质量整改支持用户私有的保存筛选视图；每人每页最多 20 个，可设默认、应用和删除，筛选字段由服务端白名单校验且不能扩大原有组织数据范围
-- 子公司开始填报并提交当前业务系统、网络资产数量快照及填报说明
-- 每次提交生成不可变的业务系统与网络资产明细快照；退回重提形成新版本，并自动与本组织最近一次提交比较新增、修改和删除/归档项
-- 集团审核人员和授权组织用户可在填报任务中查看提交差异，修改项按字段展示前后值；历史存量提交未生成明细快照时保持兼容且不显示差异入口
-- 集团退回填报时可针对当前提交中的具体业务系统或网络资产填写逐条整改意见；意见与提交快照版本绑定，子公司可查看全部历史意见后维护台账并重新提交
-- 集团审核通过或退回，子公司整改后可重新提交；全部通过后任务自动完成
-- 集团与子公司工作台按权限汇总组织、业务系统、网络资产、填报待办、待审核和逾期指标
-- 集团管理员可下发草稿、关闭进行中任务，并归档已关闭或已完成任务
-- 子公司仅查看分配给本组织的非草稿任务，不能越权创建或审核集团任务
-- 登录、组织、用户、业务系统、网络资产、导入导出和填报审核操作审计日志；填报提交审计同时记录快照 ID、版本、上一快照和资源数量
-- 集团管理员审计日志查询页：支持按关键字、操作类型、资源类型、操作人、所属组织、结果和日期范围筛选，并可查看请求与扩展详情
-- 具备 `security_finding.manage` 的集团管理员或集团安全运营管理员可基于子公司网络资产或业务系统登记安全发现，维护漏洞等级、证据、整改建议和风险接受
-- 具备 `security_workorder.manage` 的集团管理员或集团安全运营管理员可创建安全工单草稿或立即下发；子公司可接收、更新整改进度并提交复测，集团安全运营人员可退回或复测通过后关闭
-- 安全工单按责任组织隔离，支持动态逾期标识、关联发现和完整处理时间线，关键动作同步进入统一审计日志
-- 子公司可上传整改证明，集团可上传复测或参考材料；附件支持受控下载、删除、20MB 限制、扩展名白名单和审计留痕，文件持久化到 `app-data` 数据卷
-- 集团与子公司工作台新增安全整改待办，展示未关闭、待复测、3 日内到期和已逾期工单数量
-- 安全治理工作台：按当前数据权限展示漏洞严重等级/状态分布、近 30 天新增与复测关闭趋势、安全测试公网资产覆盖率、测试发现关闭率，以及子公司整改及时率和逾期工单排行；卡片和表格可跳转至已筛选的发现/工单明细
-- 轻量站内消息中心：按集团/子公司数据范围动态生成填报任务、安全工单、风险复核、数据质量和台账变更消息，支持未读筛选、分类筛选、单条/全部已读及跳转业务详情
-- 具备 `security_test.manage` 的集团管理员或集团安全运营管理员可创建安全测试批次，并通过安全域只读参考接口从未归档公网 URL、IP、域名等资产中选择 1～200 项测试目标
-- 安全测试批次支持草稿、已授权、测试中、已完成和已取消状态；授权后范围冻结，不能再修改
-- 每个测试批次固化资产值、资产类型、责任组织、业务系统、网络区域、环境和重要程度快照，并保留状态事件与统一审计记录
-- 具备 `security_test.manage` 的集团安全运营人员（含集团管理员应急接管）可在已授权、测试中或已完成的安全测试批次中上传测试报告或参考材料；支持受控下载、删除、20MB 限制、扩展名白名单、批次事件和审计留痕，文件持久化到 `app-data` 数据卷
-- 安全发现可关联安全测试批次，服务端校验所选资产必须属于已授权范围
-- 具备 `security_finding.manage` 的集团安全运营人员可按测试批次批量导入 CSV/XLSX 漏洞；系统对测试批次授权资产进行标准化精确匹配，并自动带出责任组织和业务系统
-- 精确且唯一匹配的漏洞直接入库；无匹配或多匹配项进入“待关联漏洞”，相似匹配只作为人工建议，不能自动越过授权边界生成发现
-- 人工关联只能选择当前测试批次的授权资产；支持推荐资产置顶、关联备注、忽略、重复识别、处理审计及责任组织消息通知
-- 漏洞导入支持 10MB/5000 行限制、中文严重等级、逐行格式错误、部分成功、待关联统计、重复检测、导入历史和汇总审计
-- 健康检查和系统信息接口
-- SPA 生产路由支持直接访问和刷新；构建静态资源使用 `/_assets/` 独立命名空间，避免与网络资产页面 `/assets` 冲突
-- Podman Compose 私有化部署
-- 容器化 Playwright 端到端测试
+> **项目定位**：轻量、可私有化部署、以台账和协作为核心。不包含默认运行的自动资产发现插件；自动发现能力预留为后续可插拔扩展。
 
-## 技术栈
+## 核心业务闭环
 
-- Frontend: Vue 3、TypeScript、Vite、Element Plus、Pinia、Vue Router、Axios
-- Backend: Go、Gin、pgx、Goose
-- Database: PostgreSQL 17
-- Deployment: Podman Compose
-- E2E: Playwright（仅在容器内运行）
+```text
+组织与权限
+    ↓
+业务系统 / 网络资产登记
+    ↓
+组织工作版本与填报上报
+    ↓
+集团审核、发布与数据汇总
+    ↓
+数据质量巡检与整改
+    ↓
+安全测试、漏洞关联与安全工单
+    ↓
+子公司整改、集团复测、审计留痕
+```
 
-## 首次启动
+## 功能模块
 
-项目只使用 Podman 和 `podman compose`，不要求安装 Docker。
+### 集团与多组织管理
+
+- 集团、子公司、办事处、部门等多级组织树。
+- 集团管理员可新增、编辑、启用、停用、恢复、迁移和调整组织类型。
+- 停用组织前检查其用户、资产、业务系统和未完成任务；空组织可删除或放入回收站。
+- 支持组织范围内的多组织任职，一个用户可以在授权范围内承担多个组织岗位。
+- 集团管理员拥有集团范围管理能力；子公司管理员在被授权的组织树范围内管理本组织用户、组织和台账。
+- 组织用户只能访问授权组织范围内的数据，服务端同时执行组织和角色权限校验。
+- 用户可在账户设置中修改自己的密码和联系方式；角色、组织任职等授权信息由有权限的管理员维护。
+- 集团基本信息可在组织架构页面维护，初始化环境变量不会覆盖后续页面上的人工修改。
+
+### 资产台账与工作版本
+
+- 分开管理业务系统和网络资产，业务系统编码、名称、负责人和安全属性独立维护。
+- 网络资产支持 URL、域名、IP 等类型；资产值、资产名称、关联业务系统分别展示和管理。
+- 网络范围支持公网、内网、未知；网络区域支持由集团按组织配置的办事处、园区、云 VPC 和网络分区等自定义项。
+- 业务系统支持个人信息、敏感个人信息、重要数据、核心数据等属性；个人信息记录数与“数据量是否超过 10 万条”联动校验。
+- 资产支持首次发现、最近发现、来源和可选有效期 `expires_at`；数据质量规则可检查资产到期情况。
+- 组织用户在日常台账中新增或修改的内容默认进入组织工作版本，不会因为保存就直接对集团可见。
+- 组织用户可在填报任务中选择需要上报的系统和资产；已上报资源再次上报时形成更新，未发生变化的资源无需重复操作。
+- 集团审核通过后发布到正式台账；支持差异查看、提交快照、退回和审计留痕。
+- 支持归档、恢复、软删除、回收站和资源变更历史；集团批量操作返回逐项处理结果。
+
+### 导入、导出与分页
+
+- 业务系统和网络资产支持 CSV/XLSX 导入、标准模板、列映射、逐行错误反馈、重复检测、部分成功和导入历史。
+- 所有主要列表统一使用 `page`、`page_size`、`total`、`items` 分页契约，默认每页 20 条，单页最多 100 条。
+- CSV 导出直接流式写入；大型 XLSX 使用后台导出任务，按数据库分页生成文件，避免一次性占用大量内存。
+- 网络资产、业务系统和填报任务导出均沿用当前筛选条件，并受服务端组织权限约束。
+- 后台导出任务完成或失败会生成站内消息，文件默认保留 7 天。
+
+### 填报任务
+
+- 集团创建任务、选择目标组织、选择填报资源类型并立即下发或保存草稿。
+- 网络资产专项任务支持核查范围：全部、仅公网、仅内网。
+- 创建任务时可按组织、业务系统、网络区域等条件预览资源规模；正式提交时重新按最新台账生成不可变快照。
+- 子公司可选择本次上报的业务系统和网络资产；未选择的资源不进入本次任务快照、统计和审核范围。
+- 支持草稿、开始填报、提交、集团审核、退回、差异查看和结果导出。
+- 提交前复用数据质量规则检查必填字段、负责人、安全属性和公网资产关联关系。
+- 任务截止提醒、提交待审核、退回和审核结果接入消息中心。
+
+### 数据治理
+
+- 集团统一维护业务系统和网络资产自定义字段。
+- 支持“字段必填”“长期未更新”“资产到期”等可配置数据质量规则。
+- 规则可按组织、网络区域、资产类型、网络范围、环境、重要程度、业务系统状态、数据属性和自定义字段限定适用范围。
+- 支持手动巡检和按计划执行的全集团自动巡检，多实例通过 PostgreSQL 事务锁避免重复执行。
+- 支持待确认资产、质量问题指派、开始整改、提交复核、复核通过、退回和豁免。
+- 质量整改支持批量操作、逐项权限校验、处理事件、审计日志和责任人通知。
+
+### 安全运营
+
+- 集团安全运营角色独立于集团管理员，负责安全测试、漏洞治理和安全工单，不必由集团管理员包办全部安全运营工作。
+- 安全测试批次支持按资产、业务系统、组织和网络区域圈选公网测试目标，并冻结测试授权范围。
+- 漏洞导入支持严重等级、逐行校验、重复识别、部分成功和导入历史。
+- 精确匹配的漏洞直接入库；无匹配或多匹配项进入“待人工关联”，只能关联当前测试批次授权资产。
+- 支持漏洞登记、风险接受、责任组织通知和审计留痕。
+- 安全工单支持下发、接收、整改、上传附件、提交复测、集团复测、退回和取消。
+- 资产归档、删除、恢复、状态或区域调整，以及资产上的安全发现会向责任组织发送站内消息，避免台账和安全处置闭环断开。
+
+### 平台与运维
+
+- 消息中心、审计日志、API Token、登录设备管理和账户设置。
+- 健康检查、系统信息、数据库迁移和备份恢复。
+- SPA 生产路由支持直接访问和刷新，静态资源使用 `/_assets/` 命名空间，避免与 `/assets` API 路径冲突。
+- Podman Compose 私有化部署；Playwright 端到端测试在容器中运行。
+
+## 技术架构
+
+| 层次 | 技术 |
+| --- | --- |
+| 管理端 | Vue 3、TypeScript、Vite、Element Plus、Pinia、Vue Router、Axios |
+| 后端 | Go 1.26、Gin 1.12、pgx |
+| 数据库 | PostgreSQL 17 |
+| 数据库迁移 | Goose 迁移库与项目内置 migrate 命令 |
+| 文件处理 | CSV、Excelize XLSX |
+| 部署 | Podman、Podman Compose |
+| 端到端测试 | Playwright 容器 |
+| 持续集成 | GitHub Actions、Buildx、GHCR |
+
+项目采用模块化单体结构，后端领域模块位于 `backend/internal/`，前端页面位于 `web/src/views/`，数据库迁移位于 `backend/migrations/`。
+
+## 快速开始
+
+项目优先使用 Podman 和 `podman compose`，不要求安装 Docker 或 Docker Compose。
+
+### 1. 准备配置
 
 ```bash
 cp .env.example .env
 ```
 
-启动前必须编辑 `.env`，至少将以下值替换为长度不少于 10 位的密码：
+至少修改首次初始化管理员密码：
 
 ```env
-BOOTSTRAP_ADMIN_PASSWORD=请替换为至少10位的强密码
+BOOTSTRAP_ADMIN_PASSWORD=请替换为至少10位的强随机密码
 ```
 
-然后启动服务：
+生产环境建议同时修改数据库密码、集团初始化信息，并设置：
+
+```env
+APP_ENV=production
+SESSION_COOKIE_SECURE=true
+```
+
+### 2. 启动本地环境
 
 ```bash
-podman machine start
+podman machine start             # Podman machine 未运行时执行
 podman compose up -d --build
 ```
 
-访问：`http://127.0.0.1:8080`
+应用启动后访问：
 
-首次启动时系统会创建：
-
-- 集团根组织：由 `BOOTSTRAP_GROUP_*` 配置决定
-- 集团管理员：由 `BOOTSTRAP_ADMIN_*` 配置决定
-- `group_admin` 集团管理员和 `security_operator` 集团安全运营管理员系统角色及基础权限
-
-> 初始化密码只用于创建首个管理员；用户已存在时不会在后续启动中重置其密码。生产环境请使用密钥管理或受控环境变量，不要提交 `.env`。
-
-数据质量每日自动巡检默认启用，可通过 `DATA_QUALITY_AUTO_SCAN_ENABLED` 开关控制，并使用 `DATA_QUALITY_AUTO_SCAN_TIME`（24 小时制 `HH:MM`）和 `DATA_QUALITY_AUTO_SCAN_TIMEZONE`（IANA 时区，例如 `Asia/Shanghai`）指定执行时间。自动巡检使用系统身份写入批次与审计，不会冒用某位管理员账号；失败后按 15 分钟退避重试，单次最长运行 2 小时。人工与自动巡检均接入备份写闸门：备份窗口内人工巡检会被拒绝，自动巡检会延后重试；巡检执行期间也不会与备份快照并发。
-
-> `BOOTSTRAP_GROUP_*` 只负责首次初始化集团根组织。初始化完成后，请在“组织机构 → 编辑集团信息”中维护集团名称等资料，应用重启不会再用 `.env` 覆盖人工修改。
-
-## 常用命令
-
-```bash
-# 查看状态
-podman compose ps
-
-# 查看应用日志
-podman compose logs -f app
-
-# 停止服务（保留数据卷）
-podman compose down
-
-# 停止并删除本地数据卷（会清空数据库）
-podman compose down -v
+```text
+http://127.0.0.1:8080
 ```
 
-健康检查：
+也可以使用 Makefile：
+
+```bash
+make up
+make ps
+make logs
+```
+
+### 3. 检查服务状态
 
 ```bash
 curl http://127.0.0.1:8080/health/live
 curl http://127.0.0.1:8080/health/ready
 ```
 
-## GitHub Actions 镜像构建
+首次启动会自动执行数据库迁移，并根据 `BOOTSTRAP_*` 配置创建集团根组织、首个集团管理员及内置安全运营角色。`BOOTSTRAP_GROUP_*` 只用于首次初始化；初始化完成后，应在“组织架构”页面编辑集团基本信息。
 
-仓库通过 [`.github/workflows/container-image.yml`](.github/workflows/container-image.yml) 构建多架构应用镜像，目标仓库为：
+### 持久化要求
+
+`compose.yaml` 默认使用两个命名卷：
+
+- `postgres-data`：PostgreSQL 数据库；
+- `app-data`：应用附件、导出文件和备份等数据。
+
+正式环境必须将数据库卷和应用 `/data` 卷纳入备份策略。不要使用 `podman compose down -v` 作为普通停止命令，它会删除本地数据卷。
+
+## GHCR 镜像构建与使用
+
+GitHub Actions 配置位于 [`.github/workflows/container-image.yml`](.github/workflows/container-image.yml)，发布镜像：
 
 ```text
 ghcr.io/atsud0/netassets
 ```
 
-工作流规则：
+工作流行为：
 
-- Pull Request 修改后端、前端或容器构建文件时，只执行镜像构建验证，不推送镜像。
-- 推送到 `main` 时，发布 `latest`、`main` 和 `sha-<短提交哈希>` 标签。
-- 推送 `v*` 版本标签（例如 `v1.2.3`）时，发布 `1.2.3`、`1.2`、`1` 和提交哈希标签。
-- 支持在 GitHub Actions 页面通过 `workflow_dispatch` 手动运行。
-- 同时构建 `linux/amd64` 与 `linux/arm64`，并附带 OCI 元数据、构建来源证明和 SBOM。
+- Pull Request：构建多架构镜像进行验证，不推送；
+- 推送到 `main`：发布 `latest`、`main` 和 `sha-*`；
+- 推送 `v1.2.3`：发布 `1.2.3`、`1.2`、`1` 和 `sha-*`；
+- 平台：`linux/amd64`、`linux/arm64`；
+- 包含 provenance 和 SBOM；
+- 支持 `workflow_dispatch` 手动运行。
 
-拉取默认分支的最新镜像：
+拉取镜像：
 
 ```bash
 podman pull ghcr.io/atsud0/netassets:latest
 ```
 
-如果镜像包是私有的，需要先使用具备 `read:packages` 权限的 GitHub Token 登录 GHCR：
+如果 GHCR 包为私有包：
 
 ```bash
-printf '%s' "$GITHUB_TOKEN" | podman login ghcr.io --username YOUR_GITHUB_USERNAME --password-stdin
+printf '%s' "$GITHUB_TOKEN" | podman login ghcr.io \
+  --username YOUR_GITHUB_USERNAME --password-stdin
 ```
 
-工作流使用 GitHub 自动提供的 `GITHUB_TOKEN` 发布镜像，不需要另行保存仓库密码。若组织策略限制 Actions 写入 Packages，需要在仓库或组织的 Actions 设置中允许工作流具备包写入权限。
+当前仓库的 `compose.yaml` 默认使用 `deploy/Containerfile` 从源码构建应用，适合开发、验收和需要本地构建的部署场景。若使用 GHCR 镜像部署，请在运维侧 Compose 文件中将 `app` 服务的 `build` 替换为 `image: ghcr.io/atsud0/netassets:<tag>`，同时保留 PostgreSQL 与 `/data` 的持久化配置。
+
+## 常用命令
+
+```bash
+make help                 # 查看全部命令
+make up                   # 构建并启动应用
+make down                 # 停止服务但保留数据卷
+make build                # 只构建应用镜像
+make ps                   # 查看容器状态
+make logs                 # 跟踪应用日志
+make migrate-up           # 执行一次数据库迁移
+make migrate-down         # 回滚一条迁移
+make test                 # 后端和前端单元测试
+make e2e                  # 容器内运行全部 Playwright 测试
+make e2e-roles            # 容器内运行角色边界回归测试
+make acceptance-preflight # 生产上线前配置验收
+make acceptance-running   # 对运行中的部署执行验收
+```
 
 ## 备份与恢复
 
-备份同时包含 PostgreSQL 数据库和 `/data` 附件卷。为保证数据库记录与附件一致，备份期间会短暂停止应用容器，完成后自动恢复；所有容器操作均通过 `podman compose` 执行。
+备份包含 PostgreSQL 数据库和应用 `/data` 附件卷。备份脚本会通过 `podman compose` 协调应用和数据库，确保数据库记录与附件尽量保持一致。
 
 ```bash
-# 生成备份，默认写入 ./backups/netassets-时间戳/
+# 默认生成到 ./backups/netassets-时间戳/
 make backup
 
-# 仅校验归档结构和 SHA-256，不修改当前数据
+# 只校验备份清单、归档结构和 SHA-256，不修改当前环境
 make restore-verify BACKUP=backups/netassets-20260723T000000Z
 
-# 恢复前默认自动再做一份安全备份，并要求显式确认
-NETASSETS_RESTORE_CONFIRM=YES make restore BACKUP=backups/netassets-20260723T000000Z
+# 恢复前自动创建安全备份，并要求显式确认
+NETASSETS_RESTORE_CONFIRM=YES make restore \
+  BACKUP=backups/netassets-20260723T000000Z
 ```
 
-恢复会覆盖当前数据库和全部附件。备份目录权限默认为仅当前用户可访问，`backups/` 已加入 Git 忽略列表；请将正式备份复制到受控、加密且与应用主机隔离的存储位置。
+恢复会覆盖当前数据库和附件。正式备份应复制到受控、加密并与应用主机隔离的存储中；不要将生产备份提交到 Git。
 
-## 当前 API
+## 测试
 
-```text
-POST   /api/v1/auth/login
-GET    /api/v1/auth/me
-POST   /api/v1/auth/logout
-GET    /api/v1/auth/api-tokens?page=&page_size=
-POST   /api/v1/auth/api-tokens
-DELETE /api/v1/auth/api-tokens/:id
-GET    /api/v1/organizations
-POST   /api/v1/organizations
-PATCH  /api/v1/organizations/:id
-GET  /api/v1/users
-POST /api/v1/users
-GET    /api/v1/business-systems
-POST   /api/v1/business-systems
-GET    /api/v1/business-systems/export?format=csv|xlsx&organization_id=&status=&q=
-GET    /api/v1/business-systems/imports
-GET    /api/v1/business-systems/:id/change-history
-GET    /api/v1/business-systems/import-template
-POST   /api/v1/business-systems/import
-GET    /api/v1/business-systems/:id
-GET    /api/v1/business-systems/:id/assets?page=&page_size=
-PATCH  /api/v1/business-systems/:id
-POST   /api/v1/business-systems/batch/archive
-POST   /api/v1/business-systems/:id/archive
-POST   /api/v1/business-systems/:id/restore
-DELETE /api/v1/business-systems/:id
-GET    /api/v1/assets
-POST   /api/v1/assets
-GET    /api/v1/network-areas?organization_id=
-POST   /api/v1/network-areas
-PATCH  /api/v1/network-areas/:id
-GET    /api/v1/assets/export?format=csv|xlsx&organization_id=&type=&status=&q=
-GET    /api/v1/assets/imports
-GET    /api/v1/assets/:id/change-history
-GET    /api/v1/assets/import-template
-POST   /api/v1/assets/import
-PATCH  /api/v1/assets/batch
-GET    /api/v1/assets/:id
-PATCH  /api/v1/assets/:id
-DELETE /api/v1/assets/:id
-GET    /api/v1/recycle-bin
-POST   /api/v1/recycle-bin/assets/:id/restore
-POST   /api/v1/recycle-bin/business-systems/:id/restore
-GET    /api/v1/dashboard/summary
-GET    /api/v1/audit-logs/options
-GET    /api/v1/audit-logs?page=&page_size=&action=&resource_type=&result=&user_id=&organization_id=&q=&start_at=&end_at=
-GET    /api/v1/data-quality-issues?page=&page_size=&organization_id=&status=&severity=&resource_type=&assignee=
-GET    /api/v1/data-quality-issues/:id
-POST   /api/v1/data-quality-issues/batch
-GET    /api/v1/data-quality-issues/:id/assignees?page=&page_size=
-GET    /api/v1/data-quality-issues/:id/events?page=&page_size=
-POST   /api/v1/data-quality-issues/:id/assign
-POST   /api/v1/data-quality-issues/:id/start
-POST   /api/v1/data-quality-issues/:id/submit
-POST   /api/v1/data-quality-issues/:id/review
-POST   /api/v1/data-quality-issues/:id/exempt
-POST   /api/v1/data-quality-issues/:id/reopen
-GET    /api/v1/data-quality-scan-batches?page=&page_size=
-GET    /api/v1/inventory-tasks?page=&page_size=
-POST   /api/v1/inventory-tasks/scope-preview
-POST   /api/v1/inventory-tasks
-GET    /api/v1/inventory-tasks/:taskID/export?format=csv|xlsx
-GET    /api/v1/export-jobs?page=&page_size=&status=&resource_type=
-POST   /api/v1/export-jobs
-GET    /api/v1/export-jobs/:id
-GET    /api/v1/export-jobs/:id/download
-DELETE /api/v1/export-jobs/:id
-GET    /api/v1/inventory-tasks/:taskID/organizations?page=&page_size=
-GET    /api/v1/inventory-tasks/:taskID/organizations/:organizationID/quality-check
-GET    /api/v1/inventory-tasks/:taskID/organizations/:organizationID/submission-diff
-GET    /api/v1/inventory-tasks/:taskID/organizations/:organizationID/submission-diff/items?resource_type=&change_type=&page=&page_size=
-GET    /api/v1/inventory-tasks/:taskID/organizations/:organizationID/review-context
-GET    /api/v1/inventory-tasks/:taskID/organizations/:organizationID/review-resources?q=&page=&page_size=
-GET    /api/v1/inventory-tasks/:taskID/organizations/:organizationID/review-comments?page=&page_size=
-POST   /api/v1/inventory-tasks/:taskID/organizations/:organizationID/business-system-drafts/batch-select
-POST   /api/v1/inventory-tasks/:taskID/organizations/:organizationID/asset-drafts/batch-select
-POST   /api/v1/inventory-tasks/:taskID/organizations/:organizationID/start
-POST   /api/v1/inventory-tasks/:taskID/organizations/:organizationID/submit
-POST   /api/v1/inventory-tasks/:taskID/organizations/:organizationID/review
-PATCH  /api/v1/inventory-tasks/:taskID/status
-
-GET    /api/v1/security-findings?organization_id=&status=
-POST   /api/v1/security-findings
-PATCH  /api/v1/security-findings/:id
-GET    /api/v1/security-work-orders?organization_id=&status=
-GET    /api/v1/security-work-orders/:id
-POST   /api/v1/security-work-orders
-POST   /api/v1/security-work-orders/:id/issue
-POST   /api/v1/security-work-orders/:id/accept
-POST   /api/v1/security-work-orders/:id/progress
-POST   /api/v1/security-work-orders/:id/submit
-POST   /api/v1/security-work-orders/:id/review
-POST   /api/v1/security-work-orders/:id/cancel
-POST   /api/v1/security-work-orders/:id/attachments
-GET    /api/v1/security-work-orders/:id/attachments/:attachmentID/download
-DELETE /api/v1/security-work-orders/:id/attachments/:attachmentID
-GET    /api/v1/dashboard/summary
-GET    /api/v1/dashboard/security-overview
-GET    /api/v1/notifications?unread_only=&category=&limit=
-GET    /api/v1/notifications/summary
-POST   /api/v1/notifications/read
-POST   /api/v1/notifications/read-all
-```
-
-普通列表接口统一采用 `page` / `page_size` 服务端分页，默认每页 20 条、单页最多 100 条，并返回真实 `total`。业务系统详情的关联资产、填报任务的目标组织进度也使用独立分页接口，详情/任务主列表不再嵌入无界集合；导出接口仍按授权范围生成完整文件。
-
-个人 API Token 可通过 Bearer 方式调用普通业务接口，例如：
-
-```bash
-curl \
-  -H "Authorization: Bearer nat_xxx" \
-  http://127.0.0.1:8080/api/v1/auth/me
-```
-
-Token 管理、个人资料、修改密码、登录设备、切换当前组织和退出登录等账户安全接口仅允许浏览器 Session 调用，不能使用 API Token 自行创建或撤销 Token。
-
-用户管理、集团基本信息维护、填报任务创建和审核、审计日志查询、回收站恢复及网络区域配置仍由集团管理员负责。安全测试、漏洞与风险接受、安全工单下发/复测分别受 `security_test.manage`、`security_finding.manage`、`security_workorder.manage` 控制，并且仅 `group_admin` 或内置 `security_operator` 集团角色可获得集团范围安全数据；组织自定义角色即使配置同名权限也不能扩大为集团范围。集团管理员创建仅承担集团职责的账号时，可只分配集团范围角色而不附加任何子公司组织任职，避免隐式获得组织岗位权限。消息中心按当前用户组织数据范围展示，集团管理员和集团安全运营管理员看到集团级复测与风险复核待办，子公司用户只看到本组织工单消息。子公司管理员及填报员可以开始和提交分配给授权组织的填报任务，也可以接收本组织安全工单、更新整改进度、上传整改证明并提交复测。集团管理员可维护所有组织数据，并可按子公司配置网络区域；组织用户只能查看所属组织，并只能在授权组织内登记或导入业务系统、维护或导入网络资产、选择本组织已启用的网络区域、查看本组织导入记录及集团下发的填报任务。网络暴露范围用于描述公网、内网、未知等安全属性，不与办公地点或网络分区混用。业务系统和资产编辑会按字段保存修改前后值，集团管理员及资源授权组织用户均可在对应台账中查看最近 100 条资源历史。业务系统和资产删除均采用软删除；业务系统仍有关联资产时禁止删除，归档不会删除关联关系。集团管理员可在回收站恢复误删资产或业务系统；恢复业务系统后默认保持“已归档”，恢复前若发现同一在用资产或系统编码冲突则会拒绝恢复。资产类型与标准化后的资产值在集团范围内去重。
-
-## 本地后端测试
+### 后端单元测试
 
 ```bash
 cd backend
 go test ./...
 ```
 
-如果宿主机没有 Node.js，可通过 Node 容器执行前端检查：
+### 前端构建与单元测试
+
+如果宿主机没有 Node.js，可使用 Node 容器：
 
 ```bash
 podman run --rm \
@@ -317,53 +261,149 @@ podman run --rm \
   sh -lc 'npm ci && npm run build && npm test -- --run'
 ```
 
-## Playwright
+### Playwright 端到端测试
 
-Playwright 不在宿主机安装浏览器，统一通过容器运行：
-
-```bash
-podman compose --profile e2e run --rm playwright
-```
-
-或：
+Playwright 浏览器不安装到宿主机，统一在容器中执行：
 
 ```bash
 make e2e
 ```
 
-测试账号从 `.env` 中的 `BOOTSTRAP_ADMIN_USERNAME` 和 `BOOTSTRAP_ADMIN_PASSWORD` 读取。
+角色边界回归测试：
 
-### 清理本地 E2E 测试数据
+```bash
+make e2e-roles
+```
 
-E2E 测试数据不会在测试结束后自动清除。需要清理本地开发库时，先预览严格匹配的测试组织、任务、资产、工单、附件及可归属审计记录：
+测试账号从 `.env` 的 `BOOTSTRAP_ADMIN_USERNAME` 和 `BOOTSTRAP_ADMIN_PASSWORD` 读取。E2E 使用独立的 `compose.e2e.yaml` 数据卷，测试结束后 Makefile 会清理测试容器和结果目录。
+
+清理本地普通环境中由 E2E 生成的测试数据前，先预览：
 
 ```bash
 make cleanup-e2e
-# 或 ./scripts/cleanup-e2e-data.sh --dry-run
 ```
 
-确认预览结果无误后，建议先执行 `make backup`，再显式执行删除：
+确认结果后再显式删除：
 
 ```bash
 NETASSETS_E2E_CLEANUP_CONFIRM=YES ./scripts/cleanup-e2e-data.sh --apply
 ```
 
-脚本只匹配 E2E 生成的固定命名规则（如 `SUB_PW_时间戳`、`TASK_PW_时间戳`），并同步清理关联附件和可精确归属的审计记录；不会删除普通业务数据。
+脚本只匹配固定的 E2E 命名规则，不会删除普通业务数据。执行前建议先 `make backup`。
+
+## 环境变量
+
+`.env.example` 是完整配置示例，常用变量如下：
+
+| 变量 | 作用 | 默认值 |
+| --- | --- | --- |
+| `APP_ENV` | 运行环境 | `development` |
+| `APP_HOST_PORT` | 宿主机访问端口 | `8080` |
+| `DATABASE_URL` | 应用数据库连接串 | Compose 内部 PostgreSQL 地址 |
+| `POSTGRES_DB` / `POSTGRES_USER` / `POSTGRES_PASSWORD` | PostgreSQL 初始化参数 | `netassets` |
+| `BOOTSTRAP_GROUP_*` | 首次创建集团根组织 | 示例值 |
+| `BOOTSTRAP_ADMIN_*` | 首次创建集团管理员 | 用户自定义 |
+| `SESSION_TTL` | Session 有效期 | `12h` |
+| `SESSION_COOKIE_SECURE` | 是否仅通过 HTTPS 发送 Cookie | `false` |
+| `DATA_QUALITY_AUTO_SCAN_ENABLED` | 是否启用每日质量巡检 | `true` |
+| `DATA_QUALITY_AUTO_SCAN_TIME` | 自动巡检时间 | `02:00` |
+| `DATA_QUALITY_AUTO_SCAN_TIMEZONE` | 自动巡检时区 | `Asia/Shanghai` |
+| `BUILD_HTTP_PROXY` / `BUILD_HTTPS_PROXY` | 构建阶段 HTTP 代理 | `http://host.containers.internal:6152` |
+| `BUILD_ALL_PROXY` | 构建阶段 SOCKS5 代理 | `socks5h://host.containers.internal:6153` |
+| `E2E_HTTP_PROXY` / `E2E_HTTPS_PROXY` | Playwright 依赖安装代理 | `http://host.containers.internal:6152` |
+
+### 安全注意事项
+
+- `.env` 不应提交到 Git；
+- `BOOTSTRAP_ADMIN_PASSWORD` 只在首次初始化时创建账号，不会在后续启动时重置已存在账号；
+- 生产环境使用强随机密码和独立数据库密码；
+- HTTPS 反向代理环境设置 `SESSION_COOKIE_SECURE=true`；
+- 默认应用面向集团内部网络，不建议未经反向代理、访问控制和审计就直接暴露公网；
+- API Token 只在创建时显示一次，数据库只保存摘要，请按最小权限和最短有效期使用。
+
+## API 与健康检查
+
+API 基础路径为 `/api/v1`，登录后可通过浏览器 Session Cookie 调用；个人 API Token 可用于普通业务接口的 Bearer 认证：
+
+```bash
+curl \
+  -H "Authorization: Bearer nat_xxx" \
+  http://127.0.0.1:8080/api/v1/auth/me
+```
+
+主要接口模块：
+
+| 模块 | 典型路径 |
+| --- | --- |
+| 认证与账户 | `/api/v1/auth/*` |
+| 组织、用户和角色 | `/api/v1/organizations`、`/api/v1/users`、`/api/v1/roles` |
+| 业务系统 | `/api/v1/business-systems/*` |
+| 网络资产与网络区域 | `/api/v1/assets/*`、`/api/v1/network-areas/*` |
+| 导入、导出任务 | `/api/v1/*/import`、`/api/v1/export-jobs` |
+| 填报任务 | `/api/v1/inventory-tasks/*` |
+| 数据治理 | `/api/v1/data-quality-rules/*`、`/api/v1/data-quality-issues/*` |
+| 安全测试与漏洞 | `/api/v1/security-test-batches/*`、`/api/v1/security-findings/*` |
+| 安全工单 | `/api/v1/security-work-orders/*` |
+| 消息、审计和回收站 | `/api/v1/notifications/*`、`/api/v1/audit-logs`、`/api/v1/recycle-bin` |
+| 运维 | `/health/live`、`/health/ready`、`/api/v1/system/info` |
+
+普通列表接口统一返回真实分页结果：
+
+```json
+{
+  "page": 1,
+  "page_size": 20,
+  "total": 123,
+  "items": []
+}
+```
+
+导出接口按授权范围生成完整文件，不受列表分页大小限制；大型 XLSX 会转为后台导出任务。
 
 ## 网络代理
 
-默认按本机现有代理配置：
+如果本机代理监听端口与项目默认值一致，无需额外配置：
 
-- 宿主机 HTTP：`127.0.0.1:6152`
-- 宿主机 SOCKS5：`127.0.0.1:6153`
-- 容器访问宿主机：`host.containers.internal`
+- 宿主机 HTTP：`127.0.0.1:6152`；
+- 宿主机 SOCKS5：`127.0.0.1:6153`；
+- 容器访问宿主机：`host.containers.internal`。
 
-可在 `.env` 中覆盖 `BUILD_*_PROXY` 和 `E2E_*_PROXY`。
+可通过 `.env` 覆盖 `BUILD_*_PROXY`、`E2E_*_PROXY` 和对应的 `*_NO_PROXY`。
+
+## 项目结构
+
+```text
+.
+├── backend/
+│   ├── cmd/                 # server、migrate 入口
+│   ├── internal/            # 认证、组织、资产、治理、安全等领域模块
+│   ├── migrations/          # 数据库迁移
+│   └── queries/             # SQL 查询
+├── web/
+│   ├── src/views/           # 管理端页面
+│   ├── src/components/      # 通用组件
+│   └── src/router/          # 路由与权限入口
+├── deploy/Containerfile     # 多阶段镜像构建文件
+├── compose.yaml             # 本地/源码构建部署
+├── compose.e2e.yaml         # Playwright 隔离测试部署
+├── e2e/tests/               # 端到端和角色回归测试
+├── scripts/                 # 备份、恢复、验收和测试数据脚本
+└── docs/                    # 建设方案与上线验收文档
+```
 
 ## 文档
 
-产品与技术方案位于：
+- [集团级轻量网络资产管理系统建设方案](docs/集团级轻量网络资产管理系统建设方案.md)
+- [生产上线验收与全角色回归清单](docs/生产上线验收与全角色回归清单.md)
+- [环境变量示例](.env.example)
+- [Podman Compose 配置](compose.yaml)
+- [GitHub Actions 镜像构建](.github/workflows/container-image.yml)
 
-```text
-docs/集团级轻量网络资产管理系统建设方案.md
-```
+## 后续规划
+
+以下能力不属于当前默认运行闭环，后续按插件或独立迭代实施：
+
+1. 面向指定域名、IP、URL 的自动资产发现插件；
+2. 外部扫描器和 CMDB 数据源的定时同步；
+3. 资产发现结果与待确认资产的自动去重、相似匹配和责任组织路由；
+4. 更细粒度的资产生命周期与证书、域名到期信息接入。
