@@ -14,6 +14,7 @@ import (
 
 	"netassets/internal/asset"
 	"netassets/internal/assetcandidate"
+	"netassets/internal/assetobservation"
 	"netassets/internal/auditlog"
 	"netassets/internal/auth"
 	"netassets/internal/backup"
@@ -77,6 +78,7 @@ func NewWithContext(ctx context.Context, cfg config.Config, pool *pgxpool.Pool, 
 		registerBusinessSystemRoutes(api, requireAuth, businessSystemService, customFieldService, logger)
 		assetService := asset.NewService(pool)
 		registerAssetRoutes(api, requireAuth, assetService, customFieldService, logger)
+		registerAssetObservationRoutes(api, requireAuth, assetobservation.NewService(pool), logger)
 		registerAssetCandidateRoutes(api, requireAuth, assetcandidate.NewService(pool, assetService), logger)
 		registerNetworkAreaRoutes(api, requireAuth, networkarea.NewService(pool), logger)
 		registerCustomFieldRoutes(api, requireAuth, customFieldService, logger)
