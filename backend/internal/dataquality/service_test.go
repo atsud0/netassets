@@ -2,6 +2,7 @@ package dataquality
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"testing"
 )
@@ -138,5 +139,36 @@ func TestValidateConditionAllowedValuesForCustomChoice(t *testing.T) {
 	}
 	if err := validConditionValues(RuleCondition{Operator: "in", Values: []string{"任意输入"}}, spec); !errors.Is(err, ErrInvalid) {
 		t.Fatalf("unknown option err=%v, want ErrInvalid", err)
+	}
+}
+
+func TestValidateExternalExpiryTargets(t *testing.T) {
+	svc := &Service{}
+	for _, target := range []string{"domain_registration_expires_at", "tls_certificate_expires_at"} {
+		input := Input{
+			RuleName: target, ResourceType: "asset", RuleType: "expiry", TargetField: target,
+			Severity: "warning", ExpiryWarningDays: 30,
+		}
+		if err := svc.valid(context.Background(), input); err != nil {
+			t.Fatalf("target %q rejected: %v", target, err)
+		}
+	}
+	input := Input{
+		RuleName: "invalid", ResourceType: "asset", RuleType: "expiry", TargetField: "certificate_expires_at",
+		Severity: "warning", ExpiryWarningDays: 30,
+	}
+	if err := svc.valid(context.Background(), input); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("invalid external expiry target err=%v, want ErrInvalid", err)
+	}
+}
+
+func TestLegacyRuleConditionJSONCompatibility(t *testing.T) {
+	var condition RuleCondition
+	if err := json.Unmarshal([]byte(`{"field":"system_status","operator":"equals","value":"running"}`), &condition); err != nil {
+		t.Fatalf("Unmarshal legacy condition: %v", err)
+	}
+	conditions := normalizeLoadedConditions("business_system", []RuleCondition{condition})
+	if conditions[0].Field != "status" || conditions[0].Operator != "eq" || len(conditions[0].Values) != 1 || conditions[0].Values[0] != "running" {
+		t.Fatalf("legacy condition not normalized: %#v", conditions[0])
 	}
 }

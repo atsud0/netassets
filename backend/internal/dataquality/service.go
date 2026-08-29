@@ -12,6 +12,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"netassets/internal/assetobservation"
 	"netassets/internal/auth"
 	"netassets/internal/pagination"
 )
@@ -36,6 +37,31 @@ type RuleCondition struct {
 	Field    string   `json:"field"`
 	Operator string   `json:"operator"`
 	Values   []string `json:"values,omitempty"`
+}
+
+func (condition *RuleCondition) UnmarshalJSON(data []byte) error {
+	var wire struct {
+		Field    string   `json:"field"`
+		Operator string   `json:"operator"`
+		Values   []string `json:"values"`
+		Value    string   `json:"value"`
+	}
+	if err := json.Unmarshal(data, &wire); err != nil {
+		return err
+	}
+	condition.Field = wire.Field
+	condition.Operator = wire.Operator
+	condition.Values = wire.Values
+	if len(condition.Values) == 0 && strings.TrimSpace(wire.Value) != "" {
+		condition.Values = []string{wire.Value}
+	}
+	switch strings.ToLower(strings.TrimSpace(condition.Operator)) {
+	case "equals", "equal":
+		condition.Operator = "eq"
+	case "not_equals", "not_equal":
+		condition.Operator = "ne"
+	}
+	return nil
 }
 
 type Rule struct {
@@ -74,9 +100,14 @@ type conditionFieldSpec struct {
 	allowedValues map[string]bool
 }
 
-type Service struct{ pool *pgxpool.Pool }
+type Service struct {
+	pool                 *pgxpool.Pool
+	observationRefresher externalObservationRefresher
+}
 
-func NewService(pool *pgxpool.Pool) *Service { return &Service{pool: pool} }
+func NewService(pool *pgxpool.Pool) *Service {
+	return &Service{pool: pool, observationRefresher: assetobservation.NewService(pool)}
+}
 
 func isAdmin(p auth.Principal) error {
 	if !p.HasRole("group_admin") {
@@ -174,6 +205,21 @@ func normalize(in *Input) {
 		}
 		return strings.Join(left.Values, "\x00") < strings.Join(right.Values, "\x00")
 	})
+}
+
+func normalizeLoadedConditions(resourceType string, conditions []RuleCondition) []RuleCondition {
+	for index := range conditions {
+		condition := &conditions[index]
+		condition.Field = strings.ToLower(strings.TrimSpace(condition.Field))
+		condition.Operator = strings.ToLower(strings.TrimSpace(condition.Operator))
+		if resourceType == "business_system" && condition.Field == "system_status" {
+			condition.Field = "status"
+		}
+		if resourceType == "asset" && condition.Field == "asset_status" {
+			condition.Field = "status"
+		}
+	}
+	return conditions
 }
 
 func (s *Service) customConditionField(ctx context.Context, resourceType, field string) (conditionFieldSpec, error) {
@@ -312,7 +358,8 @@ func (s *Service) valid(ctx context.Context, in Input) error {
 			return ErrInvalid
 		}
 	} else if in.RuleType == "expiry" {
-		if in.ResourceType != "asset" || in.TargetField != "expires_at" || in.StaleAfterDays != 0 || in.ExpiryWarningDays < 0 || in.ExpiryWarningDays > 3650 {
+		validTarget := in.TargetField == "expires_at" || isExternalExpiryTarget(in.TargetField)
+		if in.ResourceType != "asset" || !validTarget || in.StaleAfterDays != 0 || in.ExpiryWarningDays < 0 || in.ExpiryWarningDays > 3650 {
 			return ErrInvalid
 		}
 	} else {
@@ -349,6 +396,7 @@ func scanRule(row pgx.Row) (Rule, error) {
 	if item.Conditions == nil {
 		item.Conditions = []RuleCondition{}
 	}
+	item.Conditions = normalizeLoadedConditions(item.ResourceType, item.Conditions)
 	return item, nil
 }
 

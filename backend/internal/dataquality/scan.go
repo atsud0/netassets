@@ -50,15 +50,21 @@ type ScanIssue struct {
 }
 
 type ScanSummary struct {
-	AssetCount       int64 `json:"asset_count"`
-	SystemCount      int64 `json:"system_count"`
-	EnabledRuleCount int   `json:"enabled_rule_count"`
-	TotalIssueCount  int64 `json:"total_issue_count"`
-	ErrorCount       int64 `json:"error_count"`
-	WarningCount     int64 `json:"warning_count"`
-	AutoClosedCount  int64 `json:"auto_closed_count"`
-	ReturnedCount    int   `json:"returned_count"`
-	Truncated        bool  `json:"truncated"`
+	AssetCount                     int64 `json:"asset_count"`
+	SystemCount                    int64 `json:"system_count"`
+	EnabledRuleCount               int   `json:"enabled_rule_count"`
+	TotalIssueCount                int64 `json:"total_issue_count"`
+	ErrorCount                     int64 `json:"error_count"`
+	WarningCount                   int64 `json:"warning_count"`
+	AutoClosedCount                int64 `json:"auto_closed_count"`
+	ReturnedCount                  int   `json:"returned_count"`
+	Truncated                      bool  `json:"truncated"`
+	ExternalObservationCandidates  int   `json:"external_observation_candidates"`
+	ExternalObservationProcessed   int   `json:"external_observation_processed"`
+	ExternalObservationSuccesses   int   `json:"external_observation_successes"`
+	ExternalObservationFailures    int   `json:"external_observation_failures"`
+	ExternalObservationUnsupported int   `json:"external_observation_unsupported"`
+	ExternalObservationDeferred    int   `json:"external_observation_deferred"`
 }
 
 type ScanResult struct {
@@ -100,6 +106,10 @@ func (s *Service) scan(ctx context.Context, actorUserID string, filter ScanFilte
 		(trigger.Type == scanTriggerScheduled && trigger.ScheduledFor == "") {
 		return ScanResult{}, ErrInvalid
 	}
+	externalRefresh, err := s.refreshExternalObservations(ctx, filter, trigger)
+	if err != nil {
+		return ScanResult{}, err
+	}
 	var actorID any
 	if actorUserID != "" {
 		actorID = actorUserID
@@ -128,6 +138,12 @@ func (s *Service) scan(ctx context.Context, actorUserID string, filter ScanFilte
 	}
 
 	result := ScanResult{Issues: make([]ScanIssue, 0)}
+	result.Summary.ExternalObservationCandidates = externalRefresh.CandidateCount
+	result.Summary.ExternalObservationProcessed = externalRefresh.ProcessedCount
+	result.Summary.ExternalObservationSuccesses = externalRefresh.Successes
+	result.Summary.ExternalObservationFailures = externalRefresh.Failures
+	result.Summary.ExternalObservationUnsupported = externalRefresh.Unsupported
+	result.Summary.ExternalObservationDeferred = externalRefresh.DeferredCount
 	if filter.ResourceType == "" || filter.ResourceType == "asset" {
 		if err := tx.QueryRow(ctx, `SELECT count(*) FROM assets a JOIN asset_organizations ao ON ao.asset_id=a.id AND ao.is_primary WHERE a.deleted_at IS NULL AND (NULLIF($1::text,'') IS NULL OR ao.organization_id=$1::uuid)`, filter.OrganizationID).Scan(&result.Summary.AssetCount); err != nil {
 			return ScanResult{}, fmt.Errorf("count scanned assets: %w", err)
@@ -156,7 +172,7 @@ func (s *Service) scan(ctx context.Context, actorUserID string, filter ScanFilte
 	for _, rule := range rules {
 		issues, err := listRuleIssues(ctx, tx, rule, filter.OrganizationID)
 		if err != nil {
-			return ScanResult{}, err
+			return ScanResult{}, fmt.Errorf("scan data quality rule %s (%s): %w", rule.ID, rule.RuleName, err)
 		}
 		for _, issue := range issues {
 			var issueID string
@@ -263,11 +279,14 @@ func (s *Service) scan(ctx context.Context, actorUserID string, filter ScanFilte
 		INSERT INTO audit_logs(user_id,organization_id,action,resource_type,resource_id,summary,details,request_ip,request_id)
 		VALUES($1::uuid,NULLIF($2,'')::uuid,$3,'data_quality_scan_batch',$4,$5,
 		       jsonb_build_object('trigger_type',$6::text,'scheduled_for',NULLIF($7,'')::date,'resource_type',$8::text,
-		                          'severity',$9::text,'rule_count',$10::int,'issue_count',$11::bigint,'auto_closed_count',$12::bigint),
-		       NULLIF($13,'')::inet,NULLIF($14,''))
+		                          'severity',$9::text,'rule_count',$10::int,'issue_count',$11::bigint,'auto_closed_count',$12::bigint,
+		                          'external_observation_candidates',$13::int,'external_observation_processed',$14::int,
+		                          'external_observation_failures',$15::int,'external_observation_deferred',$16::int),
+		       NULLIF($17,'')::inet,NULLIF($18,''))
 	`, actorID, filter.OrganizationID, auditAction, result.BatchID, auditSummary, trigger.Type, trigger.ScheduledFor,
 		filter.ResourceType, filter.Severity, result.Summary.EnabledRuleCount, result.Summary.TotalIssueCount,
-		result.Summary.AutoClosedCount, ipAddress, requestID); err != nil {
+		result.Summary.AutoClosedCount, result.Summary.ExternalObservationCandidates, result.Summary.ExternalObservationProcessed,
+		result.Summary.ExternalObservationFailures, result.Summary.ExternalObservationDeferred, ipAddress, requestID); err != nil {
 		return ScanResult{}, fmt.Errorf("write data quality scan audit: %w", err)
 	}
 	if err := tx.Commit(ctx); err != nil {
@@ -355,11 +374,21 @@ func scanQueryParts(rule Rule, organizationID string) (string, string, []any, er
 			args = append(args, rule.StaleAfterDays)
 			issueCondition = fmt.Sprintf(`a.updated_at < now() - ($%d::integer * interval '1 day')`, len(args))
 		} else if rule.RuleType == "expiry" {
-			if rule.TargetField != "expires_at" || rule.ExpiryWarningDays < 0 || rule.ExpiryWarningDays > 3650 {
+			if rule.ExpiryWarningDays < 0 || rule.ExpiryWarningDays > 3650 {
 				return "", "", nil, ErrInvalid
 			}
 			args = append(args, rule.ExpiryWarningDays)
-			issueCondition = fmt.Sprintf(`a.status<>'archived' AND a.expires_at IS NOT NULL AND a.expires_at <= now() + ($%d::integer * interval '1 day')`, len(args))
+			warningPlaceholder := len(args)
+			switch rule.TargetField {
+			case "expires_at":
+				issueCondition = fmt.Sprintf(`a.status<>'archived' AND a.expires_at IS NOT NULL AND a.expires_at <= now() + ($%d::integer * interval '1 day')`, warningPlaceholder)
+			case "domain_registration_expires_at", "tls_certificate_expires_at":
+				observationType := externalExpiryTargets[rule.TargetField]
+				args = append(args, observationType)
+				issueCondition = fmt.Sprintf(`a.status<>'archived' AND EXISTS (SELECT 1 FROM asset_external_observations e WHERE e.asset_id=a.id AND e.observation_type=$%d AND e.status='success' AND e.expires_at IS NOT NULL AND e.expires_at <= now() + ($%d::integer * interval '1 day'))`, len(args), warningPlaceholder)
+			default:
+				return "", "", nil, ErrInvalid
+			}
 		} else {
 			if rule.RuleType != "required" {
 				return "", "", nil, ErrInvalid

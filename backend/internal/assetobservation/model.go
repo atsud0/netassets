@@ -62,3 +62,21 @@ type assetTarget struct {
 	NetworkScope    string
 	OrganizationID  string
 }
+
+// BulkRefreshOptions controls the bounded refresh performed before a data quality scan.
+type BulkRefreshOptions struct {
+	OrganizationID string
+	Limit          int
+	Concurrency    int
+}
+
+// BulkRefreshResult summarizes refresh work. Network lookup failures are counted
+// per observation and persisted instead of failing the whole batch.
+type BulkRefreshResult struct {
+	CandidateCount int `json:"candidate_count"`
+	ProcessedCount int `json:"processed_count"`
+	Successes      int `json:"successes"`
+	Failures       int `json:"failures"`
+	Unsupported    int `json:"unsupported"`
+	DeferredCount  int `json:"deferred_count"`
+}

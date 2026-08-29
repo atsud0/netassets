@@ -9,6 +9,7 @@ import (
 	"net/url"
 	"regexp"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -50,11 +51,21 @@ func (s *Service) Refresh(ctx context.Context, principal auth.Principal, assetID
 	if err != nil {
 		return RefreshResult{}, err
 	}
+	result, err := s.refreshTarget(ctx, target, true)
+	if err != nil {
+		return RefreshResult{}, err
+	}
+	if err := s.writeAudit(ctx, principal, target, result, requestID, ipAddress); err != nil {
+		return RefreshResult{}, err
+	}
+	return result, nil
+}
+
+func (s *Service) refreshTarget(ctx context.Context, target assetTarget, includeItems bool) (RefreshResult, error) {
 	plans, err := observationPlans(target)
 	if err != nil {
 		return RefreshResult{}, err
 	}
-
 	result := RefreshResult{}
 	collectedResults := make([]collectionResult, 0, len(plans))
 	for _, plan := range plans {
@@ -72,13 +83,11 @@ func (s *Service) Refresh(ctx context.Context, principal auth.Principal, assetID
 	if err := s.saveResults(ctx, target.ID, collectedResults); err != nil {
 		return RefreshResult{}, err
 	}
-	items, err := s.list(ctx, target.ID)
-	if err != nil {
-		return RefreshResult{}, err
-	}
-	result.Items = items
-	if err := s.writeAudit(ctx, principal, target, result, requestID, ipAddress); err != nil {
-		return RefreshResult{}, err
+	if includeItems {
+		result.Items, err = s.list(ctx, target.ID)
+		if err != nil {
+			return RefreshResult{}, err
+		}
 	}
 	return result, nil
 }
@@ -229,12 +238,27 @@ func classifyCollectionError(err error) string {
 }
 
 func (s *Service) authorizedAsset(ctx context.Context, principal auth.Principal, assetID string) (assetTarget, error) {
+	if !principal.HasPermission("asset.manage") {
+		return assetTarget{}, ErrForbidden
+	}
+	target, err := s.loadAsset(ctx, assetID)
+	if err != nil {
+		return assetTarget{}, err
+	}
+	allowed, err := access.CanOperateOrganization(ctx, s.pool, principal, target.OrganizationID, "asset.manage")
+	if err != nil {
+		return assetTarget{}, err
+	}
+	if !allowed {
+		return assetTarget{}, ErrForbidden
+	}
+	return target, nil
+}
+
+func (s *Service) loadAsset(ctx context.Context, assetID string) (assetTarget, error) {
 	assetID = strings.TrimSpace(assetID)
 	if !uuidPattern.MatchString(assetID) {
 		return assetTarget{}, ErrInvalid
-	}
-	if !principal.HasPermission("asset.manage") {
-		return assetTarget{}, ErrForbidden
 	}
 	var target assetTarget
 	err := s.pool.QueryRow(ctx, `
@@ -248,13 +272,6 @@ func (s *Service) authorizedAsset(ctx context.Context, principal auth.Principal,
 	}
 	if err != nil {
 		return assetTarget{}, fmt.Errorf("load observation asset: %w", err)
-	}
-	allowed, err := access.CanOperateOrganization(ctx, s.pool, principal, target.OrganizationID, "asset.manage")
-	if err != nil {
-		return assetTarget{}, err
-	}
-	if !allowed {
-		return assetTarget{}, ErrForbidden
 	}
 	return target, nil
 }
@@ -313,9 +330,9 @@ func saveResult(ctx context.Context, tx pgx.Tx, assetID string, result collectio
 			asset_id,observation_type,endpoint_key,status,source,source_reference,not_before,expires_at,
 			metadata,last_attempt_at,last_success_at,next_refresh_at,consecutive_failures,error_code,error_message
 		) VALUES(
-			$1::uuid,$2,$3,$4,NULLIF($5,''),NULLIF($6,''),$7,$8,$9::jsonb,now(),
-			CASE WHEN $4='success' THEN now() ELSE NULL END,now()+$10::interval,
-			CASE WHEN $4='failed' THEN 1 ELSE 0 END,NULLIF($11,''),NULLIF($12,'')
+			$1::uuid,$2::varchar,$3,$4::varchar,NULLIF($5,''),NULLIF($6,''),$7,$8,$9::jsonb,now(),
+			CASE WHEN $4::varchar='success' THEN now() ELSE NULL END,now()+$10::interval,
+			CASE WHEN $4::varchar='failed' THEN 1 ELSE 0 END,NULLIF($11,''),NULLIF($12,'')
 		)
 		ON CONFLICT(asset_id,observation_type,endpoint_key) DO UPDATE SET
 			status=EXCLUDED.status,
@@ -372,6 +389,108 @@ func (s *Service) list(ctx context.Context, assetID string) ([]Observation, erro
 		items = append(items, item)
 	}
 	return items, rows.Err()
+}
+
+// RefreshDue refreshes a bounded set of missing, stale, or due observations.
+// It is intended for trusted internal callers such as the data quality scanner.
+func (s *Service) RefreshDue(ctx context.Context, options BulkRefreshOptions) (BulkRefreshResult, error) {
+	options.OrganizationID = strings.TrimSpace(options.OrganizationID)
+	if options.OrganizationID != "" && !uuidPattern.MatchString(options.OrganizationID) {
+		return BulkRefreshResult{}, ErrInvalid
+	}
+	if options.Limit <= 0 {
+		options.Limit = 100
+	}
+	if options.Limit > 2000 {
+		options.Limit = 2000
+	}
+	if options.Concurrency <= 0 {
+		options.Concurrency = 6
+	}
+	if options.Concurrency > 16 {
+		options.Concurrency = 16
+	}
+
+	rows, err := s.pool.Query(ctx, `
+		SELECT a.id::text,a.asset_type,a.asset_value,a.normalized_value,a.network_scope,ao.organization_id::text
+		FROM assets a
+		JOIN asset_organizations ao ON ao.asset_id=a.id AND ao.is_primary
+		WHERE a.deleted_at IS NULL AND a.status<>'archived' AND a.asset_type IN ('domain','url')
+		  AND (NULLIF($1::text,'') IS NULL OR ao.organization_id=$1::uuid)
+		  AND (
+			NOT EXISTS (SELECT 1 FROM asset_external_observations e WHERE e.asset_id=a.id)
+			OR EXISTS (SELECT 1 FROM asset_external_observations e WHERE e.asset_id=a.id AND e.next_refresh_at<=now())
+			OR a.updated_at > COALESCE((SELECT max(e.updated_at) FROM asset_external_observations e WHERE e.asset_id=a.id),'-infinity'::timestamptz)
+			OR (SELECT count(*) FROM asset_external_observations e WHERE e.asset_id=a.id) <
+			   CASE WHEN a.asset_type='domain' OR a.normalized_value~*'^https://' THEN 2 ELSE 1 END
+		  )
+		ORDER BY COALESCE((SELECT min(e.next_refresh_at) FROM asset_external_observations e WHERE e.asset_id=a.id),'-infinity'::timestamptz),a.updated_at
+		LIMIT $2
+	`, options.OrganizationID, options.Limit)
+	if err != nil {
+		return BulkRefreshResult{}, fmt.Errorf("list due asset observations: %w", err)
+	}
+	targets := make([]assetTarget, 0, options.Limit)
+	for rows.Next() {
+		var target assetTarget
+		if err := rows.Scan(&target.ID, &target.AssetType, &target.Value, &target.NormalizedValue, &target.NetworkScope, &target.OrganizationID); err != nil {
+			rows.Close()
+			return BulkRefreshResult{}, fmt.Errorf("scan due asset observation: %w", err)
+		}
+		targets = append(targets, target)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return BulkRefreshResult{}, fmt.Errorf("list due asset observations: %w", err)
+	}
+	rows.Close()
+
+	result := BulkRefreshResult{CandidateCount: len(targets)}
+	jobs := make(chan assetTarget)
+	var mu sync.Mutex
+	var firstDatabaseErr error
+	var wg sync.WaitGroup
+	worker := func() {
+		defer wg.Done()
+		for target := range jobs {
+			if ctx.Err() != nil {
+				return
+			}
+			refreshed, refreshErr := s.refreshTarget(ctx, target, false)
+			mu.Lock()
+			if refreshErr == nil {
+				result.ProcessedCount++
+				result.Successes += refreshed.Successes
+				result.Failures += refreshed.Failures
+				result.Unsupported += refreshed.Unsupported
+			} else if errors.Is(refreshErr, ErrUnsupported) {
+				result.ProcessedCount++
+				result.Unsupported++
+			} else if !errors.Is(refreshErr, context.Canceled) && !errors.Is(refreshErr, context.DeadlineExceeded) && firstDatabaseErr == nil {
+				firstDatabaseErr = refreshErr
+			}
+			mu.Unlock()
+		}
+	}
+	wg.Add(options.Concurrency)
+	for range options.Concurrency {
+		go worker()
+	}
+feedLoop:
+	for _, target := range targets {
+		select {
+		case <-ctx.Done():
+			break feedLoop
+		case jobs <- target:
+		}
+	}
+	close(jobs)
+	wg.Wait()
+	result.DeferredCount = result.CandidateCount - result.ProcessedCount
+	if firstDatabaseErr != nil {
+		return result, firstDatabaseErr
+	}
+	return result, nil
 }
 
 func (s *Service) writeAudit(ctx context.Context, principal auth.Principal, target assetTarget, result RefreshResult, requestID, ipAddress string) error {

@@ -261,3 +261,30 @@ func TestScalarNegativeConditionsExcludeBlankValues(t *testing.T) {
 		}
 	}
 }
+
+func TestScanQueryPartsExternalDomainExpiry(t *testing.T) {
+	from, condition, args, err := scanQueryParts(Rule{
+		RuleType: "expiry", ResourceType: "asset", TargetField: "domain_registration_expires_at", ExpiryWarningDays: 30,
+	}, "organization-id")
+	if err != nil {
+		t.Fatalf("scanQueryParts() error = %v", err)
+	}
+	if !strings.Contains(from, "FROM assets a") || !strings.Contains(condition, "asset_external_observations") || !strings.Contains(condition, "e.status='success'") {
+		t.Fatalf("unexpected external domain expiry query parts: from=%q condition=%q", from, condition)
+	}
+	if len(args) != 3 || args[1] != 30 || args[2] != "domain_registration" {
+		t.Fatalf("unexpected external domain expiry args: %#v", args)
+	}
+}
+
+func TestScanQueryPartsExternalTLSExpiry(t *testing.T) {
+	_, condition, args, err := scanQueryParts(Rule{
+		RuleType: "expiry", ResourceType: "asset", TargetField: "tls_certificate_expires_at", ExpiryWarningDays: 7,
+	}, "")
+	if err != nil {
+		t.Fatalf("scanQueryParts() error = %v", err)
+	}
+	if !strings.Contains(condition, "asset_external_observations") || len(args) != 3 || args[2] != "tls_certificate" {
+		t.Fatalf("unexpected TLS expiry query: condition=%q args=%#v", condition, args)
+	}
+}
