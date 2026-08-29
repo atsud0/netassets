@@ -6,6 +6,7 @@ import { apiClient, getAPIErrorMessage, getDownloadAPIError } from '../api/clien
 import { createExportJob } from '../api/export-jobs'
 import { useAuthStore } from '../stores/auth'
 import SavedFilterViews from '../components/SavedFilterViews.vue'
+import AssetExternalObservations from '../components/AssetExternalObservations.vue'
 import WorkingVersionDiffDrawer from '../components/WorkingVersionDiffDrawer.vue'
 import ResourceSubmissionHistoryDrawer from '../components/ResourceSubmissionHistoryDrawer.vue'
 import { assetDraftEndpoint, batchAssetUpdateSuccessMessage } from '../utils/inventory-drafts'
@@ -1099,6 +1100,7 @@ onMounted(() => {
         <template v-if="detail">
           <div class="detail-hero"><div><span class="eyebrow">NETWORK ASSET</span><h2>{{ detail.name || detail.value }}</h2><p>{{ typeLabel(detail.type) }} · {{ detail.value }}</p></div><el-tag :type="statusTag(detail.status)" effect="plain">{{ statusLabel(detail.status) }}</el-tag></div>
           <div class="detail-grid"><div><span>所属组织</span><strong>{{ detail.organization_name }}</strong></div><div><span>关联业务系统</span><strong>{{ detail.business_system_name || '未绑定' }}</strong></div><div><span>责任人账号</span><strong>{{ assetOwnerLabel(detail) }}</strong></div><div><span>负责人补充说明</span><strong>{{ detail.owner_name || '未填写' }}</strong></div><div><span>环境</span><strong>{{ environmentLabel(detail.environment) }}</strong></div><div><span>网络暴露范围</span><strong>{{ scopeLabel(detail.network_scope) }}</strong></div><div><span>网络区域</span><strong>{{ detail.network_area_name || '未指定' }}</strong></div><div><span>重要程度</span><strong>{{ importanceLabel(detail.importance) }}</strong></div><div><span>登记来源</span><strong>{{ sourceLabel(detail.source) }}</strong></div><div><span>有效期至</span><strong><el-tag :type="expiryTag(detail.expires_at)" effect="plain">{{ expiryLabel(detail.expires_at) }}</el-tag></strong></div><div><span>最近更新</span><strong>{{ formatDate(detail.updated_at) }}</strong></div></div>
+          <AssetExternalObservations v-if="detail && !detail.is_draft && !detail.is_working_copy && ['domain', 'url'].includes(detail.type)" :asset-id="detail.id" :asset-type="detail.type" :can-refresh="auth.hasPermission('asset.manage')" />
           <template v-if="detailCustomFields.length">
             <div class="form-section-title">集团自定义字段</div>
             <div class="detail-grid"><div v-for="field in detailCustomFields" :key="field.id"><span>{{ field.field_name }}</span><strong>{{ customValueLabel(detailCustomValues[field.field_key]) }}</strong></div></div>

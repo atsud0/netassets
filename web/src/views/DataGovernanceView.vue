@@ -45,6 +45,12 @@ interface ScanSummary {
   warning_count: number
   returned_count: number
   truncated: boolean
+  external_observation_candidates: number
+  external_observation_processed: number
+  external_observation_successes: number
+  external_observation_failures: number
+  external_observation_unsupported: number
+  external_observation_deferred: number
 }
 interface ScanResult { summary: ScanSummary; issues: ScanIssue[] }
 interface ListResponse<T> { items: T[]; total: number; page: number; page_size: number }
@@ -89,7 +95,11 @@ const builtinTargets: Record<string, Array<[string, string]>> = {
 }
 const ruleTargetOptions = computed<Array<[string, string]>>(() => {
   if (ruleForm.rule_type === 'stale') return [['updated_at', '最后更新时间']]
-  if (ruleForm.rule_type === 'expiry') return [['expires_at', '有效期至']]
+  if (ruleForm.rule_type === 'expiry') return [
+    ['expires_at', '资产生命周期到期时间'],
+    ['domain_registration_expires_at', '域名注册到期时间'],
+    ['tls_certificate_expires_at', 'TLS 证书到期时间'],
+  ]
   return [
     ...(builtinTargets[ruleForm.resource_type] ?? []),
     ...qualityCustomFields.value.filter((field) => field.resource_type === ruleForm.resource_type && field.is_enabled).map((field) => [`custom:${field.field_key}`, `自定义字段：${field.field_name}`] as [string, string]),
@@ -158,6 +168,11 @@ const scanSummaryCards = computed(() => {
     { label: '错误问题', value: summary?.error_count ?? 0, tone: 'danger' },
     { label: '警告问题', value: summary?.warning_count ?? 0, tone: 'warning' },
     { label: '问题总数', value: summary?.total_issue_count ?? 0, tone: 'total' },
+    { label: '外部刷新资产', value: summary?.external_observation_processed ?? 0, tone: 'info' },
+    { label: '外部采集成功', value: summary?.external_observation_successes ?? 0, tone: 'info' },
+    { label: '外部采集失败', value: summary?.external_observation_failures ?? 0, tone: 'danger' },
+    { label: '外部不支持', value: summary?.external_observation_unsupported ?? 0, tone: 'warning' },
+    { label: '批次延后', value: summary?.external_observation_deferred ?? 0, tone: 'warning' },
   ]
 })
 
@@ -417,6 +432,12 @@ function qualityTargetLabel(issue: QualityTarget) {
   if (issue.rule_type === 'stale' || issue.target_field === 'updated_at') {
     return issue.stale_after_days ? `最后更新时间（超过 ${issue.stale_after_days} 天未维护）` : '最后更新时间'
   }
+  if (issue.target_field === 'domain_registration_expires_at') {
+    return `域名注册到期时间（提前 ${issue.expiry_warning_days ?? 0} 天提醒）`
+  }
+  if (issue.target_field === 'tls_certificate_expires_at') {
+    return `TLS 证书到期时间（提前 ${issue.expiry_warning_days ?? 0} 天提醒）`
+  }
   if (issue.rule_type === 'expiry' || issue.target_field === 'expires_at') {
     return `有效期至（提前 ${issue.expiry_warning_days ?? 0} 天提醒）`
   }
@@ -489,6 +510,13 @@ onMounted(load)
         <el-alert v-if="!scanResult" title="请选择筛选范围后手动执行检测。检测结果反映执行当时的台账状态，规则或台账变更后请重新检测。" type="info" :closable="false" show-icon />
         <template v-else>
           <div class="quality-summary-grid"><div v-for="card in scanSummaryCards" :key="card.label" class="quality-summary-card" :class="`tone-${card.tone}`"><span>{{ card.label }}</span><strong>{{ card.value }}</strong></div></div>
+          <el-alert
+            v-if="scanResult.summary.external_observation_processed || scanResult.summary.external_observation_failures || scanResult.summary.external_observation_unsupported || scanResult.summary.external_observation_deferred"
+            :title="`本次外部采集：处理 ${scanResult.summary.external_observation_processed} 项，成功 ${scanResult.summary.external_observation_successes} 项，失败 ${scanResult.summary.external_observation_failures} 项，不支持 ${scanResult.summary.external_observation_unsupported} 项，延后 ${scanResult.summary.external_observation_deferred} 项。`"
+            :type="scanResult.summary.external_observation_failures ? 'warning' : 'info'"
+            :closable="false"
+            show-icon
+          />
           <el-alert v-if="scanResult.summary.truncated" :title="`共发现 ${scanResult.summary.total_issue_count} 项问题，当前仅展示前 ${scanResult.summary.returned_count} 项，请缩小组织、对象或严重程度筛选范围。`" type="warning" :closable="false" show-icon />
           <div class="quality-issue-heading"><div><h3>问题清单</h3><span>已返回 {{ scanResult.summary.returned_count }} 项</span></div><span v-if="scanResult.summary.total_issue_count === 0" class="quality-passed">当前筛选范围检查通过</span></div>
           <el-table :data="scanResult.issues" stripe max-height="440" empty-text="当前筛选范围未发现数据质量问题">
@@ -540,7 +568,7 @@ onMounted(load)
         <el-form-item label="规则名称" prop="rule_name"><el-input v-model="ruleForm.rule_name" placeholder="如：资产责任人必填" /></el-form-item>
         <el-form-item label="检查对象"><el-select v-model="ruleForm.resource_type" :disabled="ruleForm.rule_type === 'expiry'" style="width:100%"><el-option label="网络资产" value="asset" /><el-option label="业务系统" value="business_system" /></el-select></el-form-item>
         <el-form-item label="规则类型"><el-select v-model="ruleForm.rule_type" style="width:100%"><el-option label="字段必填" value="required" /><el-option label="长期未更新" value="stale" /><el-option label="资产到期" value="expiry" /></el-select></el-form-item>
-        <el-form-item label="目标字段" prop="target_field"><el-select v-model="ruleForm.target_field" :disabled="ruleForm.rule_type === 'stale' || ruleForm.rule_type === 'expiry'" filterable style="width:100%"><el-option v-for="item in ruleTargetOptions" :key="item[0]" :label="item[1]" :value="item[0]" /></el-select></el-form-item>
+        <el-form-item label="目标字段" prop="target_field"><el-select v-model="ruleForm.target_field" :disabled="ruleForm.rule_type === 'stale'" filterable style="width:100%"><el-option v-for="item in ruleTargetOptions" :key="item[0]" :label="item[1]" :value="item[0]" /></el-select></el-form-item>
         <el-form-item v-if="ruleForm.rule_type === 'stale'" label="未维护天数" prop="stale_after_days"><el-input-number v-model="ruleForm.stale_after_days" :min="1" :max="3650" :step="30" /><span class="form-help-inline">超过该天数未更新即产生问题</span></el-form-item>
         <el-form-item v-if="ruleForm.rule_type === 'expiry'" label="提前提醒天数" prop="expiry_warning_days"><el-input-number v-model="ruleForm.expiry_warning_days" :min="0" :max="3650" :step="1" /><span class="form-help-inline">到期前 N 天及已过期资产都会产生问题；0 表示仅在到期时提醒</span></el-form-item>
         <el-form-item label="生效条件">
