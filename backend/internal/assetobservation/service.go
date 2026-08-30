@@ -412,7 +412,8 @@ func (s *Service) RefreshDue(ctx context.Context, options BulkRefreshOptions) (B
 	}
 
 	rows, err := s.pool.Query(ctx, `
-		SELECT a.id::text,a.asset_type,a.asset_value,a.normalized_value,a.network_scope,ao.organization_id::text
+		SELECT a.id::text,a.asset_type,a.asset_value,a.normalized_value,a.network_scope,ao.organization_id::text,
+		       count(*) OVER() AS candidate_count
 		FROM assets a
 		JOIN asset_organizations ao ON ao.asset_id=a.id AND ao.is_primary
 		WHERE a.deleted_at IS NULL AND a.status<>'archived' AND a.asset_type IN ('domain','url')
@@ -431,9 +432,10 @@ func (s *Service) RefreshDue(ctx context.Context, options BulkRefreshOptions) (B
 		return BulkRefreshResult{}, fmt.Errorf("list due asset observations: %w", err)
 	}
 	targets := make([]assetTarget, 0, options.Limit)
+	candidateCount := 0
 	for rows.Next() {
 		var target assetTarget
-		if err := rows.Scan(&target.ID, &target.AssetType, &target.Value, &target.NormalizedValue, &target.NetworkScope, &target.OrganizationID); err != nil {
+		if err := rows.Scan(&target.ID, &target.AssetType, &target.Value, &target.NormalizedValue, &target.NetworkScope, &target.OrganizationID, &candidateCount); err != nil {
 			rows.Close()
 			return BulkRefreshResult{}, fmt.Errorf("scan due asset observation: %w", err)
 		}
@@ -445,7 +447,7 @@ func (s *Service) RefreshDue(ctx context.Context, options BulkRefreshOptions) (B
 	}
 	rows.Close()
 
-	result := BulkRefreshResult{CandidateCount: len(targets)}
+	result := BulkRefreshResult{CandidateCount: candidateCount}
 	jobs := make(chan assetTarget)
 	var mu sync.Mutex
 	var firstDatabaseErr error
