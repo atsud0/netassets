@@ -851,3 +851,24 @@ test('集团工作台卡片操作对齐、零值图表语义正确并适配常�
     expect(layout.securitySecondRowOffset).toBeGreaterThan(0)
   }
 })
+
+test('质量巡检历史从质量整改拆分为独立子页面', async ({ page }) => {
+  test.skip(!adminPassword, 'E2E_PASSWORD/BOOTSTRAP_ADMIN_PASSWORD 未配置')
+
+  await page.goto('/data-quality-issues')
+  await login(page, adminUsername, adminPassword!)
+  await expect(page.getByRole('heading', { name: '质量整改', exact: true })).toBeVisible()
+  await expect(page.getByText('最近巡检批次', { exact: true })).toHaveCount(0)
+
+  const navigation = page.getByRole('navigation', { name: '主导航' })
+  const historyEntry = navigation.getByRole('button', { name: '巡检历史', exact: true })
+  await expect(historyEntry).toBeVisible()
+  await expect(historyEntry).toHaveClass(/nav-nested-item/)
+  await historyEntry.click()
+
+  await expect(page).toHaveURL(/\/data-quality-scan-history$/)
+  await expect(page.getByRole('heading', { name: '巡检历史', exact: true })).toBeVisible()
+  await expect(page.getByText('质量巡检批次', { exact: true })).toBeVisible()
+  await expect(page.getByRole('button', { name: '返回质量整改', exact: true })).toBeVisible()
+  await expect(page.getByRole('button', { name: '执行质量巡检', exact: true })).toBeVisible()
+})

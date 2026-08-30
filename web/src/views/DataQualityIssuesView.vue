@@ -23,16 +23,9 @@ interface IssueEvent { id: number; event_type: string; from_status?: string; to_
 interface ListResponse<T> { items: T[]; total: number; page: number; page_size: number }
 interface BatchOperationItem { id: string; success: boolean; code?: string; message: string; item?: QualityIssue; resource_name?: string }
 interface BatchOperationResult { total_count: number; success_count: number; failure_count: number; items: BatchOperationItem[] }
-interface ScanBatch {
-  id: string; organization_name?: string; resource_type?: string; severity?: string; asset_count: number; system_count: number
-  enabled_rule_count: number; total_issue_count: number; error_count: number; warning_count: number; auto_closed_count: number
-  trigger_type: 'manual' | 'scheduled'; scheduled_for?: string; created_by_name?: string; created_at: string
-}
-
 const auth = useAuthStore()
 const router = useRouter()
 const loading = ref(false)
-const batchLoading = ref(false)
 const acting = ref(false)
 const items = ref<QualityIssue[]>([])
 const issueTableRef = ref<TableInstance>()
@@ -44,10 +37,6 @@ const organizations = ref<Organization[]>([])
 const filterUsers = ref<UserItem[]>([])
 const issueAssignees = ref<UserItem[]>([])
 const assigneeLoading = ref(false)
-const batches = ref<ScanBatch[]>([])
-const batchPage = ref(1)
-const batchPageSize = ref(20)
-const batchTotal = ref(0)
 const detailVisible = ref(false)
 const detailLoading = ref(false)
 const selected = ref<QualityIssue | null>(null)
@@ -115,9 +104,6 @@ async function loadReferenceData() {
   if (auth.hasPermission('user.manage')) {
     requests.push(apiClient.get<ListResponse<UserItem>>('/users', { params: { page: 1, page_size: 100 } }).then((response) => { filterUsers.value = response.data.items }))
   }
-  if (isGroupAdmin.value) {
-    requests.push(loadBatches())
-  }
   const results = await Promise.allSettled(requests)
   if (results.every((item) => item.status === 'rejected')) ElMessage.warning('部分筛选数据读取失败，但不影响查看质量问题')
 }
@@ -139,22 +125,6 @@ async function loadIssues() {
     ElMessage.error(getAPIErrorMessage(error, '读取数据质量问题失败'))
   } finally {
     loading.value = false
-  }
-}
-
-async function loadBatches() {
-  if (!isGroupAdmin.value) return
-  batchLoading.value = true
-  try {
-    const response = await apiClient.get<ListResponse<ScanBatch>>('/data-quality-scan-batches', {
-      params: { page: batchPage.value, page_size: batchPageSize.value },
-    })
-    batches.value = response.data.items
-    batchTotal.value = response.data.total
-  } catch (error) {
-    ElMessage.error(getAPIErrorMessage(error, '读取质量巡检批次失败'))
-  } finally {
-    batchLoading.value = false
   }
 }
 
@@ -391,17 +361,6 @@ function handleIssuePageSizeChange(value: number) {
   void loadIssues()
 }
 
-function handleBatchPageChange(value: number) {
-  batchPage.value = value
-  void loadBatches()
-}
-
-function handleBatchPageSizeChange(value: number) {
-  batchPageSize.value = value
-  batchPage.value = 1
-  void loadBatches()
-}
-
 onMounted(async () => {
   const defaultFilters = await savedFilterViews.value?.initialize()
   if (defaultFilters) {
@@ -471,23 +430,6 @@ onMounted(async () => {
       </div>
     </div>
 
-      <div v-if="isGroupAdmin" class="panel quality-workflow-table-panel quality-scan-batch-panel" v-loading="batchLoading">
-      <div class="table-panel-heading"><div><strong>最近巡检批次</strong><span>完整保存每次巡检范围、问题数量和自动关闭结果</span></div><el-button link type="primary" @click="loadBatches">刷新</el-button></div>
-      <el-table :data="batches" stripe max-height="360" empty-text="尚未执行持久化质量巡检">
-        <el-table-column label="执行时间" width="170"><template #default="scope">{{ formatTime(scope.row.created_at) }}</template></el-table-column>
-        <el-table-column label="触发方式" width="120"><template #default="scope"><el-tag :type="scope.row.trigger_type === 'scheduled' ? 'success' : 'info'">{{ scope.row.trigger_type === 'scheduled' ? '系统自动' : '人工执行' }}</el-tag></template></el-table-column>
-        <el-table-column label="范围" min-width="180"><template #default="scope">{{ scope.row.organization_name || '全集团' }}<div class="muted-text">{{ resourceTypeLabel(scope.row.resource_type) }} · {{ severityLabel(scope.row.severity) }}</div></template></el-table-column>
-        <el-table-column prop="enabled_rule_count" label="规则" width="80" />
-        <el-table-column label="扫描资源" width="110"><template #default="scope">{{ scope.row.asset_count + scope.row.system_count }}</template></el-table-column>
-        <el-table-column prop="error_count" label="错误" width="80" />
-        <el-table-column prop="warning_count" label="警告" width="80" />
-        <el-table-column prop="auto_closed_count" label="自动关闭" width="100" />
-        <el-table-column label="执行人" min-width="120"><template #default="scope">{{ scope.row.trigger_type === 'scheduled' ? '系统调度器' : (scope.row.created_by_name || '未知') }}</template></el-table-column>
-      </el-table>
-      <div class="table-pagination">
-        <el-pagination background layout="total, sizes, prev, pager, next" :total="batchTotal" :current-page="batchPage" :page-size="batchPageSize" :page-sizes="[20, 50, 100]" @current-change="handleBatchPageChange" @size-change="handleBatchPageSizeChange" />
-      </div>
-    </div>
     </div>
 
     <el-drawer v-model="detailVisible" title="质量问题详情" size="620px">

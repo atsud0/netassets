@@ -10,6 +10,7 @@ const AssetsView = () => import('../views/AssetsView.vue')
 const AssetCandidatesView = () => import('../views/AssetCandidatesView.vue')
 const DataGovernanceView = () => import('../views/DataGovernanceView.vue')
 const DataQualityIssuesView = () => import('../views/DataQualityIssuesView.vue')
+const DataQualityScanHistoryView = () => import('../views/DataQualityScanHistoryView.vue')
 const InventoryTasksView = () => import('../views/InventoryTasksView.vue')
 const ExportJobsView = () => import('../views/ExportJobsView.vue')
 const AuditLogsView = () => import('../views/AuditLogsView.vue')
@@ -40,6 +41,7 @@ const router = createRouter({
         { path: 'asset-candidates', name: 'asset-candidates', component: AssetCandidatesView, meta: { groupAdminOnly: true } },
         { path: 'data-governance', name: 'data-governance', component: DataGovernanceView, meta: { groupAdminOnly: true } },
         { path: 'data-quality-issues', name: 'data-quality-issues', component: DataQualityIssuesView, meta: { permission: 'data_quality.manage' } },
+        { path: 'data-quality-scan-history', name: 'data-quality-scan-history', component: DataQualityScanHistoryView, meta: { permission: 'data_quality.manage', groupAdminOnly: true } },
         { path: 'inventory-tasks', name: 'inventory-tasks', component: InventoryTasksView, meta: { permission: 'inventory.manage' } },
         { path: 'export-jobs', name: 'export-jobs', component: ExportJobsView },
         { path: 'security-test-batches', name: 'security-test-batches', component: SecurityTestBatchesView, meta: { permission: 'security_test.manage', groupSecurityOnly: true } },

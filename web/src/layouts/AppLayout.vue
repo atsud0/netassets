@@ -20,7 +20,7 @@ const activeOrganizationID = computed({ get: () => auth.user?.organization?.id ?
 const availableOrganizations = computed(() => auth.user?.organizations ?? [])
 const switchingOrganization = ref(false)
 const perspective = computed(() => auth.isGroupAdmin ? '集团管理视角' : auth.isSecurityOperator ? '集团安全运营视角' : '所属组织视角')
-type NavigationItem = { path: string; label: string }
+type NavigationItem = { path: string; label: string; nested?: boolean }
 type NavigationGroup = { key: string; label: string; shortLabel: string; items: NavigationItem[] }
 
 const primaryItems = computed<NavigationItem[]>(() => [
@@ -34,6 +34,7 @@ const navigationGroups = computed<NavigationGroup[]>(() => {
     ...(auth.hasPermission('inventory.manage') ? [{ path: '/inventory-tasks', label: '填报任务' }] : []),
     ...(auth.isGroupAdmin ? [{ path: '/data-governance', label: '数据治理' }] : []),
     ...(auth.hasPermission('data_quality.manage') ? [{ path: '/data-quality-issues', label: '质量整改' }] : []),
+    ...(auth.isGroupAdmin && auth.hasPermission('data_quality.manage') ? [{ path: '/data-quality-scan-history', label: '巡检历史', nested: true }] : []),
     ...(auth.hasPermission('asset.manage') || auth.hasPermission('system.manage') || auth.hasPermission('inventory.manage') ? [{ path: '/export-jobs', label: '导出任务' }] : []),
   ]
   const securityOperations: NavigationItem[] = [
@@ -164,7 +165,7 @@ async function logout() {
               :key="item.path"
               type="button"
               class="nav-item nav-child-item"
-              :class="{ active: activePath === item.path }"
+              :class="{ active: activePath === item.path, 'nav-nested-item': item.nested }"
               @click="navigate(item.path)"
             >
               <span class="nav-dot" />
