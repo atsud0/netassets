@@ -204,7 +204,7 @@ onMounted(async () => {
         <el-table-column label="资源" min-width="180"><template #default="scope"><div class="audit-action-cell"><strong>{{ scope.row.resource_type_label || '—' }}</strong><span class="audit-resource-id">{{ scope.row.resource_id || '—' }}</span></div></template></el-table-column>
         <el-table-column prop="summary" label="摘要" min-width="190"><template #default="scope">{{ scope.row.summary || '—' }}</template></el-table-column>
         <el-table-column label="结果" width="86"><template #default="scope"><el-tag :type="scope.row.result === 'success' ? 'success' : 'danger'" effect="plain">{{ scope.row.result_label }}</el-tag></template></el-table-column>
-        <el-table-column label="详情" width="82" fixed="right"><template #default="scope"><el-button link type="primary" @click="showDetail(scope.row)">查看</el-button></template></el-table-column>
+        <el-table-column label="详情" width="82" fixed="right" align="right" header-align="right" class-name="table-action-column"><template #default="scope"><el-button link type="primary" @click="showDetail(scope.row)">查看</el-button></template></el-table-column>
       </el-table>
       <div class="audit-pagination">
         <el-pagination

@@ -700,7 +700,7 @@ function formatTime(value?: string) {
         <el-table-column label="测试范围" width="145"><template #default="{ row }">{{ row.asset_count }} 项 / {{ row.organization_count }} 家组织</template></el-table-column>
         <el-table-column prop="provider" label="测试单位" min-width="150" />
         <el-table-column label="计划窗口" min-width="230"><template #default="{ row }">{{ formatTime(row.start_at) }}<br>{{ formatTime(row.end_at) }}</template></el-table-column>
-        <el-table-column label="操作" width="260" fixed="right">
+        <el-table-column label="操作" width="190" fixed="right" align="right" header-align="right" class-name="table-action-column">
           <template #default="{ row }">
             <el-button link type="primary" @click="openDetail(row)">详情</el-button>
             <el-button v-if="row.status === 'draft'" link type="primary" @click="openEdit(row)">编辑</el-button>
@@ -749,7 +749,7 @@ function formatTime(value?: string) {
               <el-table-column label="资产" min-width="260"><template #default="{ row }"><strong>[{{ assetTypeLabels[row.type] ?? row.type }}] {{ row.value }}</strong><div class="scope-row-secondary">{{ row.name || '-' }}</div></template></el-table-column>
               <el-table-column prop="organization_name" label="责任组织" min-width="150" />
               <el-table-column label="业务系统 / 网络区域" min-width="180"><template #default="{ row }">{{ row.business_system_name || '-' }}<div class="scope-row-secondary">{{ row.network_area_name || '-' }}</div></template></el-table-column>
-              <el-table-column label="操作" width="72" fixed="right"><template #default="{ row }"><el-button link type="danger" @click="removeAsset(row.id)">移除</el-button></template></el-table-column>
+              <el-table-column label="操作" width="72" fixed="right" align="right" header-align="right" class-name="table-action-column"><template #default="{ row }"><el-button link type="danger" @click="removeAsset(row.id)">移除</el-button></template></el-table-column>
             </el-table>
             <el-empty v-else description="尚未选择测试资产，可逐项添加或按组织、业务系统、网络区域批量纳入" :image-size="54" class="scope-empty" />
             <div class="scope-summary">已选 <strong>{{ form.asset_ids.length }}</strong> / 200 项资产，覆盖 <strong>{{ selectedOrganizationCount }}</strong> 家组织。批量纳入会自动去重，授权后将固化为历史快照。</div>
@@ -771,7 +771,7 @@ function formatTime(value?: string) {
         <el-table-column label="公网资产" min-width="280"><template #default="{ row }"><strong>[{{ assetTypeLabels[row.type] ?? row.type }}] {{ row.value }}</strong><div class="scope-row-secondary">{{ row.name || '-' }}</div></template></el-table-column>
         <el-table-column prop="organization_name" label="责任组织" min-width="150" />
         <el-table-column label="业务系统 / 网络区域" min-width="170"><template #default="{ row }">{{ row.business_system_name || '-' }}<div class="scope-row-secondary">{{ row.network_area_name || '-' }}</div></template></el-table-column>
-        <el-table-column label="操作" width="84" fixed="right"><template #default="{ row }"><el-button v-if="!isAssetSelected(row.id)" link type="primary" @click="addAsset(row)">加入</el-button><el-button v-else link type="danger" @click="removeAsset(row.id)">移除</el-button></template></el-table-column>
+        <el-table-column label="操作" width="84" fixed="right" align="right" header-align="right" class-name="table-action-column"><template #default="{ row }"><el-button v-if="!isAssetSelected(row.id)" link type="primary" @click="addAsset(row)">加入</el-button><el-button v-else link type="danger" @click="removeAsset(row.id)">移除</el-button></template></el-table-column>
       </el-table>
       <el-table v-else v-loading="scopePickerLoading" :data="scopePickerReferences" border height="390" data-testid="security-test-bulk-scope-picker">
         <el-table-column label="选择" width="70" align="center"><template #default="{ row }"><el-checkbox :model-value="scopePickerSelectedIDs.includes(row.id)" @change="toggleScopeReference(row.id, $event)" /></template></el-table-column>
@@ -837,7 +837,7 @@ function formatTime(value?: string) {
             <el-table-column label="大小" width="100"><template #default="{ row }">{{ formatBytes(row.size_bytes) }}</template></el-table-column>
             <el-table-column prop="description" label="说明" min-width="180" />
             <el-table-column label="上传信息" min-width="180"><template #default="{ row }">{{ row.uploaded_by_name || '-' }}<br>{{ formatTime(row.created_at) }}</template></el-table-column>
-            <el-table-column label="操作" width="80"><template #default="{ row }"><el-button link type="danger" :loading="attachmentLoading" @click="deleteAttachment(row)">删除</el-button></template></el-table-column>
+            <el-table-column label="操作" width="80" align="right" header-align="right" class-name="table-action-column"><template #default="{ row }"><el-button link type="danger" :loading="attachmentLoading" @click="deleteAttachment(row)">删除</el-button></template></el-table-column>
           </el-table>
           <div v-if="attachmentTotal > 0" class="table-pagination detail-pagination">
             <el-pagination background small layout="total, sizes, prev, pager, next" :total="attachmentTotal" :current-page="attachmentPage" :page-size="attachmentPageSize" :page-sizes="[20, 50, 100]" @current-change="handleAttachmentPageChange" @size-change="handleAttachmentPageSizeChange" />

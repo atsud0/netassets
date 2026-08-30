@@ -164,7 +164,7 @@ onMounted(() => { void loadBackups() })
         <el-table-column label="状态" width="110">
           <template #default="{ row }"><el-tag :type="row.verified ? 'success' : 'info'">{{ row.verified ? '已校验' : '未校验' }}</el-tag></template>
         </el-table-column>
-        <el-table-column label="操作" min-width="330" fixed="right">
+        <el-table-column label="操作" width="190" fixed="right" align="right" header-align="right" class-name="table-action-column">
           <template #default="{ row }">
             <el-button link type="primary" :loading="verifyingID === row.id" @click="verify(row)">校验</el-button>
             <el-dropdown trigger="click">

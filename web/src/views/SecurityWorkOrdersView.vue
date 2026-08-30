@@ -997,7 +997,7 @@ async function onTabChange() {
         <el-table-column label="整改期限" min-width="165">
           <template #default="scope"><span :class="{ 'overdue-text': scope.row.overdue }">{{ formatDate(scope.row.due_at) }}</span><el-tag v-if="scope.row.overdue" type="danger" size="small" class="inline-tag">逾期</el-tag></template>
         </el-table-column>
-        <el-table-column label="操作" fixed="right" min-width="260">
+        <el-table-column label="操作" fixed="right" width="220" align="right" header-align="right" class-name="table-action-column">
           <template #default="scope">
             <el-button link type="primary" @click="openDetail(scope.row)">详情</el-button>
             <template v-if="auth.canManageSecurityWorkOrders">
@@ -1025,7 +1025,7 @@ async function onTabChange() {
         <el-table-column label="等级" width="85"><template #default="scope"><el-tag :type="severityTag(scope.row.severity)" effect="dark">{{ severityLabels[scope.row.severity] }}</el-tag></template></el-table-column>
         <el-table-column label="状态" width="135"><template #default="scope"><el-tag :type="findingStatusTag(scope.row.status)" effect="plain">{{ findingStatusLabels[scope.row.status] }}</el-tag><span v-if="scope.row.status === 'accepted_risk'" class="table-secondary risk-state" :class="{ expired: scope.row.risk_acceptance_expired }">{{ riskAcceptanceLabel(scope.row) }}</span></template></el-table-column>
         <el-table-column label="发现时间" min-width="165"><template #default="scope">{{ formatDate(scope.row.discovered_at) }}</template></el-table-column>
-        <el-table-column label="操作" fixed="right" :width="auth.canManageSecurityFindings || auth.canManageSecurityWorkOrders ? 285 : 80">
+        <el-table-column label="操作" fixed="right" :width="auth.canManageSecurityFindings || auth.canManageSecurityWorkOrders ? 240 : 80" align="right" header-align="right" class-name="table-action-column">
           <template #default="scope">
             <el-button link type="primary" @click="openFindingDetail(scope.row)">详情</el-button>
             <template v-if="auth.canManageSecurityFindings || auth.canManageSecurityWorkOrders">
@@ -1055,7 +1055,7 @@ async function onTabChange() {
         </el-table-column>
         <el-table-column label="状态" width="105"><template #default="scope"><el-tag :type="candidateStatusTag(scope.row.status)" effect="plain">{{ candidateStatusLabels[scope.row.status] || scope.row.status }}</el-tag></template></el-table-column>
         <el-table-column label="处理结果" min-width="180"><template #default="scope"><span v-if="scope.row.imported_finding_code" class="mono-text">{{ scope.row.imported_finding_code }}</span><span v-else-if="scope.row.review_note">{{ scope.row.review_note }}</span><span v-else>—</span></template></el-table-column>
-        <el-table-column label="操作" fixed="right" width="150">
+        <el-table-column label="操作" fixed="right" width="150" align="right" header-align="right" class-name="table-action-column">
           <template #default="scope">
             <template v-if="scope.row.status === 'pending'"><el-button link type="primary" @click="openFindingImportCandidate(scope.row)">关联资产</el-button><el-button link type="danger" @click="ignoreFindingImportCandidate(scope.row)">忽略</el-button></template>
             <span v-else class="table-secondary">{{ scope.row.reviewed_by_name || '已处理' }}</span>
@@ -1247,7 +1247,7 @@ async function onTabChange() {
             <el-table-column label="大小" width="90"><template #default="scope">{{ formatFileSize(scope.row.size_bytes) }}</template></el-table-column>
             <el-table-column label="上传人" width="130"><template #default="scope">{{ scope.row.uploader_organization_name || '—' }}<br><small>{{ scope.row.uploaded_by_name || '—' }}</small></template></el-table-column>
             <el-table-column label="时间" width="155"><template #default="scope">{{ formatDate(scope.row.created_at) }}</template></el-table-column>
-            <el-table-column label="操作" width="70"><template #default="scope"><el-button v-if="canDeleteAttachment(scope.row)" link type="danger" @click="deleteAttachment(scope.row)">删除</el-button></template></el-table-column>
+            <el-table-column label="操作" width="70" align="right" header-align="right" class-name="table-action-column"><template #default="scope"><el-button v-if="canDeleteAttachment(scope.row)" link type="danger" @click="deleteAttachment(scope.row)">删除</el-button></template></el-table-column>
           </el-table>
           <div v-if="orderAttachmentTotal > 0" class="table-pagination detail-pagination">
             <el-pagination background small layout="total, sizes, prev, pager, next" :total="orderAttachmentTotal" :current-page="orderAttachmentPage" :page-size="orderAttachmentPageSize" :page-sizes="[20, 50, 100]" @current-change="handleOrderAttachmentPageChange" @size-change="handleOrderAttachmentPageSizeChange" />

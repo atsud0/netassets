@@ -138,7 +138,7 @@ onBeforeUnmount(() => { if (timer !== undefined) window.clearInterval(timer) })
         <el-table-column label="文件" min-width="125"><template #default="scope">{{ formatSize(scope.row.file_size) }}</template></el-table-column>
         <el-table-column label="创建 / 完成时间" min-width="220"><template #default="scope"><div class="job-name"><strong>{{ formatTime(scope.row.created_at) }}</strong><span>{{ scope.row.completed_at ? `完成：${formatTime(scope.row.completed_at)}` : '尚未完成' }}</span></div></template></el-table-column>
         <el-table-column label="有效期 / 失败原因" min-width="230"><template #default="scope"><span v-if="scope.row.error_message" class="error-copy">{{ scope.row.error_message }}</span><span v-else>{{ scope.row.expires_at ? `保留至 ${formatTime(scope.row.expires_at)}` : '—' }}</span></template></el-table-column>
-        <el-table-column label="操作" width="135" fixed="right">
+        <el-table-column label="操作" width="120" fixed="right" align="right" header-align="right" class-name="table-action-column">
           <template #default="scope"><el-button link type="primary" :disabled="scope.row.status !== 'completed'" :loading="downloadingID === scope.row.id" @click="download(scope.row)">下载</el-button><el-button link type="danger" :disabled="scope.row.status === 'running'" :loading="deletingID === scope.row.id" @click="remove(scope.row)">删除</el-button></template>
         </el-table-column>
       </el-table>

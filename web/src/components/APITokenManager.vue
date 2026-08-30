@@ -163,7 +163,7 @@ defineExpose({ loadTokens, createForm, createToken, createdToken, secretDialogVi
       <el-table-column label="状态" width="90"><template #default="{ row }"><el-tag :type="tokenStatus(row).type" size="small">{{ tokenStatus(row).label }}</el-tag></template></el-table-column>
       <el-table-column label="最后使用" min-width="170"><template #default="{ row }">{{ formatDateTime(row.last_used_at) }}</template></el-table-column>
       <el-table-column label="有效期至" min-width="170"><template #default="{ row }">{{ formatDateTime(row.expires_at) }}</template></el-table-column>
-      <el-table-column label="操作" width="100" fixed="right">
+      <el-table-column label="操作" width="84" fixed="right" align="right" header-align="right" class-name="table-action-column">
         <template #default="{ row }"><el-button v-if="!row.revoked_at" type="danger" link @click="revokeToken(row)">撤销</el-button><span v-else>—</span></template>
       </el-table-column>
     </el-table>

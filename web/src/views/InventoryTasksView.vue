@@ -1049,7 +1049,7 @@ onMounted(async () => {
             </div>
           </template>
         </el-table-column>
-        <el-table-column label="任务操作" width="180" fixed="right">
+        <el-table-column label="任务操作" width="130" fixed="right" align="right" header-align="right" class-name="table-action-column">
           <template #default="scope">
             <template v-if="auth.isGroupAdmin">
               <el-button v-if="scope.row.status === 'draft'" type="primary" link :loading="actionLoading === operationKey(scope.row)" @click="updateTaskStatus(scope.row, 'active')">下发</el-button>
@@ -1123,7 +1123,7 @@ onMounted(async () => {
               <span v-else>{{ itemScope.row.submission_note || '—' }}</span>
             </template>
           </el-table-column>
-          <el-table-column label="操作" width="320" fixed="right">
+          <el-table-column label="操作" width="250" fixed="right" align="right" header-align="right" class-name="table-action-column">
             <template #default="itemScope">
               <el-button v-if="itemScope.row.snapshot_available" type="primary" link @click="openSubmissionDiff(detailTask, itemScope.row)">查看差异</el-button>
               <el-button v-if="itemScope.row.snapshot_available" type="primary" link @click="openReviewComments(detailTask, itemScope.row)">审核意见</el-button>

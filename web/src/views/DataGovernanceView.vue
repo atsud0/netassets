@@ -489,7 +489,7 @@ onMounted(load)
         <el-table-column label="规则" width="130"><template #default="{ row }"><el-tag v-if="row.is_required" type="warning">必填</el-tag><span v-else>选填</span></template></el-table-column>
         <el-table-column label="排序" prop="sort_order" width="90" />
         <el-table-column label="状态" width="100"><template #default="{ row }"><el-tag :type="row.is_enabled ? 'success' : 'info'">{{ row.is_enabled ? '启用' : '停用' }}</el-tag></template></el-table-column>
-        <el-table-column label="操作" width="155" fixed="right"><template #default="{ row }"><el-button link type="primary" @click="openEdit(row)">编辑</el-button><el-button link :type="row.is_enabled ? 'warning' : 'success'" :loading="saving" @click="toggle(row)">{{ row.is_enabled ? '停用' : '启用' }}</el-button></template></el-table-column>
+        <el-table-column label="操作" width="120" fixed="right" align="right" header-align="right" class-name="table-action-column"><template #default="{ row }"><el-button link type="primary" @click="openEdit(row)">编辑</el-button><el-button link :type="row.is_enabled ? 'warning' : 'success'" :loading="saving" @click="toggle(row)">{{ row.is_enabled ? '停用' : '启用' }}</el-button></template></el-table-column>
       </el-table>
       <div class="table-pagination">
         <el-pagination background layout="total, sizes, prev, pager, next" :total="fieldTotal" :current-page="fieldPage" :page-size="fieldPageSize" :page-sizes="[20, 50, 100]" @current-change="handleFieldPageChange" @size-change="handleFieldPageSizeChange" />
@@ -526,7 +526,7 @@ onMounted(load)
             <el-table-column label="资源" min-width="210"><template #default="{ row }"><strong>{{ row.resource_name || '未命名资源' }}</strong><div class="table-subtext">{{ row.resource_id }}</div></template></el-table-column>
             <el-table-column prop="organization_name" label="所属组织" min-width="190" />
             <el-table-column label="检查项" min-width="210"><template #default="{ row }">{{ qualityTargetLabel(row) }}</template></el-table-column>
-            <el-table-column label="操作" width="100" fixed="right"><template #default="{ row }"><router-link :to="resourceRoute(row)"><el-button link type="primary">前往台账</el-button></router-link></template></el-table-column>
+            <el-table-column label="操作" width="100" fixed="right" align="right" header-align="right" class-name="table-action-column"><template #default="{ row }"><router-link :to="resourceRoute(row)"><el-button link type="primary">前往台账</el-button></router-link></template></el-table-column>
           </el-table>
         </template>
       </div>
@@ -542,7 +542,7 @@ onMounted(load)
           <el-table-column label="级别" width="100"><template #default="{ row }"><el-tag :type="row.severity === 'error' ? 'danger' : 'warning'">{{ row.severity === 'error' ? '错误' : '警告' }}</el-tag></template></el-table-column>
           <el-table-column prop="sort_order" label="排序" width="90" />
           <el-table-column label="状态" width="100"><template #default="{ row }"><el-tag :type="row.is_enabled ? 'success' : 'info'">{{ row.is_enabled ? '启用' : '停用' }}</el-tag></template></el-table-column>
-          <el-table-column label="操作" width="155" fixed="right"><template #default="{ row }"><el-button link type="primary" @click="openRuleEdit(row)">编辑</el-button><el-button link :type="row.is_enabled ? 'warning' : 'success'" :loading="saving" @click="toggleRule(row)">{{ row.is_enabled ? '停用' : '启用' }}</el-button></template></el-table-column>
+          <el-table-column label="操作" width="120" fixed="right" align="right" header-align="right" class-name="table-action-column"><template #default="{ row }"><el-button link type="primary" @click="openRuleEdit(row)">编辑</el-button><el-button link :type="row.is_enabled ? 'warning' : 'success'" :loading="saving" @click="toggleRule(row)">{{ row.is_enabled ? '停用' : '启用' }}</el-button></template></el-table-column>
         </el-table>
         <div class="table-pagination">
           <el-pagination background layout="total, sizes, prev, pager, next" :total="ruleTotal" :current-page="rulePage" :page-size="rulePageSize" :page-sizes="[20, 50, 100]" @current-change="handleRulePageChange" @size-change="handleRulePageSizeChange" />

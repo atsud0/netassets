@@ -455,7 +455,7 @@ onMounted(async () => {
         <el-table-column label="状态" width="100"><template #default="scope"><el-tag :type="statusTypes[scope.row.status] as any">{{ statusLabels[scope.row.status] }}</el-tag></template></el-table-column>
         <el-table-column label="负责人" min-width="110"><template #default="scope">{{ scope.row.assignee_display_name || '未指派' }}</template></el-table-column>
         <el-table-column label="最近发现" width="155"><template #default="scope">{{ formatTime(scope.row.last_detected_at) }}</template></el-table-column>
-        <el-table-column label="操作" fixed="right" width="250"><template #default="scope"><div class="row-actions">
+        <el-table-column label="操作" fixed="right" width="210" align="right" header-align="right" class-name="table-action-column"><template #default="scope"><div class="row-actions">
           <el-button v-if="scope.row.status === 'pending'" link type="primary" @click="openAction('start', scope.row)">开始整改</el-button>
           <el-button v-if="scope.row.status === 'in_progress'" link type="primary" @click="openAction('assign', scope.row)">调整负责人</el-button>
           <el-button v-if="['pending','in_progress'].includes(scope.row.status)" link type="success" @click="openAction('submit', scope.row)">提交复核</el-button>
@@ -564,7 +564,7 @@ onMounted(async () => {
 .quality-workflow-filters { display:grid; grid-template-columns:repeat(auto-fit,minmax(min(100%,160px),1fr)); min-width:0; gap:12px; align-items:center; }
 .quality-workflow-filters :deep(.el-select) { min-width:0; width:100%; }
 .quality-saved-views { grid-column:1 / -1; min-width:0; padding-top:4px; border-top:1px dashed var(--line); }
-.quality-workflow-filter-actions { display:flex; flex-wrap:wrap; gap:8px; }.table-pagination { display:flex; justify-content:flex-end; margin-top:18px; }.quality-workflow-table-panel { min-width:0; padding-top:14px; }.row-actions { display:flex; flex-wrap:wrap; gap:2px 8px; }
+.quality-workflow-filter-actions { display:flex; flex-wrap:wrap; gap:8px; }.table-pagination { display:flex; justify-content:flex-end; margin-top:18px; }.quality-workflow-table-panel { min-width:0; padding-top:14px; }.row-actions { display:flex; flex-wrap:wrap; justify-content:flex-end; gap:2px 8px; }
 .quality-issue-panel .table-panel-heading { flex-wrap:wrap; gap:8px 12px; }.quality-issue-table-scroll { width:100%; min-width:0; overflow-x:auto; overscroll-behavior-x:contain; }.quality-issue-table-scroll :deep(.el-table) { min-width:100%; }
 .quality-batch-toolbar { flex-wrap:wrap; margin:14px 0; }.quality-batch-toolbar .button-row { flex-wrap:wrap; margin-left:auto; justify-content:flex-end; }.quality-batch-form { margin-top:18px; }
 .quality-note { margin:14px 0; padding:14px 16px; background:#f8fafc; border-radius:9px; }.quality-note span { color:var(--muted); font-size:12px; }.quality-note p { margin:7px 0; white-space:pre-wrap; line-height:1.65; }.quality-note small { color:var(--muted); }

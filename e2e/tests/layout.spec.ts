@@ -245,6 +245,118 @@ test('网络资产和业务系统的分页区使用统一表格间距', async ({
   expect(await readPaginationStyle()).toEqual({ marginTop: '18px', justifyContent: 'flex-end' })
 })
 
+test('主要列表页操作列右对齐且不再按最大场景过度留白', async ({ page }) => {
+  test.skip(!adminPassword, 'E2E_PASSWORD/BOOTSTRAP_ADMIN_PASSWORD 未配置')
+
+  await page.setViewportSize({ width: 1440, height: 900 })
+  await page.goto('/systems')
+  await login(page, adminUsername, adminPassword!)
+
+  const cases = [
+    { route: '/systems', label: '操作', maxWidth: 212 },
+    { route: '/assets', label: '操作', maxWidth: 212 },
+    { route: '/security-test-batches', label: '操作', maxWidth: 192 },
+    { route: '/security-work-orders', label: '操作', maxWidth: 222 },
+    { route: '/inventory-tasks', label: '任务操作', maxWidth: 132 },
+    { route: '/asset-candidates', label: '操作', maxWidth: 242 },
+    { route: '/data-governance', label: '操作', maxWidth: 122 },
+    { route: '/data-quality-issues', label: '操作', maxWidth: 212 },
+    { route: '/organizations', label: '操作', maxWidth: 212 },
+    { route: '/users', label: '操作', maxWidth: 222 },
+    { route: '/recycle-bin', label: '操作', maxWidth: 86 },
+    { route: '/audit-logs', label: '详情', maxWidth: 84 },
+    { route: '/backups', label: '操作', maxWidth: 192 },
+    { route: '/export-jobs', label: '操作', maxWidth: 122 },
+  ]
+
+  for (const item of cases) {
+    await page.goto(item.route)
+    await expect(page.locator('h1')).toBeVisible()
+    let header = page.locator('.el-table__header-wrapper th').filter({ hasText: new RegExp(String.raw`^\s*${item.label}\s*$`) }).first()
+    if (item.route === '/backups' && await header.count() === 0) {
+      await page.getByRole('button', { name: '创建首个备份', exact: true }).click()
+      await page.getByRole('dialog', { name: '创建系统备份' }).getByRole('button', { name: '开始备份', exact: true }).click()
+      await expect(page.getByText('系统备份已创建并完成校验')).toBeVisible({ timeout: 30_000 })
+      header = page.locator('.el-table__header-wrapper th').filter({ hasText: new RegExp(String.raw`^\s*${item.label}\s*$`) }).first()
+    }
+    await expect(header, `${item.route} 缺少${item.label}列`).toBeVisible()
+    const metrics = await header.evaluate((element) => {
+      const cell = element.querySelector<HTMLElement>('.cell') ?? element as HTMLElement
+      return {
+        width: element.getBoundingClientRect().width,
+        textAlign: getComputedStyle(cell).textAlign,
+      }
+    })
+    expect(metrics.textAlign, `${item.route} ${item.label}列未右对齐`).toBe('right')
+    expect(metrics.width, `${item.route} ${item.label}列仍然过宽`).toBeLessThanOrEqual(item.maxWidth)
+  }
+})
+
+test('业务系统和安全测试的数据行操作紧贴列右侧', async ({ page }) => {
+  test.skip(!adminPassword, 'E2E_PASSWORD/BOOTSTRAP_ADMIN_PASSWORD 未配置')
+
+  await page.setViewportSize({ width: 1440, height: 900 })
+  await page.goto('/dashboard')
+  await login(page, adminUsername, adminPassword!)
+
+  await page.route('**/api/v1/business-systems**', async (route) => {
+    const url = new URL(route.request().url())
+    if (!url.pathname.endsWith('/business-systems')) return route.continue()
+    await route.fulfill({
+      contentType: 'application/json',
+      body: JSON.stringify({
+        items: [{
+          id: 'layout-system', code: 'SYS-LAYOUT', name: '操作列布局验证系统', organization_id: 'layout-org', organization_name: '端到端测试集团',
+          owner_name: '测试负责人', status: 'active', level: 'important', internet_exposure: 'yes', contains_personal_information: 'no',
+          contains_sensitive_personal_information: 'no', data_volume_over_100k: 'no', contains_important_data: 'no', contains_core_data: 'no',
+          asset_count: 1, reporting_status: 'reported', is_working_copy: false, created_at: '2026-08-30T00:00:00Z', updated_at: '2026-08-30T00:00:00Z',
+        }],
+        total: 1, page: 1, page_size: 20,
+      }),
+    })
+  })
+  await page.goto('/systems')
+  await expect(page.getByText('操作列布局验证系统', { exact: true })).toBeVisible()
+
+  const assertRightGap = async (route: string) => {
+    const cell = page.locator('td.table-action-column:visible').first()
+    await expect(cell, `${route} 缺少操作单元格`).toBeVisible()
+    const gap = await cell.evaluate((element) => {
+      const actions = Array.from(element.querySelectorAll<HTMLElement>('button, .el-dropdown, a, .el-tag'))
+        .filter((item) => {
+          const rect = item.getBoundingClientRect()
+          const style = getComputedStyle(item)
+          return rect.width > 0 && rect.height > 0 && style.display !== 'none' && style.visibility !== 'hidden'
+        })
+      if (actions.length === 0) throw new Error('操作单元格中没有可见操作')
+      const cellRight = element.getBoundingClientRect().right
+      const actionRight = Math.max(...actions.map(item => item.getBoundingClientRect().right))
+      return cellRight - actionRight
+    })
+    expect(gap, `${route} 操作按钮右侧仍有明显空白`).toBeLessThanOrEqual(16)
+  }
+  await assertRightGap('/systems')
+
+  await page.route('**/api/v1/security-test-batches**', async (route) => {
+    const url = new URL(route.request().url())
+    if (!url.pathname.endsWith('/security-test-batches')) return route.continue()
+    await route.fulfill({
+      contentType: 'application/json',
+      body: JSON.stringify({
+        items: [{
+          id: 'layout-batch', code: 'ST-LAYOUT', name: '操作列布局验证批次', test_type: 'penetration', status: 'draft', provider: '集团安全团队',
+          authorization_note: '仅用于布局回归', start_at: '2026-09-01T01:00:00Z', end_at: '2026-09-02T01:00:00Z', asset_count: 1,
+          organization_count: 1, created_at: '2026-08-30T00:00:00Z', updated_at: '2026-08-30T00:00:00Z',
+        }],
+        total: 1, page: 1, page_size: 20,
+      }),
+    })
+  })
+  await page.goto('/security-test-batches')
+  await expect(page.getByText('操作列布局验证批次', { exact: true })).toBeVisible()
+  await assertRightGap('/security-test-batches')
+})
+
 test('管理页面在常用窄内容宽度下不出现整体横向溢出，安全工单换行操作保持右对齐', async ({ page }) => {
   test.skip(!adminPassword, 'E2E_PASSWORD/BOOTSTRAP_ADMIN_PASSWORD 未配置')
 

@@ -169,7 +169,7 @@ onMounted(load)
         <el-table-column label="删除时间" min-width="178">
           <template #default="scope">{{ formatTime(scope.row.deleted_at) }}</template>
         </el-table-column>
-        <el-table-column label="操作" width="118" fixed="right">
+        <el-table-column label="操作" width="84" fixed="right" align="right" header-align="right" class-name="table-action-column">
           <template #default="scope">
             <el-button type="primary" link :loading="restoringID === scope.row.id" @click="restore(scope.row)">恢复</el-button>
           </template>

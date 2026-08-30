@@ -223,7 +223,7 @@ onMounted(loadOrganizations)
         <el-table-column label="负责人 / 联系方式" min-width="190"><template #default="scope"><div class="organization-contact-cell"><span>{{ scope.row.manager || '未填写负责人' }}</span><small>{{ scope.row.contact || '未填写联系方式' }}</small></div></template></el-table-column>
         <el-table-column label="系统 / 资产" width="130" align="center"><template #default="scope">{{ scope.row.business_system_count }} / {{ scope.row.asset_count }}</template></el-table-column>
         <el-table-column label="状态" width="96"><template #default="scope"><el-tag :type="scope.row.status === 'enabled' ? 'success' : 'info'" effect="plain">{{ scope.row.status === 'enabled' ? '启用' : '停用' }}</el-tag></template></el-table-column>
-        <el-table-column v-if="canManageOrganizations || auth.isGroupAdmin" label="操作" :width="auth.isGroupAdmin ? 245 : 210" fixed="right"><template #default="scope">
+        <el-table-column v-if="canManageOrganizations || auth.isGroupAdmin" label="操作" :width="auth.isGroupAdmin ? 210 : 200" fixed="right" align="right" header-align="right" class-name="table-action-column"><template #default="scope">
           <div class="table-row-actions organization-actions">
             <el-button v-if="scope.row.can_update" link type="primary" @click="openEditDialog(scope.row)">编辑信息</el-button>
             <el-button v-if="!auth.isGroupAdmin && scope.row.can_create_child" link type="primary" @click="openCreateDialog(scope.row)">新增下级组织</el-button>
@@ -287,7 +287,7 @@ onMounted(loadOrganizations)
 .organization-name-cell,.organization-contact-cell { display:flex; flex-direction:column; gap:4px; min-width:0; }
 .organization-name-cell span,.organization-contact-cell small { color:var(--text-muted); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 .organization-code-cell { white-space:nowrap; font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,monospace; }
-.organization-actions { display:flex; align-items:center; gap:12px; min-height:32px; }
+.organization-actions { display:flex; align-items:center; justify-content:flex-end; gap:12px; min-height:32px; }
 .organization-actions > :deep(.el-button),.organization-actions > :deep(.el-dropdown) { display:inline-flex; align-items:center; height:32px; margin-left:0; }
 .organization-actions :deep(.el-dropdown .el-button) { display:inline-flex; align-items:center; height:32px; margin:0; }
 .dialog-form-with-alert { margin-top:18px; }

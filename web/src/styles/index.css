@@ -107,6 +107,10 @@ button, input { font: inherit; }
 .el-table__cell .cell > .el-dropdown { vertical-align: middle; }
 .el-table__cell .cell > .el-button + .el-dropdown,
 .el-table__cell .cell > .el-dropdown + .el-button { margin-left: 12px; }
+/* 固定操作列统一靠右、禁止无意义换行；列宽由各页面按实际最大操作组合给出。 */
+.el-table__cell.table-action-column > .cell { white-space: nowrap; }
+.el-table__cell.table-action-column .row-actions,
+.el-table__cell.table-action-column .table-row-actions { justify-content: flex-end; }
 /* 台账列表统一使用 18px 的表格—分页间距；分页只在卡片内部右对齐。 */
 .data-table-panel > .table-pagination { display: flex; justify-content: flex-end; margin-top: 18px; }
 .inline-note { margin-left: 8px; color: var(--muted); font-size: 12px; }
