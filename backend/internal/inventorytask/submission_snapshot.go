@@ -1036,10 +1036,10 @@ func updateSubmissionReviewStatus(ctx context.Context, tx pgx.Tx, submissionID, 
 	}
 	result, err := tx.Exec(ctx, `
 		UPDATE inventory_submissions
-		SET review_status=$2,
+		SET review_status=$2::varchar,
 		    reviewed_at=now(),
 		    reviewed_by=NULLIF($3, '')::uuid,
-		    return_reason=CASE WHEN $2='returned' THEN NULLIF($4, '') ELSE NULL END
+		    return_reason=CASE WHEN $2::varchar='returned' THEN NULLIF($4, '') ELSE NULL END
 		WHERE id::text=$1
 	`, submissionID, status, reviewerID, strings.TrimSpace(returnReason))
 	if err != nil {
