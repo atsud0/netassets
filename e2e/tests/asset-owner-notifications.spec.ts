@@ -107,8 +107,10 @@ test('网络资产责任人绑定、候选范围和精确通知回归', async ({
     await expectStatus(rolesResponse, 200, '读取角色')
     const roles = (await rolesResponse.json() as { items: RoleItem[] }).items
     const roleByKey = new Map(roles.map((item) => [item.key, item]))
+    const groupAdminRole = roleByKey.get('group_admin')
     const organizationAdminRole = roleByKey.get('organization_admin')
     const organizationEditorRole = roleByKey.get('organization_editor')
+    expect(groupAdminRole, '缺少 group_admin 内置角色').toBeTruthy()
     expect(organizationAdminRole, '缺少 organization_admin 内置角色').toBeTruthy()
     expect(organizationEditorRole, '缺少 organization_editor 内置角色').toBeTruthy()
 
@@ -132,7 +134,7 @@ test('网络资产责任人绑定、候选范围和精确通知回归', async ({
     await expectStatus(createOrganizationResponse, 201, '创建责任人通知测试组织')
     const organization = (await createOrganizationResponse.json() as { item: OrganizationItem }).item
 
-    const createUser = async (username: string, displayName: string, roleID: string) => {
+    const createUser = async (username: string, displayName: string, roleID: string, globalRoleIDs: string[] = []) => {
       const response = await admin.context.request.post('/api/v1/users', {
         data: {
           username,
@@ -141,7 +143,7 @@ test('网络资产责任人绑定、候选范围和精确通知回归', async ({
           email: `${username}@example.invalid`,
           mobile_phone: '',
           office_phone: '',
-          global_role_ids: [],
+          global_role_ids: globalRoleIDs,
           appointments: [{
             organization_id: organization.id,
             is_primary: true,
@@ -152,7 +154,7 @@ test('网络资产责任人绑定、候选范围和精确通知回归', async ({
       await expectStatus(response, 201, `创建用户 ${username}`)
     }
 
-    await createUser(usernames.actor, '责任人通知操作管理员', organizationAdminRole!.id)
+    await createUser(usernames.actor, '责任人通知操作管理员', organizationAdminRole!.id, [groupAdminRole!.id])
     await createUser(usernames.owner, '网络资产责任人', organizationEditorRole!.id)
     await createUser(usernames.peer, '同组织其他填报员', organizationEditorRole!.id)
 

@@ -1,4 +1,4 @@
-import { expect, test, type Page } from '@playwright/test'
+import { expect, test, type Browser, type Page, type TestInfo } from '@playwright/test'
 
 const adminUsername = process.env.E2E_USERNAME ?? 'admin'
 const adminPassword = process.env.E2E_PASSWORD
@@ -16,12 +16,45 @@ async function logout(page: Page) {
   await expect(page).toHaveURL(/\/login(?:\?|$)/)
 }
 
+let cleanupSuffix = ''
+let cleanupCustomFieldID = ''
+
+test.afterAll(async ({ browser }, testInfo: TestInfo) => {
+  if (!adminPassword || !cleanupCustomFieldID) return
+  const context = await browser.newContext({
+    baseURL: String(testInfo.project.use.baseURL ?? 'http://127.0.0.1:8080'),
+  })
+  try {
+    const loginResponse = await context.request.post('/api/v1/auth/login', {
+      data: { username: adminUsername, password: adminPassword! },
+    })
+    expect(loginResponse.ok()).toBeTruthy()
+    const response = await context.request.patch(`/api/v1/custom-fields/${cleanupCustomFieldID}`, {
+      data: {
+        resource_type: 'business_system',
+        field_key: `bs_owner_${cleanupSuffix.slice(-12)}`,
+        field_name: `系统归口部门_${cleanupSuffix}`,
+        description: '验证任务草稿保存、快照和发布时保留集团自定义字段',
+        field_type: 'text',
+        options: [],
+        is_required: false,
+        is_enabled: false,
+        sort_order: 90000,
+      },
+    })
+    expect(response.ok(), `停用测试自定义字段失败：${await response.text()}`).toBeTruthy()
+  } finally {
+    await context.close()
+  }
+})
+
 test('任务中新建业务系统在提交和审核通过前与正式台账隔离，并支持提交后自动发布', async ({ page }) => {
   test.skip(!adminPassword, 'E2E_PASSWORD/BOOTSTRAP_ADMIN_PASSWORD 未配置')
   test.setTimeout(300_000)
   page.setDefaultTimeout(15_000)
 
   const suffix = Date.now().toString()
+  cleanupSuffix = suffix
   const organizationCode = `BS_DRAFT_${suffix}`
   const organizationName = `业务系统草稿子公司_${suffix}`
   const childUsername = `bs_draft_user_${suffix}`
@@ -131,6 +164,7 @@ test('任务中新建业务系统在提交和审核通过前与正式台账隔�
       taskID: taskResponse.item.id as string,
     }
   }, { organizationCode, organizationName, childUsername, temporaryPassword, taskName, fieldKey, suffix })
+  cleanupCustomFieldID = fixture.customFieldID
 
   await logout(page)
   await login(page, childUsername, temporaryPassword)
@@ -175,14 +209,15 @@ test('任务中新建业务系统在提交和审核通过前与正式台账隔�
     if (!createResponse.ok) throw new Error(`create business system draft failed: ${createResponse.status} ${createText}`)
     const draft = JSON.parse(createText).item
 
-    const formalResponse = await fetch(`/api/v1/business-systems?page=1&page_size=20&q=${encodeURIComponent(systemCode)}`)
-    const formal = await formalResponse.json()
+    const workingResponse = await fetch(`/api/v1/business-systems?page=1&page_size=20&q=${encodeURIComponent(systemCode)}`)
+    const working = await workingResponse.json()
     const draftResponse = await fetch(`/api/v1/inventory-tasks/${taskID}/organizations/${organizationID}/business-system-drafts?page=1&page_size=20`)
     const drafts = await draftResponse.json()
-    return { draft, formalTotal: formal.total, drafts }
+    return { draft, workingTotal: working.total, drafts }
   }, { ...fixture, systemCode, systemName, fieldKey, customValue })
 
-  expect(createdDraft.formalTotal).toBe(0)
+  // 子公司账号访问 /business-systems 时看到的是工作库存，其中的草稿会作为工作副本返回。
+  expect(createdDraft.workingTotal).toBe(1)
   expect(createdDraft.drafts.total).toBe(1)
   expect(createdDraft.draft.draft_status).toBe('editing')
   expect(createdDraft.draft.is_draft).toBe(true)

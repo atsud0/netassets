@@ -30,6 +30,17 @@ async function ensureTaskDetailOpen(page: Page, taskName: string) {
   return drawer
 }
 
+function futureDateTime(days: number) {
+  const date = new Date(Date.now() + days * 24 * 60 * 60 * 1000)
+  const pad = (value: number) => String(value).padStart(2, '0')
+  const input = [
+    `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`,
+    `${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`,
+  ].join(' ')
+  const display = `${date.getFullYear()}/${date.getMonth() + 1}/${date.getDate()}`
+  return { input, display }
+}
+
 async function closeTaskDetail(page: Page) {
   const drawer = page.locator('.el-drawer:visible').filter({ hasText: '填报任务详情' }).last()
   if (!await drawer.isVisible().catch(() => false)) return
@@ -68,6 +79,8 @@ test('集团创建子公司账号，子公司隔离登记业务系统和网络�
   const rootOrganizationID = rootOrganization.id
 
   const suffix = Date.now().toString()
+  const riskAcceptedUntil = futureDateTime(30)
+  const riskReviewedUntil = futureDateTime(60)
   const organizationCode = `SUB_PW_${suffix}`
   const organizationName = `端到端测试子公司_${suffix}`
   const subsidiaryUsername = `pw_user_${suffix}`
@@ -984,12 +997,12 @@ test('集团创建安全测试批次并批量导入授权范围内漏洞', async
   await findingDrawer.getByRole('button', { name: '接受风险', exact: true }).click()
   const riskDialog = page.getByRole('dialog', { name: '接受风险' })
   await riskDialog.getByPlaceholder('说明暂不整改的业务原因、补偿措施和责任判断').fill('业务系统正在进行重大版本切换，当前采用访问控制和专项监控作为补偿措施。')
-  await riskDialog.locator('.el-date-editor input').fill('2026-08-22 18:00:00')
+  await riskDialog.locator('.el-date-editor input').fill(riskAcceptedUntil.input)
   await riskDialog.locator('.el-date-editor input').press('Enter')
   await riskDialog.getByRole('button', { name: '确认接受风险', exact: true }).click()
   await expect(page.getByText('风险接受已保存', { exact: true })).toBeVisible()
   await expect(findingDrawer).toContainText('风险接受中')
-  await expect(findingDrawer).toContainText('2026/8/22')
+  await expect(findingDrawer).toContainText(riskAcceptedUntil.display)
 
   const findingID = await page.evaluate(async (title) => {
     const response = await fetch('/api/v1/security-findings')
@@ -1006,11 +1019,11 @@ test('集团创建安全测试批次并批量导入授权范围内漏洞', async
   await findingDrawer.getByRole('button', { name: '复核并延长有效期', exact: true }).click()
   const reviewDialog = page.getByRole('dialog', { name: '复核风险' })
   await reviewDialog.getByPlaceholder('记录本次复核结论、现有补偿措施及继续接受风险的理由').fill('已复核补偿措施和业务切换计划，同意继续接受风险至下一复核节点。')
-  await reviewDialog.locator('.el-date-editor input').fill('2026-09-22 18:00:00')
+  await reviewDialog.locator('.el-date-editor input').fill(riskReviewedUntil.input)
   await reviewDialog.locator('.el-date-editor input').press('Enter')
   await reviewDialog.getByRole('button', { name: '确认复核风险', exact: true }).click()
   await expect(page.getByText('风险复核已完成', { exact: true })).toBeVisible()
-  await expect(findingDrawer).toContainText('2026/9/22')
+  await expect(findingDrawer).toContainText(riskReviewedUntil.display)
 
   await findingDrawer.getByRole('button', { name: '撤销风险接受', exact: true }).click()
   const revokePrompt = page.getByRole('dialog', { name: '撤销风险接受' })

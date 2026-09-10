@@ -146,14 +146,15 @@ test('任务中新建资产在提交和审核通过前与集团正式台账隔�
     if (!createResponse.ok) throw new Error(`create draft failed: ${createResponse.status} ${createText}`)
     const draft = JSON.parse(createText).item
 
-    const formalResponse = await fetch(`/api/v1/assets?page=1&page_size=20&q=${encodeURIComponent(assetValue)}`)
-    const formal = await formalResponse.json()
+    const workingResponse = await fetch(`/api/v1/assets?page=1&page_size=20&q=${encodeURIComponent(assetValue)}`)
+    const working = await workingResponse.json()
     const draftResponse = await fetch(`/api/v1/inventory-tasks/${taskID}/organizations/${organizationID}/asset-drafts?page=1&page_size=20`)
     const drafts = await draftResponse.json()
-    return { draft, formalTotal: formal.total, draftTotal: drafts.total }
+    return { draft, workingTotal: working.total, draftTotal: drafts.total }
   }, { ...fixture, assetValue, assetName })
 
-  expect(createdDraft.formalTotal).toBe(0)
+  // 子公司账号访问 /assets 时看到的是工作库存，其中的草稿会作为工作副本返回。
+  expect(createdDraft.workingTotal).toBe(1)
   expect(createdDraft.draftTotal).toBe(1)
   expect(createdDraft.draft.draft_status).toBe('editing')
   expect(createdDraft.draft.is_draft).toBe(true)
