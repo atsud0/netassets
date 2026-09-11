@@ -94,6 +94,12 @@ button, input { font: inherit; }
 .organization-summary > div { padding: 17px 20px; display: flex; align-items: baseline; justify-content: space-between; background: white; border: 1px solid var(--line); border-radius: 12px; }
 .organization-summary span { color: var(--muted); font-size: 13px; }
 .organization-summary strong { color: var(--navy); font-size: 24px; }
+/* 面板内联统计：筛选卡右侧与工单保存视图下方共用的轻量统计样式。 */
+.filter-stat-list { display: flex; align-items: baseline; justify-content: flex-end; gap: 20px; flex-wrap: wrap; }
+.filter-stat { display: flex; align-items: baseline; gap: 6px; white-space: nowrap; }
+.filter-stat span { color: var(--muted); font-size: 13px; }
+.filter-stat strong { color: var(--navy); font-size: 20px; }
+.filter-stat.danger strong { color: var(--el-color-danger); }
 .organization-table-panel { padding: 6px 18px 18px; }
 .organization-name-cell { display: flex; flex-direction: column; gap: 3px; }
 .organization-name-cell > span { color: var(--muted); font-size: 12px; }

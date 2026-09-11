@@ -207,9 +207,6 @@ const eventLabels: Record<string, string> = {
   approve_launch: '批准上线', cancel: '取消申请',
 }
 
-const draftCount = computed(() => requests.value.filter(item => item.status === 'draft').length)
-const submittedCount = computed(() => requests.value.filter(item => item.status === 'submitted').length)
-const testingCount = computed(() => requests.value.filter(item => ['testing', 'pending_launch'].includes(item.status)).length)
 const selectedOrganizationCount = computed(() => new Set(selectedScope.value.map(item => item.organization_name)).size)
 const systemPickerSelectable = (row: SystemPickerRow) => {
   if (!row.is_working_copy) return true
@@ -788,13 +785,6 @@ function formatDate(value?: string) {
       <div v-if="isApplicant" class="button-row">
         <el-button type="primary" data-testid="create-security-test-request" @click="openCreate">新建测试申请</el-button>
       </div>
-    </div>
-
-    <div class="organization-summary">
-      <div><span>符合筛选申请</span><strong>{{ total }}</strong></div>
-      <div><span>本页草稿</span><strong>{{ draftCount }}</strong></div>
-      <div><span>本页待审核</span><strong>{{ submittedCount }}</strong></div>
-      <div><span>本页测试中</span><strong>{{ testingCount }}</strong></div>
     </div>
 
     <div class="panel request-filter-panel">

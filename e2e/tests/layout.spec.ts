@@ -19,7 +19,7 @@ test('应用壳层固定导航，安全测试页面使用统一台账布局', as
   await expect(page).toHaveURL(/\/security-test-batches$/)
   await expect(page.getByRole('heading', { name: '安全测试', exact: true })).toBeVisible()
 
-  await expect(page.locator('.organization-summary > div')).toHaveCount(4)
+  await expect(page.locator('.organization-summary')).toHaveCount(0)
   await expect(page.locator('.panel.security-test-filter-panel')).toBeVisible()
   await expect(page.locator('.panel.data-table-panel')).toBeVisible()
 

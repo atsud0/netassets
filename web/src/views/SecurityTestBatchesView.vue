@@ -179,9 +179,6 @@ const attachmentCategoryLabels: Record<string, string> = { test_report: '测试�
 
 const selectedAssets = computed(() => form.asset_ids.map(id => selectedAssetMap.value[id]).filter((item): item is Asset => Boolean(item)))
 const selectedOrganizationCount = computed(() => new Set(selectedAssets.value.map(item => item.organization_id)).size)
-const draftCount = computed(() => batches.value.filter(item => item.status === 'draft').length)
-const authorizedCount = computed(() => batches.value.filter(item => item.status === 'authorized').length)
-const activeCount = computed(() => batches.value.filter(item => item.status === 'in_progress').length)
 const scopePickerTitles: Record<ScopePickerMode, string> = {
   asset: '逐项添加公网资产', organization: '按组织纳入公网资产', business_system: '按业务系统纳入公网资产', network_area: '按网络区域纳入公网资产',
 }
@@ -672,13 +669,6 @@ function formatTime(value?: string) {
       <div class="button-row">
         <el-button type="primary" data-testid="create-security-test-batch" @click="openCreate">新建测试批次</el-button>
       </div>
-    </div>
-
-    <div class="organization-summary">
-      <div><span>符合筛选批次</span><strong>{{ total }}</strong></div>
-      <div><span>本页草稿</span><strong>{{ draftCount }}</strong></div>
-      <div><span>本页已授权</span><strong>{{ authorizedCount }}</strong></div>
-      <div><span>本页测试中</span><strong>{{ activeCount }}</strong></div>
     </div>
 
     <div class="panel security-test-filter-panel">

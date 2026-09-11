@@ -761,12 +761,6 @@ onMounted(load)
       <div><span class="eyebrow">BUSINESS SYSTEMS</span><h1>业务系统</h1><p>登记子公司的业务系统、负责人、系统等级以及个人信息和重要数据属性。</p></div>
       <div class="button-row ledger-page-actions business-system-page-actions"><el-dropdown v-if="!inventoryMode"><el-button :loading="exporting">导出台账</el-button><template #dropdown><el-dropdown-menu><el-dropdown-item @click="exportLedger('xlsx')">导出 XLSX</el-dropdown-item><el-dropdown-item @click="exportLedger('csv')">导出 CSV</el-dropdown-item><el-dropdown-item divided @click="queueXLSXExport">后台生成 XLSX</el-dropdown-item></el-dropdown-menu></template></el-dropdown><el-button v-if="!inventoryMode" @click="openImportHistory">导入记录</el-button><el-button v-if="!inventoryMode" @click="openImportDialog">批量导入</el-button><el-button v-if="!inventoryMode || !auth.isGroupAdmin" type="primary" :disabled="eligibleOrganizations.length === 0" @click="openCreateDialog">{{ '新增业务系统' }}</el-button></div>
     </div>
-    <div class="organization-summary">
-      <div><span>符合条件系统</span><strong>{{ total }}</strong></div>
-      <div><span>本页含个人信息</span><strong>{{ systems.filter((item) => item.contains_personal_information === 'yes').length }}</strong></div>
-      <div><span>本页含敏感个人信息</span><strong>{{ systems.filter((item) => item.contains_sensitive_personal_information === 'yes').length }}</strong></div>
-      <div><span>本页超过 10 万条</span><strong>{{ systems.filter((item) => item.data_volume_over_100k === 'yes').length }}</strong></div>
-    </div>
     <div class="panel asset-filter-panel">
       <el-input v-model="search" clearable placeholder="搜索系统编码、名称、组织或负责人" @keyup.enter="resetAndLoadSystems" @clear="resetAndLoadSystems" />
       <el-select v-model="statusFilter" clearable placeholder="全部状态" @change="resetAndLoadSystems" @clear="resetAndLoadSystems">

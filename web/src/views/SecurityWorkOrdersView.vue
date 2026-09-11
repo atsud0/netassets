@@ -937,13 +937,6 @@ async function onTabChange() {
       <template #title>这里只显示本组织有权访问的工单。请按期限接收、更新进度并提交整改结果，集团将在系统中记录复测结论。</template>
     </el-alert>
 
-    <div v-if="activeTab === 'orders'" class="organization-summary">
-      <div><span>符合筛选工单</span><strong>{{ orderTotal }}</strong></div>
-      <div><span>本页处理中</span><strong>{{ activeOrderCount }}</strong></div>
-      <div><span>本页待集团复测</span><strong>{{ pendingVerificationCount }}</strong></div>
-      <div><span>本页逾期</span><strong class="danger-number">{{ overdueCount }}</strong></div>
-    </div>
-
     <div class="panel security-panel">
       <el-tabs v-model="activeTab" @tab-change="onTabChange">
         <el-tab-pane label="安全整改工单" name="orders" />
@@ -983,6 +976,12 @@ async function onTabChange() {
         <el-button @click="resetFilters">重置</el-button>
       </div>
       <SavedFilterViews v-show="activeTab === 'orders'" ref="savedFilterViews" page-key="security_work_orders" :current-filters="currentWorkOrderFilters" class="work-order-saved-views" @apply="applySavedWorkOrderFilters" />
+      <div v-show="activeTab === 'orders'" class="filter-stat-list work-order-stat-list">
+        <div class="filter-stat"><span>符合筛选工单</span><strong>{{ orderTotal }}</strong></div>
+        <div class="filter-stat"><span>处理中</span><strong>{{ activeOrderCount }}</strong></div>
+        <div class="filter-stat"><span>待复测</span><strong>{{ pendingVerificationCount }}</strong></div>
+        <div class="filter-stat danger"><span>逾期</span><strong>{{ overdueCount }}</strong></div>
+      </div>
 
       <el-table v-if="activeTab === 'orders'" :data="workOrders" row-key="id" empty-text="暂无安全整改工单">
         <el-table-column label="工单" min-width="230">
@@ -1284,7 +1283,8 @@ async function onTabChange() {
 
 <style scoped>
 .security-panel { overflow: hidden; }
-.work-order-saved-views { margin:-8px 0 18px; padding-top:12px; border-top:1px dashed var(--line); }
+.work-order-saved-views { margin:-8px 0 0; padding-top:12px; border-top:1px dashed var(--line); }
+.work-order-stat-list { justify-content: flex-start; margin: 12px 0 18px; padding-top: 12px; border-top: 1px dashed var(--line); }
 .filter-bar { display: flex; flex-wrap: wrap; gap: 10px; margin: 4px 0 18px; }
 .table-pagination { display: flex; justify-content: flex-end; margin-top: 18px; }
 .detail-pagination { overflow-x: auto; padding-bottom: 2px; }

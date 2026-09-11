@@ -160,9 +160,6 @@ const selectedOrganizationID = computed(() => {
   return ids.size === 1 ? [...ids][0] : ''
 })
 const selectedNetworkAreas = computed(() => networkAreas.value.filter((item) => item.organization_id === selectedOrganizationID.value && item.status === 'enabled'))
-const activeCount = computed(() => assets.value.filter((item) => item.status === 'active').length)
-const publicCount = computed(() => assets.value.filter((item) => item.network_scope === 'public').length)
-const domainCount = computed(() => assets.value.filter((item) => item.type === 'domain').length)
 const valuePlaceholder = computed(() => ({
   domain: '如：portal.example.com', ip: '如：203.0.113.10', url: '如：https://portal.example.com/login',
   service: '如：10.0.0.8:443', other: '请输入资产标识',
@@ -976,13 +973,6 @@ onMounted(() => {
         <el-button v-if="!inventoryMode" @click="openImportDialog">批量导入</el-button>
         <el-button type="primary" @click="openCreateDialog">新增资产</el-button>
       </div>
-    </div>
-
-    <div class="organization-summary">
-      <div><span>符合条件资产</span><strong>{{ total }}</strong></div>
-      <div><span>本页启用资产</span><strong>{{ activeCount }}</strong></div>
-      <div><span>本页公网资产</span><strong>{{ publicCount }}</strong></div>
-      <div><span>本页域名资产</span><strong>{{ domainCount }}</strong></div>
     </div>
 
     <div class="panel asset-filter-panel network-asset-filter-panel">
