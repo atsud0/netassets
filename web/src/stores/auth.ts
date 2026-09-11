@@ -39,6 +39,7 @@ export const useAuthStore = defineStore('auth', () => {
   const hasPermission = (permission: string) => user.value?.permissions.includes(permission) ?? false
 
   const canManageSecurityTests = computed(() => hasGroupSecurityRole.value && hasPermission('security_test.manage'))
+  const canRequestSecurityTest = computed(() => !hasGroupSecurityRole.value && hasPermission('security_test.request'))
   const canManageSecurityFindings = computed(() => hasGroupSecurityRole.value && hasPermission('security_finding.manage'))
   const canManageSecurityWorkOrders = computed(() => hasGroupSecurityRole.value && hasPermission('security_workorder.manage'))
 
@@ -81,5 +82,5 @@ export const useAuthStore = defineStore('auth', () => {
     }
   }
 
-  return { user, initialized, authenticated, isGroupAdmin, isSecurityOperator, hasGroupSecurityRole, canManageSecurityTests, canManageSecurityFindings, canManageSecurityWorkOrders, hasPermission, setCurrentUser, fetchCurrentUser, login, switchOrganization, logout }
+  return { user, initialized, authenticated, isGroupAdmin, isSecurityOperator, hasGroupSecurityRole, canManageSecurityTests, canRequestSecurityTest, canManageSecurityFindings, canManageSecurityWorkOrders, hasPermission, setCurrentUser, fetchCurrentUser, login, switchOrganization, logout }
 })

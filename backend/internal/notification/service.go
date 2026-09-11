@@ -178,6 +178,13 @@ WHERE child.status='enabled' AND child.deleted_at IS NULL
 			WHEN 'working_version.asset_unselected' THEN '网络资产已取消纳入填报'
 			WHEN 'working_version.business_system_unselected' THEN '业务系统已取消纳入填报'
 			WHEN 'working_version.published' THEN '工作版本已发布'
+			WHEN 'security_test_request.submitted' THEN '收到上线安全测试申请'
+			WHEN 'security_test_request.withdrawn' THEN '上线安全测试申请已撤回'
+			WHEN 'security_test_request.approved' THEN '上线安全测试申请已通过'
+			WHEN 'security_test_request.reject' THEN '上线安全测试申请被驳回'
+			WHEN 'security_test_request.cancel' THEN '上线安全测试申请已取消'
+			WHEN 'security_test_request.pending_launch' THEN '申请达成上线条件'
+			WHEN 'security_test_request.launch_approved' THEN '申请已批准上线'
 			ELSE '台账发生变更'
 		END::text AS title,
 		CASE ne.event_type
@@ -222,6 +229,13 @@ WHERE child.status='enabled' AND child.deleted_at IS NULL
 			WHEN 'working_version.asset_unselected' THEN format('%s 已将网络资产“%s”从当前填报任务取消纳入，资源已回到未上报工作区。', COALESCE(NULLIF(actor.display_name,''),actor.username,'组织用户'),ne.resource_label)
 			WHEN 'working_version.business_system_unselected' THEN format('%s 已将业务系统“%s”从当前填报任务取消纳入，资源已回到未上报工作区。', COALESCE(NULLIF(actor.display_name,''),actor.username,'组织用户'),ne.resource_label)
 			WHEN 'working_version.published' THEN format('填报任务《%s》中 %s 个工作版本已通过审核并发布到集团正式台账。',ne.resource_label,COALESCE(NULLIF(ne.details->>'item_count',''),'0'))
+			WHEN 'security_test_request.submitted' THEN format('%s 提交了上线安全测试申请“%s”，请及时审核。', COALESCE(NULLIF(actor.display_name,''),actor.username,'组织用户'), ne.resource_label)
+			WHEN 'security_test_request.withdrawn' THEN format('%s 撤回了上线安全测试申请“%s”。', COALESCE(NULLIF(actor.display_name,''),actor.username,'组织用户'), ne.resource_label)
+			WHEN 'security_test_request.approved' THEN format('上线安全测试申请“%s”已通过审核，测试批次 %s 已授权。', ne.resource_label, COALESCE(ne.details->>'batch_code',''))
+			WHEN 'security_test_request.reject' THEN format('上线安全测试申请“%s”被驳回，请查看驳回原因并修改后重新提交。', ne.resource_label)
+			WHEN 'security_test_request.cancel' THEN format('上线安全测试申请“%s”已取消。', ne.resource_label)
+			WHEN 'security_test_request.pending_launch' THEN format('申请“%s”的测试批次 %s 已完成且无未闭环发现，可批准上线。', ne.resource_label, COALESCE(ne.details->>'batch_code',''))
+			WHEN 'security_test_request.launch_approved' THEN format('上线安全测试申请“%s”已批准上线，待上报内容已自动上报集团台账审核。', ne.resource_label)
 			ELSE '本组织台账发生变更，请及时查看。'
 		END::text AS message,
 		ne.level::text AS level,
@@ -236,6 +250,7 @@ WHERE child.status='enabled' AND child.deleted_at IS NULL
 			WHEN ne.event_type IN ('working_version.asset_created','working_version.asset_restored','working_version.asset_unselected') THEN '/assets?organization_id=' || ne.target_organization_id::text || CASE WHEN ne.resource_id IS NOT NULL THEN '&asset_id=' || ne.resource_id ELSE '' END
 			WHEN ne.event_type IN ('working_version.business_system_created','working_version.business_system_restored','working_version.business_system_unselected') THEN '/business-systems?organization_id=' || ne.target_organization_id::text || CASE WHEN ne.resource_id IS NOT NULL THEN '&system_id=' || ne.resource_id ELSE '' END
 			WHEN ne.event_type='working_version.published' THEN '/inventory-tasks?task_id=' || COALESCE(ne.resource_id,'') || '&organization_id=' || ne.target_organization_id::text
+			WHEN ne.event_type LIKE 'security_test_request.%' THEN '/security-test-requests?keyword=' || COALESCE(ne.details->>'request_code','')
 			ELSE ''
 		END::text AS action_path,
 		ne.updated_at AS occurred_at,
@@ -770,7 +785,7 @@ func ValidateCategory(category string) bool {
 		return true
 	}
 	switch strings.TrimSpace(category) {
-	case "export_job", "work_order_review", "work_order_received", "work_order_returned", "work_order_overdue", "work_order_due_soon", "risk_review", "quality_review", "quality_received", "quality_returned", "quality_exemption", CategoryAssetChange, CategoryBusinessSystemChange, CategoryFindingReceived, CategoryInventoryTaskReview, CategoryInventoryTaskReceived, CategoryInventoryTaskReturned, CategoryInventoryTaskDueSoon, CategoryInventoryTaskOverdue, CategoryWorkingVersion:
+	case "export_job", "work_order_review", "work_order_received", "work_order_returned", "work_order_overdue", "work_order_due_soon", "risk_review", "quality_review", "quality_received", "quality_returned", "quality_exemption", CategoryAssetChange, CategoryBusinessSystemChange, CategoryFindingReceived, CategoryInventoryTaskReview, CategoryInventoryTaskReceived, CategoryInventoryTaskReturned, CategoryInventoryTaskDueSoon, CategoryInventoryTaskOverdue, CategoryWorkingVersion, CategorySecurityTestRequest:
 		return true
 	default:
 		return false

@@ -14,6 +14,7 @@ const (
 	CategoryAssetChange           = "asset_change"
 	CategoryBusinessSystemChange  = "business_system_change"
 	CategoryFindingReceived       = "finding_received"
+	CategorySecurityTestRequest   = "security_test_request"
 	CategoryInventoryTaskReview   = "inventory_task_review"
 	CategoryInventoryTaskReceived = "inventory_task_received"
 	CategoryInventoryTaskReturned = "inventory_task_returned"

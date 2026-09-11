@@ -35,6 +35,7 @@ import (
 	"netassets/internal/savedfilter"
 	"netassets/internal/securityreference"
 	"netassets/internal/securitytestbatch"
+	"netassets/internal/securitytestrequest"
 	"netassets/internal/securityworkorder"
 	userdomain "netassets/internal/user"
 )
@@ -109,6 +110,7 @@ func NewWithContext(ctx context.Context, cfg config.Config, pool *pgxpool.Pool, 
 		registerSecurityReferenceRoutes(api, requireAuth, securityreference.NewService(pool), logger)
 		registerSecurityWorkOrderRoutes(api, requireAuth, securityworkorder.NewService(pool, cfg.DataDir), logger)
 		registerSecurityTestBatchRoutes(api, requireAuth, securitytestbatch.NewService(pool, cfg.DataDir), logger)
+		registerSecurityTestRequestRoutes(api, requireAuth, securitytestrequest.NewService(pool), logger)
 		registerBackupRoutes(api, requireAuth, backupService, logger)
 	}
 

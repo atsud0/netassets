@@ -16,6 +16,7 @@ const ExportJobsView = () => import('../views/ExportJobsView.vue')
 const AuditLogsView = () => import('../views/AuditLogsView.vue')
 const SecurityWorkOrdersView = () => import('../views/SecurityWorkOrdersView.vue')
 const SecurityTestBatchesView = () => import('../views/SecurityTestBatchesView.vue')
+const SecurityTestRequestsView = () => import('../views/SecurityTestRequestsView.vue')
 const NotificationsView = () => import('../views/NotificationsView.vue')
 const RecycleBinView = () => import('../views/RecycleBinView.vue')
 const BackupsView = () => import('../views/BackupsView.vue')
@@ -45,6 +46,7 @@ const router = createRouter({
         { path: 'inventory-tasks', name: 'inventory-tasks', component: InventoryTasksView, meta: { permission: 'inventory.manage' } },
         { path: 'export-jobs', name: 'export-jobs', component: ExportJobsView },
         { path: 'security-test-batches', name: 'security-test-batches', component: SecurityTestBatchesView, meta: { permission: 'security_test.manage', groupSecurityOnly: true } },
+        { path: 'security-test-requests', name: 'security-test-requests', component: SecurityTestRequestsView, meta: { anyPermission: ['security_test.request', 'security_test.manage'] } },
         { path: 'security-work-orders', name: 'security-work-orders', component: SecurityWorkOrdersView },
         { path: 'audit-logs', name: 'audit-logs', component: AuditLogsView, meta: { groupAdminOnly: true } },
         { path: 'recycle-bin', name: 'recycle-bin', component: RecycleBinView, meta: { groupAdminOnly: true } },
@@ -75,6 +77,12 @@ router.beforeEach(async (to) => {
     return { name: 'dashboard' }
   }
   if (to.meta.permission && !auth.hasPermission(String(to.meta.permission))) {
+    return { name: 'dashboard' }
+  }
+  // anyPermission gates the launch security-test request page, which serves both
+  // subsidiary applicants (security_test.request) and group reviewers
+  // (security_test.manage); holding any one of the listed permissions suffices.
+  if (Array.isArray(to.meta.anyPermission) && !(to.meta.anyPermission as string[]).some(permission => auth.hasPermission(permission))) {
     return { name: 'dashboard' }
   }
   return true

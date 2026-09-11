@@ -38,6 +38,7 @@ const navigationGroups = computed<NavigationGroup[]>(() => {
     ...(auth.hasPermission('asset.manage') || auth.hasPermission('system.manage') || auth.hasPermission('inventory.manage') ? [{ path: '/export-jobs', label: '导出任务' }] : []),
   ]
   const securityOperations: NavigationItem[] = [
+    ...(auth.canRequestSecurityTest || auth.canManageSecurityTests ? [{ path: '/security-test-requests', label: '测试申请' }] : []),
     ...(auth.canManageSecurityTests ? [{ path: '/security-test-batches', label: '安全测试' }] : []),
     ...(auth.canManageSecurityFindings || auth.canManageSecurityWorkOrders || !auth.hasGroupSecurityRole ? [{ path: '/security-work-orders', label: '安全工单' }] : []),
   ]

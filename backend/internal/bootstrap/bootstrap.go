@@ -23,6 +23,7 @@ var permissions = map[string]string{
 	"inventory.manage":          "管理资产填报与审核",
 	"data_quality.manage":       "处理数据质量问题",
 	"security_test.manage":      "管理安全测试批次",
+	"security_test.request":     "发起上线安全测试申请",
 	"security_finding.manage":   "管理安全发现与风险接受",
 	"security_workorder.manage": "管理安全工单",
 	"audit.read":                "查看审计日志和变更记录",
@@ -120,8 +121,8 @@ func Ensure(ctx context.Context, pool *pgxpool.Pool, cfg config.Config, logger *
 		Description string
 		Permissions []string
 	}{
-		{Key: "organization_admin", Name: "子公司管理员", Description: "管理授权组织树内的组织信息、用户、业务系统、网络资产和填报数据", Permissions: []string{"organization.read", "organization.create", "organization.update", "system.manage", "asset.manage", "inventory.manage", "data_quality.manage", "user.manage"}},
-		{Key: "organization_editor", Name: "子公司填报员", Description: "维护所属组织的业务系统、网络资产和填报数据", Permissions: []string{"organization.read", "system.manage", "asset.manage", "inventory.manage"}},
+		{Key: "organization_admin", Name: "子公司管理员", Description: "管理授权组织树内的组织信息、用户、业务系统、网络资产和填报数据", Permissions: []string{"organization.read", "organization.create", "organization.update", "system.manage", "asset.manage", "inventory.manage", "data_quality.manage", "security_test.request", "user.manage"}},
+		{Key: "organization_editor", Name: "子公司填报员", Description: "维护所属组织的业务系统、网络资产和填报数据", Permissions: []string{"organization.read", "system.manage", "asset.manage", "inventory.manage", "security_test.request"}},
 	}
 	for _, role := range organizationRoles {
 		var organizationRoleID string

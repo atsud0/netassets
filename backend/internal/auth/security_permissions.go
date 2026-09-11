@@ -4,9 +4,10 @@ const (
 	RoleGroupAdmin       = "group_admin"
 	RoleSecurityOperator = "security_operator"
 
-	PermissionSecurityTest      = "security_test.manage"
-	PermissionSecurityFinding   = "security_finding.manage"
-	PermissionSecurityWorkOrder = "security_workorder.manage"
+	PermissionSecurityTest        = "security_test.manage"
+	PermissionSecurityTestRequest = "security_test.request"
+	PermissionSecurityFinding     = "security_finding.manage"
+	PermissionSecurityWorkOrder   = "security_workorder.manage"
 )
 
 // HasGroupSecurityRole limits group-wide security data to built-in group roles.

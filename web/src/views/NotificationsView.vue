@@ -26,6 +26,7 @@ const categoryOptions = [
   { value: 'asset_change', label: '资产变更' },
   { value: 'business_system_change', label: '系统变更' },
   { value: 'finding_received', label: '安全发现' },
+  { value: 'security_test_request', label: '上线测试申请' },
   { value: 'inventory_task_review', label: '填报审核' },
   { value: 'inventory_task_received', label: '填报任务' },
   { value: 'inventory_task_returned', label: '填报退回' },
