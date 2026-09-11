@@ -12,6 +12,9 @@ const loading = ref(false)
 const form = reactive({ username: '', password: '' })
 
 async function submit() {
+  if (loading.value) {
+    return
+  }
   if (!form.username.trim() || !form.password) {
     ElMessage.warning('请输入用户名和密码')
     return
@@ -51,10 +54,10 @@ async function submit() {
       </div>
       <el-form label-position="top" @submit.prevent="submit">
         <el-form-item label="用户名">
-          <el-input v-model="form.username" name="username" size="large" autocomplete="username" placeholder="请输入用户名" @keyup.enter="submit" />
+          <el-input v-model="form.username" name="username" size="large" autocomplete="username" placeholder="请输入用户名" />
         </el-form-item>
         <el-form-item label="密码">
-          <el-input v-model="form.password" name="password" size="large" type="password" show-password autocomplete="current-password" placeholder="请输入密码" @keyup.enter="submit" />
+          <el-input v-model="form.password" name="password" size="large" type="password" show-password autocomplete="current-password" placeholder="请输入密码" />
         </el-form-item>
         <el-button type="primary" native-type="submit" size="large" :loading="loading" class="full-button">登录</el-button>
       </el-form>
