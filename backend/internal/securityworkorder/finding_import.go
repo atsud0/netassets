@@ -170,9 +170,11 @@ func (s *Service) ImportFindings(ctx context.Context, principal auth.Principal, 
 			result.Errors = append(result.Errors, FindingImportError{Row: rowNumber, Code: rowErr.code, Message: rowErr.message})
 			continue
 		}
-		normalizedValue := ""
-		if value, normalizeErr := asset.NormalizeValue(assetType, assetValue); normalizeErr == nil {
-			normalizedValue = value
+		normalizedValue, normalizeErr := asset.NormalizeValue(assetType, assetValue)
+		if normalizeErr != nil {
+			result.FailureCount++
+			result.Errors = append(result.Errors, FindingImportError{Row: rowNumber, Code: "invalid_asset_value", Message: "资产类型与资产值不匹配，或资产值格式不合法"})
+			continue
 		}
 		matches := exactFindingImportScopes(scopes, assetType, assetValue, normalizedValue)
 		if len(matches) != 1 {

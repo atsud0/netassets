@@ -704,7 +704,7 @@ func loadQualityCheck(ctx context.Context, q qualityCheckQuerier, principal auth
 			  AND (task_scope.asset_network_scope = 'all' OR a.network_scope = task_scope.asset_network_scope)
 			UNION ALL
 			SELECT draft.id, draft.network_scope, draft.importance, draft.owner_name,
-			       draft.business_system_id IS NOT NULL AS has_system
+			       (draft.business_system_id IS NOT NULL OR draft.business_system_draft_id IS NOT NULL) AS has_system
 			FROM inventory_asset_drafts draft
 			CROSS JOIN assignment task_scope
 			WHERE draft.task_id::text = $2 AND draft.organization_id::text = $3

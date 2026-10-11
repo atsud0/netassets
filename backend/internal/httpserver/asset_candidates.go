@@ -68,6 +68,22 @@ func registerAssetCandidateRoutes(api *gin.RouterGroup, requireAuth gin.HandlerF
 		}
 		c.JSON(http.StatusOK, response)
 	})
+	group.POST("/:id/retry-findings", func(c *gin.Context) {
+		if findingService == nil {
+			writeAPIError(c, http.StatusNotImplemented, "not_available", "漏洞关联服务不可用")
+			return
+		}
+		result, err := findingService.RetryAcceptedAssetCandidate(c.Request.Context(), mustPrincipal(c), c.Param("id"), "", c.GetString("request_id"), c.ClientIP())
+		if err != nil && result.Linked == 0 {
+			writeFindingImportCandidateError(c, logger, "retry imported findings", err)
+			return
+		}
+		response := gin.H{"result": result}
+		if err != nil {
+			response["warning"] = "部分漏洞关联失败，失败项仍可重试"
+		}
+		c.JSON(http.StatusOK, response)
+	})
 	group.POST("/:id/ignore", func(c *gin.Context) {
 		var input assetcandidate.ReviewInput
 		if c.Request.ContentLength != 0 && c.ShouldBindJSON(&input) != nil {

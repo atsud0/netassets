@@ -62,14 +62,15 @@ func (s *Service) SearchAssetDrafts(ctx context.Context, principal auth.Principa
 		SELECT draft.id::text, draft.task_id::text, COALESCE(draft.source_asset_id::text,''), draft.operation, draft.draft_status,
 		       draft.asset_type, draft.asset_value, draft.normalized_value, COALESCE(draft.asset_name, ''),
 		       organization.id::text, organization.organization_code, organization.organization_name,
-		       COALESCE(system.id::text, ''), COALESCE(system.system_code, ''), COALESCE(system.system_name, ''),
+		       COALESCE(working_system.id::text, system.id::text, ''), COALESCE(working_system.system_code, system.system_code, ''), COALESCE(working_system.system_name, system.system_name, ''),
 		       draft.environment, draft.network_scope, COALESCE(area.id::text, ''), COALESCE(area.area_name, ''),
-		       draft.status, draft.importance, 'manual',
+		       draft.status, draft.importance, COALESCE(draft.source, 'manual'),
 		       COALESCE(draft.owner_user_id::text, ''), COALESCE(owner.username, ''), COALESCE(owner.display_name, ''),
 		       COALESCE(draft.owner_name, ''), COALESCE(draft.notes, ''), draft.expires_at, draft.created_at, draft.updated_at, draft.custom_values
 		FROM inventory_asset_drafts draft
 		JOIN organizations organization ON organization.id=draft.organization_id
 		LEFT JOIN business_systems system ON system.id=draft.business_system_id AND system.deleted_at IS NULL
+		LEFT JOIN inventory_business_system_drafts working_system ON working_system.id=draft.business_system_draft_id AND working_system.draft_status IN ('editing','submitted','returned','published')
 		LEFT JOIN asset_network_areas area ON area.id=draft.network_area_id
 		LEFT JOIN users owner ON owner.id=draft.owner_user_id
 		WHERE draft.task_id::text=$1 AND draft.organization_id::text=$2`+visibility+`
@@ -132,6 +133,11 @@ func (s *Service) CreateAssetDraft(ctx context.Context, principal auth.Principal
 	if err := validateDraftReferences(ctx, tx, organizationID, input); err != nil {
 		return AssetDraft{}, err
 	}
+	formalSystemID, systemDraftID, err := resolveBusinessSystemReference(ctx, tx, organizationID, input.BusinessSystemID)
+	if err != nil {
+		return AssetDraft{}, err
+	}
+	input.BusinessSystemID = formalSystemID
 	var duplicate bool
 	if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM assets WHERE asset_type=$1 AND normalized_value=$2 AND deleted_at IS NULL)`, input.Type, normalizedValue).Scan(&duplicate); err != nil {
 		return AssetDraft{}, fmt.Errorf("check formal asset duplicate: %w", err)
@@ -143,12 +149,12 @@ func (s *Service) CreateAssetDraft(ctx context.Context, principal auth.Principal
 	err = tx.QueryRow(ctx, `
 		INSERT INTO inventory_asset_drafts (
 			task_id, organization_id, asset_type, asset_value, normalized_value, asset_name,
-			environment, network_scope, network_area_id, business_system_id, status, importance,
+			environment, network_scope, network_area_id, business_system_id, business_system_draft_id, status, importance, source,
 			owner_user_id, owner_name, notes, expires_at, custom_values, created_by, updated_by
-		) VALUES ($1::uuid,$2::uuid,$3,$4,$5,NULLIF($6,''),$7,$8,NULLIF($9,'')::uuid,NULLIF($10,'')::uuid,$11,$12,NULLIF($13,'')::uuid,NULLIF($14,''),NULLIF($15,''),$16,$17::jsonb,$18::uuid,$18::uuid)
+		) VALUES ($1::uuid,$2::uuid,$3,$4,$5,NULLIF($6,''),$7,$8,NULLIF($9,'')::uuid,NULLIF($10,'')::uuid,NULLIF($11,'')::uuid,$12,$13,'manual',NULLIF($14,'')::uuid,NULLIF($15,''),NULLIF($16,''),$17,$18::jsonb,$19::uuid,$19::uuid)
 		RETURNING id::text
 	`, taskID, organizationID, input.Type, input.Value, normalizedValue, input.Name, input.Environment, input.NetworkScope,
-		input.NetworkAreaID, input.BusinessSystemID, input.Status, input.Importance, input.OwnerUserID, input.OwnerName,
+		input.NetworkAreaID, input.BusinessSystemID, systemDraftID, input.Status, input.Importance, input.OwnerUserID, input.OwnerName,
 		input.Notes, input.ExpiresAt, customValues, principal.UserID).Scan(&id)
 	if err != nil {
 		return AssetDraft{}, mapDraftDatabaseError(err)
@@ -196,15 +202,17 @@ func (s *Service) createAssetChangeDraft(ctx context.Context, principal auth.Pri
 		return AssetDraft{}, err
 	}
 	var current asset.CreateInput
+	var currentSystemDraftID string
+	var currentSource string
 	var normalizedValue string
 	err = tx.QueryRow(ctx, `
 		SELECT formal.asset_type,formal.asset_value,formal.normalized_value,COALESCE(formal.asset_name,''),owner.organization_id::text,
 		       COALESCE(link.business_system_id::text,''),formal.environment,formal.network_scope,COALESCE(formal.network_area_id::text,''),
-		       formal.status,formal.importance,COALESCE(owner.owner_user_id::text,''),COALESCE(owner.owner_name,''),COALESCE(formal.notes,''),formal.expires_at
+		       formal.status,formal.importance,COALESCE(formal.source,'manual'),COALESCE(owner.owner_user_id::text,''),COALESCE(owner.owner_name,''),COALESCE(formal.notes,''),formal.expires_at
 		FROM assets formal JOIN asset_organizations owner ON owner.asset_id=formal.id AND owner.is_primary
 		LEFT JOIN system_assets link ON link.asset_id=formal.id AND link.is_primary
 		WHERE formal.id::text=$1 AND owner.organization_id::text=$2 AND formal.deleted_at IS NULL
-	`, sourceAssetID, organizationID).Scan(&current.Type, &current.Value, &normalizedValue, &current.Name, &current.OrganizationID, &current.BusinessSystemID, &current.Environment, &current.NetworkScope, &current.NetworkAreaID, &current.Status, &current.Importance, &current.OwnerUserID, &current.OwnerName, &current.Notes, &current.ExpiresAt)
+	`, sourceAssetID, organizationID).Scan(&current.Type, &current.Value, &normalizedValue, &current.Name, &current.OrganizationID, &current.BusinessSystemID, &current.Environment, &current.NetworkScope, &current.NetworkAreaID, &current.Status, &current.Importance, &currentSource, &current.OwnerUserID, &current.OwnerName, &current.Notes, &current.ExpiresAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return AssetDraft{}, ErrNotFound
 	}
@@ -232,6 +240,11 @@ func (s *Service) createAssetChangeDraft(ctx context.Context, principal auth.Pri
 		if err := validateDraftReferences(ctx, tx, organizationID, input); err != nil {
 			return AssetDraft{}, err
 		}
+		formalSystemID, systemDraftID, resolveErr := resolveBusinessSystemReference(ctx, tx, organizationID, input.BusinessSystemID)
+		if resolveErr != nil {
+			return AssetDraft{}, resolveErr
+		}
+		input.BusinessSystemID, currentSystemDraftID = formalSystemID, systemDraftID
 		var duplicate bool
 		if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM assets WHERE asset_type=$1 AND normalized_value=$2 AND id::text<>$3 AND deleted_at IS NULL)`, input.Type, normalizedValue, sourceAssetID).Scan(&duplicate); err != nil {
 			return AssetDraft{}, fmt.Errorf("check formal asset duplicate: %w", err)
@@ -247,15 +260,15 @@ func (s *Service) createAssetChangeDraft(ctx context.Context, principal auth.Pri
 	}
 	var id string
 	err = tx.QueryRow(ctx, `
-		INSERT INTO inventory_asset_drafts(task_id,organization_id,operation,source_asset_id,asset_type,asset_value,normalized_value,asset_name,environment,network_scope,network_area_id,business_system_id,status,importance,owner_user_id,owner_name,notes,expires_at,custom_values,created_by,updated_by)
-		VALUES($1::uuid,$2::uuid,$3,$4::uuid,$5,$6,$7,NULLIF($8,''),$9,$10,NULLIF($11,'')::uuid,NULLIF($12,'')::uuid,$13,$14,NULLIF($15,'')::uuid,NULLIF($16,''),NULLIF($17,''),$18,$19::jsonb,$20::uuid,$20::uuid)
+		INSERT INTO inventory_asset_drafts(task_id,organization_id,operation,source_asset_id,asset_type,asset_value,normalized_value,asset_name,environment,network_scope,network_area_id,business_system_id,business_system_draft_id,status,importance,source,owner_user_id,owner_name,notes,expires_at,custom_values,created_by,updated_by)
+		VALUES($1::uuid,$2::uuid,$3,$4::uuid,$5,$6,$7,NULLIF($8,''),$9,$10,NULLIF($11,'')::uuid,NULLIF($12,'')::uuid,NULLIF($13,'')::uuid,$14,$15,$16,NULLIF($17,'')::uuid,NULLIF($18,''),NULLIF($19,''),$20,$21::jsonb,$22::uuid,$22::uuid)
 		ON CONFLICT (organization_id,source_asset_id) WHERE source_asset_id IS NOT NULL AND draft_status IN ('editing','submitted','returned') DO UPDATE SET
 		operation=EXCLUDED.operation,asset_type=EXCLUDED.asset_type,asset_value=EXCLUDED.asset_value,normalized_value=EXCLUDED.normalized_value,asset_name=EXCLUDED.asset_name,
-		environment=EXCLUDED.environment,network_scope=EXCLUDED.network_scope,network_area_id=EXCLUDED.network_area_id,business_system_id=EXCLUDED.business_system_id,
-		status=EXCLUDED.status,importance=EXCLUDED.importance,owner_user_id=EXCLUDED.owner_user_id,owner_name=EXCLUDED.owner_name,notes=EXCLUDED.notes,expires_at=EXCLUDED.expires_at,custom_values=EXCLUDED.custom_values,
+		environment=EXCLUDED.environment,network_scope=EXCLUDED.network_scope,network_area_id=EXCLUDED.network_area_id,business_system_id=EXCLUDED.business_system_id,business_system_draft_id=EXCLUDED.business_system_draft_id,
+		status=EXCLUDED.status,importance=EXCLUDED.importance,source=EXCLUDED.source,owner_user_id=EXCLUDED.owner_user_id,owner_name=EXCLUDED.owner_name,notes=EXCLUDED.notes,expires_at=EXCLUDED.expires_at,custom_values=EXCLUDED.custom_values,
 		draft_status='editing',updated_by=EXCLUDED.updated_by,updated_at=now()
 		WHERE inventory_asset_drafts.draft_status IN ('editing','returned') RETURNING id::text
-	`, taskID, organizationID, operation, sourceAssetID, current.Type, current.Value, normalizedValue, current.Name, current.Environment, current.NetworkScope, current.NetworkAreaID, current.BusinessSystemID, current.Status, current.Importance, current.OwnerUserID, current.OwnerName, current.Notes, current.ExpiresAt, customValues, principal.UserID).Scan(&id)
+	`, taskID, organizationID, operation, sourceAssetID, current.Type, current.Value, normalizedValue, current.Name, current.Environment, current.NetworkScope, current.NetworkAreaID, current.BusinessSystemID, currentSystemDraftID, current.Status, current.Importance, currentSource, current.OwnerUserID, current.OwnerName, current.Notes, current.ExpiresAt, customValues, principal.UserID).Scan(&id)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return AssetDraft{}, ErrState
 	}
@@ -315,6 +328,11 @@ func (s *Service) UpdateAssetDraft(ctx context.Context, principal auth.Principal
 	if err := validateDraftReferences(ctx, tx, organizationID, input); err != nil {
 		return AssetDraft{}, err
 	}
+	formalSystemID, systemDraftID, err := resolveBusinessSystemReference(ctx, tx, organizationID, input.BusinessSystemID)
+	if err != nil {
+		return AssetDraft{}, err
+	}
+	input.BusinessSystemID = formalSystemID
 	var duplicate bool
 	if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM assets WHERE asset_type=$1 AND normalized_value=$2 AND id<>COALESCE((SELECT source_asset_id FROM inventory_asset_drafts WHERE id::text=$3),gen_random_uuid()) AND deleted_at IS NULL)`, input.Type, normalizedValue, draftID).Scan(&duplicate); err != nil {
 		return AssetDraft{}, fmt.Errorf("check formal asset duplicate: %w", err)
@@ -324,12 +342,12 @@ func (s *Service) UpdateAssetDraft(ctx context.Context, principal auth.Principal
 	}
 	result, err := tx.Exec(ctx, `
 		UPDATE inventory_asset_drafts SET asset_type=$5,asset_value=$6,normalized_value=$7,asset_name=NULLIF($8,''),
-		       environment=$9,network_scope=$10,network_area_id=NULLIF($11,'')::uuid,business_system_id=NULLIF($12,'')::uuid,
-		       status=$13,importance=$14,owner_user_id=NULLIF($15,'')::uuid,owner_name=NULLIF($16,''),notes=NULLIF($17,''),
-		       expires_at=$18,custom_values=$19::jsonb,draft_status='editing',updated_by=$20::uuid,updated_at=now()
+		       environment=$9,network_scope=$10,network_area_id=NULLIF($11,'')::uuid,business_system_id=NULLIF($12,'')::uuid,business_system_draft_id=NULLIF($13,'')::uuid,
+		       status=$14,importance=$15,owner_user_id=NULLIF($16,'')::uuid,owner_name=NULLIF($17,''),notes=NULLIF($18,''),
+		       expires_at=$19,custom_values=$20::jsonb,draft_status='editing',updated_by=$21::uuid,updated_at=now()
 		WHERE id::text=$4 AND task_id::text=$1 AND organization_id::text=$2 AND operation IN ('create','update') AND draft_status IN ('editing','returned')
 	`, taskID, organizationID, principal.UserID, draftID, input.Type, input.Value, normalizedValue, input.Name,
-		input.Environment, input.NetworkScope, input.NetworkAreaID, input.BusinessSystemID, input.Status, input.Importance,
+		input.Environment, input.NetworkScope, input.NetworkAreaID, input.BusinessSystemID, systemDraftID, input.Status, input.Importance,
 		input.OwnerUserID, input.OwnerName, input.Notes, input.ExpiresAt, customValues, principal.UserID)
 	if err != nil {
 		return AssetDraft{}, mapDraftDatabaseError(err)
@@ -438,6 +456,27 @@ func (s *Service) loadDraftAssignment(ctx context.Context, q queryRower, princip
 	return item, nil
 }
 
+func resolveBusinessSystemReference(ctx context.Context, q queryRower, organizationID, referenceID string) (formalID, draftID string, err error) {
+	referenceID = strings.TrimSpace(referenceID)
+	if referenceID == "" {
+		return "", "", nil
+	}
+	var exists bool
+	if err = q.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM business_systems WHERE id::text=$1 AND owner_organization_id::text=$2 AND deleted_at IS NULL)`, referenceID, organizationID).Scan(&exists); err != nil {
+		return "", "", err
+	}
+	if exists {
+		return referenceID, "", nil
+	}
+	if err = q.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM inventory_business_system_drafts WHERE id::text=$1 AND organization_id::text=$2 AND draft_status IN ('editing','submitted','returned','published') AND operation <> 'delete')`, referenceID, organizationID).Scan(&exists); err != nil {
+		return "", "", err
+	}
+	if !exists {
+		return "", "", ErrInvalid
+	}
+	return "", referenceID, nil
+}
+
 func validateDraftReferences(ctx context.Context, q queryRower, organizationID string, input asset.CreateInput) error {
 	var organizationStatus string
 	if err := q.QueryRow(ctx, `SELECT status FROM organizations WHERE id::text=$1 AND deleted_at IS NULL`, organizationID).Scan(&organizationStatus); errors.Is(err, pgx.ErrNoRows) {
@@ -459,7 +498,7 @@ func validateDraftReferences(ctx context.Context, q queryRower, organizationID s
 	}
 	if input.BusinessSystemID != "" {
 		var ok bool
-		if err := q.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM business_systems WHERE id::text=$1 AND owner_organization_id::text=$2 AND deleted_at IS NULL)`, input.BusinessSystemID, organizationID).Scan(&ok); err != nil {
+		if err := q.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM business_systems WHERE id::text=$1 AND owner_organization_id::text=$2 AND deleted_at IS NULL) OR EXISTS(SELECT 1 FROM inventory_business_system_drafts WHERE id::text=$1 AND organization_id::text=$2 AND draft_status IN ('editing','submitted','returned','published') AND operation <> 'delete')`, input.BusinessSystemID, organizationID).Scan(&ok); err != nil {
 			return fmt.Errorf("validate draft business system: %w", err)
 		}
 		if !ok {
@@ -483,13 +522,14 @@ func loadAssetDraft(ctx context.Context, q queryRower, draftID string) (AssetDra
 		SELECT draft.id::text, draft.task_id::text, COALESCE(draft.source_asset_id::text,''), draft.operation, draft.draft_status,
 		       draft.asset_type, draft.asset_value, draft.normalized_value, COALESCE(draft.asset_name, ''),
 		       organization.id::text, organization.organization_code, organization.organization_name,
-		       COALESCE(system.id::text, ''), COALESCE(system.system_code, ''), COALESCE(system.system_name, ''),
+		       COALESCE(working_system.id::text, system.id::text, ''), COALESCE(working_system.system_code, system.system_code, ''), COALESCE(working_system.system_name, system.system_name, ''),
 		       draft.environment, draft.network_scope, COALESCE(area.id::text, ''), COALESCE(area.area_name, ''),
-		       draft.status, draft.importance, 'manual', COALESCE(draft.owner_user_id::text, ''),
+		       draft.status, draft.importance, COALESCE(draft.source, 'manual'), COALESCE(draft.owner_user_id::text, ''),
 		       COALESCE(owner.username, ''), COALESCE(owner.display_name, ''), COALESCE(draft.owner_name, ''),
 		       COALESCE(draft.notes, ''), draft.expires_at, draft.created_at, draft.updated_at, draft.custom_values
 		FROM inventory_asset_drafts draft JOIN organizations organization ON organization.id=draft.organization_id
 		LEFT JOIN business_systems system ON system.id=draft.business_system_id AND system.deleted_at IS NULL
+		LEFT JOIN inventory_business_system_drafts working_system ON working_system.id=draft.business_system_draft_id AND working_system.draft_status IN ('editing','submitted','returned','published')
 		LEFT JOIN asset_network_areas area ON area.id=draft.network_area_id LEFT JOIN users owner ON owner.id=draft.owner_user_id
 		WHERE draft.id::text=$1
 	`, draftID)
@@ -549,20 +589,20 @@ func mapDraftDatabaseError(err error) error {
 }
 
 func publishAssetDrafts(ctx context.Context, tx pgx.Tx, principal auth.Principal, taskID, organizationID, requestID, ipAddress string) error {
-	rows, err := tx.Query(ctx, `SELECT id::text,operation,COALESCE(source_asset_id::text,''),asset_type,asset_value,normalized_value,COALESCE(asset_name,''),environment,network_scope,COALESCE(network_area_id::text,''),COALESCE(business_system_id::text,''),status,importance,source,COALESCE(owner_user_id::text,''),COALESCE(owner_name,''),COALESCE(notes,''),expires_at,custom_values FROM inventory_asset_drafts WHERE task_id::text=$1 AND organization_id::text=$2 AND draft_status='submitted' ORDER BY created_at FOR UPDATE`, taskID, organizationID)
+	rows, err := tx.Query(ctx, `SELECT id::text,operation,COALESCE(source_asset_id::text,''),asset_type,asset_value,normalized_value,COALESCE(asset_name,''),environment,network_scope,COALESCE(network_area_id::text,''),COALESCE(business_system_id::text,''),COALESCE(business_system_draft_id::text,''),status,importance,source,COALESCE(owner_user_id::text,''),COALESCE(owner_name,''),COALESCE(notes,''),expires_at,custom_values FROM inventory_asset_drafts WHERE task_id::text=$1 AND organization_id::text=$2 AND draft_status='submitted' ORDER BY created_at FOR UPDATE`, taskID, organizationID)
 	if err != nil {
 		return fmt.Errorf("load submitted asset drafts: %w", err)
 	}
 	type draft struct {
-		id, operation, sourceID, typ, value, normalized, name, environment, scope, areaID, systemID, status, importance, source, ownerUserID, ownerName, notes string
-		expiresAt                                                                                                                                              *time.Time
-		customValues                                                                                                                                           []customfield.Value
+		id, operation, sourceID, typ, value, normalized, name, environment, scope, areaID, systemID, systemDraftID, status, importance, source, ownerUserID, ownerName, notes string
+		expiresAt                                                                                                                                                             *time.Time
+		customValues                                                                                                                                                          []customfield.Value
 	}
 	items := make([]draft, 0)
 	for rows.Next() {
 		var item draft
 		var raw []byte
-		if err := rows.Scan(&item.id, &item.operation, &item.sourceID, &item.typ, &item.value, &item.normalized, &item.name, &item.environment, &item.scope, &item.areaID, &item.systemID, &item.status, &item.importance, &item.source, &item.ownerUserID, &item.ownerName, &item.notes, &item.expiresAt, &raw); err != nil {
+		if err := rows.Scan(&item.id, &item.operation, &item.sourceID, &item.typ, &item.value, &item.normalized, &item.name, &item.environment, &item.scope, &item.areaID, &item.systemID, &item.systemDraftID, &item.status, &item.importance, &item.source, &item.ownerUserID, &item.ownerName, &item.notes, &item.expiresAt, &raw); err != nil {
 			rows.Close()
 			return fmt.Errorf("scan submitted asset draft: %w", err)
 		}
@@ -582,6 +622,11 @@ func publishAssetDrafts(ctx context.Context, tx pgx.Tx, principal auth.Principal
 		return err
 	}
 	for _, item := range items {
+		if item.systemDraftID != "" {
+			if err := tx.QueryRow(ctx, `SELECT CASE WHEN operation='create' THEN id::text ELSE COALESCE(source_system_id::text,'') END FROM inventory_business_system_drafts WHERE id=$1::uuid AND organization_id=$2::uuid AND draft_status IN ('submitted','published')`, item.systemDraftID, organizationID).Scan(&item.systemID); err != nil {
+				return fmt.Errorf("resolve published business system for asset: %w", err)
+			}
+		}
 		resourceID := item.id
 		action, summary := "asset.create", "审核发布填报网络资产"
 		switch item.operation {

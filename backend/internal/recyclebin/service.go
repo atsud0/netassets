@@ -155,6 +155,33 @@ func (s *Service) RestoreAsset(ctx context.Context, principal auth.Principal, as
 	if err != nil {
 		return fmt.Errorf("load deleted asset: %w", err)
 	}
+	var validReference bool
+	if err := tx.QueryRow(ctx, `SELECT status='enabled' FROM organizations WHERE id=$1::uuid AND deleted_at IS NULL`, organizationID).Scan(&validReference); err != nil {
+		return fmt.Errorf("validate asset organization on restore: %w", err)
+	}
+	if !validReference {
+		return ErrInvalid
+	}
+	if err := tx.QueryRow(ctx, `SELECT NOT EXISTS (SELECT 1 FROM assets a JOIN asset_network_areas area ON area.id=a.network_area_id WHERE a.id=$1::uuid AND (area.status <> 'enabled' OR area.organization_id <> $2::uuid))`, assetID, organizationID).Scan(&validReference); err != nil {
+		return fmt.Errorf("validate asset network area on restore: %w", err)
+	}
+	if !validReference {
+		return ErrInvalid
+	}
+	if ownerUserID != "" {
+		if err := tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM users u JOIN user_organizations membership ON membership.user_id=u.id WHERE u.id=$1::uuid AND membership.organization_id=$2::uuid AND u.status='enabled' AND u.deleted_at IS NULL)`, ownerUserID, organizationID).Scan(&validReference); err != nil {
+			return fmt.Errorf("validate asset owner on restore: %w", err)
+		}
+		if !validReference {
+			return ErrInvalid
+		}
+	}
+	if err := tx.QueryRow(ctx, `SELECT NOT EXISTS (SELECT 1 FROM system_assets link JOIN business_systems system ON system.id=link.business_system_id WHERE link.asset_id=$1::uuid AND (system.deleted_at IS NOT NULL OR system.owner_organization_id <> $2::uuid))`, assetID, organizationID).Scan(&validReference); err != nil {
+		return fmt.Errorf("validate asset system on restore: %w", err)
+	}
+	if !validReference {
+		return ErrInvalid
+	}
 
 	var hasConflict bool
 	if err := tx.QueryRow(ctx, `

@@ -35,7 +35,8 @@ type Candidate struct {
 	Source           string         `json:"source"`
 	SourceReference  string         `json:"source_reference,omitempty"`
 	SuggestedData    map[string]any `json:"suggested_data"`
-	Status           string         `json:"status"`
+	Status           string         `json:"status"` // 审核状态，不代表正式资产是否启用
+	ReviewStatus     string         `json:"review_status"`
 	MatchedAssetID   string         `json:"matched_asset_id,omitempty"`
 	ReviewNote       string         `json:"review_note,omitempty"`
 	CreatedBy        string         `json:"created_by,omitempty"`
@@ -123,6 +124,7 @@ func (s *Service) List(ctx context.Context, principal auth.Principal, status str
 		if i.SuggestedData == nil {
 			i.SuggestedData = map[string]any{}
 		}
+		i.ReviewStatus = i.Status
 		items = append(items, i)
 	}
 	return items, rows.Err()
@@ -166,6 +168,7 @@ func (s *Service) Search(ctx context.Context, principal auth.Principal, status s
 		if i.SuggestedData == nil {
 			i.SuggestedData = map[string]any{}
 		}
+		i.ReviewStatus = i.Status
 		items = append(items, i)
 	}
 	if err := rows.Err(); err != nil {
@@ -213,6 +216,7 @@ func (s *Service) listByID(ctx context.Context, id string) (Candidate, error) {
 	if i.SuggestedData == nil {
 		i.SuggestedData = map[string]any{}
 	}
+	i.ReviewStatus = i.Status
 	return i, nil
 }
 
@@ -230,7 +234,7 @@ func (s *Service) Create(ctx context.Context, principal auth.Principal, in Creat
 	if in.Source == "" {
 		in.Source = "manual"
 	}
-	if in.Source != "manual" && in.Source != "api" {
+	if in.Source != "manual" && in.Source != "api" && in.Source != "import" && in.Source != "finding_import" {
 		return Candidate{}, ErrInvalid
 	}
 	normalized, err := asset.NormalizeValue(in.AssetType, in.AssetValue)
@@ -256,17 +260,19 @@ func (s *Service) Create(ctx context.Context, principal auth.Principal, in Creat
 		return Candidate{}, fmt.Errorf("begin candidate: %w", err)
 	}
 	defer tx.Rollback(ctx)
-	var enabled bool
-	if err := tx.QueryRow(ctx, `SELECT status='enabled' FROM organizations WHERE id=$1::uuid AND deleted_at IS NULL`, in.OrganizationID).Scan(&enabled); errors.Is(err, pgx.ErrNoRows) {
-		return Candidate{}, ErrNotFound
-	} else if err != nil {
-		return Candidate{}, err
-	}
-	if !enabled {
-		return Candidate{}, ErrInvalid
+	if in.OrganizationID != "" {
+		var enabled bool
+		if err := tx.QueryRow(ctx, `SELECT status='enabled' FROM organizations WHERE id=$1::uuid AND deleted_at IS NULL`, in.OrganizationID).Scan(&enabled); errors.Is(err, pgx.ErrNoRows) {
+			return Candidate{}, ErrNotFound
+		} else if err != nil {
+			return Candidate{}, err
+		}
+		if !enabled {
+			return Candidate{}, ErrInvalid
+		}
 	}
 	var id string
-	err = tx.QueryRow(ctx, `INSERT INTO asset_candidates(asset_type,asset_value,normalized_value,suggested_data,organization_id,source,source_reference,status,created_by) VALUES($1,$2,$3,$4::jsonb,$5::uuid,$6,NULLIF($7,''),'pending',$8::uuid) RETURNING id::text`, in.AssetType, in.AssetValue, normalized, data, in.OrganizationID, in.Source, in.SourceReference, principal.UserID).Scan(&id)
+	err = tx.QueryRow(ctx, `INSERT INTO asset_candidates(asset_type,asset_value,normalized_value,suggested_data,organization_id,source,source_reference,status,created_by) VALUES($1,$2,$3,$4::jsonb,NULLIF($5,'')::uuid,$6,NULLIF($7,''),'pending',$8::uuid) RETURNING id::text`, in.AssetType, in.AssetValue, normalized, data, in.OrganizationID, in.Source, in.SourceReference, principal.UserID).Scan(&id)
 	if err != nil {
 		return Candidate{}, fmt.Errorf("insert asset candidate: %w", err)
 	}
@@ -306,12 +312,34 @@ func (s *Service) Accept(ctx context.Context, principal auth.Principal, id strin
 			in.Notes = v
 		}
 	}
-	item, err := s.assets.Create(ctx, principal, in.CreateInput, "manual", requestID, ip)
+	source := "manual"
+	if candidate.Source == "finding_import" {
+		source = "finding_import"
+	}
+	item, err := s.assets.CreateWithAfterCreate(ctx, principal, in.CreateInput, source, requestID, ip, func(ctxTx pgx.Tx, created asset.Asset) error {
+		var current, org string
+		if err := ctxTx.QueryRow(ctx, `SELECT status,COALESCE(organization_id::text,'') FROM asset_candidates WHERE id=$1::uuid FOR UPDATE`, id).Scan(&current, &org); errors.Is(err, pgx.ErrNoRows) {
+			return ErrNotFound
+		} else if err != nil {
+			return fmt.Errorf("lock asset candidate for acceptance: %w", err)
+		}
+		if current != "pending" {
+			return ErrConflict
+		}
+		// Finding imports may arrive before ownership is known. Once an administrator
+		// accepts the discovery, persist the selected organization on the candidate as
+		// well so subsequent review/list responses retain the resolved ownership.
+		resolvedOrganizationID := org
+		if resolvedOrganizationID == "" {
+			resolvedOrganizationID = in.OrganizationID
+		}
+		if _, err := ctxTx.Exec(ctx, `UPDATE asset_candidates SET organization_id=$2::uuid,status='accepted',matched_asset_id=$3::uuid,review_note=NULLIF($4,''),reviewed_by=$5::uuid,reviewed_at=now(),updated_at=now() WHERE id=$1::uuid`, id, resolvedOrganizationID, created.ID, strings.TrimSpace(in.ReviewNote), principal.UserID); err != nil {
+			return fmt.Errorf("accept asset candidate: %w", err)
+		}
+		return s.audit(ctx, ctxTx, principal, resolvedOrganizationID, "asset_candidate.accept", id, "确认待确认资产并入库", map[string]any{"matched_asset_id": created.ID, "review_note": strings.TrimSpace(in.ReviewNote)}, requestID, ip)
+	})
 	if err != nil {
 		return asset.Asset{}, mapAssetError(err)
-	}
-	if err := s.review(ctx, principal, id, "accepted", item.ID, in.ReviewNote, requestID, ip); err != nil {
-		return asset.Asset{}, err
 	}
 	return item, nil
 }

@@ -163,7 +163,7 @@ func (s *Service) createUnreportedWithSource(ctx context.Context, p auth.Princip
 	if !p.HasPermission("asset.manage") {
 		return Asset{}, ErrForbidden
 	}
-	if source != "manual" && source != "import" && source != "api" && source != "plugin" {
+	if source != "manual" && source != "import" && source != "api" && source != "plugin" && source != "finding_import" {
 		return Asset{}, ErrInvalid
 	}
 	normalized, e := PrepareCreateInput(&in)

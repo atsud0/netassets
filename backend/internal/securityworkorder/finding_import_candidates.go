@@ -319,7 +319,7 @@ func insertFindingImportCandidates(ctx context.Context, tx pgx.Tx, importID, bat
 		// all point to that discovery and are released together when the asset is
 		// confirmed.
 		var assetCandidateID string
-		if batchID == "" && candidate.SuggestedAssetID == "" {
+		if batchID == "" && candidate.SuggestedAssetID == "" && candidate.NormalizedValue != "" {
 			err = tx.QueryRow(ctx, `
 			SELECT id::text FROM asset_candidates
 			WHERE asset_type=$1 AND normalized_value=$2 AND status='pending'
@@ -354,6 +354,8 @@ func insertFindingImportCandidates(ctx context.Context, tx pgx.Tx, importID, bat
 					(asset_type, asset_value, normalized_value, suggested_data, organization_id,
 					 source, source_reference, status, created_by)
 				VALUES ($1,$2,$3,$4::jsonb,NULL,'finding_import',NULLIF($5,''),'pending',$6::uuid)
+				ON CONFLICT (asset_type, normalized_value) WHERE status='pending' AND normalized_value <> ''
+				DO UPDATE SET updated_at=now()
 				RETURNING id::text`, candidate.AssetType, candidate.AssetValue, candidate.NormalizedValue,
 					suggested, sourceReference, createdBy).Scan(&assetCandidateID)
 				if err != nil {
@@ -778,45 +780,73 @@ func (s *Service) IgnoreFindingImportCandidate(ctx context.Context, principal au
 	return s.GetFindingImportCandidate(ctx, principal, id)
 }
 
-// LinkAcceptedAssetCandidate releases all vulnerability imports waiting on an
-// asset discovery after that discovery has been accepted into the asset ledger.
-// The operation is intentionally idempotent: already processed candidates are
-// skipped, so the caller can safely retry after a transient failure.
+// FindingImportLinkResult makes partial linking explicit so failed rows remain
+// pending and can be retried without re-importing the file.
+type FindingImportLinkResult struct {
+	Total   int `json:"total"`
+	Linked  int `json:"linked"`
+	Failed  int `json:"failed"`
+	Pending int `json:"pending"`
+}
+
+// LinkAcceptedAssetCandidate links all pending findings for an accepted asset.
+// It is idempotent and retains failed candidates as pending.
 func (s *Service) LinkAcceptedAssetCandidate(ctx context.Context, principal auth.Principal, assetCandidateID, assetID, requestID, ipAddress string) error {
+	_, err := s.RetryAcceptedAssetCandidate(ctx, principal, assetCandidateID, assetID, requestID, ipAddress)
+	return err
+}
+
+func (s *Service) RetryAcceptedAssetCandidate(ctx context.Context, principal auth.Principal, assetCandidateID, assetID, requestID, ipAddress string) (FindingImportLinkResult, error) {
+	result := FindingImportLinkResult{}
 	if !principal.CanManageSecurityFindings() {
-		return ErrForbidden
+		return result, ErrForbidden
 	}
-	assetCandidateID = strings.TrimSpace(assetCandidateID)
-	assetID = strings.TrimSpace(assetID)
-	if !validUUID(assetCandidateID) || !validUUID(assetID) {
-		return ErrInvalid
+	assetCandidateID, assetID = strings.TrimSpace(assetCandidateID), strings.TrimSpace(assetID)
+	if !validUUID(assetCandidateID) {
+		return result, ErrInvalid
 	}
-	rows, err := s.pool.Query(ctx, `
-		SELECT id::text
-		FROM security_finding_import_candidates
-		WHERE asset_candidate_id=$1::uuid AND status='pending'
-		ORDER BY source_row_number, created_at`, assetCandidateID)
+	if assetID == "" {
+		if err := s.pool.QueryRow(ctx, `SELECT COALESCE(matched_asset_id::text,'') FROM asset_candidates WHERE id=$1::uuid AND status='accepted'`, assetCandidateID).Scan(&assetID); err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				return result, ErrNotFound
+			}
+			return result, fmt.Errorf("load accepted asset candidate: %w", err)
+		}
+	}
+	if !validUUID(assetID) {
+		return result, ErrInvalid
+	}
+	rows, err := s.pool.Query(ctx, `SELECT id::text FROM security_finding_import_candidates WHERE asset_candidate_id=$1::uuid AND status='pending' ORDER BY source_row_number,created_at`, assetCandidateID)
 	if err != nil {
-		return fmt.Errorf("list findings for accepted asset candidate: %w", err)
+		return result, fmt.Errorf("list findings for accepted asset candidate: %w", err)
 	}
 	defer rows.Close()
 	ids := make([]string, 0)
 	for rows.Next() {
 		var id string
 		if err := rows.Scan(&id); err != nil {
-			return fmt.Errorf("scan finding for accepted asset candidate: %w", err)
+			return result, err
 		}
 		ids = append(ids, id)
 	}
 	if err := rows.Err(); err != nil {
-		return fmt.Errorf("iterate findings for accepted asset candidate: %w", err)
+		return result, err
 	}
+	result.Total = len(ids)
+	var firstErr error
 	for _, id := range ids {
-		if _, err := s.LinkFindingImportCandidate(ctx, principal, id, FindingImportCandidateLinkInput{
-			AssetID: assetID,
-		}, requestID, ipAddress); err != nil {
-			return fmt.Errorf("link finding import candidate %s: %w", id, err)
+		if _, err := s.LinkFindingImportCandidate(ctx, principal, id, FindingImportCandidateLinkInput{AssetID: assetID}, requestID, ipAddress); err != nil {
+			result.Failed++
+			if firstErr == nil {
+				firstErr = fmt.Errorf("link finding import candidate %s: %w", id, err)
+			}
+			continue
 		}
+		result.Linked++
 	}
-	return nil
+	result.Pending = result.Failed
+	if firstErr != nil {
+		return result, firstErr
+	}
+	return result, nil
 }

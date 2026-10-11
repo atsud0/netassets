@@ -34,6 +34,7 @@ var (
 	ErrForbidden      = errors.New("forbidden")
 	ErrNotFound       = errors.New("not found")
 	ErrConflict       = errors.New("conflict")
+	ErrEditConflict   = errors.New("edit conflict")
 	ErrInvalid        = errors.New("invalid input")
 	ErrTaskBound      = errors.New("asset is bound to an inventory task")
 	ErrExportTooLarge = errors.New("synchronous xlsx export too large")
@@ -86,21 +87,22 @@ type Asset struct {
 }
 
 type CreateInput struct {
-	Type             string              `json:"type"`
-	Value            string              `json:"value"`
-	Name             string              `json:"name"`
-	OrganizationID   string              `json:"organization_id"`
-	BusinessSystemID string              `json:"business_system_id"`
-	Environment      string              `json:"environment"`
-	NetworkScope     string              `json:"network_scope"`
-	NetworkAreaID    string              `json:"network_area_id"`
-	Status           string              `json:"status"`
-	Importance       string              `json:"importance"`
-	OwnerUserID      string              `json:"owner_user_id"`
-	OwnerName        string              `json:"owner_name"`
-	Notes            string              `json:"notes"`
-	ExpiresAt        *time.Time          `json:"expires_at"`
-	CustomValues     []customfield.Value `json:"custom_values,omitempty"`
+	Type              string              `json:"type"`
+	Value             string              `json:"value"`
+	Name              string              `json:"name"`
+	OrganizationID    string              `json:"organization_id"`
+	BusinessSystemID  string              `json:"business_system_id"`
+	Environment       string              `json:"environment"`
+	NetworkScope      string              `json:"network_scope"`
+	NetworkAreaID     string              `json:"network_area_id"`
+	Status            string              `json:"status"`
+	Importance        string              `json:"importance"`
+	OwnerUserID       string              `json:"owner_user_id"`
+	OwnerName         string              `json:"owner_name"`
+	Notes             string              `json:"notes"`
+	ExpiresAt         *time.Time          `json:"expires_at"`
+	CustomValues      []customfield.Value `json:"custom_values,omitempty"`
+	ExpectedUpdatedAt *time.Time          `json:"expected_updated_at,omitempty"`
 }
 
 type ImportError struct {
@@ -815,7 +817,7 @@ func assetExportLabel(kind, value string) string {
 		"scope":       {"public": "公网", "private": "内网", "unknown": "未知"},
 		"status":      {"active": "启用", "pending": "待确认", "disabled": "停用", "archived": "已归档"},
 		"importance":  {"normal": "一般", "important": "重要", "core": "核心"},
-		"source":      {"manual": "手工", "import": "导入", "api": "API", "plugin": "插件"},
+		"source":      {"manual": "手工", "import": "导入", "api": "API", "plugin": "插件", "finding_import": "漏洞导入"},
 	}
 	if label, ok := labels[kind][value]; ok {
 		return label
@@ -854,6 +856,17 @@ func (s *Service) Create(ctx context.Context, principal auth.Principal, input Cr
 		return s.createUnreported(ctx, principal, input, requestID, ipAddress)
 	}
 	return s.create(ctx, principal, input, source, requestID, ipAddress, nil)
+}
+
+// CreateWithAfterCreate is the transactional variant used by workflows that
+// must update their review record together with the newly created asset. The
+// callback runs before the asset transaction commits; returning an error rolls
+// the entire operation back.
+func (s *Service) CreateWithAfterCreate(ctx context.Context, principal auth.Principal, input CreateInput, source, requestID, ipAddress string, afterCreate func(pgx.Tx, Asset) error) (Asset, error) {
+	if usesWorkingInventory(principal) {
+		return Asset{}, ErrInvalid
+	}
+	return s.create(ctx, principal, input, source, requestID, ipAddress, afterCreate)
 }
 
 func (s *Service) create(ctx context.Context, principal auth.Principal, input CreateInput, source, requestID, ipAddress string, afterCreate func(pgx.Tx, Asset) error) (Asset, error) {
@@ -1066,9 +1079,9 @@ func (s *Service) Update(ctx context.Context, principal auth.Principal, assetID 
 		UPDATE assets SET asset_type = $2, asset_value = $3, normalized_value = $4, asset_name = NULLIF($5, ''),
 		                  environment = $6, network_scope = $7, network_area_id = NULLIF($8, '')::uuid, status = $9, importance = $10,
 		                  notes = NULLIF($11, ''), expires_at = $12, updated_by = $13::uuid, updated_at = now()
-		WHERE id::text = $1 AND deleted_at IS NULL
+		WHERE id::text = $1 AND deleted_at IS NULL AND ($14::timestamptz IS NULL OR updated_at = $14::timestamptz)
 	`, assetID, input.Type, input.Value, normalizedValue, input.Name, input.Environment, input.NetworkScope, input.NetworkAreaID,
-		input.Status, input.Importance, input.Notes, input.ExpiresAt, principal.UserID)
+		input.Status, input.Importance, input.Notes, input.ExpiresAt, principal.UserID, input.ExpectedUpdatedAt)
 	if err != nil {
 		var pgErr *pgconn.PgError
 		if errors.As(err, &pgErr) && pgErr.Code == "23505" {
@@ -1077,6 +1090,9 @@ func (s *Service) Update(ctx context.Context, principal auth.Principal, assetID 
 		return Asset{}, fmt.Errorf("update asset: %w", err)
 	}
 	if command.RowsAffected() == 0 {
+		if input.ExpectedUpdatedAt != nil {
+			return Asset{}, ErrEditConflict
+		}
 		return Asset{}, ErrNotFound
 	}
 	if _, err := tx.Exec(ctx, `DELETE FROM asset_organizations WHERE asset_id::text = $1 AND is_primary`, assetID); err != nil {

@@ -865,7 +865,7 @@ func createSubmissionSnapshot(ctx context.Context, tx pgx.Tx, principal auth.Pri
 		           'status', draft.status,
 		           'importance', draft.importance,
 		           'expires_at', draft.expires_at,
-		           'linked_system_codes', CASE WHEN system.id IS NULL THEN '[]'::jsonb ELSE jsonb_build_array(system.system_code) END,
+		           'linked_system_codes', CASE WHEN COALESCE(working_system.id, system.id) IS NULL THEN '[]'::jsonb ELSE jsonb_build_array(COALESCE(working_system.system_code, system.system_code)) END,
 		           'notes', COALESCE(draft.notes, ''),
 		           '_inventory_draft', true,
 		           '_inventory_operation', draft.operation,
@@ -874,6 +874,7 @@ func createSubmissionSnapshot(ctx context.Context, tx pgx.Tx, principal auth.Pri
 		FROM inventory_asset_drafts draft
 		LEFT JOIN asset_network_areas area ON area.id=draft.network_area_id
 		LEFT JOIN business_systems system ON system.id=draft.business_system_id AND system.deleted_at IS NULL
+		LEFT JOIN inventory_business_system_drafts working_system ON working_system.id=draft.business_system_draft_id AND working_system.draft_status IN ('editing','submitted','returned','published')
 		WHERE draft.task_id=$3::uuid AND draft.organization_id=$2::uuid
 		  AND draft.draft_status IN ('editing','returned')
 		  AND EXISTS (

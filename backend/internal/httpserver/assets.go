@@ -263,6 +263,8 @@ func registerAssetRoutes(api *gin.RouterGroup, requireAuth gin.HandlerFunc, serv
 			writeAPIError(c, http.StatusBadRequest, "invalid_asset", "请检查资产类型、资产值、状态和归属信息")
 		case errors.Is(err, asset.ErrNotFound):
 			writeAPIError(c, http.StatusNotFound, "reference_not_found", "网络资产、所属组织或业务系统不存在")
+		case errors.Is(err, asset.ErrEditConflict):
+			writeAPIError(c, http.StatusConflict, "asset_edit_conflict", "资产已被其他人修改，请刷新后重试")
 		case errors.Is(err, asset.ErrConflict):
 			writeAPIError(c, http.StatusConflict, "asset_exists", "相同类型和资产值已存在")
 		case err != nil:

@@ -337,6 +337,13 @@ func (s *Service) DeleteBusinessSystemDraft(ctx context.Context, principal auth.
 	if _, err := s.loadDraftAssignment(ctx, tx, principal, taskID, organizationID, true, "business_systems"); err != nil {
 		return err
 	}
+	var referencedAssets int
+	if err := tx.QueryRow(ctx, `SELECT count(*) FROM inventory_asset_drafts WHERE business_system_draft_id=$1::uuid AND draft_status IN ('editing','submitted','returned')`, draftID).Scan(&referencedAssets); err != nil {
+		return fmt.Errorf("check business system draft asset references: %w", err)
+	}
+	if referencedAssets > 0 {
+		return ErrResourceInUse
+	}
 	var code, label string
 	unselected := false
 	if err := tx.QueryRow(ctx, `UPDATE inventory_business_system_drafts SET task_id=NULL,selected_at=NULL,updated_by=$4::uuid,updated_at=now() WHERE id::text=$1 AND task_id::text=$2 AND organization_id::text=$3 AND selected_at IS NOT NULL AND draft_status IN ('editing','returned') RETURNING system_code,system_name`, draftID, taskID, organizationID, principal.UserID).Scan(&code, &label); errors.Is(err, pgx.ErrNoRows) {
@@ -509,7 +516,9 @@ func publishBusinessSystemDrafts(ctx context.Context, tx pgx.Tx, principal auth.
 			resourceID = item.SourceSystemID
 			action, summary = "business_system.delete", "审核发布填报业务系统删除"
 			var linkedAssets int
-			if err := tx.QueryRow(ctx, `SELECT count(*) FROM system_assets link JOIN assets formal ON formal.id=link.asset_id WHERE link.business_system_id=$1::uuid AND formal.deleted_at IS NULL`, resourceID).Scan(&linkedAssets); err != nil {
+			if err := tx.QueryRow(ctx, `SELECT count(*) FROM system_assets link JOIN assets formal ON formal.id=link.asset_id
+                WHERE link.business_system_id=$1::uuid AND formal.deleted_at IS NULL
+                  AND NOT EXISTS (SELECT 1 FROM inventory_asset_drafts ad WHERE ad.task_id::text=$2 AND ad.organization_id::text=$3 AND ad.source_asset_id=link.asset_id AND ad.draft_status='submitted' AND (ad.operation='delete' OR (ad.operation='update' AND COALESCE(ad.business_system_id::text,'') <> $1::text)))`, resourceID, taskID, organizationID).Scan(&linkedAssets); err != nil {
 				return fmt.Errorf("check published business system assets: %w", err)
 			}
 			if linkedAssets > 0 {
