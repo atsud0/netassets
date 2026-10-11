@@ -377,7 +377,7 @@ func mapAssetRestoreError(err error) error {
 		return ErrForbidden
 	case errors.Is(err, asset.ErrNotFound):
 		return ErrNotFound
-	case errors.Is(err, asset.ErrTaskBound), errors.Is(err, asset.ErrConflict):
+	case errors.Is(err, asset.ErrTaskBound), errors.Is(err, asset.ErrConflict), errors.Is(err, asset.ErrEditConflict):
 		return ErrConflict
 	case errors.Is(err, asset.ErrInvalid):
 		return ErrInvalid

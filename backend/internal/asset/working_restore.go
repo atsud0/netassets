@@ -76,6 +76,11 @@ func (s *Service) restoreWorking(ctx context.Context, principal auth.Principal, 
 	if err != nil {
 		return Asset{}, err
 	}
+	// A restore rewrites the working version from a historical revision, which
+	// may carry a different type or value than the current draft.
+	if err = s.ensureWorkingValueAvailable(ctx, tx, input.Type, normalizedValue, current.ID); err != nil {
+		return Asset{}, err
+	}
 	result, err := tx.Exec(ctx, `
 		UPDATE inventory_asset_drafts
 		SET operation='update', asset_type=$2, asset_value=$3, normalized_value=$4,
@@ -87,13 +92,17 @@ func (s *Service) restoreWorking(ctx context.Context, principal auth.Principal, 
 		    updated_by=$18::uuid, updated_at=now()
 		WHERE id::text=$1 AND task_id IS NULL AND source_asset_id IS NOT NULL
 		  AND draft_status IN `+inventorydraft.EditableSQL+`
+		  AND ($19::timestamptz IS NULL OR updated_at=$19::timestamptz)
 	`, current.ID, input.Type, input.Value, normalizedValue, input.Name, input.Environment, input.NetworkScope,
 		input.NetworkAreaID, businessSystemID, businessSystemDraftID, input.Status, input.Importance,
-		input.OwnerUserID, input.OwnerName, input.Notes, input.ExpiresAt, customValues, principal.UserID)
+		input.OwnerUserID, input.OwnerName, input.Notes, input.ExpiresAt, customValues, principal.UserID, input.ExpectedUpdatedAt)
 	if err != nil {
 		return Asset{}, mapUnreportedDB(err)
 	}
 	if result.RowsAffected() == 0 {
+		if input.ExpectedUpdatedAt != nil {
+			return Asset{}, ErrEditConflict
+		}
 		return Asset{}, ErrTaskBound
 	}
 	if _, err = tx.Exec(ctx, `

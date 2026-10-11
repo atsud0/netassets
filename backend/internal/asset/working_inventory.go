@@ -249,6 +249,11 @@ func (s *Service) updateWorking(ctx context.Context, p auth.Principal, id string
 	if e != nil {
 		return Asset{}, e
 	}
+	// Editing an existing working version can retype or revalue it, so the pair
+	// must be re-reserved rather than assumed still held by this row.
+	if e = s.ensureWorkingValueAvailable(ctx, tx, in.Type, normalized, id); e != nil {
+		return Asset{}, e
+	}
 	r, e := tx.Exec(ctx, `UPDATE inventory_asset_drafts SET asset_type=$2,asset_value=$3,normalized_value=$4,asset_name=NULLIF($5,''),environment=$6,network_scope=$7,network_area_id=NULLIF($8,'')::uuid,business_system_id=NULLIF($9,'')::uuid,business_system_draft_id=NULLIF($10,'')::uuid,status=$11,importance=$12,owner_user_id=NULLIF($13,'')::uuid,owner_name=NULLIF($14,''),notes=NULLIF($15,''),expires_at=$16,custom_values=$17::jsonb,draft_status='editing',updated_by=$18::uuid,updated_at=now() WHERE id::text=$1 AND task_id IS NULL AND operation IN ('create','update') AND draft_status IN `+inventorydraft.EditableSQL+` AND ($19::timestamptz IS NULL OR updated_at=$19::timestamptz)`, id, in.Type, in.Value, normalized, in.Name, in.Environment, in.NetworkScope, in.NetworkAreaID, bs, bsd, in.Status, in.Importance, in.OwnerUserID, in.OwnerName, in.Notes, in.ExpiresAt, raw, p.UserID, in.ExpectedUpdatedAt)
 	if e != nil {
 		return Asset{}, mapUnreportedDB(e)
@@ -287,6 +292,9 @@ func (s *Service) createWorkingUpdate(ctx context.Context, p auth.Principal, cur
 	defer func() { _ = tx.Rollback(ctx) }()
 	bs, bsd, e := validateUnreportedReferences(ctx, tx, in)
 	if e != nil {
+		return Asset{}, e
+	}
+	if e = s.ensureWorkingValueAvailable(ctx, tx, in.Type, normalized, ""); e != nil {
 		return Asset{}, e
 	}
 	var id string
@@ -447,4 +455,32 @@ func mapUnreportedDB(e error) error {
 		return ErrConflict
 	}
 	return e
+}
+
+// ensureWorkingValueAvailable reserves the (asset_type, normalized_value) pair
+// for a working version. Both the published ledger and every other active draft
+// count as a reservation, because the organization ledger hides a published row
+// as soon as it has an active draft — a draft that duplicates an unrelated
+// published asset would therefore collide only later, at publish time, where the
+// failure is far harder to attribute.
+//
+// excludeDraftID is the row being rewritten, so re-submitting an asset without
+// changing its type or value does not report a conflict against itself.
+func (s *Service) ensureWorkingValueAvailable(ctx context.Context, tx pgx.Tx, assetType, normalizedValue, excludeDraftID string) error {
+	var duplicate bool
+	e := tx.QueryRow(ctx, `SELECT EXISTS(
+	 SELECT 1 FROM assets WHERE asset_type=$1 AND normalized_value=$2 AND deleted_at IS NULL
+	) OR EXISTS(
+	 SELECT 1 FROM inventory_asset_drafts
+	 WHERE asset_type=$1 AND normalized_value=$2
+	   AND draft_status IN `+inventorydraft.ActiveSQL+`
+	   AND ($3='' OR id::text<>$3)
+	)`, assetType, normalizedValue, excludeDraftID).Scan(&duplicate)
+	if e != nil {
+		return e
+	}
+	if duplicate {
+		return ErrConflict
+	}
+	return nil
 }
