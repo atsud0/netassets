@@ -8,6 +8,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"netassets/internal/auth"
+	"netassets/internal/findingstatus"
 	"netassets/internal/pagination"
 )
 
@@ -656,7 +657,7 @@ func (s *Service) CloseOrder(ctx context.Context, p auth.Principal, id, reason s
 	}
 	var unfinished bool
 	err = tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM security_work_order_findings l JOIN security_findings f ON f.id=l.finding_id WHERE l.work_order_id=$1::uuid AND
- (NOT (f.status IN ('fixed','false_positive') OR (f.status='risk_accepted' AND f.risk_accepted_until>now()))
+ (NOT (f.status IN (`+findingstatus.ClosedSQL()+`) OR (f.status='risk_accepted' AND f.risk_accepted_until>now()))
  OR NOT EXISTS(SELECT 1 FROM remediation_tasks t WHERE t.work_order_id=l.work_order_id AND t.finding_id=l.finding_id AND t.status='completed')))
  OR EXISTS(SELECT 1 FROM remediation_tasks t WHERE t.work_order_id=$1::uuid AND t.status NOT IN ('completed','cancelled'))`, id).Scan(&unfinished)
 	if err != nil {

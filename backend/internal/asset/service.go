@@ -949,6 +949,20 @@ func createInTx(ctx context.Context, tx pgx.Tx, principal auth.Principal, input 
 		}
 	}
 
+	// Formal assets are unique per (asset_type, normalized_value) only inside the
+	// assets table. An organization may already have reserved the same value in
+	// an active working version that has not been reported yet, and PostgreSQL
+	// cannot express that cross-table rule, so check it here for every path that
+	// writes a formal asset (manual create, headquarters import, and acceptance
+	// of an imported asset candidate).
+	var workingReserved bool
+	if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM inventory_asset_drafts WHERE asset_type=$1 AND normalized_value=$2 AND draft_status IN `+inventorydraft.ActiveSQL+`)`, input.Type, normalizedValue).Scan(&workingReserved); err != nil {
+		return Asset{}, fmt.Errorf("check asset working version reservation: %w", err)
+	}
+	if workingReserved {
+		return Asset{}, ErrConflict
+	}
+
 	var item Asset
 	err = tx.QueryRow(ctx, `
 		INSERT INTO assets (asset_type, asset_value, normalized_value, asset_name, environment, network_scope, network_area_id,
@@ -1942,21 +1956,8 @@ func (s *Service) createImported(ctx context.Context, principal auth.Principal, 
 		return s.createUnreportedWithSource(ctx, principal, input, "import", requestID, ipAddress)
 	}
 
-	// A headquarters import must not create a formal record that collides with
-	// an organization's active, not-yet-reported working version. Cross-table
-	// uniqueness cannot be enforced by PostgreSQL, so guard it here as well as
-	// in preview.
-	normalized, err := PrepareCreateInput(&input)
-	if err != nil {
-		return Asset{}, err
-	}
-	var workingDuplicate bool
-	if err := s.pool.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM inventory_asset_drafts WHERE asset_type=$1 AND normalized_value=$2 AND draft_status IN `+inventorydraft.ActiveSQL+`)`, input.Type, normalized).Scan(&workingDuplicate); err != nil {
-		return Asset{}, fmt.Errorf("check imported asset working duplicate: %w", err)
-	}
-	if workingDuplicate {
-		return Asset{}, ErrConflict
-	}
+	// Working-version reservations are checked inside create, which every formal
+	// asset write shares.
 	return s.create(ctx, principal, input, "import", requestID, ipAddress, func(tx pgx.Tx, item Asset) error {
 		return customfield.SaveImportedValuesInTx(ctx, tx, "asset", item.ID, definitions, customValues, principal.UserID)
 	})

@@ -16,6 +16,7 @@ import (
 
 	"netassets/internal/access"
 	"netassets/internal/auth"
+	"netassets/internal/findingstatus"
 	"netassets/internal/notification"
 	"netassets/internal/pagination"
 )
@@ -1591,7 +1592,7 @@ func validSeverity(value string) bool {
 }
 
 func validFindingStatus(value string) bool {
-	return value == "pending" || value == "in_progress" || value == "confirmed" || value == "resolved" || value == "fixed" || value == "false_positive" || value == "duplicate" || value == "risk_accepted" || value == "ignored"
+	return findingstatus.Valid(value)
 }
 
 func validWorkOrderStatus(value string) bool {

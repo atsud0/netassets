@@ -10,6 +10,37 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"netassets/internal/auth"
+	"netassets/internal/findingstatus"
+)
+
+// findingStatusValues, findingStatusLabels and findingStatusOrders back the
+// status breakdown, so the order and the Chinese labels come from the shared
+// finding status vocabulary instead of a hand-maintained VALUES list.
+var (
+	findingStatusValues = func() []string {
+		definitions := findingstatus.Definitions()
+		values := make([]string, 0, len(definitions))
+		for _, definition := range definitions {
+			values = append(values, definition.Value)
+		}
+		return values
+	}()
+	findingStatusLabels = func() []string {
+		definitions := findingstatus.Definitions()
+		labels := make([]string, 0, len(definitions))
+		for _, definition := range definitions {
+			labels = append(labels, definition.Label)
+		}
+		return labels
+	}()
+	findingStatusOrders = func() []int32 {
+		definitions := findingstatus.Definitions()
+		orders := make([]int32, 0, len(definitions))
+		for _, definition := range definitions {
+			orders = append(orders, int32(definition.SortOrder))
+		}
+		return orders
+	}()
 )
 
 type TaskProgress struct {
@@ -225,7 +256,8 @@ func (s *Service) GetSecurityOverview(ctx context.Context, principal auth.Princi
 		) AS definitions(key, label, sort_order)
 		LEFT JOIN security_findings f ON f.severity = definitions.key AND `+findingVisible("f")+`
 		GROUP BY definitions.key, definitions.label, definitions.sort_order
-		ORDER BY definitions.sort_order`, principal.UserID, principal.CanViewGroupSecurityDashboard())
+		ORDER BY definitions.sort_order`,
+		principal.UserID, principal.CanViewGroupSecurityDashboard())
 	if err != nil {
 		return SecurityOverview{}, fmt.Errorf("load security severity overview: %w", err)
 	}
@@ -243,14 +275,11 @@ func (s *Service) GetSecurityOverview(ctx context.Context, principal auth.Princi
 
 	statusRows, err := s.pool.Query(ctx, scopeCTE+`
 		SELECT definitions.key, definitions.label, count(f.id)
-		FROM (VALUES
-			('pending', '待处理', 1), ('in_progress', '处理中', 2), ('confirmed', '已确认', 3),
-			('resolved', '已处理', 4), ('fixed', '已修复', 5), ('false_positive', '误报', 6),
-			('ignored', '忽略', 7), ('duplicate', '重复', 8), ('risk_accepted', '风险接受', 9)
-		) AS definitions(key, label, sort_order)
+		FROM unnest($3::text[], $4::text[], $5::int[]) AS definitions(key, label, sort_order)
 		LEFT JOIN security_findings f ON f.status = definitions.key AND `+findingVisible("f")+`
 		GROUP BY definitions.key, definitions.label, definitions.sort_order
-		ORDER BY definitions.sort_order`, principal.UserID, principal.CanViewGroupSecurityDashboard())
+		ORDER BY definitions.sort_order`,
+		principal.UserID, principal.CanViewGroupSecurityDashboard(), findingStatusValues, findingStatusLabels, findingStatusOrders)
 	if err != nil {
 		return SecurityOverview{}, fmt.Errorf("load security finding status overview: %w", err)
 	}
@@ -352,7 +381,7 @@ func (s *Service) GetSecurityOverview(ctx context.Context, principal auth.Princi
 			   AND ($2::boolean OR EXISTS (SELECT 1 FROM security_test_scope_assets scope WHERE scope.batch_id = batch.id AND scope.organization_id IN (SELECT id FROM scoped_organizations)))),
 			(SELECT count(*) FROM security_findings f WHERE f.test_batch_id IS NOT NULL AND ` + findingVisible("f") + `),
 			(SELECT count(*) FROM security_findings f WHERE f.test_batch_id IS NOT NULL
-			   AND f.status IN ('resolved', 'fixed', 'false_positive', 'ignored', 'duplicate', 'risk_accepted') AND ` + findingVisible("f") + `)
+			   AND f.status IN (` + findingstatus.ClosedSQL() + `) AND ` + findingVisible("f") + `)
 	`
 	if err := s.pool.QueryRow(ctx, coverageQuery, principal.UserID, principal.CanViewGroupSecurityDashboard()).Scan(
 		&result.TestCoverage.PublicAssetCount, &result.TestCoverage.TestedPublicAssetCount,
