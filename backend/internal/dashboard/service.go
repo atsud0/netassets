@@ -108,11 +108,15 @@ type TestCoverage struct {
 }
 
 type SecurityOverview struct {
-	FindingSeverity         []SecurityBreakdown               `json:"finding_severity"`
-	FindingStatus           []SecurityBreakdown               `json:"finding_status"`
-	FindingTrend            []SecurityTrendPoint              `json:"finding_trend"`
-	OrganizationPerformance []OrganizationSecurityPerformance `json:"organization_performance"`
-	TestCoverage            TestCoverage                      `json:"test_coverage"`
+	// PendingAssetFindingCount is 待关联资产: findings that belong to an asset
+	// working version which has not been published yet, so they are tracked
+	// before the asset register catches up.
+	PendingAssetFindingCount int64                             `json:"pending_asset_finding_count"`
+	FindingSeverity          []SecurityBreakdown               `json:"finding_severity"`
+	FindingStatus            []SecurityBreakdown               `json:"finding_status"`
+	FindingTrend             []SecurityTrendPoint              `json:"finding_trend"`
+	OrganizationPerformance  []OrganizationSecurityPerformance `json:"organization_performance"`
+	TestCoverage             TestCoverage                      `json:"test_coverage"`
 }
 
 type Service struct{ pool *pgxpool.Pool }
@@ -295,6 +299,16 @@ func (s *Service) GetSecurityOverview(ctx context.Context, principal auth.Princi
 		return SecurityOverview{}, fmt.Errorf("iterate security finding status overview: %w", err)
 	}
 
+	// 待关联资产 follows the same visibility rule as every other indicator: group
+	// users see everything in scope, subsidiary users only see findings already
+	// disclosed through an issued work order.
+	if err := s.pool.QueryRow(ctx, scopeCTE+`
+		SELECT count(*) FROM security_findings f
+		WHERE `+pendingAssetFinding("f")+` AND `+findingVisible("f")+`
+	`, principal.UserID, principal.CanViewGroupSecurityDashboard()).Scan(&result.PendingAssetFindingCount); err != nil {
+		return SecurityOverview{}, fmt.Errorf("load security pending asset findings: %w", err)
+	}
+
 	trendRows, err := s.pool.Query(ctx, scopeCTE+`
 		SELECT to_char(days.day, 'YYYY-MM-DD'),
 			count(DISTINCT new_finding.id),
@@ -394,6 +408,13 @@ func (s *Service) GetSecurityOverview(ctx context.Context, principal auth.Princi
 	result.TestCoverage.PublicAssetCoverageRate = percentage(result.TestCoverage.TestedPublicAssetCount, result.TestCoverage.PublicAssetCount)
 	result.TestCoverage.TestFindingClosureRate = percentage(result.TestCoverage.ClosedTestFindingCount, result.TestCoverage.TestFindingCount)
 	return result, nil
+}
+
+// pendingAssetFinding matches findings that are tracked against an unpublished
+// asset working version: no formal asset yet, but the owning organization already
+// confirmed the draft that will register it.
+func pendingAssetFinding(alias string) string {
+	return alias + `.asset_id IS NULL AND ` + alias + `.pending_asset_draft_id IS NOT NULL`
 }
 
 func percentage(numerator, denominator int64) int64 {

@@ -44,7 +44,7 @@ const router = createRouter({
         { path: 'profile', name: 'profile', component: ProfileView },
         { path: 'systems', name: 'systems', component: BusinessSystemsView, meta: { permission: 'system.manage' } },
         { path: 'assets', name: 'assets', component: AssetsView, meta: { permission: 'asset.manage' } },
-        { path: 'asset-candidates', name: 'asset-candidates', component: AssetCandidatesView, meta: { groupAdminOnly: true } },
+        { path: 'asset-candidates', name: 'asset-candidates', component: AssetCandidatesView, meta: { anyPermission: ['asset.manage'] } },
         { path: 'data-governance', name: 'data-governance', component: DataGovernanceView, meta: { groupAdminOnly: true } },
         { path: 'data-quality-issues', name: 'data-quality-issues', component: DataQualityIssuesView, meta: { permission: 'data_quality.manage' } },
         { path: 'data-quality-scan-history', name: 'data-quality-scan-history', component: DataQualityScanHistoryView, meta: { permission: 'data_quality.manage', groupAdminOnly: true } },

@@ -7,6 +7,13 @@ import { useRoute } from 'vue-router'
 import { apiClient, getAPIErrorMessage } from '../api/client'
 import { useAuthStore } from '../stores/auth'
 import SavedFilterViews from '../components/SavedFilterViews.vue'
+import {
+  FINDING_STATUS_CONFIRMED,
+  FINDING_STATUS_PENDING,
+  FINDING_STATUS_RISK_ACCEPTED,
+  findingStatusLabels,
+  findingStatusTagType,
+} from '../constants/findingStatus'
 
 interface ListResponse<T> { items: T[]; total: number; page: number; page_size: number }
 interface FindingSummaryStats { total: number; pending: number; critical: number; high: number; medium: number; low: number }
@@ -101,7 +108,7 @@ const findingDialogVisible = ref(false)
 const findingFormRef = ref<FormInstance>()
 const editingFindingID = ref('')
 const findingForm = reactive({
-  title: '', severity: 'high', status: 'pending', assignee_organization_id: '', asset_id: '', business_system_id: '', test_batch_id: '',
+  title: '', severity: 'high', status: FINDING_STATUS_PENDING, assignee_organization_id: '', asset_id: '', business_system_id: '', test_batch_id: '',
   vulnerability_type: '', description: '', evidence: '', remediation_advice: '', source: 'manual', discovered_at: new Date() as Date | string,
 })
 
@@ -171,7 +178,6 @@ const actionOrder = ref<WorkOrder>()
 const actionForm = reactive({ comment: '', progress: '', remediation_result: '', verification_result: '', return_reason: '' })
 
 const severityLabels: Record<string, string> = { critical: '严重', high: '高危', medium: '中危', low: '低危', info: '提示' }
-const findingStatusLabels: Record<string, string> = { pending: '待处理', in_progress: '处理中', confirmed: '已确认', resolved: '已处理', fixed: '已修复', false_positive: '误报', ignored: '忽略', duplicate: '重复', risk_accepted: '风险接受' }
 const riskActionLabels: Record<string, string> = { accept: '接受风险', review: '复核风险' }
 const orderStatusLabels: Record<string, string> = {
   draft: '草稿', issued: '已下发', in_progress: '整改中', pending_verification: '待复测', returned: '已退回', closed: '已关闭', cancelled: '已取消',
@@ -206,7 +212,7 @@ const enabledOrganizations = computed(() => organizations.value.filter(item => i
 const scopedAssets = computed(() => assets.value.filter(item => item.organization_id === findingForm.assignee_organization_id && item.status !== 'archived' && (!findingForm.test_batch_id || findingBatchScopeAssetIDs.value.includes(item.id))))
 const scopedSystems = computed(() => systems.value.filter(item => item.organization_id === findingForm.assignee_organization_id && item.status !== 'archived'))
 const usableTestBatches = computed(() => testBatches.value.filter(item => ['authorized', 'in_progress', 'completed'].includes(item.status)))
-const orderFindings = computed(() => findingOptions.value.filter(item => item.assignee_organization_id === workOrderForm.assignee_organization_id && ['pending', 'confirmed'].includes(item.status)))
+const orderFindings = computed(() => findingOptions.value.filter(item => item.assignee_organization_id === workOrderForm.assignee_organization_id && [FINDING_STATUS_PENDING, FINDING_STATUS_CONFIRMED].includes(item.status)))
 const currentPage = computed(() => activeTab.value === 'orders' ? orderPage.value : activeTab.value === 'findings' ? findingPage.value : candidatePage.value)
 const currentTotal = computed(() => activeTab.value === 'orders' ? orderTotal.value : activeTab.value === 'findings' ? findingTotal.value : candidateTotal.value)
 const activeOrderCount = computed(() => workOrders.value.filter(item => !['closed', 'cancelled'].includes(item.status)).length)
@@ -441,7 +447,7 @@ function defaultRiskUntil() {
 
 function resetFindingForm() {
   Object.assign(findingForm, {
-    title: '', severity: 'high', status: 'pending', assignee_organization_id: defaultOrganizationID(), asset_id: '', business_system_id: '', test_batch_id: '',
+    title: '', severity: 'high', status: FINDING_STATUS_PENDING, assignee_organization_id: defaultOrganizationID(), asset_id: '', business_system_id: '', test_batch_id: '',
     vulnerability_type: '', description: '', evidence: '', remediation_advice: '', source: 'manual', discovered_at: new Date(),
   })
 }
@@ -911,11 +917,11 @@ function actionSuccessLabel(mode: ActionMode) {
 function actionButtonType(mode: ActionMode) { return mode === 'cancel' || mode === 'return' ? 'danger' : 'primary' }
 function severityTag(value: string) { return value === 'critical' ? 'danger' : value === 'high' ? 'danger' : value === 'medium' ? 'warning' : value === 'low' ? 'success' : 'info' }
 function orderStatusTag(value: string) { return value === 'closed' ? 'success' : value === 'returned' || value === 'cancelled' ? 'danger' : value === 'pending_verification' ? 'warning' : value === 'in_progress' ? 'primary' : 'info' }
-function findingStatusTag(value: string) { return value === 'fixed' ? 'success' : value === 'resolved' ? 'success' : value === 'in_progress' || value === 'confirmed' ? 'warning' : value === 'false_positive' || value === 'ignored' || value === 'duplicate' ? 'info' : value === 'risk_accepted' ? 'danger' : 'primary' }
+function findingStatusTag(value: string) { return findingStatusTagType(value) }
 function formatDate(value?: string) { return value ? new Date(value).toLocaleString('zh-CN', { hour12: false }) : '—' }
 function findingTarget(item: FindingSummary | Finding) { return item.asset_value || item.business_system_name || '未关联对象' }
 function riskAcceptanceLabel(item: Finding) {
-  if (item.status !== 'risk_accepted') return ''
+  if (item.status !== FINDING_STATUS_RISK_ACCEPTED) return ''
   return item.risk_acceptance_expired ? '已到期，待复核' : '风险接受中'
 }
 async function onTabChange() {
@@ -1041,16 +1047,16 @@ async function onTabChange() {
         <el-table-column label="关联资产/系统" min-width="155"><template #default="scope">{{ findingTarget(scope.row) }}<span v-if="scope.row.asset_value && scope.row.business_system_name" class="table-secondary">{{ scope.row.business_system_name }}</span></template></el-table-column>
 
         <el-table-column label="等级" width="85"><template #default="scope"><el-tag :type="severityTag(scope.row.severity)" effect="dark">{{ severityLabels[scope.row.severity] }}</el-tag></template></el-table-column>
-        <el-table-column label="状态" width="115"><template #default="scope"><el-tag :type="findingStatusTag(scope.row.status)" effect="plain">{{ findingStatusLabels[scope.row.status] }}</el-tag><span v-if="scope.row.status === 'risk_accepted'" class="table-secondary risk-state" :class="{ expired: scope.row.risk_acceptance_expired }">{{ riskAcceptanceLabel(scope.row) }}</span></template></el-table-column>
+        <el-table-column label="状态" width="115"><template #default="scope"><el-tag :type="findingStatusTag(scope.row.status)" effect="plain">{{ findingStatusLabels[scope.row.status] }}</el-tag><span v-if="scope.row.status === FINDING_STATUS_RISK_ACCEPTED" class="table-secondary risk-state" :class="{ expired: scope.row.risk_acceptance_expired }">{{ riskAcceptanceLabel(scope.row) }}</span></template></el-table-column>
         <el-table-column label="发现时间" min-width="135"><template #default="scope">{{ formatDate(scope.row.discovered_at) }}</template></el-table-column>
         <el-table-column label="操作" fixed="right" width="88" align="right" header-align="right" class-name="table-action-column">
           <template #default="scope"><RowActions :label="`操作：${scope.row.name || scope.row.title || scope.row.code || scope.row.display_name || scope.row.id}`">
             <el-button link type="primary" @click="openFindingDetail(scope.row)">详情</el-button>
             <template v-if="auth.canManageSecurityFindings || auth.canManageSecurityWorkOrders">
               <el-button v-if="auth.canManageSecurityFindings" link type="primary" @click="openEditFinding(scope.row)">编辑</el-button>
-              <el-button v-if="auth.canManageSecurityWorkOrders && ['pending', 'confirmed'].includes(scope.row.status)" link type="success" @click="openCreateWorkOrder(scope.row)">生成工单</el-button>
-              <el-button v-if="auth.canManageSecurityFindings && ['pending', 'in_progress', 'confirmed', 'resolved', 'fixed'].includes(scope.row.status)" link type="warning" @click="openRiskDialog(scope.row, 'accept')">接受风险</el-button>
-              <el-button v-if="auth.canManageSecurityFindings && scope.row.status === 'risk_accepted'" link type="warning" @click="openRiskDialog(scope.row, 'review')">复核</el-button>
+              <el-button v-if="auth.canManageSecurityWorkOrders && [FINDING_STATUS_PENDING, FINDING_STATUS_CONFIRMED].includes(scope.row.status)" link type="success" @click="openCreateWorkOrder(scope.row)">生成工单</el-button>
+              <el-button v-if="auth.canManageSecurityFindings && ['pending', 'in_progress', FINDING_STATUS_CONFIRMED, 'resolved', 'fixed'].includes(scope.row.status)" link type="warning" @click="openRiskDialog(scope.row, 'accept')">接受风险</el-button>
+              <el-button v-if="auth.canManageSecurityFindings && scope.row.status === FINDING_STATUS_RISK_ACCEPTED" link type="warning" @click="openRiskDialog(scope.row, 'review')">复核</el-button>
             </template>
           </RowActions></template>
         </el-table-column>
@@ -1102,7 +1108,7 @@ async function onTabChange() {
           <div><span class="mono-text">{{ selectedFinding.code }}</span><h2>{{ selectedFinding.title }}</h2></div>
           <div class="finding-detail-tags"><el-tag :type="severityTag(selectedFinding.severity)" effect="dark">{{ severityLabels[selectedFinding.severity] }}</el-tag><el-tag :type="findingStatusTag(selectedFinding.status)" effect="plain">{{ findingStatusLabels[selectedFinding.status] }}</el-tag></div>
         </div>
-        <el-alert v-if="selectedFinding.status === 'risk_accepted' && selectedFinding.risk_acceptance_expired" title="风险接受已到期，请集团安全运营人员及时复核、延长有效期或撤销风险接受。" type="error" :closable="false" show-icon class="detail-alert" />
+        <el-alert v-if="selectedFinding.status === FINDING_STATUS_RISK_ACCEPTED && selectedFinding.risk_acceptance_expired" title="风险接受已到期，请集团安全运营人员及时复核、延长有效期或撤销风险接受。" type="error" :closable="false" show-icon class="detail-alert" />
         <el-descriptions :column="2" border>
           <el-descriptions-item label="责任组织">{{ selectedFinding.assignee_organization_name }}</el-descriptions-item>
           <el-descriptions-item label="漏洞类型">{{ selectedFinding.vulnerability_type || '未分类' }}</el-descriptions-item>
@@ -1115,7 +1121,7 @@ async function onTabChange() {
         <div v-if="selectedFinding.evidence" class="detail-block"><h3>验证证据</h3><p>{{ selectedFinding.evidence }}</p></div>
         <div v-if="selectedFinding.remediation_advice" class="detail-block"><h3>整改建议</h3><p>{{ selectedFinding.remediation_advice }}</p></div>
         <div v-if="selectedFinding.risk_accepted_at" class="detail-block risk-acceptance-card" :class="{ expired: selectedFinding.risk_acceptance_expired }">
-          <div class="detail-block-heading"><h3>风险接受记录</h3><el-tag v-if="selectedFinding.status === 'risk_accepted'" :type="selectedFinding.risk_acceptance_expired ? 'danger' : 'warning'">{{ riskAcceptanceLabel(selectedFinding) }}</el-tag><el-tag v-else type="info">已撤销</el-tag></div>
+          <div class="detail-block-heading"><h3>风险接受记录</h3><el-tag v-if="selectedFinding.status === FINDING_STATUS_RISK_ACCEPTED" :type="selectedFinding.risk_acceptance_expired ? 'danger' : 'warning'">{{ riskAcceptanceLabel(selectedFinding) }}</el-tag><el-tag v-else type="info">已撤销</el-tag></div>
           <el-descriptions :column="1" border size="small">
             <el-descriptions-item label="接受原因">{{ selectedFinding.risk_acceptance_reason || '—' }}</el-descriptions-item>
             <el-descriptions-item label="接受人/时间">{{ selectedFinding.risk_accepted_by_name || '—' }} · {{ formatDate(selectedFinding.risk_accepted_at) }}</el-descriptions-item>
@@ -1124,10 +1130,10 @@ async function onTabChange() {
           </el-descriptions>
         </div>
         <div v-if="auth.canManageSecurityFindings || auth.canManageSecurityWorkOrders" class="finding-detail-actions">
-          <el-button v-if="auth.canManageSecurityFindings && ['pending', 'in_progress', 'confirmed', 'resolved', 'fixed'].includes(selectedFinding.status)" type="warning" @click="openRiskDialog(selectedFinding, 'accept')">接受风险</el-button>
-          <el-button v-if="auth.canManageSecurityFindings && selectedFinding.status === 'risk_accepted'" type="warning" @click="openRiskDialog(selectedFinding, 'review')">复核并延长有效期</el-button>
-          <el-button v-if="auth.canManageSecurityFindings && selectedFinding.status === 'risk_accepted'" type="danger" plain @click="revokeFindingRisk(selectedFinding)">撤销风险接受</el-button>
-          <el-button v-if="auth.canManageSecurityWorkOrders && ['pending', 'confirmed'].includes(selectedFinding.status)" type="primary" @click="openCreateWorkOrder(selectedFinding)">生成整改工单</el-button>
+          <el-button v-if="auth.canManageSecurityFindings && ['pending', 'in_progress', FINDING_STATUS_CONFIRMED, 'resolved', 'fixed'].includes(selectedFinding.status)" type="warning" @click="openRiskDialog(selectedFinding, 'accept')">接受风险</el-button>
+          <el-button v-if="auth.canManageSecurityFindings && selectedFinding.status === FINDING_STATUS_RISK_ACCEPTED" type="warning" @click="openRiskDialog(selectedFinding, 'review')">复核并延长有效期</el-button>
+          <el-button v-if="auth.canManageSecurityFindings && selectedFinding.status === FINDING_STATUS_RISK_ACCEPTED" type="danger" plain @click="revokeFindingRisk(selectedFinding)">撤销风险接受</el-button>
+          <el-button v-if="auth.canManageSecurityWorkOrders && ([FINDING_STATUS_PENDING, FINDING_STATUS_CONFIRMED] as string[]).includes(selectedFinding.status)" type="primary" @click="openCreateWorkOrder(selectedFinding)">生成整改工单</el-button>
         </div>
       </div>
     </el-drawer>
@@ -1154,7 +1160,7 @@ async function onTabChange() {
           <el-form-item label="关联网络资产"><el-select v-model="findingForm.asset_id" clearable filterable style="width:100%" placeholder="URL、IP、域名等"><el-option v-for="item in scopedAssets" :key="item.id" :label="`${item.name || item.value}（${item.value}）`" :value="item.id" /></el-select></el-form-item>
           <el-form-item label="关联业务系统"><el-select v-model="findingForm.business_system_id" clearable filterable style="width:100%" placeholder="可与网络资产同时选择"><el-option v-for="item in scopedSystems" :key="item.id" :label="`${item.name}（${item.code}）`" :value="item.id" /></el-select></el-form-item>
           <el-form-item label="发现时间" prop="discovered_at"><el-date-picker v-model="findingForm.discovered_at" type="datetime" style="width:100%" /></el-form-item>
-          <el-form-item v-if="editingFindingID" label="发现状态"><el-select v-model="findingForm.status" style="width:100%" :disabled="findingForm.status === 'risk_accepted'"><el-option v-for="(label, value) in findingStatusLabels" :key="value" :label="label" :value="value" :disabled="value === 'risk_accepted'" /></el-select><small v-if="findingForm.status === 'risk_accepted'" class="form-help">风险接受状态请通过详情中的风险操作维护</small></el-form-item>
+          <el-form-item v-if="editingFindingID" label="发现状态"><el-select v-model="findingForm.status" style="width:100%" :disabled="findingForm.status === FINDING_STATUS_RISK_ACCEPTED"><el-option v-for="(label, value) in findingStatusLabels" :key="value" :label="label" :value="value" :disabled="value === FINDING_STATUS_RISK_ACCEPTED" /></el-select><small v-if="findingForm.status === FINDING_STATUS_RISK_ACCEPTED" class="form-help">风险接受状态请通过详情中的风险操作维护</small></el-form-item>
         </div>
         <el-form-item label="漏洞描述" prop="description"><el-input v-model="findingForm.description" type="textarea" :rows="4" placeholder="描述漏洞位置、触发条件和影响" /></el-form-item>
         <el-form-item label="验证证据"><el-input v-model="findingForm.evidence" type="textarea" :rows="3" placeholder="请脱敏填写请求路径、响应现象或证据位置，不要录入明文口令" /></el-form-item>

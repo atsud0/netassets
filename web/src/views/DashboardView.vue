@@ -5,6 +5,7 @@ import { ElMessage } from 'element-plus'
 import { apiClient, getAPIErrorMessage } from '../api/client'
 import type { RepairStatistics } from '../api/remediation'
 import { useAuthStore } from '../stores/auth'
+import { FINDING_STATUS_PENDING, findingStatusTagType } from '../constants/findingStatus'
 
 interface TaskProgress {
   id: string
@@ -47,6 +48,7 @@ interface TestCoverage {
   test_finding_count: number; closed_test_finding_count: number; test_finding_closure_rate: number
 }
 interface SecurityOverview {
+  pending_asset_finding_count: number
   finding_severity: SecurityBreakdown[]
   finding_status: SecurityBreakdown[]
   finding_trend: SecurityTrendPoint[]
@@ -75,6 +77,7 @@ const summary = ref<DashboardSummary>({
   overdue_work_order_count: 0, due_soon_work_order_count: 0,
 })
 const overview = ref<SecurityOverview>({
+  pending_asset_finding_count: 0,
   finding_severity: [], finding_status: [], finding_trend: [], organization_performance: [],
   test_coverage: {
     public_asset_count: 0, tested_public_asset_count: 0, public_asset_coverage_rate: 0,
@@ -114,7 +117,7 @@ function formatDate(value?: string) {
   return new Intl.DateTimeFormat('zh-CN', { dateStyle: 'medium', timeStyle: 'short' }).format(new Date(value))
 }
 function findingStatusType(status: string) {
-  return status === 'fixed' || status === 'resolved' ? 'success' : status === 'risk_accepted' || status === 'in_progress' || status === 'confirmed' ? 'warning' : status === 'false_positive' || status === 'ignored' || status === 'duplicate' ? 'info' : 'primary'
+  return findingStatusTagType(status)
 }
 function severityType(severity: string) {
   return severity === 'critical' ? 'danger' : severity === 'high' ? 'warning' : severity === 'medium' ? 'primary' : 'info'
@@ -170,11 +173,14 @@ onMounted(() => { void load();void loadRepair() })
       </div>
 
       <div class="security-highlight-grid">
-        <button class="security-highlight-card clickable" type="button" @click="toFindings('pending')">
-          <span>待处理漏洞</span><strong>{{ overview.finding_status.find(item => item.key === 'pending')?.count ?? 0 }}</strong><small>点击查看待处理发现</small>
+        <button class="security-highlight-card clickable" type="button" @click="toFindings(FINDING_STATUS_PENDING)">
+          <span>待处理漏洞</span><strong>{{ overview.finding_status.find(item => item.key === FINDING_STATUS_PENDING)?.count ?? 0 }}</strong><small>点击查看待处理发现</small>
         </button>
         <button class="security-highlight-card clickable" type="button" @click="toWorkOrders('pending_verification')">
           <span>待集团复测</span><strong>{{ summary.pending_verification_work_order_count }}</strong><small>点击处理待复测工单</small>
+        </button>
+        <button class="security-highlight-card clickable" type="button" @click="toFindings(FINDING_STATUS_PENDING)">
+          <span>待关联资产</span><strong>{{ overview.pending_asset_finding_count }}</strong><small>资产仍在工作版本待发布</small>
         </button>
         <button class="security-highlight-card danger clickable" type="button" @click="toWorkOrders(undefined, true)">
           <span>逾期整改工单</span><strong>{{ summary.overdue_work_order_count }}</strong><small>点击查看已逾期工单</small>

@@ -48,6 +48,38 @@ func registerAssetCandidateRoutes(api *gin.RouterGroup, requireAuth gin.HandlerF
 		}
 		c.JSON(http.StatusCreated, gin.H{"item": item})
 	})
+	group.GET("/self-service-policies", func(c *gin.Context) {
+		items, err := service.LoadSelfServicePolicies(c.Request.Context(), mustPrincipal(c))
+		if err != nil {
+			writeAssetCandidateError(c, logger, "list asset candidate self service policies", err)
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"items": items})
+	})
+	group.PUT("/self-service-policies", func(c *gin.Context) {
+		var input assetcandidate.SelfServicePolicyInput
+		if err := c.ShouldBindJSON(&input); err != nil {
+			writeAPIError(c, http.StatusBadRequest, "invalid_request", "请检查自助确认策略配置")
+			return
+		}
+		item, err := service.SetSelfServicePolicy(c.Request.Context(), mustPrincipal(c), input)
+		if err != nil {
+			writeAssetCandidateError(c, logger, "save asset candidate self service policy", err)
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"item": item})
+	})
+	group.POST("/batch-accept", func(c *gin.Context) {
+		var input assetcandidate.BatchAcceptInput
+		if err := c.ShouldBindJSON(&input); err != nil {
+			writeAPIError(c, http.StatusBadRequest, "invalid_request", "请检查批量确认请求内容")
+			return
+		}
+		result := service.BatchAccept(c.Request.Context(), mustPrincipal(c), input, c.GetString("request_id"), c.ClientIP())
+		// A batch never fails as a whole: the response is 200 with per-row outcomes
+		// so the reviewer sees which rows still need attention.
+		c.JSON(http.StatusOK, gin.H{"result": result})
+	})
 	group.POST("/:id/accept", func(c *gin.Context) {
 		var input assetcandidate.AcceptInput
 		if err := c.ShouldBindJSON(&input); err != nil {
@@ -61,8 +93,11 @@ func registerAssetCandidateRoutes(api *gin.RouterGroup, requireAuth gin.HandlerF
 		}
 		response := gin.H{"item": item}
 		if findingService != nil {
-			if linkErr := findingService.LinkAcceptedAssetCandidate(c.Request.Context(), mustPrincipal(c), c.Param("id"), item.ID, c.GetString("request_id"), c.ClientIP()); linkErr != nil {
-				logger.Error("link imported findings after asset candidate acceptance", "error", linkErr, "asset_candidate_id", c.Param("id"), "asset_id", item.ID, "request_id", c.GetString("request_id"))
+			// item.ID is the organization working version, not a formal asset. The
+			// link service re-reads the candidate to pick up the draft id, so pass
+			// an empty asset id instead of pretending the draft is an asset.
+			if linkErr := findingService.LinkAcceptedAssetCandidate(c.Request.Context(), mustPrincipal(c), c.Param("id"), "", c.GetString("request_id"), c.ClientIP()); linkErr != nil {
+				logger.Error("link imported findings after asset candidate acceptance", "error", linkErr, "asset_candidate_id", c.Param("id"), "working_version_id", item.ID, "request_id", c.GetString("request_id"))
 				response["warning"] = "资产已入库，但关联漏洞暂未全部生成安全发现，请刷新后重试"
 			}
 		}
@@ -125,8 +160,12 @@ func registerAssetCandidateRoutes(api *gin.RouterGroup, requireAuth gin.HandlerF
 
 func writeAssetCandidateError(c *gin.Context, logger *slog.Logger, operation string, err error) {
 	switch {
+	case errors.Is(err, assetcandidate.ErrSelfServiceClosed):
+		// Not a permission problem: the user may manage assets, the organization
+		// simply has not been delegated the right to settle ownership.
+		writeAPIError(c, http.StatusForbidden, "self_service_closed", "该组织未开通待确认资产自助确认，请联系集团管理员处理")
 	case errors.Is(err, assetcandidate.ErrForbidden):
-		writeAPIError(c, http.StatusForbidden, "forbidden", "仅集团管理员可以管理待确认资产")
+		writeAPIError(c, http.StatusForbidden, "forbidden", "仅集团管理员或已开通自助确认的组织可以处理该待确认资产")
 	case errors.Is(err, assetcandidate.ErrInvalid):
 		writeAPIError(c, http.StatusBadRequest, "invalid_asset_candidate", "请检查资产类型、资产值、所属组织和处理信息")
 	case errors.Is(err, assetcandidate.ErrNotFound):

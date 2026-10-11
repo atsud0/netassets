@@ -16,6 +16,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 
+	"netassets/internal/access"
 	"netassets/internal/asset"
 	"netassets/internal/auth"
 	"netassets/internal/pagination"
@@ -671,7 +672,16 @@ func (s *Service) linkFindingToWorkingVersion(ctx context.Context, tx pgx.Tx, pr
 
 func (s *Service) LinkFindingImportCandidate(ctx context.Context, principal auth.Principal, id string, input FindingImportCandidateLinkInput, requestID, ipAddress string) (FindingImportCandidate, error) {
 	if !principal.CanManageSecurityFindings() {
-		return FindingImportCandidate{}, ErrForbidden
+		// A subsidiary delegated the confirmation of its own asset candidates also
+		// needs to release the findings that arrived with them, otherwise it
+		// registers the asset and the vulnerabilities stay in the import queue.
+		allowed, accessErr := s.canReleaseCandidateFindings(ctx, principal, input.AssetCandidateID)
+		if accessErr != nil {
+			return FindingImportCandidate{}, accessErr
+		}
+		if !allowed {
+			return FindingImportCandidate{}, ErrForbidden
+		}
 	}
 	id = strings.TrimSpace(id)
 	input.ScopeAssetID = strings.TrimSpace(input.ScopeAssetID)
@@ -905,12 +915,26 @@ func (s *Service) LinkAcceptedAssetCandidate(ctx context.Context, principal auth
 
 func (s *Service) RetryAcceptedAssetCandidate(ctx context.Context, principal auth.Principal, assetCandidateID, assetID, requestID, ipAddress string) (FindingImportLinkResult, error) {
 	result := FindingImportLinkResult{}
-	if !principal.CanManageSecurityFindings() {
-		return result, ErrForbidden
-	}
 	assetCandidateID, assetID = strings.TrimSpace(assetCandidateID), strings.TrimSpace(assetID)
 	if !validUUID(assetCandidateID) {
 		return result, ErrInvalid
+	}
+	// Headquarters releases findings with security_finding.manage. A subsidiary
+	// that has been delegated the confirmation of its own asset candidates must be
+	// able to release the findings that came with them, otherwise it confirms the
+	// asset and the vulnerabilities behind it stay stuck in the import queue.
+	if !principal.CanManageSecurityFindings() {
+		organizationID, candidateErr := s.candidateOrganization(ctx, assetCandidateID)
+		if candidateErr != nil {
+			return result, candidateErr
+		}
+		allowed, accessErr := access.CanOperateOrganization(ctx, s.pool, principal, organizationID, "asset.manage")
+		if accessErr != nil {
+			return result, accessErr
+		}
+		if !allowed {
+			return result, ErrForbidden
+		}
 	}
 	// A confirmed discovery has an unpublished working version rather than a
 	// formal asset until the organization publishes it. Findings released now are
@@ -960,6 +984,39 @@ func (s *Service) RetryAcceptedAssetCandidate(ctx context.Context, principal aut
 		return result, firstErr
 	}
 	return result, nil
+}
+
+// canReleaseCandidateFindings reports whether a non-headquarters user may link
+// findings that belong to the given asset candidate. Without an asset candidate
+// the answer is no: headquarters keeps every finding that is not attached to an
+// organization asset it has been given.
+func (s *Service) canReleaseCandidateFindings(ctx context.Context, principal auth.Principal, assetCandidateID string) (bool, error) {
+	assetCandidateID = strings.TrimSpace(assetCandidateID)
+	if assetCandidateID == "" || !principal.HasPermission("asset.manage") {
+		return false, nil
+	}
+	organizationID, err := s.candidateOrganization(ctx, assetCandidateID)
+	if err != nil {
+		return false, err
+	}
+	if organizationID == "" {
+		return false, nil
+	}
+	return access.CanOperateOrganization(ctx, s.pool, principal, organizationID, "asset.manage")
+}
+
+// candidateOrganization returns the organization that owns an asset candidate,
+// or an empty string when ownership has not been resolved yet.
+func (s *Service) candidateOrganization(ctx context.Context, assetCandidateID string) (string, error) {
+	var organizationID string
+	err := s.pool.QueryRow(ctx, `SELECT COALESCE(organization_id::text,'') FROM asset_candidates WHERE id=$1::uuid`, assetCandidateID).Scan(&organizationID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return "", ErrNotFound
+	}
+	if err != nil {
+		return "", fmt.Errorf("load asset candidate organization: %w", err)
+	}
+	return organizationID, nil
 }
 
 // isFindingDuplicateViolation reports whether err is the unique violation raised

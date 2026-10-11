@@ -47,7 +47,9 @@ const navigationGroups = computed<NavigationGroup[]>(() => {
   const assetGovernance: NavigationItem[] = [
     ...(auth.hasPermission('system.manage') ? [{ path: '/systems', label: '业务系统' }] : []),
     ...(auth.hasPermission('asset.manage') ? [{ path: '/assets', label: '网络资产' }] : []),
-    ...(auth.isGroupAdmin ? [{ path: '/asset-candidates', label: '待确认资产' }] : []),
+    // The queue is organization-scoped now: group reviews everything, a subsidiary
+    // sees only its own candidates.
+    ...(auth.isGroupAdmin || auth.hasPermission('asset.manage') ? [{ path: '/asset-candidates', label: '待确认资产' }] : []),
     ...(auth.hasPermission('inventory.manage') ? [{ path: '/inventory-tasks', label: '填报任务' }] : []),
     ...(auth.isGroupAdmin ? [{ path: '/data-governance', label: '数据治理' }] : []),
     ...(auth.hasPermission('data_quality.manage') ? [{ path: '/data-quality-issues', label: '质量整改' }] : []),

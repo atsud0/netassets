@@ -89,15 +89,25 @@ func requireGroupAdmin(principal auth.Principal) error {
 	return nil
 }
 
+// requireCandidateReader allows headquarters, and any organization user that
+// holds asset.manage somewhere, to open the candidate queue. Row-level scope is
+// applied by the query itself rather than here.
+func requireCandidateReader(principal auth.Principal) error {
+	if principal.HasRole("group_admin") || principal.HasPermission("asset.manage") {
+		return nil
+	}
+	return ErrForbidden
+}
+
 func (s *Service) List(ctx context.Context, principal auth.Principal, status string) ([]Candidate, error) {
-	if err := requireGroupAdmin(principal); err != nil {
+	if err := requireCandidateReader(principal); err != nil {
 		return nil, err
 	}
 	status = strings.TrimSpace(status)
 	if status != "" && !validStatus(status) {
 		return nil, ErrInvalid
 	}
-	rows, err := s.pool.Query(ctx, `
+	rows, err := s.pool.Query(ctx, candidateScopeCTE+`
         SELECT c.id::text, c.asset_type, c.asset_value, c.normalized_value,
                COALESCE(c.suggested_data->>'name', ''), COALESCE(o.id::text, ''), COALESCE(o.organization_code, ''), COALESCE(o.organization_name, ''),
                c.source, COALESCE(c.source_reference, ''), c.suggested_data, c.status,
@@ -107,8 +117,8 @@ func (s *Service) List(ctx context.Context, principal auth.Principal, status str
                (SELECT count(*) FROM security_finding_import_candidates fic WHERE fic.asset_candidate_id=c.id AND fic.status='pending'),
                COALESCE((SELECT CASE max(CASE fic.severity WHEN 'critical' THEN 4 WHEN 'high' THEN 3 WHEN 'medium' THEN 2 WHEN 'low' THEN 1 ELSE 0 END) WHEN 4 THEN 'critical' WHEN 3 THEN 'high' WHEN 2 THEN 'medium' WHEN 1 THEN 'low' ELSE '' END FROM security_finding_import_candidates fic WHERE fic.asset_candidate_id=c.id AND fic.status='pending'),'')
         FROM asset_candidates c LEFT JOIN organizations o ON o.id=c.organization_id
-        WHERE ($1='' OR c.status=$1)
-        ORDER BY CASE WHEN c.status='pending' THEN 0 ELSE 1 END, c.created_at DESC`, status)
+        WHERE ($3='' OR c.status=$3) AND ($2::boolean OR c.organization_id IN (SELECT id FROM accessible))
+        ORDER BY CASE WHEN c.status='pending' THEN 0 ELSE 1 END, c.created_at DESC`, principal.UserID, principal.HasRole("group_admin"), status)
 	if err != nil {
 		return nil, fmt.Errorf("list asset candidates: %w", err)
 	}
@@ -133,14 +143,14 @@ func (s *Service) List(ctx context.Context, principal auth.Principal, status str
 }
 
 func (s *Service) Search(ctx context.Context, principal auth.Principal, status string, query pagination.Query) (pagination.Result[Candidate], error) {
-	if err := requireGroupAdmin(principal); err != nil {
+	if err := requireCandidateReader(principal); err != nil {
 		return pagination.Result[Candidate]{}, err
 	}
 	status = strings.TrimSpace(status)
 	if status != "" && !validStatus(status) {
 		return pagination.Result[Candidate]{}, ErrInvalid
 	}
-	rows, err := s.pool.Query(ctx, `
+	rows, err := s.pool.Query(ctx, candidateScopeCTE+`
         SELECT c.id::text, c.asset_type, c.asset_value, c.normalized_value,
                COALESCE(c.suggested_data->>'name', ''), COALESCE(o.id::text, ''), COALESCE(o.organization_code, ''), COALESCE(o.organization_name, ''),
                c.source, COALESCE(c.source_reference, ''), c.suggested_data, c.status,
@@ -150,9 +160,9 @@ func (s *Service) Search(ctx context.Context, principal auth.Principal, status s
                (SELECT count(*) FROM security_finding_import_candidates fic WHERE fic.asset_candidate_id=c.id AND fic.status='pending'),
                COALESCE((SELECT CASE max(CASE fic.severity WHEN 'critical' THEN 4 WHEN 'high' THEN 3 WHEN 'medium' THEN 2 WHEN 'low' THEN 1 ELSE 0 END) WHEN 4 THEN 'critical' WHEN 3 THEN 'high' WHEN 2 THEN 'medium' WHEN 1 THEN 'low' ELSE '' END FROM security_finding_import_candidates fic WHERE fic.asset_candidate_id=c.id AND fic.status='pending'),''), count(*) OVER ()
         FROM asset_candidates c LEFT JOIN organizations o ON o.id=c.organization_id
-        WHERE ($1='' OR c.status=$1)
+        WHERE ($3='' OR c.status=$3) AND ($2::boolean OR c.organization_id IN (SELECT id FROM accessible))
         ORDER BY CASE WHEN c.status='pending' THEN 0 ELSE 1 END, c.created_at DESC
-        LIMIT $2 OFFSET $3`, status, query.PageSize, query.Offset())
+        LIMIT $4 OFFSET $5`, principal.UserID, principal.HasRole("group_admin"), status, query.PageSize, query.Offset())
 	if err != nil {
 		return pagination.Result[Candidate]{}, fmt.Errorf("search asset candidates: %w", err)
 	}
@@ -178,22 +188,33 @@ func (s *Service) Search(ctx context.Context, principal auth.Principal, status s
 		return pagination.Result[Candidate]{}, err
 	}
 	if pagination.NeedsTotalFallback(len(items), query) {
-		if err := s.pool.QueryRow(ctx, `SELECT count(*) FROM asset_candidates WHERE ($1='' OR status=$1)`, status).Scan(&total); err != nil {
+		if err := s.pool.QueryRow(ctx, candidateScopeCTE+`SELECT count(*) FROM asset_candidates c WHERE ($3='' OR c.status=$3) AND ($2::boolean OR c.organization_id IN (SELECT id FROM accessible))`, principal.UserID, principal.HasRole("group_admin"), status).Scan(&total); err != nil {
 			return pagination.Result[Candidate]{}, fmt.Errorf("count asset candidates: %w", err)
 		}
 	}
 	return pagination.NewResult(items, total, query), nil
 }
 
+// Get loads a candidate the principal may read. Organization users see the
+// candidates of the organizations they are appointed to, because a subsidiary
+// needs to know what a scan found in its estate even when headquarters still
+// owns the confirmation.
 func (s *Service) Get(ctx context.Context, principal auth.Principal, id string) (Candidate, error) {
-	if err := requireGroupAdmin(principal); err != nil {
+	if err := requireCandidateReader(principal); err != nil {
 		return Candidate{}, err
 	}
-	items, err := s.listByID(ctx, id)
+	item, err := s.listByID(ctx, id)
 	if err != nil {
 		return Candidate{}, err
 	}
-	return items, nil
+	viewable, err := s.canViewCandidate(ctx, principal, item.OrganizationID)
+	if err != nil {
+		return Candidate{}, err
+	}
+	if !viewable {
+		return Candidate{}, ErrForbidden
+	}
+	return item, nil
 }
 
 func (s *Service) listByID(ctx context.Context, id string) (Candidate, error) {
@@ -299,15 +320,9 @@ func (s *Service) Create(ctx context.Context, principal auth.Principal, in Creat
 // is published, at which point inventorytask settles it and releases the
 // findings that were waiting on the asset.
 func (s *Service) Accept(ctx context.Context, principal auth.Principal, id string, in AcceptInput, requestID, ip string) (asset.Asset, error) {
-	if err := requireGroupAdmin(principal); err != nil {
-		return asset.Asset{}, err
-	}
-	candidate, err := s.Get(ctx, principal, id)
+	candidate, err := s.confirmCandidate(ctx, principal, id)
 	if err != nil {
 		return asset.Asset{}, err
-	}
-	if candidate.Status != "pending" {
-		return asset.Asset{}, ErrConflict
 	}
 	in.Type = candidate.AssetType
 	in.Value = candidate.AssetValue
@@ -396,7 +411,7 @@ func (s *Service) MarkDuplicate(ctx context.Context, p auth.Principal, id string
 	return s.review(ctx, p, id, "duplicate", in.MatchedAssetID, in.ReviewNote, rid, ip)
 }
 func (s *Service) review(ctx context.Context, p auth.Principal, id, status, matched, note, rid, ip string) error {
-	if err := requireGroupAdmin(p); err != nil {
+	if _, err := s.confirmCandidate(ctx, p, id); err != nil {
 		return err
 	}
 	if !validStatus(status) || status == "pending" {

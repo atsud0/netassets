@@ -1,6 +1,9 @@
 package dashboard
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestPercentage(t *testing.T) {
 	tests := []struct {
@@ -20,5 +23,17 @@ func TestPercentage(t *testing.T) {
 				t.Fatalf("percentage(%d, %d) = %d, want %d", tt.numerator, tt.denominator, got, tt.want)
 			}
 		})
+	}
+}
+
+func TestPendingAssetFinding(t *testing.T) {
+	got := pendingAssetFinding("f")
+	for _, fragment := range []string{"f.asset_id IS NULL", "f.pending_asset_draft_id IS NOT NULL"} {
+		if !strings.Contains(got, fragment) {
+			t.Fatalf("pendingAssetFinding(%q) = %q, want it to contain %q", "f", got, fragment)
+		}
+	}
+	if strings.Contains(got, "pending_asset_draft_id IS NULL") {
+		t.Fatalf("pendingAssetFinding(%q) = %q, must only count findings that have a working version", "f", got)
 	}
 }
