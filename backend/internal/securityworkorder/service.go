@@ -82,6 +82,11 @@ type FindingInput struct {
 	RemediationAdvice      string    `json:"remediation_advice"`
 	Source                 string    `json:"source"`
 	DiscoveredAt           time.Time `json:"discovered_at"`
+	// PendingAssetDraftID attaches the finding to an unpublished organization
+	// working version. An imported vulnerability is real the moment it arrives,
+	// so it is recorded and counted even when the asset register has not caught
+	// up yet; publishing the draft fills in AssetID.
+	PendingAssetDraftID string `json:"pending_asset_draft_id,omitempty"`
 }
 
 type FindingSummaryStats struct {
@@ -431,13 +436,13 @@ func (s *Service) createFindingInTx(ctx context.Context, tx pgx.Tx, principal au
 	var id string
 	if err := tx.QueryRow(ctx, `
 		INSERT INTO security_findings (
-			finding_code, title, severity, status, assignee_organization_id, asset_id, business_system_id, test_batch_id,
+			finding_code, title, severity, status, assignee_organization_id, asset_id, pending_asset_draft_id, business_system_id, test_batch_id,
 			vulnerability_type, description, evidence, remediation_advice, source, discovered_at, created_by, updated_by
-		) VALUES ($1, $2, $3, $4, $5::uuid, NULLIF($6, '')::uuid, NULLIF($7, '')::uuid, NULLIF($8, '')::uuid,
+		) VALUES ($1, $2, $3, $4, $5::uuid, NULLIF($6, '')::uuid, NULLIF($16, '')::uuid, NULLIF($7, '')::uuid, NULLIF($8, '')::uuid,
 		          NULLIF($9, ''), $10, NULLIF($11, ''), NULLIF($12, ''), $13, $14, $15::uuid, $15::uuid)
 		RETURNING id::text`, code, input.Title, input.Severity, input.Status, input.AssigneeOrganizationID,
 		input.AssetID, input.BusinessSystemID, input.TestBatchID, input.VulnerabilityType, input.Description, input.Evidence,
-		input.RemediationAdvice, input.Source, input.DiscoveredAt, principal.UserID).Scan(&id); err != nil {
+		input.RemediationAdvice, input.Source, input.DiscoveredAt, principal.UserID, input.PendingAssetDraftID).Scan(&id); err != nil {
 		return "", "", fmt.Errorf("insert security finding: %w", err)
 	}
 	if err := writeAudit(ctx, tx, principal, input.AssigneeOrganizationID, "security_finding.create", "security_finding", id,

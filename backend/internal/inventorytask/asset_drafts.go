@@ -589,6 +589,49 @@ func mapDraftDatabaseError(err error) error {
 	return fmt.Errorf("write inventory asset draft: %w", err)
 }
 
+// settleFindingImportCandidate completes the loop opened when a finding import
+// discovered an asset the register did not hold. The candidate only becomes
+// accepted when its working version is published, and the findings that were
+// waiting on the asset are attached to the formal asset here so a vulnerability
+// never disappears because the asset register was behind.
+func settleFindingImportCandidate(ctx context.Context, tx pgx.Tx, draftID, assetID, userID, requestID, ipAddress string) error {
+	if _, err := tx.Exec(ctx, `
+		UPDATE asset_candidates
+		SET status='accepted', matched_asset_id=$2::uuid, updated_by=$3::uuid, updated_at=now()
+		WHERE working_version_draft_id=$1::uuid AND status='pending'`, draftID, assetID, userID); err != nil {
+		return fmt.Errorf("accept published finding import asset candidate: %w", err)
+	}
+	if _, err := tx.Exec(ctx, `
+		UPDATE security_findings
+		SET asset_id=$2::uuid, pending_asset_draft_id=NULL, updated_by=$3::uuid, updated_at=now()
+		WHERE pending_asset_draft_id=$1::uuid`, draftID, assetID, userID); err != nil {
+		return fmt.Errorf("attach published asset to findings: %w", err)
+	}
+	if _, err := tx.Exec(ctx, `
+		UPDATE security_finding_import_candidates candidate
+		SET matched_asset_id=$2::uuid,
+		    imported_finding_id=(
+		        SELECT f.id FROM security_findings f
+		        WHERE f.pending_asset_draft_id=$1::uuid AND f.asset_id=$2::uuid
+		        ORDER BY f.created_at LIMIT 1
+		    ),
+		    updated_at=now()
+		WHERE candidate.asset_candidate_id IN (
+		    SELECT id FROM asset_candidates WHERE working_version_draft_id=$1::uuid
+		) AND candidate.status='pending'`, draftID, assetID); err != nil {
+		return fmt.Errorf("attach published asset to finding import candidates: %w", err)
+	}
+	if _, err := tx.Exec(ctx, `
+		INSERT INTO audit_logs(user_id,organization_id,action,resource_type,resource_id,summary,details,request_ip,request_id)
+		SELECT $3::uuid, c.organization_id, 'asset_candidate.published', 'asset_candidate', c.id::text,
+		       '漏洞导入待确认资产工作版本已发布', jsonb_build_object('asset_id', $2::text),
+		       NULLIF($5,'')::inet, NULLIF($4,'')
+		FROM asset_candidates c WHERE c.working_version_draft_id=$1::uuid AND c.status='accepted'`, draftID, assetID, userID, requestID, ipAddress); err != nil {
+		return fmt.Errorf("write published asset candidate audit: %w", err)
+	}
+	return nil
+}
+
 func publishAssetDrafts(ctx context.Context, tx pgx.Tx, principal auth.Principal, taskID, organizationID, requestID, ipAddress string) error {
 	rows, err := tx.Query(ctx, `SELECT id::text,operation,COALESCE(source_asset_id::text,''),asset_type,asset_value,normalized_value,COALESCE(asset_name,''),environment,network_scope,COALESCE(network_area_id::text,''),COALESCE(business_system_id::text,''),COALESCE(business_system_draft_id::text,''),status,importance,source,COALESCE(owner_user_id::text,''),COALESCE(owner_name,''),COALESCE(notes,''),expires_at,custom_values FROM inventory_asset_drafts WHERE task_id::text=$1 AND organization_id::text=$2 AND draft_status='submitted' ORDER BY created_at FOR UPDATE`, taskID, organizationID)
 	if err != nil {
@@ -686,6 +729,11 @@ func publishAssetDrafts(ctx context.Context, tx pgx.Tx, principal auth.Principal
 		}
 		if _, err := tx.Exec(ctx, `INSERT INTO audit_logs(user_id,organization_id,action,resource_type,resource_id,summary,details,request_ip,request_id) VALUES($1::uuid,$2::uuid,$3,'asset',$4,$5,jsonb_build_object('task_id',$6::text,'type',$7::text,'value',$8::text,'source','inventory_task'),NULLIF($9,'')::inet,NULLIF($10,''))`, principal.UserID, organizationID, action, resourceID, summary, taskID, item.typ, item.value, ipAddress, requestID); err != nil {
 			return fmt.Errorf("write published asset audit: %w", err)
+		}
+		if item.operation == "create" {
+			if err := settleFindingImportCandidate(ctx, tx, item.id, resourceID, principal.UserID, requestID, ipAddress); err != nil {
+				return err
+			}
 		}
 	}
 	if _, err := tx.Exec(ctx, `UPDATE inventory_asset_drafts SET draft_status='published',published_at=now(),updated_by=$3::uuid,updated_at=now() WHERE task_id::text=$1 AND organization_id::text=$2 AND draft_status='submitted'`, taskID, organizationID, principal.UserID); err != nil {

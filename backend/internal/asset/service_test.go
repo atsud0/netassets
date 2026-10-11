@@ -439,3 +439,42 @@ func TestResolveAssetImportHeadersRejectsMissingOrDuplicateRequiredMapping(t *te
 		t.Fatal("expected duplicate source column mapping to fail")
 	}
 }
+
+func TestNormalizeIPAcceptsHostPort(t *testing.T) {
+	// A scan export records one endpoint per listening port; every one of them
+	// describes the same host and must collapse onto one asset.
+	cases := map[string]string{
+		"192.168.1.10:443":   "192.168.1.10",
+		"192.168.1.10:80":    "192.168.1.10",
+		"192.168.1.10":       "192.168.1.10",
+		"[2001:db8::1]:8080": "2001:db8::1",
+		"2001:db8::1":        "2001:db8::1",
+	}
+	for input, want := range cases {
+		got, err := NormalizeValue("ip", input)
+		if err != nil {
+			t.Fatalf("NormalizeValue(%q) returned error: %v", input, err)
+		}
+		if got != want {
+			t.Fatalf("NormalizeValue(%q) = %q, want %q", input, got, want)
+		}
+	}
+	for _, invalid := range []string{"192.168.1.10:", "192.168.1.10:99999", "192.168.1.10:http", "not-an-ip:80"} {
+		if _, err := NormalizeValue("ip", invalid); err == nil {
+			t.Fatalf("NormalizeValue(%q) should have failed", invalid)
+		}
+	}
+}
+
+func TestSplitHostPort(t *testing.T) {
+	host, port, ok := SplitHostPort("192.168.1.10:443")
+	if !ok || host != "192.168.1.10" || port != "443" {
+		t.Fatalf("SplitHostPort returned (%q, %q, %v)", host, port, ok)
+	}
+	if _, _, ok := SplitHostPort("192.168.1.10"); ok {
+		t.Fatal("a bare address carries no port")
+	}
+	if _, _, ok := SplitHostPort("192.168.1.10:99999"); ok {
+		t.Fatal("an out-of-range port must be rejected")
+	}
+}

@@ -115,6 +115,33 @@ func (s *Service) getWorkingBySource(ctx context.Context, p auth.Principal, sour
 	return s.getWorkingWithPredicate(ctx, p, "d.source_asset_id::text=$2", sourceAssetID)
 }
 
+// workingAssetInTx loads a working version inside an open transaction. The
+// pool-backed getWorking refuses group administrators because organization users
+// are the audience for the working ledger, but headquarters needs to read the
+// row it just created while settling a finding-import candidate in the same
+// transaction.
+func workingAssetInTx(ctx context.Context, tx pgx.Tx, p auth.Principal, id string) (Asset, error) {
+	row := tx.QueryRow(ctx, `
+SELECT d.id::text,d.asset_type,d.asset_value,d.normalized_value,COALESCE(d.asset_name,''),o.id::text,o.organization_code,o.organization_name,
+ COALESCE(d.business_system_id::text,''),COALESCE(d.business_system_id::text,''),COALESCE(d.business_system_id::text,''),d.environment,d.network_scope,
+ COALESCE(d.network_area_id::text,''),COALESCE(na.area_name,''),d.status,d.importance,d.source,COALESCE(d.owner_user_id::text,''),COALESCE(u.username,''),COALESCE(u.display_name,''),
+ COALESCE(d.owner_name,''),COALESCE(d.notes,''),d.expires_at,d.created_at,d.updated_at,'unreported',true,COALESCE(d.source_asset_id::text,''),COALESCE(d.task_id::text,''),d.draft_status,d.operation,d.custom_values
+FROM inventory_asset_drafts d JOIN organizations o ON o.id=d.organization_id LEFT JOIN users u ON u.id=d.owner_user_id
+LEFT JOIN asset_network_areas na ON na.id=d.network_area_id
+WHERE d.id::text=$1 AND d.draft_status IN `+inventorydraft.ActiveSQL, id)
+	var a Asset
+	var raw []byte
+	if err := row.Scan(&a.ID, &a.Type, &a.Value, &a.NormalizedValue, &a.Name, &a.OrganizationID, &a.OrganizationCode, &a.OrganizationName, &a.BusinessSystemID, &a.BusinessSystemCode, &a.BusinessSystemName, &a.Environment, &a.NetworkScope, &a.NetworkAreaID, &a.NetworkAreaName, &a.Status, &a.Importance, &a.Source, &a.OwnerUserID, &a.OwnerUsername, &a.OwnerUserDisplayName, &a.OwnerName, &a.Notes, &a.ExpiresAt, &a.CreatedAt, &a.UpdatedAt, &a.ReportingStatus, &a.IsWorkingCopy, &a.PublishedID, &a.TaskID, &a.DraftStatus, &a.Operation, &raw); errors.Is(err, pgx.ErrNoRows) {
+		return Asset{}, pgx.ErrNoRows
+	} else if err != nil {
+		return Asset{}, err
+	}
+	if err := json.Unmarshal(raw, &a.CustomValues); err != nil {
+		return Asset{}, err
+	}
+	return a, nil
+}
+
 func (s *Service) getWorkingWithPredicate(ctx context.Context, p auth.Principal, predicate, id string) (Asset, error) {
 	if p.HasRole("group_admin") || !p.HasPermission("asset.manage") {
 		return Asset{}, ErrNotFound
@@ -219,6 +246,75 @@ func (s *Service) createUnreportedWithSource(ctx context.Context, p auth.Princip
 		return Asset{}, e
 	}
 	return s.getWorking(ctx, p, id)
+}
+
+// CreateWorkingVersion records an organization working version without going
+// through a reporting task, and lets the caller settle related rows in the same
+// transaction.
+//
+// Headquarters uses this when it confirms an asset that a finding import found
+// but the asset register does not hold yet. Writing the formal assets table
+// directly skipped the working version, and with it the snapshot, the quality
+// checks and the publish/rollback path every other asset change follows. Going
+// through the working version also leaves the organization that owns the address
+// as the party that fills in the missing details instead of the reviewer.
+func (s *Service) CreateWorkingVersion(ctx context.Context, p auth.Principal, in CreateInput, source, requestID, ip string, afterCreate func(pgx.Tx, Asset) error) (Asset, error) {
+	if source != "manual" && source != "import" && source != "api" && source != "plugin" && source != "finding_import" {
+		return Asset{}, ErrInvalid
+	}
+	if afterCreate == nil {
+		return s.createUnreportedWithSource(ctx, p, in, source, requestID, ip)
+	}
+	normalized, err := PrepareCreateInput(&in)
+	if err != nil {
+		return Asset{}, err
+	}
+	raw, err := s.validateWorkingValues(ctx, in.CustomValues)
+	if err != nil {
+		return Asset{}, err
+	}
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return Asset{}, fmt.Errorf("begin asset working version: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	systemID, systemDraftID, err := validateUnreportedReferences(ctx, tx, in)
+	if err != nil {
+		return Asset{}, err
+	}
+	var duplicate bool
+	if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM assets WHERE asset_type=$1 AND normalized_value=$2 AND deleted_at IS NULL) OR EXISTS(SELECT 1 FROM inventory_asset_drafts WHERE asset_type=$1 AND normalized_value=$2 AND draft_status IN `+inventorydraft.ActiveSQL+`)`, in.Type, normalized).Scan(&duplicate); err != nil {
+		return Asset{}, fmt.Errorf("check asset working version duplicate: %w", err)
+	}
+	if duplicate {
+		return Asset{}, ErrConflict
+	}
+	var id string
+	if err := tx.QueryRow(ctx, `INSERT INTO inventory_asset_drafts(task_id,organization_id,operation,asset_type,asset_value,normalized_value,asset_name,environment,network_scope,network_area_id,business_system_id,business_system_draft_id,status,importance,source,owner_user_id,owner_name,notes,expires_at,custom_values,draft_status,created_by,updated_by) VALUES(NULL,$1::uuid,'create',$2,$3,$4,NULLIF($5,''),$6,$7,NULLIF($8,'')::uuid,NULLIF($9,'')::uuid,NULLIF($10,'')::uuid,$11,$12,$13,NULLIF($14,'')::uuid,NULLIF($15,''),NULLIF($16,''),$17,$18::jsonb,'editing',$19::uuid,$19::uuid) RETURNING id::text`, in.OrganizationID, in.Type, in.Value, normalized, in.Name, in.Environment, in.NetworkScope, in.NetworkAreaID, systemID, systemDraftID, in.Status, in.Importance, source, in.OwnerUserID, in.OwnerName, in.Notes, in.ExpiresAt, raw, p.UserID).Scan(&id); err != nil {
+		return Asset{}, mapUnreportedDB(err)
+	}
+	if _, err := tx.Exec(ctx, `INSERT INTO audit_logs(user_id,organization_id,action,resource_type,resource_id,summary,details,request_ip,request_id) VALUES($1::uuid,$2::uuid,'asset.working_create','asset',$3,'新增未上报网络资产',jsonb_build_object('reporting_status','unreported','source',$6::text),NULLIF($4,'')::inet,NULLIF($5,''))`, p.UserID, in.OrganizationID, id, ip, requestID, source); err != nil {
+		return Asset{}, fmt.Errorf("write asset working version audit: %w", err)
+	}
+	created, err := workingAssetInTx(ctx, tx, p, id)
+	if err != nil {
+		return Asset{}, err
+	}
+	if err := afterCreate(tx, created); err != nil {
+		return Asset{}, err
+	}
+	if err := notification.WriteEvent(ctx, tx, notification.EventInput{
+		EventType: notification.EventAssetWorkingVersionCreated, Category: notification.CategoryWorkingVersion,
+		TargetOrganizationID: in.OrganizationID, ActorUserID: p.UserID, RequiredPermission: "asset.manage",
+		ResourceType: "asset", ResourceID: id, ResourceLabel: workingAssetLabel(in), BatchKey: requestID,
+		Details: map[string]any{"operation": "create", "source": source},
+	}); err != nil {
+		return Asset{}, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return Asset{}, fmt.Errorf("commit asset working version: %w", err)
+	}
+	return created, nil
 }
 
 func (s *Service) updateWorking(ctx context.Context, p auth.Principal, id string, in CreateInput, requestID, ip string) (Asset, error) {

@@ -84,6 +84,10 @@ type FindingImportCandidateLinkInput struct {
 	ScopeAssetID string `json:"scope_asset_id"`
 	AssetID      string `json:"asset_id"`
 	ReviewNote   string `json:"review_note"`
+	// AssetCandidateID and PendingAssetDraftID let a release target an
+	// unpublished organization working version instead of a formal asset.
+	AssetCandidateID    string `json:"asset_candidate_id,omitempty"`
+	PendingAssetDraftID string `json:"pending_asset_draft_id,omitempty"`
 }
 
 type FindingImportCandidateReviewInput struct {
@@ -595,6 +599,76 @@ func (s *Service) ListFindingImportScopeOptions(ctx context.Context, principal a
 	return items, nil
 }
 
+// linkFindingToWorkingVersion records a finding against an unpublished
+// organization working version. Ownership of a discovered asset is confirmed long
+// before the asset register necessarily holds it, and an imported vulnerability
+// is real the moment it arrives, so the finding is stored against the working
+// version instead of being held back as an untracked import row. Publishing the
+// working version fills in the formal asset id.
+func (s *Service) linkFindingToWorkingVersion(ctx context.Context, tx pgx.Tx, principal auth.Principal, id string, candidate FindingImportCandidate, input FindingImportCandidateLinkInput, requestID, ipAddress string) (FindingImportCandidate, error) {
+	var organizationID string
+	if err := tx.QueryRow(ctx, `
+		SELECT d.organization_id::text
+		FROM inventory_asset_drafts d
+		JOIN organizations o ON o.id=d.organization_id AND o.status='enabled' AND o.deleted_at IS NULL
+		WHERE d.id=$1::uuid AND d.operation='create' AND d.draft_status IN ('editing','submitted','returned','published')
+		FOR UPDATE OF d`, input.PendingAssetDraftID).Scan(&organizationID); errors.Is(err, pgx.ErrNoRows) {
+		return FindingImportCandidate{}, ErrNotFound
+	} else if err != nil {
+		return FindingImportCandidate{}, fmt.Errorf("load finding import working version: %w", err)
+	}
+
+	var duplicateFindingID string
+	err := tx.QueryRow(ctx, `
+		SELECT id::text FROM security_findings
+		WHERE pending_asset_draft_id=$1::uuid AND lower(btrim(title))=lower(btrim($2))
+		ORDER BY created_at LIMIT 1`, input.PendingAssetDraftID, candidate.Title).Scan(&duplicateFindingID)
+	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+		return FindingImportCandidate{}, fmt.Errorf("check working version finding duplicate: %w", err)
+	}
+	status := "imported"
+	findingID := duplicateFindingID
+	if errors.Is(err, pgx.ErrNoRows) {
+		findingInput := FindingInput{
+			Title: candidate.Title, Severity: candidate.Severity, Status: "pending",
+			AssigneeOrganizationID: organizationID, PendingAssetDraftID: input.PendingAssetDraftID,
+			VulnerabilityType: candidate.VulnerabilityType, Description: candidate.Description,
+			Evidence: candidate.Evidence, RemediationAdvice: candidate.RemediationAdvice,
+			Source: "import", DiscoveredAt: candidate.DiscoveredAt,
+		}
+		findingID, _, err = s.createFindingInTx(ctx, tx, principal, findingInput, requestID, ipAddress)
+		if err != nil {
+			return FindingImportCandidate{}, err
+		}
+	} else {
+		status = "duplicate"
+	}
+	if _, err := tx.Exec(ctx, `
+		UPDATE security_finding_import_candidates
+		SET status=$2, matched_scope_asset_id=NULL, matched_asset_id=NULL,
+		    review_note=NULLIF($3,''), reviewed_by=$4::uuid, reviewed_at=now(), imported_finding_id=$5::uuid, updated_at=now()
+		WHERE id=$1::uuid`, id, status, input.ReviewNote, principal.UserID, findingID); err != nil {
+		return FindingImportCandidate{}, fmt.Errorf("update linked finding import candidate: %w", err)
+	}
+	if _, err := tx.Exec(ctx, `UPDATE security_finding_imports SET pending_count=GREATEST(pending_count-1,0) WHERE id=$1::uuid`, candidate.FindingImportID); err != nil {
+		return FindingImportCandidate{}, fmt.Errorf("update finding import pending count: %w", err)
+	}
+	action := "security_finding_import_candidate.imported"
+	summary := "人工关联漏洞导入项并生成安全发现"
+	if status == "duplicate" {
+		action = "security_finding_import_candidate.duplicate"
+		summary = "人工关联漏洞导入项并标记为重复"
+	}
+	if err := writeAudit(ctx, tx, principal, organizationID, action, "security_finding_import_candidate", id,
+		summary, map[string]any{"pending_asset_draft_id": input.PendingAssetDraftID, "finding_id": findingID, "review_note": input.ReviewNote}, requestID, ipAddress); err != nil {
+		return FindingImportCandidate{}, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return FindingImportCandidate{}, fmt.Errorf("commit link finding import candidate: %w", err)
+	}
+	return s.GetFindingImportCandidate(ctx, principal, id)
+}
+
 func (s *Service) LinkFindingImportCandidate(ctx context.Context, principal auth.Principal, id string, input FindingImportCandidateLinkInput, requestID, ipAddress string) (FindingImportCandidate, error) {
 	if !principal.CanManageSecurityFindings() {
 		return FindingImportCandidate{}, ErrForbidden
@@ -603,9 +677,12 @@ func (s *Service) LinkFindingImportCandidate(ctx context.Context, principal auth
 	input.ScopeAssetID = strings.TrimSpace(input.ScopeAssetID)
 	input.AssetID = strings.TrimSpace(input.AssetID)
 	input.ReviewNote = strings.TrimSpace(input.ReviewNote)
+	input.AssetCandidateID = strings.TrimSpace(input.AssetCandidateID)
+	input.PendingAssetDraftID = strings.TrimSpace(input.PendingAssetDraftID)
 	if !validUUID(id) || len(input.ReviewNote) > 2000 ||
-		(input.ScopeAssetID == "" && input.AssetID == "") ||
-		(input.ScopeAssetID != "" && input.AssetID != "") {
+		(input.ScopeAssetID == "" && input.AssetID == "" && input.PendingAssetDraftID == "") ||
+		(input.ScopeAssetID != "" && input.AssetID != "") ||
+		(input.PendingAssetDraftID != "" && (input.ScopeAssetID != "" || input.AssetID != "")) {
 		return FindingImportCandidate{}, ErrInvalid
 	}
 
@@ -628,6 +705,14 @@ func (s *Service) LinkFindingImportCandidate(ctx context.Context, principal auth
 	}
 	if candidate.Status != "pending" {
 		return FindingImportCandidate{}, ErrState
+	}
+
+	if input.PendingAssetDraftID != "" {
+		// The discovery has been confirmed but its working version is not
+		// published yet. The finding is recorded against the working version so it
+		// is counted and assignable now, and picks up the formal asset id when the
+		// organization publishes.
+		return s.linkFindingToWorkingVersion(ctx, tx, principal, id, candidate, input, requestID, ipAddress)
 	}
 
 	selectedID := input.ScopeAssetID
@@ -827,15 +912,19 @@ func (s *Service) RetryAcceptedAssetCandidate(ctx context.Context, principal aut
 	if !validUUID(assetCandidateID) {
 		return result, ErrInvalid
 	}
-	if assetID == "" {
-		if err := s.pool.QueryRow(ctx, `SELECT COALESCE(matched_asset_id::text,'') FROM asset_candidates WHERE id=$1::uuid AND status='accepted'`, assetCandidateID).Scan(&assetID); err != nil {
-			if errors.Is(err, pgx.ErrNoRows) {
-				return result, ErrNotFound
-			}
-			return result, fmt.Errorf("load accepted asset candidate: %w", err)
+	// A confirmed discovery has an unpublished working version rather than a
+	// formal asset until the organization publishes it. Findings released now are
+	// attached to that working version and move onto the formal asset when it is
+	// published, so an imported vulnerability is never left untracked just
+	// because the asset register is behind.
+	var draftID string
+	if err := s.pool.QueryRow(ctx, `SELECT COALESCE(matched_asset_id::text,''),COALESCE(working_version_draft_id::text,'') FROM asset_candidates WHERE id=$1::uuid`, assetCandidateID).Scan(&assetID, &draftID); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return result, ErrNotFound
 		}
+		return result, fmt.Errorf("load asset candidate for finding link: %w", err)
 	}
-	if !validUUID(assetID) {
+	if draftID == "" && !validUUID(assetID) {
 		return result, ErrInvalid
 	}
 	rows, err := s.pool.Query(ctx, `SELECT id::text FROM security_finding_import_candidates WHERE asset_candidate_id=$1::uuid AND status='pending' ORDER BY source_row_number,created_at`, assetCandidateID)
@@ -857,7 +946,7 @@ func (s *Service) RetryAcceptedAssetCandidate(ctx context.Context, principal aut
 	result.Total = len(ids)
 	var firstErr error
 	for _, id := range ids {
-		if _, err := s.LinkFindingImportCandidate(ctx, principal, id, FindingImportCandidateLinkInput{AssetID: assetID}, requestID, ipAddress); err != nil {
+		if _, err := s.LinkFindingImportCandidate(ctx, principal, id, FindingImportCandidateLinkInput{AssetID: assetID, AssetCandidateID: assetCandidateID, PendingAssetDraftID: draftID}, requestID, ipAddress); err != nil {
 			result.Failed++
 			if firstErr == nil {
 				firstErr = fmt.Errorf("link finding import candidate %s: %w", id, err)

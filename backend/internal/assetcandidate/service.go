@@ -24,28 +24,29 @@ var (
 )
 
 type Candidate struct {
-	ID               string         `json:"id"`
-	AssetType        string         `json:"asset_type"`
-	AssetValue       string         `json:"asset_value"`
-	NormalizedValue  string         `json:"normalized_value"`
-	Name             string         `json:"name,omitempty"`
-	OrganizationID   string         `json:"organization_id"`
-	OrganizationCode string         `json:"organization_code"`
-	OrganizationName string         `json:"organization_name"`
-	Source           string         `json:"source"`
-	SourceReference  string         `json:"source_reference,omitempty"`
-	SuggestedData    map[string]any `json:"suggested_data"`
-	Status           string         `json:"status"` // 审核状态，不代表正式资产是否启用
-	ReviewStatus     string         `json:"review_status"`
-	MatchedAssetID   string         `json:"matched_asset_id,omitempty"`
-	ReviewNote       string         `json:"review_note,omitempty"`
-	CreatedBy        string         `json:"created_by,omitempty"`
-	CreatedAt        time.Time      `json:"created_at"`
-	UpdatedAt        time.Time      `json:"updated_at"`
-	ReviewedBy       string         `json:"reviewed_by,omitempty"`
-	ReviewedAt       *time.Time     `json:"reviewed_at,omitempty"`
-	FindingCount     int            `json:"finding_count,omitempty"`
-	HighestSeverity  string         `json:"highest_severity,omitempty"`
+	ID                    string         `json:"id"`
+	AssetType             string         `json:"asset_type"`
+	AssetValue            string         `json:"asset_value"`
+	NormalizedValue       string         `json:"normalized_value"`
+	Name                  string         `json:"name,omitempty"`
+	OrganizationID        string         `json:"organization_id"`
+	OrganizationCode      string         `json:"organization_code"`
+	OrganizationName      string         `json:"organization_name"`
+	Source                string         `json:"source"`
+	SourceReference       string         `json:"source_reference,omitempty"`
+	SuggestedData         map[string]any `json:"suggested_data"`
+	Status                string         `json:"status"` // 审核状态，不代表正式资产是否启用
+	ReviewStatus          string         `json:"review_status"`
+	MatchedAssetID        string         `json:"matched_asset_id,omitempty"`
+	WorkingVersionDraftID string         `json:"working_version_draft_id,omitempty"`
+	ReviewNote            string         `json:"review_note,omitempty"`
+	CreatedBy             string         `json:"created_by,omitempty"`
+	CreatedAt             time.Time      `json:"created_at"`
+	UpdatedAt             time.Time      `json:"updated_at"`
+	ReviewedBy            string         `json:"reviewed_by,omitempty"`
+	ReviewedAt            *time.Time     `json:"reviewed_at,omitempty"`
+	FindingCount          int            `json:"finding_count,omitempty"`
+	HighestSeverity       string         `json:"highest_severity,omitempty"`
 }
 
 type CreateInput struct {
@@ -100,7 +101,8 @@ func (s *Service) List(ctx context.Context, principal auth.Principal, status str
         SELECT c.id::text, c.asset_type, c.asset_value, c.normalized_value,
                COALESCE(c.suggested_data->>'name', ''), COALESCE(o.id::text, ''), COALESCE(o.organization_code, ''), COALESCE(o.organization_name, ''),
                c.source, COALESCE(c.source_reference, ''), c.suggested_data, c.status,
-               COALESCE(c.matched_asset_id::text, ''), COALESCE(c.review_note, ''), COALESCE(c.created_by::text, ''),
+               COALESCE(c.matched_asset_id::text, ''), COALESCE(c.working_version_draft_id::text, ''),
+               COALESCE(c.review_note, ''), COALESCE(c.created_by::text, ''),
                c.created_at, c.updated_at, COALESCE(c.reviewed_by::text, ''), c.reviewed_at,
                (SELECT count(*) FROM security_finding_import_candidates fic WHERE fic.asset_candidate_id=c.id AND fic.status='pending'),
                COALESCE((SELECT CASE max(CASE fic.severity WHEN 'critical' THEN 4 WHEN 'high' THEN 3 WHEN 'medium' THEN 2 WHEN 'low' THEN 1 ELSE 0 END) WHEN 4 THEN 'critical' WHEN 3 THEN 'high' WHEN 2 THEN 'medium' WHEN 1 THEN 'low' ELSE '' END FROM security_finding_import_candidates fic WHERE fic.asset_candidate_id=c.id AND fic.status='pending'),'')
@@ -115,7 +117,7 @@ func (s *Service) List(ctx context.Context, principal auth.Principal, status str
 	for rows.Next() {
 		var i Candidate
 		var raw []byte
-		if err := rows.Scan(&i.ID, &i.AssetType, &i.AssetValue, &i.NormalizedValue, &i.Name, &i.OrganizationID, &i.OrganizationCode, &i.OrganizationName, &i.Source, &i.SourceReference, &raw, &i.Status, &i.MatchedAssetID, &i.ReviewNote, &i.CreatedBy, &i.CreatedAt, &i.UpdatedAt, &i.ReviewedBy, &i.ReviewedAt, &i.FindingCount, &i.HighestSeverity); err != nil {
+		if err := rows.Scan(&i.ID, &i.AssetType, &i.AssetValue, &i.NormalizedValue, &i.Name, &i.OrganizationID, &i.OrganizationCode, &i.OrganizationName, &i.Source, &i.SourceReference, &raw, &i.Status, &i.MatchedAssetID, &i.WorkingVersionDraftID, &i.ReviewNote, &i.CreatedBy, &i.CreatedAt, &i.UpdatedAt, &i.ReviewedBy, &i.ReviewedAt, &i.FindingCount, &i.HighestSeverity); err != nil {
 			return nil, fmt.Errorf("scan asset candidate: %w", err)
 		}
 		if len(raw) > 0 {
@@ -142,7 +144,8 @@ func (s *Service) Search(ctx context.Context, principal auth.Principal, status s
         SELECT c.id::text, c.asset_type, c.asset_value, c.normalized_value,
                COALESCE(c.suggested_data->>'name', ''), COALESCE(o.id::text, ''), COALESCE(o.organization_code, ''), COALESCE(o.organization_name, ''),
                c.source, COALESCE(c.source_reference, ''), c.suggested_data, c.status,
-               COALESCE(c.matched_asset_id::text, ''), COALESCE(c.review_note, ''), COALESCE(c.created_by::text, ''),
+               COALESCE(c.matched_asset_id::text, ''), COALESCE(c.working_version_draft_id::text, ''),
+               COALESCE(c.review_note, ''), COALESCE(c.created_by::text, ''),
                c.created_at, c.updated_at, COALESCE(c.reviewed_by::text, ''), c.reviewed_at,
                (SELECT count(*) FROM security_finding_import_candidates fic WHERE fic.asset_candidate_id=c.id AND fic.status='pending'),
                COALESCE((SELECT CASE max(CASE fic.severity WHEN 'critical' THEN 4 WHEN 'high' THEN 3 WHEN 'medium' THEN 2 WHEN 'low' THEN 1 ELSE 0 END) WHEN 4 THEN 'critical' WHEN 3 THEN 'high' WHEN 2 THEN 'medium' WHEN 1 THEN 'low' ELSE '' END FROM security_finding_import_candidates fic WHERE fic.asset_candidate_id=c.id AND fic.status='pending'),''), count(*) OVER ()
@@ -159,7 +162,7 @@ func (s *Service) Search(ctx context.Context, principal auth.Principal, status s
 	for rows.Next() {
 		var i Candidate
 		var raw []byte
-		if err := rows.Scan(&i.ID, &i.AssetType, &i.AssetValue, &i.NormalizedValue, &i.Name, &i.OrganizationID, &i.OrganizationCode, &i.OrganizationName, &i.Source, &i.SourceReference, &raw, &i.Status, &i.MatchedAssetID, &i.ReviewNote, &i.CreatedBy, &i.CreatedAt, &i.UpdatedAt, &i.ReviewedBy, &i.ReviewedAt, &i.FindingCount, &i.HighestSeverity, &total); err != nil {
+		if err := rows.Scan(&i.ID, &i.AssetType, &i.AssetValue, &i.NormalizedValue, &i.Name, &i.OrganizationID, &i.OrganizationCode, &i.OrganizationName, &i.Source, &i.SourceReference, &raw, &i.Status, &i.MatchedAssetID, &i.WorkingVersionDraftID, &i.ReviewNote, &i.CreatedBy, &i.CreatedAt, &i.UpdatedAt, &i.ReviewedBy, &i.ReviewedAt, &i.FindingCount, &i.HighestSeverity, &total); err != nil {
 			return pagination.Result[Candidate]{}, fmt.Errorf("scan asset candidate page: %w", err)
 		}
 		if len(raw) > 0 {
@@ -200,12 +203,13 @@ func (s *Service) listByID(ctx context.Context, id string) (Candidate, error) {
         SELECT c.id::text, c.asset_type, c.asset_value, c.normalized_value,
                COALESCE(c.suggested_data->>'name', ''), COALESCE(o.id::text, ''), COALESCE(o.organization_code, ''), COALESCE(o.organization_name, ''),
                c.source, COALESCE(c.source_reference, ''), c.suggested_data, c.status,
-               COALESCE(c.matched_asset_id::text, ''), COALESCE(c.review_note, ''), COALESCE(c.created_by::text, ''),
+               COALESCE(c.matched_asset_id::text, ''), COALESCE(c.working_version_draft_id::text, ''),
+               COALESCE(c.review_note, ''), COALESCE(c.created_by::text, ''),
                c.created_at, c.updated_at, COALESCE(c.reviewed_by::text, ''), c.reviewed_at,
                (SELECT count(*) FROM security_finding_import_candidates fic WHERE fic.asset_candidate_id=c.id AND fic.status='pending'),
                COALESCE((SELECT CASE max(CASE fic.severity WHEN 'critical' THEN 4 WHEN 'high' THEN 3 WHEN 'medium' THEN 2 WHEN 'low' THEN 1 ELSE 0 END) WHEN 4 THEN 'critical' WHEN 3 THEN 'high' WHEN 2 THEN 'medium' WHEN 1 THEN 'low' ELSE '' END FROM security_finding_import_candidates fic WHERE fic.asset_candidate_id=c.id AND fic.status='pending'),'')
         FROM asset_candidates c LEFT JOIN organizations o ON o.id=c.organization_id WHERE c.id=$1::uuid`, id).
-		Scan(&i.ID, &i.AssetType, &i.AssetValue, &i.NormalizedValue, &i.Name, &i.OrganizationID, &i.OrganizationCode, &i.OrganizationName, &i.Source, &i.SourceReference, &raw, &i.Status, &i.MatchedAssetID, &i.ReviewNote, &i.CreatedBy, &i.CreatedAt, &i.UpdatedAt, &i.ReviewedBy, &i.ReviewedAt, &i.FindingCount, &i.HighestSeverity)
+		Scan(&i.ID, &i.AssetType, &i.AssetValue, &i.NormalizedValue, &i.Name, &i.OrganizationID, &i.OrganizationCode, &i.OrganizationName, &i.Source, &i.SourceReference, &raw, &i.Status, &i.MatchedAssetID, &i.WorkingVersionDraftID, &i.ReviewNote, &i.CreatedBy, &i.CreatedAt, &i.UpdatedAt, &i.ReviewedBy, &i.ReviewedAt, &i.FindingCount, &i.HighestSeverity)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return Candidate{}, ErrNotFound
 	}
@@ -285,6 +289,15 @@ func (s *Service) Create(ctx context.Context, principal auth.Principal, in Creat
 	return s.listByID(ctx, id)
 }
 
+// Accept confirms ownership of a discovered asset. It records an organization
+// working version rather than a formal asset: the finding import knows an
+// address exists, not who owns it or how it should be classified, and writing
+// assets directly skipped the working version, the reporting task, the snapshot
+// and the quality checks that every other asset change goes through.
+//
+// The candidate stays pending and carries the draft id until the working version
+// is published, at which point inventorytask settles it and releases the
+// findings that were waiting on the asset.
 func (s *Service) Accept(ctx context.Context, principal auth.Principal, id string, in AcceptInput, requestID, ip string) (asset.Asset, error) {
 	if err := requireGroupAdmin(principal); err != nil {
 		return asset.Asset{}, err
@@ -316,14 +329,32 @@ func (s *Service) Accept(ctx context.Context, principal auth.Principal, id strin
 	if candidate.Source == "finding_import" {
 		source = "finding_import"
 	}
-	item, err := s.assets.CreateWithAfterCreate(ctx, principal, in.CreateInput, source, requestID, ip, func(ctxTx pgx.Tx, created asset.Asset) error {
-		var current, org string
-		if err := ctxTx.QueryRow(ctx, `SELECT status,COALESCE(organization_id::text,'') FROM asset_candidates WHERE id=$1::uuid FOR UPDATE`, id).Scan(&current, &org); errors.Is(err, pgx.ErrNoRows) {
+	if source == "finding_import" {
+		// The scan recorded an endpoint; the port is evidence about the host, not
+		// part of its identity. Normalising has already collapsed host:port onto
+		// the address, so the port is kept as a note for the owner to classify.
+		if host, port, ok := asset.SplitHostPort(in.Value); ok {
+			if in.Notes == "" {
+				in.Notes = "漏洞导入记录端口 " + port
+			} else {
+				in.Notes = in.Notes + "；漏洞导入记录端口 " + port
+			}
+			in.Value = host
+		}
+	}
+	item, err := s.assets.CreateWorkingVersion(ctx, principal, in.CreateInput, source, requestID, ip, func(ctxTx pgx.Tx, created asset.Asset) error {
+		var current, org, draftID string
+		if err := ctxTx.QueryRow(ctx, `SELECT status,COALESCE(organization_id::text,''),COALESCE(working_version_draft_id::text,'') FROM asset_candidates WHERE id=$1::uuid FOR UPDATE`, id).Scan(&current, &org, &draftID); errors.Is(err, pgx.ErrNoRows) {
 			return ErrNotFound
 		} else if err != nil {
 			return fmt.Errorf("lock asset candidate for acceptance: %w", err)
 		}
 		if current != "pending" {
+			return ErrConflict
+		}
+		if draftID != "" {
+			// A working version already exists for this candidate; accepting again
+			// must not leave a second unpublished draft behind for the same value.
 			return ErrConflict
 		}
 		// Finding imports may arrive before ownership is known. Once an administrator
@@ -333,10 +364,19 @@ func (s *Service) Accept(ctx context.Context, principal auth.Principal, id strin
 		if resolvedOrganizationID == "" {
 			resolvedOrganizationID = in.OrganizationID
 		}
-		if _, err := ctxTx.Exec(ctx, `UPDATE asset_candidates SET organization_id=$2::uuid,status='accepted',matched_asset_id=$3::uuid,review_note=NULLIF($4,''),reviewed_by=$5::uuid,reviewed_at=now(),updated_at=now() WHERE id=$1::uuid`, id, resolvedOrganizationID, created.ID, strings.TrimSpace(in.ReviewNote), principal.UserID); err != nil {
+		if _, err := ctxTx.Exec(ctx, `UPDATE asset_candidates SET organization_id=$2::uuid,working_version_draft_id=$3::uuid,review_note=NULLIF($4,''),reviewed_by=$5::uuid,reviewed_at=now(),updated_at=now() WHERE id=$1::uuid`, id, resolvedOrganizationID, created.ID, strings.TrimSpace(in.ReviewNote), principal.UserID); err != nil {
 			return fmt.Errorf("accept asset candidate: %w", err)
 		}
-		return s.audit(ctx, ctxTx, principal, resolvedOrganizationID, "asset_candidate.accept", id, "确认待确认资产并入库", map[string]any{"matched_asset_id": created.ID, "review_note": strings.TrimSpace(in.ReviewNote)}, requestID, ip)
+		// The findings behind this discovery no longer wait on asset bookkeeping:
+		// they are attached to the working version and move to the formal asset
+		// when it is published.
+		if _, err := ctxTx.Exec(ctx, `
+			UPDATE security_finding_import_candidates
+			SET matched_asset_id=NULL, updated_at=now()
+			WHERE asset_candidate_id=$1::uuid AND status='pending'`, id); err != nil {
+			return fmt.Errorf("detach pending findings from asset candidate: %w", err)
+		}
+		return s.audit(ctx, ctxTx, principal, resolvedOrganizationID, "asset_candidate.accept", id, "确认待确认资产归属并生成未上报工作版本", map[string]any{"working_version_draft_id": created.ID, "review_note": strings.TrimSpace(in.ReviewNote)}, requestID, ip)
 	})
 	if err != nil {
 		return asset.Asset{}, mapAssetError(err)

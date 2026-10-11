@@ -124,14 +124,19 @@ func TestFindingImportCandidatesLifecycle(t *testing.T) {
 	csv := strings.Join([]string{
 		"资产类型,资产值,漏洞标题,严重等级,漏洞描述,发现时间",
 		"domain,EXAMPLE.COM.,域名精确匹配漏洞,高危,应通过标准化值直接入库,2026-07-29 10:00:00",
-		"ip,192.168.1.10:443,端口标识待关联漏洞,中危,应进入人工关联区,2026-07-29 10:05:00",
+		// The port is evidence about the host, not part of its identity, so this
+		// resolves onto the existing 192.168.1.10 asset instead of becoming a
+		// second asset or a manual association.
+		"ip,192.168.1.10:443,端口标识同主机漏洞,中危,应归一到该主机资产,2026-07-29 10:05:00",
+		// An address the batch scope never covered still needs a human decision.
+		"ip,198.51.100.77,范围外待关联漏洞,中危,应进入人工关联区,2026-07-29 10:06:00",
 	}, "\n")
 	result, err := service.ImportFindings(ctx, principal, batchID, "scanner.csv", strings.NewReader(csv), "finding-import-1", "127.0.0.1")
 	if err != nil {
 		t.Fatalf("ImportFindings() error = %v", err)
 	}
-	if result.Status != "partial" || result.TotalCount != 2 || result.SuccessCount != 1 || result.PendingCount != 1 || result.FailureCount != 0 {
-		t.Fatalf("ImportFindings() result = %+v, want partial/success=1/pending=1", result)
+	if result.Status != "partial" || result.TotalCount != 3 || result.SuccessCount != 2 || result.PendingCount != 1 || result.FailureCount != 0 {
+		t.Fatalf("ImportFindings() result = %+v, want partial/success=2/pending=1", result)
 	}
 
 	page, _ := pagination.Normalize(1, 20)
@@ -143,8 +148,20 @@ func TestFindingImportCandidatesLifecycle(t *testing.T) {
 		t.Fatalf("pending candidates = total %d items %d, want 1", candidates.Total, len(candidates.Items))
 	}
 	candidate := candidates.Items[0]
-	if candidate.SuggestedScopeAssetID != ipScopeID || candidate.MatchMethod != "endpoint_host" || candidate.MatchConfidence != 90 {
-		t.Fatalf("candidate suggestion = scope %q method %q confidence %d, want IP scope/endpoint_host/90", candidate.SuggestedScopeAssetID, candidate.MatchMethod, candidate.MatchConfidence)
+	if candidate.SuggestedScopeAssetID != "" || candidate.MatchMethod == "endpoint_host" {
+		t.Fatalf("candidate suggestion = scope %q method %q, want no scope suggestion for an out-of-scope address", candidate.SuggestedScopeAssetID, candidate.MatchMethod)
+	}
+
+	// The endpoint row resolved onto the scoped host without a manual decision.
+	var importedPortFinding int
+	if err := pool.QueryRow(ctx, `
+		SELECT count(*) FROM security_findings f
+		WHERE f.test_batch_id=$1::uuid AND f.asset_id=$2::uuid AND f.title='端口标识同主机漏洞'
+	`, batchID, ipAssetID).Scan(&importedPortFinding); err != nil {
+		t.Fatalf("count endpoint finding: %v", err)
+	}
+	if importedPortFinding != 1 {
+		t.Fatalf("endpoint finding on scoped host = %d, want 1", importedPortFinding)
 	}
 
 	options, err := service.ListFindingImportScopeOptions(ctx, principal, candidate.ID)
@@ -170,7 +187,7 @@ func TestFindingImportCandidatesLifecycle(t *testing.T) {
 
 	linked, err := service.LinkFindingImportCandidate(ctx, principal, candidate.ID, FindingImportCandidateLinkInput{
 		ScopeAssetID: ipScopeID,
-		ReviewNote:   "确认扫描器输出中的端口属于该主机",
+		ReviewNote:   "确认该地址属于本批次测试范围",
 	}, "finding-import-link", "127.0.0.1")
 	if err != nil {
 		t.Fatalf("LinkFindingImportCandidate() error = %v", err)
@@ -188,8 +205,8 @@ func TestFindingImportCandidatesLifecycle(t *testing.T) {
 	if err := pool.QueryRow(ctx, `SELECT count(*) FROM security_findings WHERE test_batch_id=$1::uuid`, batchID).Scan(&findingCount); err != nil {
 		t.Fatalf("count imported findings: %v", err)
 	}
-	if findingCount != 2 {
-		t.Fatalf("finding count after exact import and manual link = %d, want 2", findingCount)
+	if findingCount != 3 {
+		t.Fatalf("finding count after automatic matches and manual link = %d, want 3", findingCount)
 	}
 	if err := pool.QueryRow(ctx, `
 		SELECT count(*) FROM notification_events
@@ -197,10 +214,15 @@ func TestFindingImportCandidatesLifecycle(t *testing.T) {
 	`, organizationID).Scan(&notificationCount); err != nil {
 		t.Fatalf("count finding notifications: %v", err)
 	}
+	// Two findings landed on assets: the endpoint row resolved onto the scoped
+	// host and the out-of-scope address was linked by hand. The domain row is
+	// keyed on a business system instead and notifies through a different event.
 	if notificationCount != 2 {
 		t.Fatalf("notification event count = %d, want 2", notificationCount)
 	}
 
+	// The same issue re-reported for another port on the same host. It resolves to
+	// the same asset and title, so no second finding may be created.
 	duplicateCSV := strings.Join([]string{
 		"资产类型,资产值,漏洞标题,严重等级,漏洞描述",
 		"ip,192.168.1.10:8443,端口标识待关联漏洞,中危,重复漏洞应由人工关联阶段识别",
@@ -209,16 +231,31 @@ func TestFindingImportCandidatesLifecycle(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ImportFindings(duplicate candidate) error = %v", err)
 	}
-	duplicateCandidates, err := service.SearchFindingImportCandidates(ctx, principal, FindingImportCandidateFilter{TestBatchID: batchID, Status: "pending", Keyword: "8443", Page: page})
-	if err != nil || len(duplicateCandidates.Items) != 1 {
-		t.Fatalf("duplicate pending candidate search = %+v, %v", duplicateCandidates, err)
+	var duplicateFindingCount int
+	if err := pool.QueryRow(ctx, `
+		SELECT count(*) FROM security_findings
+		WHERE test_batch_id=$1::uuid AND asset_id=$2::uuid AND lower(btrim(title))=lower('端口标识待关联漏洞')
+	`, batchID, ipAssetID).Scan(&duplicateFindingCount); err != nil {
+		t.Fatalf("count duplicate findings: %v", err)
 	}
-	duplicateLinked, err := service.LinkFindingImportCandidate(ctx, principal, duplicateCandidates.Items[0].ID, FindingImportCandidateLinkInput{ScopeAssetID: ipScopeID}, "finding-import-duplicate-link", "127.0.0.1")
-	if err != nil {
-		t.Fatalf("LinkFindingImportCandidate(duplicate) error = %v", err)
+	if duplicateFindingCount != 1 {
+		t.Fatalf("findings for one host+title = %d, want 1 even across two ports", duplicateFindingCount)
 	}
-	if duplicateLinked.Status != "duplicate" || duplicateLinked.ImportedFindingID != linked.ImportedFindingID {
-		t.Fatalf("duplicate linked candidate = %+v, want duplicate referencing existing finding %s", duplicateLinked, linked.ImportedFindingID)
+	// The row matched an existing issue for the same host and title at import
+	// time, so it never became a manual-association row and nothing is left for
+	// a reviewer to decide.
+	var duplicateStillPending int
+	if err := pool.QueryRow(ctx, `
+		SELECT count(*) FROM security_finding_import_candidates c
+		WHERE c.finding_import_id=$1::uuid AND c.status='pending'
+	`, duplicateImport.ID).Scan(&duplicateStillPending); err != nil {
+		t.Fatalf("count duplicate import statuses: %v", err)
+	}
+	if duplicateStillPending != 0 {
+		t.Fatalf("duplicate import left %d rows for manual association, want 0", duplicateStillPending)
+	}
+	if duplicateImport.SuccessCount != 1 || duplicateImport.PendingCount != 0 {
+		t.Fatalf("duplicate import = success %d pending %d, want 1/0", duplicateImport.SuccessCount, duplicateImport.PendingCount)
 	}
 	if err := pool.QueryRow(ctx, `SELECT pending_count FROM security_finding_imports WHERE id=$1::uuid`, duplicateImport.ID).Scan(&pendingCount); err != nil || pendingCount != 0 {
 		t.Fatalf("duplicate import pending_count = %d, %v; want 0", pendingCount, err)
@@ -226,13 +263,13 @@ func TestFindingImportCandidatesLifecycle(t *testing.T) {
 
 	ignoreCSV := strings.Join([]string{
 		"资产类型,资产值,漏洞标题,严重等级,漏洞描述",
-		"ip,198.51.100.20,无对应资产漏洞,低危,无法确认资产归属时可人工忽略",
+		"ip,198.51.100.90,无对应资产漏洞,低危,无法确认资产归属时可人工忽略",
 	}, "\n")
 	ignoreImport, err := service.ImportFindings(ctx, principal, batchID, "ignore.csv", strings.NewReader(ignoreCSV), "finding-import-ignore", "127.0.0.1")
 	if err != nil {
 		t.Fatalf("ImportFindings(ignore candidate) error = %v", err)
 	}
-	ignoreCandidates, err := service.SearchFindingImportCandidates(ctx, principal, FindingImportCandidateFilter{TestBatchID: batchID, Status: "pending", Keyword: "198.51.100.20", Page: page})
+	ignoreCandidates, err := service.SearchFindingImportCandidates(ctx, principal, FindingImportCandidateFilter{TestBatchID: batchID, Status: "pending", Keyword: "198.51.100.90", Page: page})
 	if err != nil || len(ignoreCandidates.Items) != 1 {
 		t.Fatalf("ignore pending candidate search = %+v, %v", ignoreCandidates, err)
 	}
@@ -255,8 +292,10 @@ func TestFindingImportCandidatesLifecycle(t *testing.T) {
 	`).Scan(&auditCount); err != nil {
 		t.Fatalf("count candidate audits: %v", err)
 	}
-	if auditCount != 3 {
-		t.Fatalf("candidate audit count = %d, want 3", auditCount)
+	// Only the two rows that needed a human decision produced review actions:
+	// the linked out-of-scope address and the ignored scan artefact.
+	if auditCount != 2 {
+		t.Fatalf("candidate audit count = %d, want 2", auditCount)
 	}
 
 	if result.ID == duplicateImport.ID || duplicateImport.ID == ignoreImport.ID {

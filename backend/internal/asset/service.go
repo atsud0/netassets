@@ -2160,6 +2160,22 @@ func NormalizeValue(assetType, value string) (string, error) {
 	return normalizeValue(assetType, value)
 }
 
+// SplitHostPort extracts the port from an endpoint value such as
+// "192.168.1.10:443". It reports whether one was present, so callers that match
+// scan output against the asset register can keep the port as evidence instead
+// of discarding it when the address normalises onto an existing asset.
+func SplitHostPort(value string) (string, string, bool) {
+	host, port, err := net.SplitHostPort(strings.TrimSpace(value))
+	if err != nil {
+		return "", "", false
+	}
+	portNumber, convErr := strconv.Atoi(port)
+	if convErr != nil || portNumber < 1 || portNumber > 65535 {
+		return "", "", false
+	}
+	return host, strconv.Itoa(portNumber), true
+}
+
 func normalizeValue(assetType, value string) (string, error) {
 	value = strings.TrimSpace(value)
 	switch assetType {
@@ -2170,6 +2186,17 @@ func normalizeValue(assetType, value string) (string, error) {
 		}
 		return domain, nil
 	case "ip":
+		// Scan exports routinely record an endpoint as host:port. An IP asset is
+		// identified by its address alone, so the port is stripped before
+		// normalisation: 192.168.1.10:443 and 192.168.1.10 must collapse onto the
+		// same asset instead of creating one row per listening port.
+		if host, port, err := net.SplitHostPort(value); err == nil {
+			portNumber, convErr := strconv.Atoi(port)
+			if convErr != nil || portNumber < 1 || portNumber > 65535 {
+				return "", ErrInvalid
+			}
+			value = host
+		}
 		ip := net.ParseIP(value)
 		if ip == nil {
 			return "", ErrInvalid
