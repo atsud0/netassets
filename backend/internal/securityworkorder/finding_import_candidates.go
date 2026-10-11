@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 
 	"netassets/internal/asset"
 	"netassets/internal/auth"
@@ -710,16 +711,37 @@ func (s *Service) LinkFindingImportCandidate(ctx context.Context, principal auth
 		}
 		findingID, _, err = s.createFindingInTx(ctx, tx, principal, findingInput, requestID, ipAddress)
 		if err != nil {
-			return FindingImportCandidate{}, err
+			// The pre-check above is advisory; a concurrent link for the same asset
+			// and title can win the race and make the unique index reject this
+			// insert. Re-read the surviving finding and record the row as a
+			// duplicate instead of failing the whole import item.
+			if !isFindingDuplicateViolation(err) {
+				return FindingImportCandidate{}, err
+			}
+			if lookupErr := tx.QueryRow(ctx, `
+				SELECT id::text FROM security_findings
+				WHERE test_batch_id::text=$1 AND asset_id::text=$2 AND lower(btrim(title))=lower(btrim($3))
+				ORDER BY created_at LIMIT 1`, candidate.TestBatchID, scope.AssetID, candidate.Title).Scan(&findingID); lookupErr != nil {
+				return FindingImportCandidate{}, fmt.Errorf("resolve concurrently created finding: %w", lookupErr)
+			}
+			status = "duplicate"
 		}
 	} else {
 		status = "duplicate"
+	}
+	// matched_scope_asset_id references security_test_scope_assets, so it may only
+	// be set when the finding came from a test batch. A batchless import resolves
+	// straight to a formal asset and must leave the scope column NULL; writing the
+	// asset id there violates the foreign key and rolled the whole link back.
+	matchedScopeAssetID := scope.ScopeAssetID
+	if candidate.TestBatchID == "" {
+		matchedScopeAssetID = ""
 	}
 	if _, err := tx.Exec(ctx, `
 		UPDATE security_finding_import_candidates
 		SET status=$2, matched_scope_asset_id=NULLIF($3,'')::uuid, matched_asset_id=NULLIF($4,'')::uuid,
 		    review_note=NULLIF($5,''), reviewed_by=$6::uuid, reviewed_at=now(), imported_finding_id=$7::uuid, updated_at=now()
-		WHERE id=$1::uuid`, id, status, scope.ScopeAssetID, scope.AssetID, input.ReviewNote, principal.UserID, findingID); err != nil {
+		WHERE id=$1::uuid`, id, status, matchedScopeAssetID, scope.AssetID, input.ReviewNote, principal.UserID, findingID); err != nil {
 		return FindingImportCandidate{}, fmt.Errorf("update linked finding import candidate: %w", err)
 	}
 	if _, err := tx.Exec(ctx, `UPDATE security_finding_imports SET pending_count=GREATEST(pending_count-1,0) WHERE id=$1::uuid`, candidate.FindingImportID); err != nil {
@@ -849,4 +871,12 @@ func (s *Service) RetryAcceptedAssetCandidate(ctx context.Context, principal aut
 		return result, firstErr
 	}
 	return result, nil
+}
+
+// isFindingDuplicateViolation reports whether err is the unique violation raised
+// by security_findings_batch_asset_title_unique, which is the signal that a
+// parallel import already recorded this issue for the same asset.
+func isFindingDuplicateViolation(err error) bool {
+	var pgErr *pgconn.PgError
+	return errors.As(err, &pgErr) && pgErr.Code == "23505" && pgErr.ConstraintName == "security_findings_batch_asset_title_unique"
 }
