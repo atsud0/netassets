@@ -1,4 +1,5 @@
 import { expect, test, type Locator, type Page } from '@playwright/test'
+import { clickRowAction } from '../helpers/row-actions'
 
 const adminUsername = process.env.E2E_USERNAME ?? 'admin'
 const adminPassword = process.env.E2E_PASSWORD
@@ -63,7 +64,7 @@ test('左侧导航按业务分组，消息中心仅保留在顶栏', async ({ pa
   await login(page, adminUsername, adminPassword!)
 
   const navigation = page.getByRole('navigation', { name: '主导航' })
-  await expect(navigation.getByRole('button', { name: '集团工作台', exact: true })).toBeVisible()
+  await expect(navigation.getByRole('button', { name: '工作台', exact: true })).toBeVisible()
   await expect(navigation.getByRole('button', { name: '资产治理', exact: true })).toBeVisible()
   await expect(navigation.getByRole('button', { name: '安全运营', exact: true })).toBeVisible()
   await expect(navigation.getByRole('button', { name: '系统设置', exact: true })).toBeVisible()
@@ -129,9 +130,10 @@ test('治理页面内容卡片与台账页面保持相同圆角和间距', async
     })
   })
 
-  expect(await measureActionGaps('.asset-page-actions')).toEqual([10, 10, 10, 10])
-  await expect(page.locator('.asset-page-actions .el-dropdown')).toHaveCount(1)
-  await page.getByRole('button', { name: '批量导入', exact: true }).click()
+  expect(await measureActionGaps('.asset-page-actions')).toEqual([10, 10])
+  await expect(page.locator('.asset-page-actions .el-dropdown')).toHaveCount(2)
+  await page.getByRole('button', { name: '更多操作', exact: true }).click()
+  await page.getByRole('menuitem', { name: '批量导入', exact: true }).click()
   const assetImportDialog = page.getByRole('dialog', { name: '批量导入网络资产' })
   await expect(assetImportDialog).toBeVisible()
   await expect(assetImportDialog.getByRole('button', { name: '下载 XLSX 模板', exact: true })).toBeVisible()
@@ -164,7 +166,7 @@ test('治理页面内容卡片与台账页面保持相同圆角和间距', async
 
   const ledgerBaseline = await measureCards('.asset-filter-panel', '.data-table-panel')
   expect(ledgerBaseline.gap).toBe(16)
-  expect(ledgerBaseline.radius).toBe('14px')
+  expect(ledgerBaseline.radius).toBe('10px')
   expect(ledgerBaseline.borderStyle).toBe('solid')
 
   await page.goto('/asset-candidates')
@@ -601,7 +603,7 @@ test('填报任务列表以已提交和待提交表达提交进度', async ({ pa
   await expect(detailDrawer.locator('.task-organization-table .el-table__body-wrapper tbody tr').filter({ hasText: organizationName }).first()).toBeVisible()
 })
 
-test('业务系统名称和系统编码使用独立列表列', async ({ page }) => {
+test('业务系统列表突出名称，详情保留系统编码', async ({ page }) => {
   test.skip(!adminPassword, 'E2E_PASSWORD/BOOTSTRAP_ADMIN_PASSWORD 未配置')
 
   await page.setViewportSize({ width: 1440, height: 950 })
@@ -611,18 +613,23 @@ test('业务系统名称和系统编码使用独立列表列', async ({ page }) 
 
   const table = page.locator('.data-table-panel > .el-table')
   const headerLabels = await table.locator('.el-table__header-wrapper').first().locator('th .cell').allTextContents()
-  expect(headerLabels.map(label => label.trim())).toEqual(expect.arrayContaining(['系统名称', '系统编码', '所属组织']))
-  expect(headerLabels.map(label => label.trim())).not.toContain('系统')
+  expect(headerLabels.map(label => label.trim())).toEqual(expect.arrayContaining(['业务系统', '所属组织', '数据安全']))
+  expect(headerLabels.map(label => label.trim())).not.toContain('系统 / 编码')
 
   const firstRow = table.locator('.el-table__body-wrapper tbody tr').first()
   if (await firstRow.count()) {
     const cells = firstRow.locator('td')
     await expect(cells.nth(1).locator('.table-link')).toBeVisible()
-    await expect(cells.nth(2).locator('.mono-text')).not.toHaveText('')
+    await expect(cells.nth(1).locator('.mono-text')).toHaveCount(0)
+    await firstRow.locator('.table-link').click()
+    const detailDrawer = page.locator('.el-drawer:visible').filter({ hasText: '业务系统详情' }).last()
+    await expect(detailDrawer).toBeVisible()
+    await expect(detailDrawer).toContainText('系统编码（系统字段）')
+    await expect(detailDrawer.locator('.detail-system-code code')).not.toHaveText('')
   }
 })
 
-test('网络资产名称与资产值独立展示且名称打开详情', async ({ page }) => {
+test('网络资产名称与访问标识聚合展示且名称打开详情', async ({ page }) => {
   test.skip(!adminPassword, 'E2E_PASSWORD/BOOTSTRAP_ADMIN_PASSWORD 未配置')
 
   await page.setViewportSize({ width: 1440, height: 950 })
@@ -671,16 +678,14 @@ test('网络资产名称与资产值独立展示且名称打开详情', async ({
   await page.getByPlaceholder('搜索资产值、名称、系统或负责人').press('Enter')
   const tablePanel = page.locator('.data-table-panel')
   const headerLabels = await tablePanel.locator('.el-table__header-wrapper').first().locator('th .cell').allTextContents()
-  expect(headerLabels.map(label => label.trim())).toEqual(expect.arrayContaining(['资产名称', '资产值', '业务系统']))
+  expect(headerLabels.map(label => label.trim())).toEqual(expect.arrayContaining(['资产 / 访问标识', '业务归属', '责任人']))
   expect(headerLabels.map(label => label.trim())).not.toContain('资产')
   const row = tablePanel.locator('.el-table__body-wrapper tbody tr').filter({ hasText: assetValue }).first()
   await expect(row).toBeVisible()
   const cells = row.locator('td')
   await expect(cells.nth(1).getByRole('button', { name: assetName, exact: true })).toBeVisible()
-  await expect(cells.nth(1)).not.toContainText(assetValue)
-  await expect(cells.nth(2).locator('.mono-text')).toHaveText(assetValue)
-  await expect(cells.nth(2)).not.toContainText(assetName)
-  await expect(cells.nth(5)).toHaveText(systemName)
+  await expect(cells.nth(1).locator('.mono-text')).toHaveText(assetValue)
+  await expect(cells.nth(3)).toContainText(systemName)
   await expect(row.getByText(systemCode, { exact: true })).toHaveCount(0)
   await expect(tablePanel.getByRole('button', { name: '详情', exact: true })).toHaveCount(0)
 
@@ -698,9 +703,9 @@ test('网络资产名称与资产值独立展示且名称打开详情', async ({
   await expect(drawer).toBeHidden()
 
   await page.goto('/systems')
-  await page.getByPlaceholder('搜索系统编码、名称、组织或负责人').fill(systemCode)
-  await page.getByPlaceholder('搜索系统编码、名称、组织或负责人').press('Enter')
-  const systemRow = page.locator('.data-table-panel .el-table__body-wrapper tbody tr').filter({ hasText: systemCode }).first()
+  await page.getByPlaceholder('搜索系统名称、组织或负责人，也可输入编码').fill(systemCode)
+  await page.getByPlaceholder('搜索系统名称、组织或负责人，也可输入编码').press('Enter')
+  const systemRow = page.locator('.data-table-panel .el-table__body-wrapper tbody tr').filter({ hasText: systemName }).first()
   const systemNameLink = systemRow.getByRole('button', { name: systemName, exact: true })
   await expect(systemNameLink).toBeVisible()
   const systemNameStyle = await systemNameLink.locator('span').evaluate(element => {
@@ -711,7 +716,7 @@ test('网络资产名称与资产值独立展示且名称打开详情', async ({
   expect(assetNameStyle.color).not.toBe('rgb(107, 119, 133)')
 })
 
-test('组织名称与编码独立展示且集团管理员可编辑已有组织', async ({ page }) => {
+test('组织列表突出名称且集团管理员可编辑已有组织', async ({ page }) => {
   test.skip(!adminPassword, 'E2E_PASSWORD/BOOTSTRAP_ADMIN_PASSWORD 未配置')
 
   await page.setViewportSize({ width: 1440, height: 950 })
@@ -721,7 +726,7 @@ test('组织名称与编码独立展示且集团管理员可编辑已有组织',
 
   const table = page.locator('.organization-tree-panel .el-table')
   const headerLabels = (await table.locator('.el-table__header-wrapper').first().locator('th .cell').allTextContents()).map(label => label.trim())
-  expect(headerLabels).toEqual(expect.arrayContaining(['组织名称', '组织编码', '类型', '状态', '操作']))
+  expect(headerLabels).toEqual(expect.arrayContaining(['组织', '类型', '状态', '操作']))
   expect(headerLabels).not.toContain('上级组织')
 
   const rows = table.locator('.el-table__body-wrapper tbody tr')
@@ -748,7 +753,7 @@ test('组织名称与编码独立展示且集团管理员可编辑已有组织',
     await expect(editableRow).toBeVisible()
   }
 
-  await editableRow.getByRole('button', { name: '编辑信息', exact: true }).click()
+  await clickRowAction(page, editableRow, '编辑信息')
   const dialog = page.getByRole('dialog', { name: '编辑子公司基本信息' })
   await expect(dialog).toBeVisible()
   await expect(dialog.getByLabel('组织名称')).not.toHaveValue('')

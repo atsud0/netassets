@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import RowActions from '../components/RowActions.vue'
 import { computed, onMounted, reactive, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox, type FormInstance, type FormRules } from 'element-plus'
@@ -1002,9 +1003,7 @@ onMounted(async () => {
   <section>
     <div class="page-heading">
       <div>
-        <span class="eyebrow">INVENTORY</span>
         <h1>填报任务</h1>
-        <p>{{ auth.isGroupAdmin ? '集团选择下级组织并下发填报任务，统一跟踪提交和审核进度。' : '维护本组织的业务系统和网络资产，并在任务中提交集团审核。' }}</p>
       </div>
       <el-button v-if="auth.isGroupAdmin" type="primary" :disabled="eligibleOrganizations.length === 0" @click="openCreateDialog">创建任务</el-button>
     </div>
@@ -1038,8 +1037,8 @@ onMounted(async () => {
           <template #default="scope"><el-button link type="primary" class="table-link" @click="openTaskDetail(scope.row)">{{ scope.row.name }}</el-button></template>
         </el-table-column>
         <el-table-column label="状态" width="105"><template #default="scope"><el-tag :type="taskStatusTag(scope.row.status)" effect="plain">{{ taskStatusLabels[scope.row.status] || scope.row.status }}</el-tag></template></el-table-column>
-        <el-table-column label="开始时间" min-width="165"><template #default="scope">{{ formatDate(scope.row.start_at) }}</template></el-table-column>
-        <el-table-column label="截止时间" min-width="165"><template #default="scope">{{ formatDate(scope.row.deadline_at) }}</template></el-table-column>
+        <el-table-column label="开始时间" min-width="155"><template #default="scope">{{ formatDate(scope.row.start_at) }}</template></el-table-column>
+        <el-table-column label="截止时间" min-width="155"><template #default="scope">{{ formatDate(scope.row.deadline_at) }}</template></el-table-column>
         <el-table-column label="提交进度" width="205">
           <template #default="scope">
             <div class="submission-progress">
@@ -1049,24 +1048,19 @@ onMounted(async () => {
             </div>
           </template>
         </el-table-column>
-        <el-table-column label="任务操作" width="130" fixed="right" align="right" header-align="right" class-name="table-action-column">
-          <template #default="scope">
+        <el-table-column label="任务操作" width="88" fixed="right" align="right" header-align="right" class-name="table-action-column">
+          <template #default="scope"><RowActions :label="`操作：${scope.row.name || scope.row.display_name || scope.row.id}`">
             <template v-if="auth.isGroupAdmin">
               <el-button v-if="scope.row.status === 'draft'" type="primary" link :loading="actionLoading === operationKey(scope.row)" @click="updateTaskStatus(scope.row, 'active')">下发</el-button>
               <el-button v-else-if="scope.row.status === 'active'" type="warning" link :loading="actionLoading === operationKey(scope.row)" @click="updateTaskStatus(scope.row, 'closed')">关闭</el-button>
               <el-button v-else-if="['closed', 'completed'].includes(scope.row.status)" type="info" link :loading="actionLoading === operationKey(scope.row)" @click="updateTaskStatus(scope.row, 'archived')">归档</el-button>
             </template>
-            <el-dropdown trigger="click" @command="handleExportCommand(scope.row, $event)">
-              <el-button type="primary" link :loading="exportLoading === scope.row.id">导出</el-button>
-              <template #dropdown>
-                <el-dropdown-menu>
-                  <el-dropdown-item command="xlsx">导出 XLSX</el-dropdown-item>
-                  <el-dropdown-item command="csv">导出 CSV</el-dropdown-item>
-                  <el-dropdown-item command="background_xlsx" divided>后台生成 XLSX</el-dropdown-item>
-                </el-dropdown-menu>
-              </template>
-            </el-dropdown>
-          </template>
+
+                  <el-button link type="primary" @click="handleExportCommand(scope.row, 'xlsx')" :disabled="exportLoading === scope.row.id">导出 XLSX</el-button>
+                  <el-button link type="primary" @click="handleExportCommand(scope.row, 'csv')" :disabled="exportLoading === scope.row.id">导出 CSV</el-button>
+                  <el-button link type="primary" @click="handleExportCommand(scope.row, 'background_xlsx')" :disabled="exportLoading === scope.row.id">后台生成 XLSX</el-button>
+
+          </RowActions></template>
         </el-table-column>
       </el-table>
       <div class="table-pagination">
@@ -1123,8 +1117,8 @@ onMounted(async () => {
               <span v-else>{{ itemScope.row.submission_note || '—' }}</span>
             </template>
           </el-table-column>
-          <el-table-column label="操作" width="250" fixed="right" align="right" header-align="right" class-name="table-action-column">
-            <template #default="itemScope">
+          <el-table-column label="操作" width="88" fixed="right" align="right" header-align="right" class-name="table-action-column">
+            <template #default="itemScope"><RowActions :label="`操作：${itemScope.row.name || itemScope.row.display_name || itemScope.row.id}`">
               <el-button v-if="itemScope.row.snapshot_available" type="primary" link @click="openSubmissionDiff(detailTask, itemScope.row)">查看差异</el-button>
               <el-button v-if="itemScope.row.snapshot_available" type="primary" link @click="openReviewComments(detailTask, itemScope.row)">审核意见</el-button>
               <template v-if="auth.isGroupAdmin">
@@ -1139,7 +1133,7 @@ onMounted(async () => {
                 <span v-if="detailTask.status === 'active' && new Date(detailTask.start_at).getTime() > Date.now()" class="table-secondary">尚未到开始时间</span>
                 <span v-else-if="detailTask.status === 'active' && !detailTask.allow_late_submission && new Date(detailTask.deadline_at).getTime() < Date.now() && !['submitted', 'approved'].includes(itemScope.row.status)" class="table-secondary">已截止，不允许逾期提交</span>
               </template>
-            </template>
+            </RowActions></template>
           </el-table-column>
         </el-table>
         <div v-if="taskOrganizationState(detailTask).total > 0" class="table-pagination task-organization-pagination">

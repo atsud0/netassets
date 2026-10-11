@@ -122,9 +122,7 @@ onMounted(load)
   <section>
     <div class="page-heading">
       <div>
-        <p class="eyebrow">RECYCLE BIN</p>
         <h1>回收站</h1>
-        <p>展示已软删除的网络资产、业务系统和空组织。业务系统恢复后保持归档状态，组织恢复后保持停用状态，均需人工确认后再启用。</p>
       </div>
       <div class="page-heading-actions">
         <el-button :loading="loading" @click="load">刷新</el-button>

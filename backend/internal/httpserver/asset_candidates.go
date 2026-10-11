@@ -9,9 +9,10 @@ import (
 	"github.com/gin-gonic/gin"
 
 	"netassets/internal/assetcandidate"
+	"netassets/internal/securityworkorder"
 )
 
-func registerAssetCandidateRoutes(api *gin.RouterGroup, requireAuth gin.HandlerFunc, service *assetcandidate.Service, logger *slog.Logger) {
+func registerAssetCandidateRoutes(api *gin.RouterGroup, requireAuth gin.HandlerFunc, service *assetcandidate.Service, findingService *securityworkorder.Service, logger *slog.Logger) {
 	group := api.Group("/asset-candidates", requireAuth)
 	group.GET("", func(c *gin.Context) {
 		page, err := parsePageQuery(c)
@@ -58,7 +59,14 @@ func registerAssetCandidateRoutes(api *gin.RouterGroup, requireAuth gin.HandlerF
 			writeAssetCandidateError(c, logger, "accept asset candidate", err)
 			return
 		}
-		c.JSON(http.StatusOK, gin.H{"item": item})
+		response := gin.H{"item": item}
+		if findingService != nil {
+			if linkErr := findingService.LinkAcceptedAssetCandidate(c.Request.Context(), mustPrincipal(c), c.Param("id"), item.ID, c.GetString("request_id"), c.ClientIP()); linkErr != nil {
+				logger.Error("link imported findings after asset candidate acceptance", "error", linkErr, "asset_candidate_id", c.Param("id"), "asset_id", item.ID, "request_id", c.GetString("request_id"))
+				response["warning"] = "资产已入库，但关联漏洞暂未全部生成安全发现，请刷新后重试"
+			}
+		}
+		c.JSON(http.StatusOK, response)
 	})
 	group.POST("/:id/ignore", func(c *gin.Context) {
 		var input assetcandidate.ReviewInput

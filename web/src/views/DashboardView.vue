@@ -3,6 +3,7 @@ import { computed, onMounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import { apiClient, getAPIErrorMessage } from '../api/client'
+import type { RepairStatistics } from '../api/remediation'
 import { useAuthStore } from '../stores/auth'
 
 interface TaskProgress {
@@ -56,6 +57,16 @@ interface SecurityOverview {
 const auth = useAuthStore()
 const router = useRouter()
 const loading = ref(false)
+const repairStats = ref<RepairStatistics>()
+const repairError = ref(false)
+const canUseRepair = computed(() => auth.hasPermission('remediation.assign') || auth.hasPermission('remediation.review') || auth.canManageSecurityWorkOrders)
+const pendingRepairReview = computed(() => (auth.hasPermission('remediation.review')?(repairStats.value?.counts.pending_org_review??0):0)+(auth.canManageSecurityWorkOrders?(repairStats.value?.counts.pending_security_review??0):0))
+async function loadRepair() {
+ if(!canUseRepair.value)return
+ try {repairStats.value=(await apiClient.get<RepairStatistics>('/remediation-tasks/statistics',{params:{status:'all'}})).data;repairError.value=false} catch {repairError.value=true}
+}
+function toRepair(view?:string) { void router.push({path:'/remediation',query:view==='overdue'?{overdue:'true'}:view?{view}:{}}) }
+
 const summary = ref<DashboardSummary>({
   organization_count: 0, system_count: 0, asset_count: 0, public_asset_count: 0,
   unlinked_asset_count: 0, sensitive_public_system_count: 0, active_task_count: 0,
@@ -72,26 +83,12 @@ const overview = ref<SecurityOverview>({
   },
 })
 
-const stats = computed(() => {
-  if (auth.isGroupAdmin) return [
-    { label: '下级组织', value: summary.value.organization_count, hint: '已启用的子公司和部门' },
-    { label: '业务系统', value: summary.value.system_count, hint: '集团当前系统台账' },
-    { label: '网络资产', value: summary.value.asset_count, hint: `${summary.value.public_asset_count} 项公网资产` },
-    { label: '待集团审核', value: summary.value.pending_review_count, hint: `${summary.value.overdue_count} 个组织已逾期` },
-  ]
-  if (auth.isSecurityOperator) return [
-    { label: '处理中工单', value: summary.value.active_work_order_count, hint: '集团范围未关闭工单' },
-    { label: '待复测工单', value: summary.value.pending_verification_work_order_count, hint: '等待集团复测确认' },
-    { label: '逾期工单', value: summary.value.overdue_work_order_count, hint: '需优先督办整改' },
-    { label: '三日内到期', value: summary.value.due_soon_work_order_count, hint: '尚未关闭的临期工单' },
-  ]
-  return [
-    { label: '业务系统', value: summary.value.system_count, hint: '本组织及授权范围' },
-    { label: '网络资产', value: summary.value.asset_count, hint: `${summary.value.public_asset_count} 项公网资产` },
-    { label: '待填报任务', value: summary.value.pending_task_count, hint: `${summary.value.returned_task_count} 项被退回` },
-    { label: '逾期任务', value: summary.value.overdue_count, hint: '请优先完成逾期填报' },
-  ]
-})
+const stats = computed(() => [
+ {label:canUseRepair.value?'待我审核的修复任务':'待复测工单',value:canUseRepair.value?(repairStats.value?pendingRepairReview.value:'—'):summary.value.pending_verification_work_order_count,hint:'核对当前提交版本与证明材料',action:()=>canUseRepair.value?toRepair('review_mine'):toWorkOrders('pending_verification')},
+ {label:'逾期整改工单',value:summary.value.overdue_work_order_count,hint:'需优先督办整改',danger:true,action:()=>toWorkOrders(undefined,true)},
+ {label:'处理中工单',value:summary.value.active_work_order_count,hint:'当前权限范围内的未关闭工单',action:()=>toWorkOrders()},
+ auth.hasPermission('inventory.manage')?{label:auth.isGroupAdmin?'待审核填报':'待填报任务',value:auth.isGroupAdmin?summary.value.pending_review_count:summary.value.pending_task_count,hint:`${summary.value.overdue_count} 项填报已逾期`,action:()=>router.push('/inventory-tasks')}:{label:'三日内到期工单',value:summary.value.due_soon_work_order_count,hint:'尽早协调验证与发布安排',action:()=>toWorkOrders()},
+])
 const trendMax = computed(() => Math.max(1, ...overview.value.finding_trend.flatMap(item => [item.new_finding_count, item.closed_finding_count])))
 const latestTrend = computed(() => overview.value.finding_trend.slice(-14))
 const severityTotal = computed(() => overview.value.finding_severity.reduce((total, item) => total + item.count, 0))
@@ -117,7 +114,7 @@ function formatDate(value?: string) {
   return new Intl.DateTimeFormat('zh-CN', { dateStyle: 'medium', timeStyle: 'short' }).format(new Date(value))
 }
 function findingStatusType(status: string) {
-  return status === 'resolved' ? 'success' : status === 'accepted_risk' ? 'warning' : status === 'false_positive' ? 'info' : 'primary'
+  return status === 'fixed' || status === 'resolved' ? 'success' : status === 'risk_accepted' || status === 'in_progress' || status === 'confirmed' ? 'warning' : status === 'false_positive' || status === 'ignored' || status === 'duplicate' ? 'info' : 'primary'
 }
 function severityType(severity: string) {
   return severity === 'critical' ? 'danger' : severity === 'high' ? 'warning' : severity === 'medium' ? 'primary' : 'info'
@@ -135,65 +132,37 @@ function onOrganizationRowClick(row: OrganizationPerformance) {
   toOrganizationOrders(row.organization_id)
 }
 
-onMounted(load)
+onMounted(() => { void load();void loadRepair() })
 </script>
 
 <template>
   <section v-loading="loading">
     <div class="page-heading">
       <div>
-        <span class="eyebrow">OVERVIEW</span>
-        <h1>{{ auth.hasGroupSecurityRole ? '集团安全治理工作台' : '组织安全治理工作台' }}</h1>
-        <p>{{ auth.hasGroupSecurityRole ? '统一掌握集团漏洞风险、测试覆盖和子公司整改效能。' : `查看${auth.user?.organization?.name || '本组织'}在授权范围内的资产台账、安全风险和整改待办。` }}</p>
+        <h1>今天，先处理关键事项</h1>
       </div>
       <div class="heading-actions">
         <el-button v-if="auth.hasPermission('inventory.manage')" @click="router.push('/inventory-tasks')">{{ auth.isGroupAdmin ? '创建填报任务' : '处理填报任务' }}</el-button>
-        <el-button type="primary" @click="toWorkOrders()">处理安全工单</el-button>
+        <el-button type="primary" @click="canUseRepair ? toRepair() : toWorkOrders()">{{ canUseRepair ? '查看修复任务' : '处理安全工单' }}</el-button>
       </div>
     </div>
 
     <div class="stat-grid">
-      <article v-for="stat in stats" :key="stat.label" class="stat-card">
+      <button v-for="stat in stats" :key="stat.label" class="stat-card" :class="{danger:stat.danger}" @click="stat.action()">
         <span>{{ stat.label }}</span><strong>{{ stat.value }}</strong><small>{{ stat.hint }}</small>
-      </article>
+      </button>
     </div>
 
-    <div v-if="!auth.isSecurityOperator" class="content-grid">
-      <article class="panel dashboard-panel">
-        <div class="panel-header">
-          <div><h2>填报进度</h2><p>{{ auth.isGroupAdmin ? '最近一项进行中或已完成的集团任务。' : '最近一项与本组织相关的填报任务。' }}</p></div>
-          <el-button text type="primary" @click="router.push('/inventory-tasks')">查看全部</el-button>
-        </div>
-        <template v-if="summary.latest_task">
-          <div class="latest-task-heading">
-            <div><strong>{{ summary.latest_task.name }}</strong><span>截止 {{ formatDate(summary.latest_task.deadline_at) }}</span></div>
-            <el-tag :type="summary.latest_task.status === 'completed' ? 'success' : 'primary'" effect="plain">{{ summary.latest_task.status === 'completed' ? '已完成' : '进行中' }}</el-tag>
-          </div>
-          <el-progress :percentage="summary.latest_task.completion_rate" :stroke-width="12" />
-          <div class="task-progress-metrics">
-            <span>目标组织 <strong>{{ summary.latest_task.target_count }}</strong></span>
-            <span>已提交 <strong>{{ summary.latest_task.submitted_count }}</strong></span>
-            <span>已审核 <strong>{{ summary.latest_task.approved_count }}</strong></span>
-          </div>
-        </template>
-        <el-empty v-else description="暂无可展示的填报任务" :image-size="70" />
+    <div v-if="summary.overdue_work_order_count" class="workspace-notice"><span>有 {{ summary.overdue_work_order_count }} 张整改工单已逾期，请优先跟进责任组织。</span><el-button size="small" @click="toWorkOrders(undefined,true)">查看逾期工单</el-button></div>
+    <div class="dashboard-priority-grid">
+      <article class="panel"><div class="panel-header"><div><h2>需要你处理</h2><p>按当前职责查看待办，并进入对应处理队列。</p></div><el-tag effect="plain">今日优先</el-tag></div>
+        <div v-if="canUseRepair" class="dashboard-todo"><div><strong>核验修复提交</strong><p>{{ repairError?'修复待办暂时读取失败':`待我审核 ${repairStats?pendingRepairReview:'—'} 项 · 逐项确认版本与验证结果` }}</p></div><el-button v-if="repairError" @click="loadRepair">重试</el-button><el-button v-else @click="toRepair('review_mine')">进入审核</el-button></div>
+        <div v-if="canUseRepair" class="dashboard-todo"><div><strong>跟进逾期修复</strong><p>逾期任务 {{ repairStats?.overdue ?? '—' }} 项，联系负责人排除阻塞</p></div><el-button @click="toRepair('overdue')">查看任务</el-button></div>
+        <div v-if="auth.hasPermission('remediation.assign')" class="dashboard-todo"><div><strong>安排修复负责人</strong><p>选择已下发的个人派单工单，确认材料后派给具体人员</p></div><el-button @click="toRepair()">安排人员</el-button></div>
+        <div v-if="auth.hasPermission('inventory.manage')" class="dashboard-todo"><div><strong>{{ auth.isGroupAdmin?'审核资产填报':'完成资产填报' }}</strong><p>填报进度和整改反馈集中处理</p></div><el-button @click="router.push('/inventory-tasks')">查看填报</el-button></div>
       </article>
-
-      <article class="panel dashboard-panel">
-        <div class="panel-header">
-          <div><h2>资产治理提示</h2><p>优先补全公网暴露、未关联业务系统的资产信息。</p></div>
-          <el-button text type="primary" @click="router.push('/assets')">查看资产</el-button>
-        </div>
-        <ul class="metric-list dashboard-metrics">
-          <li><span>未关联业务系统资产</span><strong>{{ summary.unlinked_asset_count }}</strong></li>
-          <li><span>公网网络资产</span><strong>{{ summary.public_asset_count }}</strong></li>
-          <li><span>公网且涉及敏感个人信息系统</span><strong>{{ summary.sensitive_public_system_count }}</strong></li>
-          <li v-if="auth.isGroupAdmin"><span>进行中填报任务</span><strong>{{ summary.active_task_count }}</strong></li>
-        </ul>
-        <div class="dashboard-actions"><el-button size="small" @click="router.push('/systems')">查看业务系统</el-button><el-button size="small" @click="router.push('/assets')">查看网络资产</el-button></div>
-      </article>
+      <article class="panel"><div class="panel-header"><div><h2>资产治理</h2><p>补齐业务归属与责任人，支撑后续派单。</p></div></div><div class="dashboard-asset-metrics"><div><strong>{{ summary.asset_count }}</strong><span>网络资产</span></div><div><strong>{{ summary.system_count }}</strong><span>业务系统</span></div><div><strong>{{ summary.unlinked_asset_count }}</strong><span>待关联资产</span></div></div><p>公网资产 {{ summary.public_asset_count }} 项 · 公网敏感系统 {{ summary.sensitive_public_system_count }} 个</p><div class="dashboard-actions"><el-button v-if="auth.hasPermission('asset.manage')" @click="router.push('/assets')">查看资产台账</el-button><el-button v-if="auth.hasPermission('system.manage')" @click="router.push('/systems')">业务系统</el-button></div></article>
     </div>
-
     <section class="security-overview-section">
       <div class="section-heading">
         <div><span class="eyebrow">SECURITY GOVERNANCE</span><h2>安全治理概览</h2><p>统计范围会根据当前账号的数据权限自动收敛；子公司仅看到已经下发的相关漏洞与工单。</p></div>
@@ -201,8 +170,8 @@ onMounted(load)
       </div>
 
       <div class="security-highlight-grid">
-        <button class="security-highlight-card clickable" type="button" @click="toFindings('open')">
-          <span>待处置漏洞</span><strong>{{ overview.finding_status.find(item => item.key === 'open')?.count ?? 0 }}</strong><small>点击查看待处置发现</small>
+        <button class="security-highlight-card clickable" type="button" @click="toFindings('pending')">
+          <span>待处理漏洞</span><strong>{{ overview.finding_status.find(item => item.key === 'pending')?.count ?? 0 }}</strong><small>点击查看待处理发现</small>
         </button>
         <button class="security-highlight-card clickable" type="button" @click="toWorkOrders('pending_verification')">
           <span>待集团复测</span><strong>{{ summary.pending_verification_work_order_count }}</strong><small>点击处理待复测工单</small>
@@ -264,6 +233,42 @@ onMounted(load)
         </article>
       </div>
     </section>
+    <div v-if="!auth.isSecurityOperator" class="content-grid">
+      <article class="panel dashboard-panel">
+        <div class="panel-header">
+          <div><h2>填报进度</h2><p>{{ auth.isGroupAdmin ? '最近一项进行中或已完成的集团任务。' : '最近一项与本组织相关的填报任务。' }}</p></div>
+          <el-button text type="primary" @click="router.push('/inventory-tasks')">查看全部</el-button>
+        </div>
+        <template v-if="summary.latest_task">
+          <div class="latest-task-heading">
+            <div><strong>{{ summary.latest_task.name }}</strong><span>截止 {{ formatDate(summary.latest_task.deadline_at) }}</span></div>
+            <el-tag :type="summary.latest_task.status === 'completed' ? 'success' : 'primary'" effect="plain">{{ summary.latest_task.status === 'completed' ? '已完成' : '进行中' }}</el-tag>
+          </div>
+          <el-progress :percentage="summary.latest_task.completion_rate" :stroke-width="12" />
+          <div class="task-progress-metrics">
+            <span>目标组织 <strong>{{ summary.latest_task.target_count }}</strong></span>
+            <span>已提交 <strong>{{ summary.latest_task.submitted_count }}</strong></span>
+            <span>已审核 <strong>{{ summary.latest_task.approved_count }}</strong></span>
+          </div>
+        </template>
+        <el-empty v-else description="暂无可展示的填报任务" :image-size="70" />
+      </article>
+
+      <article class="panel dashboard-panel">
+        <div class="panel-header">
+          <div><h2>资产治理提示</h2><p>优先补全公网暴露、未关联业务系统的资产信息。</p></div>
+          <el-button text type="primary" @click="router.push('/assets')">查看资产</el-button>
+        </div>
+        <ul class="metric-list dashboard-metrics">
+          <li><span>未关联业务系统资产</span><strong>{{ summary.unlinked_asset_count }}</strong></li>
+          <li><span>公网网络资产</span><strong>{{ summary.public_asset_count }}</strong></li>
+          <li><span>公网且涉及敏感个人信息系统</span><strong>{{ summary.sensitive_public_system_count }}</strong></li>
+          <li v-if="auth.isGroupAdmin"><span>进行中填报任务</span><strong>{{ summary.active_task_count }}</strong></li>
+        </ul>
+        <div class="dashboard-actions"><el-button size="small" @click="router.push('/systems')">查看业务系统</el-button><el-button size="small" @click="router.push('/assets')">查看网络资产</el-button></div>
+      </article>
+    </div>
+
   </section>
 </template>
 
@@ -324,4 +329,14 @@ onMounted(load)
   .panel-header { flex-wrap: wrap; }
   .panel-header > .el-button { margin-left: 0; }
 }
+</style>
+
+<style scoped>
+.dashboard-priority-grid { display:grid;grid-template-columns:minmax(0,1.5fr) minmax(0,1fr);gap:20px;margin-top:20px; }.dashboard-todo { display:flex;justify-content:space-between;align-items:center;gap:16px;border-bottom:1px solid var(--line);padding:20px 0; }.dashboard-todo:last-child { border-bottom:0;padding-bottom:0; }.dashboard-todo strong { font-weight:500;font-size:14px; }.dashboard-todo p { margin-top:6px; }.dashboard-todo .el-button { flex:none; }.dashboard-asset-metrics { display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:16px;margin:32px 0; }.dashboard-asset-metrics>div { display:grid;gap:10px;border-right:1px solid var(--line); }.dashboard-asset-metrics>div:last-child { border:0; }.dashboard-asset-metrics strong { font-size:27px;font-weight:500; }.dashboard-asset-metrics span { font-size:12px;color:var(--muted); }
+@media(max-width:980px) { .dashboard-priority-grid { grid-template-columns:1fr; } }
+@media(max-width:760px) { .security-content-grid,.security-highlight-grid { grid-template-columns:1fr; }.section-heading { align-items:flex-start;flex-wrap:wrap; }.trend-chart { gap:2px; }.trend-column small { font-size:9px; } }
+</style>
+
+<style scoped>
+@media(max-width:760px) { .stat-grid { grid-template-columns:repeat(2,minmax(0,1fr)); }.stat-card { gap:8px; }.stat-card span { font-size:12px; }.stat-card small { font-size:11px; } }
 </style>

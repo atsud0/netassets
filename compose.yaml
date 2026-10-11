@@ -45,7 +45,7 @@ services:
       BOOTSTRAP_ADMIN_PASSWORD: ${BOOTSTRAP_ADMIN_PASSWORD}
       BOOTSTRAP_ADMIN_DISPLAY_NAME: ${BOOTSTRAP_ADMIN_DISPLAY_NAME:-集团管理员}
     ports:
-      - "${APP_HOST_PORT:-8080}:8080"
+      - "${APP_HOST_IP:-0.0.0.0}:${APP_HOST_PORT:-8080}:8080"
     volumes:
       - app-data:/data
     depends_on:

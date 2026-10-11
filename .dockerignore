@@ -11,5 +11,6 @@ e2e/playwright-report
 backend/bin
 backend/coverage.out
 data
+backups
 *.log
 .DS_Store

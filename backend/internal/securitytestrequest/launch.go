@@ -72,7 +72,7 @@ func (s *Service) promoteIfReady(ctx context.Context, principal auth.Principal, 
 	var openFindings int
 	if err := tx.QueryRow(ctx, `
 		SELECT b.status, (SELECT count(*) FROM security_findings f
-		                  WHERE f.test_batch_id=b.id AND f.status IN ('open','assigned'))
+		                  WHERE f.test_batch_id=b.id AND f.status IN ('pending','in_progress'))
 		FROM security_test_batches b WHERE b.id=$1::uuid`, locked.ConvertedBatchID).Scan(&batchStatus, &openFindings); err != nil {
 		return false, fmt.Errorf("check converted batch readiness: %w", err)
 	}
@@ -228,7 +228,7 @@ func pendingLaunchFrom(status string) string {
 func openFindings(ctx context.Context, q scopeQuerier, batchID string) ([]BlockingFinding, error) {
 	rows, err := q.Query(ctx, `
 		SELECT finding_code, title, status FROM security_findings
-		WHERE test_batch_id=$1::uuid AND status IN ('open','assigned')
+		WHERE test_batch_id=$1::uuid AND status IN ('pending','in_progress')
 		ORDER BY discovered_at LIMIT 50`, batchID)
 	if err != nil {
 		return nil, fmt.Errorf("load unclosed findings for launch approval: %w", err)

@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import RowActions from '../components/RowActions.vue'
 import { computed, onMounted, reactive, ref } from 'vue'
 import { ElMessage, ElMessageBox, type FormInstance, type FormRules } from 'element-plus'
 import axios from 'axios'
@@ -778,9 +779,7 @@ function formatDate(value?: string) {
   <section data-testid="security-test-requests-page">
     <div class="page-heading">
       <div>
-        <span class="eyebrow">SECURITY TEST REQUEST</span>
         <h1>上线测试申请</h1>
-        <p>{{ isManager ? '审核子单位提出的上线安全测试申请，批准后自动生成测试批次并跟踪上线发布。' : '子单位新系统上线前申请集团安全测试，批准上线后自动将填报内容上报集团台账。' }}</p>
       </div>
       <div v-if="isApplicant" class="button-row">
         <el-button type="primary" data-testid="create-security-test-request" @click="openCreate">新建测试申请</el-button>
@@ -799,24 +798,24 @@ function formatDate(value?: string) {
 
     <div class="panel data-table-panel" v-loading="loading">
       <el-table :data="requests" row-key="id" empty-text="暂无上线安全测试申请">
-        <el-table-column prop="code" label="申请编号" min-width="165" />
-        <el-table-column label="申请名称" min-width="230">
-          <template #default="{ row }"><button class="link-button" type="button" @click="openDetail(row)">{{ row.request_name }}</button></template>
+
+        <el-table-column label="测试申请" min-width="210">
+          <template #default="{ row }"><button class="link-button" type="button" @click="openDetail(row)">{{ row.request_name }}</button><span class="list-secondary">{{ row.code }}</span></template>
         </el-table-column>
-        <el-table-column prop="applicant_organization_name" label="申请组织" min-width="140" />
-        <el-table-column prop="business_system_name" label="上线系统" min-width="150" />
-        <el-table-column label="类型" width="100"><template #default="{ row }">{{ typeLabels[row.test_type] ?? row.test_type }}</template></el-table-column>
-        <el-table-column label="范围" width="90"><template #default="{ row }">{{ row.scope_asset_count }} 项</template></el-table-column>
+
+        <el-table-column label="系统 / 申请组织" min-width="170"><template #default="{ row }">{{ row.business_system_name }}<span class="list-secondary">{{ row.applicant_organization_name }}</span></template></el-table-column>
+        <el-table-column label="类型" width="90"><template #default="{ row }">{{ typeLabels[row.test_type] ?? row.test_type }}</template></el-table-column>
+        <el-table-column label="范围" width="70"><template #default="{ row }">{{ row.scope_asset_count }} 项</template></el-table-column>
         <el-table-column label="未闭环发现" width="100">
           <template #default="{ row }">
             <el-tag v-if="['testing', 'pending_launch'].includes(row.status)" :type="row.open_finding_count > 0 ? 'danger' : 'success'" effect="plain">{{ row.open_finding_count }}</el-tag>
             <span v-else>-</span>
           </template>
         </el-table-column>
-        <el-table-column label="状态" width="110"><template #default="{ row }"><el-tag :type="statusTypes[row.status] as any">{{ statusLabels[row.status] ?? row.status }}</el-tag></template></el-table-column>
-        <el-table-column label="期望上线" width="110"><template #default="{ row }">{{ formatDate(row.expected_launch_at) }}</template></el-table-column>
-        <el-table-column label="操作" width="250" fixed="right" align="right" header-align="right" class-name="table-action-column">
-          <template #default="{ row }">
+        <el-table-column label="状态" width="100"><template #default="{ row }"><el-tag :type="statusTypes[row.status] as any">{{ statusLabels[row.status] ?? row.status }}</el-tag></template></el-table-column>
+        <el-table-column label="期望上线" width="105"><template #default="{ row }">{{ formatDate(row.expected_launch_at) }}</template></el-table-column>
+        <el-table-column label="操作" width="88" fixed="right" align="right" header-align="right" class-name="table-action-column">
+          <template #default="{ row }"><RowActions :label="`操作：${row.name || row.title || row.code || row.display_name || row.id}`">
             <el-button link type="primary" @click="openDetail(row)">详情</el-button>
             <el-button v-if="canEdit(row)" link type="primary" @click="openEdit(row)">编辑</el-button>
             <el-button v-if="canSubmit(row)" link type="success" :loading="actionLoading" data-testid="submit-security-test-request" @click="runSubmit(row)">提交</el-button>
@@ -825,7 +824,7 @@ function formatDate(value?: string) {
             <el-button v-if="canApprove(row)" link type="danger" :loading="actionLoading" data-testid="reject-security-test-request" @click="runReject(row)">驳回</el-button>
             <el-button v-if="canApproveLaunch(row)" link type="success" :loading="actionLoading" data-testid="approve-security-test-launch" @click="runApproveLaunch(row)">批准上线</el-button>
             <el-button v-if="canCancel(row)" link type="danger" :loading="actionLoading" @click="runCancel(row)">取消</el-button>
-          </template>
+          </RowActions></template>
         </el-table-column>
       </el-table>
       <div class="table-pagination">
@@ -865,7 +864,7 @@ function formatDate(value?: string) {
           <div class="system-select-row">
             <template v-if="selectedSystem">
               <el-tag :type="selectedSystem.kind === 'draft' ? 'warning' : 'success'" effect="plain">{{ selectedSystem.kind === 'draft' ? '待上报版本' : '已上报版本' }}</el-tag>
-              <strong>{{ selectedSystem.code }} · {{ selectedSystem.name }}</strong>
+              <strong>{{ selectedSystem.name }}</strong>
               <el-button link type="primary" data-testid="change-request-system" @click="openSystemPicker">更换</el-button>
               <el-button link type="danger" @click="clearSystem">清除</el-button>
             </template>
@@ -900,11 +899,11 @@ function formatDate(value?: string) {
 
     <el-dialog v-model="systemPickerVisible" title="选择上线业务系统" width="780px" append-to-body destroy-on-close>
       <div class="scope-search-bar">
-        <el-input v-model="systemPickerKeyword" clearable placeholder="搜索系统编码、名称或负责人" @keyup.enter="searchSystemPicker" @clear="searchSystemPicker" />
+        <el-input v-model="systemPickerKeyword" clearable placeholder="搜索系统名称或负责人，也可输入编码" @keyup.enter="searchSystemPicker" @clear="searchSystemPicker" />
         <el-button type="primary" @click="searchSystemPicker">搜索</el-button>
       </div>
       <el-table v-loading="systemPickerLoading" :data="systemPickerRows" border height="390" data-testid="request-system-picker">
-        <el-table-column label="业务系统" min-width="260"><template #default="{ row }"><strong>{{ row.code }} · {{ row.name }}</strong><div class="scope-row-secondary">{{ systemPickerHint(row) }}</div></template></el-table-column>
+        <el-table-column label="业务系统" min-width="260"><template #default="{ row }"><strong>{{ row.name }}</strong><div class="scope-row-secondary">{{ systemPickerHint(row) }}</div></template></el-table-column>
         <el-table-column prop="organization_name" label="归属组织" min-width="140" />
         <el-table-column label="版本" width="110">
           <template #default="{ row }"><el-tag :type="row.is_working_copy ? 'warning' : 'success'" effect="plain">{{ row.is_working_copy ? '待上报' : '已上报' }}</el-tag></template>

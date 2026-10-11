@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import RowActions from '../components/RowActions.vue'
 import { computed, onMounted, reactive, ref } from 'vue'
 import { ElMessage, ElMessageBox, type FormInstance, type FormRules } from 'element-plus'
 import { apiClient, getAPIErrorMessage } from '../api/client'
@@ -299,7 +300,7 @@ function scopeReferenceTitle(item: ScopeReference) {
   }
   if (scopePickerMode.value === 'business_system') {
     const system = item as BusinessSystemReference
-    return `${system.code} · ${system.name}`
+    return system.name
   }
   const area = item as NetworkAreaReference
   return `${area.code ? `${area.code} · ` : ''}${area.name}`
@@ -662,9 +663,7 @@ function formatTime(value?: string) {
   <section data-testid="security-test-batches-page">
     <div class="page-heading">
       <div>
-        <span class="eyebrow">SECURITY TEST</span>
         <h1>安全测试</h1>
-        <p>集团统一确定测试窗口和授权边界，以资产快照固化每次互联网安全测试范围。</p>
       </div>
       <div class="button-row">
         <el-button type="primary" data-testid="create-security-test-batch" @click="openCreate">新建测试批次</el-button>
@@ -681,24 +680,24 @@ function formatTime(value?: string) {
 
     <div class="panel data-table-panel" v-loading="loading">
       <el-table :data="batches" row-key="id" empty-text="暂无安全测试批次">
-        <el-table-column prop="code" label="批次编号" min-width="170" />
-        <el-table-column label="批次名称" min-width="260">
-          <template #default="{ row }"><button class="link-button" type="button" @click="openDetail(row)">{{ row.name }}</button></template>
+
+        <el-table-column label="测试批次" min-width="230">
+          <template #default="{ row }"><button class="link-button" type="button" @click="openDetail(row)">{{ row.name }}</button><span class="list-secondary">{{ row.code }}</span></template>
         </el-table-column>
-        <el-table-column label="类型" width="110"><template #default="{ row }">{{ typeLabels[row.test_type] ?? row.test_type }}</template></el-table-column>
-        <el-table-column label="状态" width="105"><template #default="{ row }"><el-tag :type="statusTypes[row.status] as any">{{ statusLabels[row.status] }}</el-tag></template></el-table-column>
-        <el-table-column label="测试范围" width="145"><template #default="{ row }">{{ row.asset_count }} 项 / {{ row.organization_count }} 家组织</template></el-table-column>
-        <el-table-column prop="provider" label="测试单位" min-width="150" />
-        <el-table-column label="计划窗口" min-width="230"><template #default="{ row }">{{ formatTime(row.start_at) }}<br>{{ formatTime(row.end_at) }}</template></el-table-column>
-        <el-table-column label="操作" width="190" fixed="right" align="right" header-align="right" class-name="table-action-column">
-          <template #default="{ row }">
+        <el-table-column label="类型" width="95"><template #default="{ row }">{{ typeLabels[row.test_type] ?? row.test_type }}</template></el-table-column>
+        <el-table-column label="状态" width="95"><template #default="{ row }"><el-tag :type="statusTypes[row.status] as any">{{ statusLabels[row.status] }}</el-tag></template></el-table-column>
+        <el-table-column label="测试范围" width="130"><template #default="{ row }">{{ row.asset_count }} 项 / {{ row.organization_count }} 家组织</template></el-table-column>
+        <el-table-column prop="provider" label="测试单位" min-width="130" />
+        <el-table-column label="计划窗口" min-width="165"><template #default="{ row }">{{ formatTime(row.start_at) }}<br>{{ formatTime(row.end_at) }}</template></el-table-column>
+        <el-table-column label="操作" width="88" fixed="right" align="right" header-align="right" class-name="table-action-column">
+          <template #default="{ row }"><RowActions :direct="!['draft', 'authorized', 'in_progress'].includes(row.status)" :label="`操作：${row.name || row.title || row.code || row.display_name || row.id}`">
             <el-button link type="primary" @click="openDetail(row)">详情</el-button>
             <el-button v-if="row.status === 'draft'" link type="primary" @click="openEdit(row)">编辑</el-button>
             <el-button v-if="row.status === 'draft'" link type="warning" :loading="actionLoading" @click="runAction(row, 'authorize')">授权</el-button>
             <el-button v-if="row.status === 'authorized'" link type="primary" :loading="actionLoading" @click="runAction(row, 'start')">开始</el-button>
             <el-button v-if="row.status === 'in_progress'" link type="success" :loading="actionLoading" @click="runAction(row, 'complete')">完成</el-button>
             <el-button v-if="['draft', 'authorized', 'in_progress'].includes(row.status)" link type="danger" :loading="actionLoading" @click="runAction(row, 'cancel')">取消</el-button>
-          </template>
+          </RowActions></template>
         </el-table-column>
       </el-table>
       <div class="table-pagination">
@@ -793,7 +792,7 @@ function formatTime(value?: string) {
 
         <div class="section-heading"><div><h3>授权范围快照</h3><p>后续资产名称、归属或系统关联发生变化，不影响本批次历史授权证据。</p></div><div class="scope-chips"><el-tag v-for="item in scopeByOrganization" :key="item.name" effect="plain">{{ item.name }} {{ item.count }} 项</el-tag></div></div>
         <el-table :data="currentBatch.scope_assets ?? []" border max-height="420">
-          <el-table-column label="类型" width="90"><template #default="{ row }">{{ assetTypeLabels[row.asset_type] ?? row.asset_type }}</template></el-table-column>
+          <el-table-column label="类型" width="95"><template #default="{ row }">{{ assetTypeLabels[row.asset_type] ?? row.asset_type }}</template></el-table-column>
           <el-table-column prop="asset_value" label="资产值" min-width="240" />
           <el-table-column prop="asset_name" label="资产名称" min-width="150" />
           <el-table-column prop="organization_name" label="责任组织" min-width="160" />

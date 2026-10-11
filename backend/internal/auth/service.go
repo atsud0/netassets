@@ -40,6 +40,8 @@ type Organization struct {
 }
 
 type Principal struct {
+	RepairEnabled      bool           `json:"repair_enabled"`
+	ExecutionOnly      bool           `json:"execution_only"`
 	UserID             string         `json:"id"`
 	Username           string         `json:"username"`
 	DisplayName        string         `json:"display_name"`
@@ -520,6 +522,10 @@ func (s *Service) loadPrincipalDetails(ctx context.Context, user *Principal, act
 		return err
 	}
 	user.Roles, user.Permissions = roles, permissions
+	if err := s.pool.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM remediation_grants WHERE user_id=$1::uuid)`, user.UserID).Scan(&user.RepairEnabled); err != nil {
+		return err
+	}
+	user.ExecutionOnly = user.RepairEnabled && len(roles) == 0
 	return nil
 }
 
@@ -688,4 +694,10 @@ func truncate(value string, max int) string {
 		return value
 	}
 	return value[:max]
+}
+
+// RecordRepairBoundaryDenial audits execution accounts attempting management APIs.
+func (s *Service) RecordRepairBoundaryDenial(ctx context.Context, p Principal, method, route, requestID, ip string) error {
+	_, err := s.pool.Exec(ctx, `INSERT INTO audit_logs(user_id,action,resource_type,summary,details,request_id,request_ip,result) VALUES($1::uuid,'remediation.access_denied','remediation','执行账号访问管理接口被拒绝',jsonb_build_object('method',$2::text,'route',$3::text),$4,NULLIF($5,'')::inet,'failure')`, p.UserID, method, route, requestID, ip)
+	return err
 }

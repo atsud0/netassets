@@ -11,6 +11,8 @@ export interface UserOrganization {
 }
 
 export interface CurrentUser {
+  repair_enabled?: boolean
+  execution_only?: boolean
   id: string
   username: string
   display_name: string
@@ -32,6 +34,9 @@ interface AuthResponse {
 export const useAuthStore = defineStore('auth', () => {
   const user = ref<CurrentUser | null>(null)
   const initialized = ref(false)
+  const executionOnly = computed(() => user.value?.execution_only ?? false)
+  const repairEnabled = computed(() => user.value?.repair_enabled ?? false)
+  const homePath = computed(() => executionOnly.value ? '/repair/tasks' : '/dashboard')
   const authenticated = computed(() => user.value !== null)
   const isGroupAdmin = computed(() => user.value?.roles.includes('group_admin') ?? false)
   const isSecurityOperator = computed(() => user.value?.roles.includes('security_operator') ?? false)
@@ -82,5 +87,5 @@ export const useAuthStore = defineStore('auth', () => {
     }
   }
 
-  return { user, initialized, authenticated, isGroupAdmin, isSecurityOperator, hasGroupSecurityRole, canManageSecurityTests, canRequestSecurityTest, canManageSecurityFindings, canManageSecurityWorkOrders, hasPermission, setCurrentUser, fetchCurrentUser, login, switchOrganization, logout }
+  return { executionOnly, repairEnabled, homePath, user, initialized, authenticated, isGroupAdmin, isSecurityOperator, hasGroupSecurityRole, canManageSecurityTests, canRequestSecurityTest, canManageSecurityFindings, canManageSecurityWorkOrders, hasPermission, setCurrentUser, fetchCurrentUser, login, switchOrganization, logout }
 })

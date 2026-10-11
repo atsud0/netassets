@@ -78,9 +78,7 @@ onMounted(() => { void loadHistory() })
   <section class="page-stack">
     <div class="page-heading">
       <div>
-        <span class="eyebrow">DATA QUALITY INSPECTION HISTORY</span>
         <h1>巡检历史</h1>
-        <p>查看集团历次数据质量巡检的执行范围、命中问题和自动关闭结果。</p>
       </div>
       <div class="page-heading-actions">
         <el-button :loading="loading" @click="loadHistory">刷新</el-button>
@@ -98,16 +96,16 @@ onMounted(() => { void loadHistory() })
       </div>
       <div class="inspection-history-table-scroll">
         <el-table :data="items" stripe empty-text="尚未执行持久化质量巡检">
-          <el-table-column label="执行时间" width="170"><template #default="scope">{{ formatTime(scope.row.created_at) }}</template></el-table-column>
-          <el-table-column label="触发方式" width="120"><template #default="scope"><el-tag :type="scope.row.trigger_type === 'scheduled' ? 'success' : 'info'">{{ scope.row.trigger_type === 'scheduled' ? '系统自动' : '人工执行' }}</el-tag></template></el-table-column>
-          <el-table-column label="巡检范围" min-width="190"><template #default="scope"><strong>{{ scope.row.organization_name || '全集团' }}</strong><div class="muted-text">{{ resourceTypeLabel(scope.row.resource_type) }} · {{ severityLabel(scope.row.severity) }}</div></template></el-table-column>
-          <el-table-column prop="enabled_rule_count" label="启用规则" width="100" />
-          <el-table-column label="扫描资源" width="110"><template #default="scope">{{ scope.row.asset_count + scope.row.system_count }}</template></el-table-column>
-          <el-table-column prop="total_issue_count" label="命中问题" width="100" />
-          <el-table-column prop="error_count" label="错误" width="80" />
-          <el-table-column prop="warning_count" label="警告" width="80" />
-          <el-table-column prop="auto_closed_count" label="自动关闭" width="100" />
-          <el-table-column label="执行人" min-width="130"><template #default="scope">{{ scope.row.trigger_type === 'scheduled' ? '系统调度器' : (scope.row.created_by_name || '未知') }}</template></el-table-column>
+          <el-table-column label="执行时间" width="155"><template #default="scope">{{ formatTime(scope.row.created_at) }}</template></el-table-column>
+          <el-table-column label="触发方式" width="100"><template #default="scope"><el-tag :type="scope.row.trigger_type === 'scheduled' ? 'success' : 'info'">{{ scope.row.trigger_type === 'scheduled' ? '系统自动' : '人工执行' }}</el-tag></template></el-table-column>
+          <el-table-column label="巡检范围" min-width="165"><template #default="scope"><strong>{{ scope.row.organization_name || '全集团' }}</strong><div class="muted-text">{{ resourceTypeLabel(scope.row.resource_type) }} · {{ severityLabel(scope.row.severity) }}</div></template></el-table-column>
+          <el-table-column prop="enabled_rule_count" label="启用规则" width="90" />
+          <el-table-column label="扫描资源" width="90"><template #default="scope">{{ scope.row.asset_count + scope.row.system_count }}</template></el-table-column>
+          <el-table-column label="命中问题" width="150"><template #default="scope">共 {{ scope.row.total_issue_count }} 项<span class="list-secondary">错误 {{ scope.row.error_count }} · 警告 {{ scope.row.warning_count }}</span></template></el-table-column>
+
+
+          <el-table-column prop="auto_closed_count" label="自动关闭" width="90" />
+          <el-table-column label="执行人" min-width="120"><template #default="scope">{{ scope.row.trigger_type === 'scheduled' ? '系统调度器' : (scope.row.created_by_name || '未知') }}</template></el-table-column>
         </el-table>
       </div>
       <div class="table-pagination">

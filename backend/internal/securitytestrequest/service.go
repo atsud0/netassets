@@ -850,7 +850,7 @@ SELECT r.id::text, r.request_code, r.request_name, r.applicant_organization_id::
        EXISTS (SELECT 1 FROM security_test_request_scope_assets u WHERE u.request_id=r.id AND u.working_asset_id IS NOT NULL),
        COALESCE(cr.display_name, ''), r.created_at, r.updated_at,
        (SELECT count(*) FROM security_test_request_scope_assets s WHERE s.request_id=r.id),
-       (SELECT count(*) FROM security_findings f WHERE f.test_batch_id=r.converted_batch_id AND f.status IN ('open', 'assigned'))`
+       (SELECT count(*) FROM security_findings f WHERE f.test_batch_id=r.converted_batch_id AND f.status IN ('pending', 'in_progress'))`
 
 const requestFrom = `
 FROM security_test_requests r

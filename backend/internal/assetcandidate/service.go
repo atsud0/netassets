@@ -43,6 +43,8 @@ type Candidate struct {
 	UpdatedAt        time.Time      `json:"updated_at"`
 	ReviewedBy       string         `json:"reviewed_by,omitempty"`
 	ReviewedAt       *time.Time     `json:"reviewed_at,omitempty"`
+	FindingCount     int            `json:"finding_count,omitempty"`
+	HighestSeverity  string         `json:"highest_severity,omitempty"`
 }
 
 type CreateInput struct {
@@ -95,11 +97,13 @@ func (s *Service) List(ctx context.Context, principal auth.Principal, status str
 	}
 	rows, err := s.pool.Query(ctx, `
         SELECT c.id::text, c.asset_type, c.asset_value, c.normalized_value,
-               COALESCE(c.suggested_data->>'name', ''), o.id::text, o.organization_code, o.organization_name,
+               COALESCE(c.suggested_data->>'name', ''), COALESCE(o.id::text, ''), COALESCE(o.organization_code, ''), COALESCE(o.organization_name, ''),
                c.source, COALESCE(c.source_reference, ''), c.suggested_data, c.status,
                COALESCE(c.matched_asset_id::text, ''), COALESCE(c.review_note, ''), COALESCE(c.created_by::text, ''),
-               c.created_at, c.updated_at, COALESCE(c.reviewed_by::text, ''), c.reviewed_at
-        FROM asset_candidates c JOIN organizations o ON o.id=c.organization_id
+               c.created_at, c.updated_at, COALESCE(c.reviewed_by::text, ''), c.reviewed_at,
+               (SELECT count(*) FROM security_finding_import_candidates fic WHERE fic.asset_candidate_id=c.id AND fic.status='pending'),
+               COALESCE((SELECT CASE max(CASE fic.severity WHEN 'critical' THEN 4 WHEN 'high' THEN 3 WHEN 'medium' THEN 2 WHEN 'low' THEN 1 ELSE 0 END) WHEN 4 THEN 'critical' WHEN 3 THEN 'high' WHEN 2 THEN 'medium' WHEN 1 THEN 'low' ELSE '' END FROM security_finding_import_candidates fic WHERE fic.asset_candidate_id=c.id AND fic.status='pending'),'')
+        FROM asset_candidates c LEFT JOIN organizations o ON o.id=c.organization_id
         WHERE ($1='' OR c.status=$1)
         ORDER BY CASE WHEN c.status='pending' THEN 0 ELSE 1 END, c.created_at DESC`, status)
 	if err != nil {
@@ -110,7 +114,7 @@ func (s *Service) List(ctx context.Context, principal auth.Principal, status str
 	for rows.Next() {
 		var i Candidate
 		var raw []byte
-		if err := rows.Scan(&i.ID, &i.AssetType, &i.AssetValue, &i.NormalizedValue, &i.Name, &i.OrganizationID, &i.OrganizationCode, &i.OrganizationName, &i.Source, &i.SourceReference, &raw, &i.Status, &i.MatchedAssetID, &i.ReviewNote, &i.CreatedBy, &i.CreatedAt, &i.UpdatedAt, &i.ReviewedBy, &i.ReviewedAt); err != nil {
+		if err := rows.Scan(&i.ID, &i.AssetType, &i.AssetValue, &i.NormalizedValue, &i.Name, &i.OrganizationID, &i.OrganizationCode, &i.OrganizationName, &i.Source, &i.SourceReference, &raw, &i.Status, &i.MatchedAssetID, &i.ReviewNote, &i.CreatedBy, &i.CreatedAt, &i.UpdatedAt, &i.ReviewedBy, &i.ReviewedAt, &i.FindingCount, &i.HighestSeverity); err != nil {
 			return nil, fmt.Errorf("scan asset candidate: %w", err)
 		}
 		if len(raw) > 0 {
@@ -134,11 +138,13 @@ func (s *Service) Search(ctx context.Context, principal auth.Principal, status s
 	}
 	rows, err := s.pool.Query(ctx, `
         SELECT c.id::text, c.asset_type, c.asset_value, c.normalized_value,
-               COALESCE(c.suggested_data->>'name', ''), o.id::text, o.organization_code, o.organization_name,
+               COALESCE(c.suggested_data->>'name', ''), COALESCE(o.id::text, ''), COALESCE(o.organization_code, ''), COALESCE(o.organization_name, ''),
                c.source, COALESCE(c.source_reference, ''), c.suggested_data, c.status,
                COALESCE(c.matched_asset_id::text, ''), COALESCE(c.review_note, ''), COALESCE(c.created_by::text, ''),
-               c.created_at, c.updated_at, COALESCE(c.reviewed_by::text, ''), c.reviewed_at, count(*) OVER ()
-        FROM asset_candidates c JOIN organizations o ON o.id=c.organization_id
+               c.created_at, c.updated_at, COALESCE(c.reviewed_by::text, ''), c.reviewed_at,
+               (SELECT count(*) FROM security_finding_import_candidates fic WHERE fic.asset_candidate_id=c.id AND fic.status='pending'),
+               COALESCE((SELECT CASE max(CASE fic.severity WHEN 'critical' THEN 4 WHEN 'high' THEN 3 WHEN 'medium' THEN 2 WHEN 'low' THEN 1 ELSE 0 END) WHEN 4 THEN 'critical' WHEN 3 THEN 'high' WHEN 2 THEN 'medium' WHEN 1 THEN 'low' ELSE '' END FROM security_finding_import_candidates fic WHERE fic.asset_candidate_id=c.id AND fic.status='pending'),''), count(*) OVER ()
+        FROM asset_candidates c LEFT JOIN organizations o ON o.id=c.organization_id
         WHERE ($1='' OR c.status=$1)
         ORDER BY CASE WHEN c.status='pending' THEN 0 ELSE 1 END, c.created_at DESC
         LIMIT $2 OFFSET $3`, status, query.PageSize, query.Offset())
@@ -151,7 +157,7 @@ func (s *Service) Search(ctx context.Context, principal auth.Principal, status s
 	for rows.Next() {
 		var i Candidate
 		var raw []byte
-		if err := rows.Scan(&i.ID, &i.AssetType, &i.AssetValue, &i.NormalizedValue, &i.Name, &i.OrganizationID, &i.OrganizationCode, &i.OrganizationName, &i.Source, &i.SourceReference, &raw, &i.Status, &i.MatchedAssetID, &i.ReviewNote, &i.CreatedBy, &i.CreatedAt, &i.UpdatedAt, &i.ReviewedBy, &i.ReviewedAt, &total); err != nil {
+		if err := rows.Scan(&i.ID, &i.AssetType, &i.AssetValue, &i.NormalizedValue, &i.Name, &i.OrganizationID, &i.OrganizationCode, &i.OrganizationName, &i.Source, &i.SourceReference, &raw, &i.Status, &i.MatchedAssetID, &i.ReviewNote, &i.CreatedBy, &i.CreatedAt, &i.UpdatedAt, &i.ReviewedBy, &i.ReviewedAt, &i.FindingCount, &i.HighestSeverity, &total); err != nil {
 			return pagination.Result[Candidate]{}, fmt.Errorf("scan asset candidate page: %w", err)
 		}
 		if len(raw) > 0 {
@@ -189,12 +195,14 @@ func (s *Service) listByID(ctx context.Context, id string) (Candidate, error) {
 	var raw []byte
 	err := s.pool.QueryRow(ctx, `
         SELECT c.id::text, c.asset_type, c.asset_value, c.normalized_value,
-               COALESCE(c.suggested_data->>'name', ''), o.id::text, o.organization_code, o.organization_name,
+               COALESCE(c.suggested_data->>'name', ''), COALESCE(o.id::text, ''), COALESCE(o.organization_code, ''), COALESCE(o.organization_name, ''),
                c.source, COALESCE(c.source_reference, ''), c.suggested_data, c.status,
                COALESCE(c.matched_asset_id::text, ''), COALESCE(c.review_note, ''), COALESCE(c.created_by::text, ''),
-               c.created_at, c.updated_at, COALESCE(c.reviewed_by::text, ''), c.reviewed_at
-        FROM asset_candidates c JOIN organizations o ON o.id=c.organization_id WHERE c.id=$1::uuid`, id).
-		Scan(&i.ID, &i.AssetType, &i.AssetValue, &i.NormalizedValue, &i.Name, &i.OrganizationID, &i.OrganizationCode, &i.OrganizationName, &i.Source, &i.SourceReference, &raw, &i.Status, &i.MatchedAssetID, &i.ReviewNote, &i.CreatedBy, &i.CreatedAt, &i.UpdatedAt, &i.ReviewedBy, &i.ReviewedAt)
+               c.created_at, c.updated_at, COALESCE(c.reviewed_by::text, ''), c.reviewed_at,
+               (SELECT count(*) FROM security_finding_import_candidates fic WHERE fic.asset_candidate_id=c.id AND fic.status='pending'),
+               COALESCE((SELECT CASE max(CASE fic.severity WHEN 'critical' THEN 4 WHEN 'high' THEN 3 WHEN 'medium' THEN 2 WHEN 'low' THEN 1 ELSE 0 END) WHEN 4 THEN 'critical' WHEN 3 THEN 'high' WHEN 2 THEN 'medium' WHEN 1 THEN 'low' ELSE '' END FROM security_finding_import_candidates fic WHERE fic.asset_candidate_id=c.id AND fic.status='pending'),'')
+        FROM asset_candidates c LEFT JOIN organizations o ON o.id=c.organization_id WHERE c.id=$1::uuid`, id).
+		Scan(&i.ID, &i.AssetType, &i.AssetValue, &i.NormalizedValue, &i.Name, &i.OrganizationID, &i.OrganizationCode, &i.OrganizationName, &i.Source, &i.SourceReference, &raw, &i.Status, &i.MatchedAssetID, &i.ReviewNote, &i.CreatedBy, &i.CreatedAt, &i.UpdatedAt, &i.ReviewedBy, &i.ReviewedAt, &i.FindingCount, &i.HighestSeverity)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return Candidate{}, ErrNotFound
 	}
@@ -226,7 +234,7 @@ func (s *Service) Create(ctx context.Context, principal auth.Principal, in Creat
 		return Candidate{}, ErrInvalid
 	}
 	normalized, err := asset.NormalizeValue(in.AssetType, in.AssetValue)
-	if err != nil || in.OrganizationID == "" || len(in.Name) > 255 || len(in.SourceReference) > 255 || len(in.Notes) > 5000 {
+	if err != nil || (in.Source != "finding_import" && in.OrganizationID == "") || len(in.Name) > 255 || len(in.SourceReference) > 255 || len(in.Notes) > 5000 {
 		return Candidate{}, ErrInvalid
 	}
 	suggested := in.SuggestedData
@@ -284,7 +292,12 @@ func (s *Service) Accept(ctx context.Context, principal auth.Principal, id strin
 	}
 	in.Type = candidate.AssetType
 	in.Value = candidate.AssetValue
-	in.OrganizationID = candidate.OrganizationID
+	if candidate.OrganizationID != "" {
+		in.OrganizationID = candidate.OrganizationID
+	}
+	if strings.TrimSpace(in.OrganizationID) == "" {
+		return asset.Asset{}, ErrInvalid
+	}
 	if in.Name == "" {
 		in.Name = candidate.Name
 	}
@@ -362,7 +375,7 @@ func (s *Service) review(ctx context.Context, p auth.Principal, id, status, matc
 }
 func (s *Service) audit(ctx context.Context, tx pgx.Tx, p auth.Principal, org, action, id, summary string, details map[string]any, rid, ip string) error {
 	data, _ := json.Marshal(details)
-	_, err := tx.Exec(ctx, `INSERT INTO audit_logs(user_id,organization_id,action,resource_type,resource_id,summary,details,request_ip,request_id) VALUES($1::uuid,$2::uuid,$3,'asset_candidate',$4::uuid,$5,$6::jsonb,NULLIF($7,'')::inet,NULLIF($8,''))`, p.UserID, org, action, id, summary, data, ip, rid)
+	_, err := tx.Exec(ctx, `INSERT INTO audit_logs(user_id,organization_id,action,resource_type,resource_id,summary,details,request_ip,request_id) VALUES($1::uuid,NULLIF($2,'')::uuid,$3,'asset_candidate',$4::uuid,$5,$6::jsonb,NULLIF($7,'')::inet,NULLIF($8,''))`, p.UserID, org, action, id, summary, data, ip, rid)
 	if err != nil {
 		return fmt.Errorf("write candidate audit: %w", err)
 	}

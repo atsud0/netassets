@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import RowActions from '../components/RowActions.vue'
 import { computed, onMounted, reactive, ref, watch } from 'vue'
 import { ElMessage, type FormInstance } from 'element-plus'
 import { apiClient, getAPIErrorMessage } from '../api/client'
@@ -476,7 +477,9 @@ onMounted(load)
 <template>
   <section>
     <div class="page-heading">
-      <div><span class="eyebrow">DATA GOVERNANCE</span><h1>数据治理</h1><p>集团统一定义补充字段和质量规则，并可主动检查当前网络资产与业务系统台账。</p></div>
+      <div>
+      <h1>数据治理</h1>
+      </div>
       <div class="button-row"><el-button v-if="activeTab === 'quality'" type="primary" @click="openRuleCreate">新增质量规则</el-button><el-button v-else type="primary" @click="openCreate">新增自定义字段</el-button></div>
     </div>
     <div class="panel governance-filter-panel"><el-tabs v-model="activeTab" @tab-change="onTabChange"><el-tab-pane label="网络资产字段" name="asset" /><el-tab-pane label="业务系统字段" name="business_system" /><el-tab-pane label="数据质量规则" name="quality" /></el-tabs></div>
@@ -487,9 +490,9 @@ onMounted(load)
         <el-table-column label="字段类型" width="130"><template #default="{ row }">{{ types.find((item) => item[0] === row.field_type)?.[1] || row.field_type }}</template></el-table-column>
         <el-table-column label="选项" min-width="180"><template #default="{ row }">{{ row.options?.join('、') || '—' }}</template></el-table-column>
         <el-table-column label="规则" width="130"><template #default="{ row }"><el-tag v-if="row.is_required" type="warning">必填</el-tag><span v-else>选填</span></template></el-table-column>
-        <el-table-column label="排序" prop="sort_order" width="90" />
-        <el-table-column label="状态" width="100"><template #default="{ row }"><el-tag :type="row.is_enabled ? 'success' : 'info'">{{ row.is_enabled ? '启用' : '停用' }}</el-tag></template></el-table-column>
-        <el-table-column label="操作" width="120" fixed="right" align="right" header-align="right" class-name="table-action-column"><template #default="{ row }"><el-button link type="primary" @click="openEdit(row)">编辑</el-button><el-button link :type="row.is_enabled ? 'warning' : 'success'" :loading="saving" @click="toggle(row)">{{ row.is_enabled ? '停用' : '启用' }}</el-button></template></el-table-column>
+        <el-table-column label="排序" prop="sort_order" width="65" />
+        <el-table-column label="状态" width="85"><template #default="{ row }"><el-tag :type="row.is_enabled ? 'success' : 'info'">{{ row.is_enabled ? '启用' : '停用' }}</el-tag></template></el-table-column>
+        <el-table-column label="操作" width="88" fixed="right" align="right" header-align="right" class-name="table-action-column"><template #default="{ row }"><RowActions :label="`操作：${row.name || row.title || row.code || row.display_name || row.id}`"><el-button link type="primary" @click="openEdit(row)">编辑</el-button><el-button link :type="row.is_enabled ? 'warning' : 'success'" :loading="saving" @click="toggle(row)">{{ row.is_enabled ? '停用' : '启用' }}</el-button></RowActions></template></el-table-column>
       </el-table>
       <div class="table-pagination">
         <el-pagination background layout="total, sizes, prev, pager, next" :total="fieldTotal" :current-page="fieldPage" :page-size="fieldPageSize" :page-sizes="[20, 50, 100]" @current-change="handleFieldPageChange" @size-change="handleFieldPageSizeChange" />
@@ -521,11 +524,11 @@ onMounted(load)
           <div class="quality-issue-heading"><div><h3>问题清单</h3><span>已返回 {{ scanResult.summary.returned_count }} 项</span></div><span v-if="scanResult.summary.total_issue_count === 0" class="quality-passed">当前筛选范围检查通过</span></div>
           <el-table :data="scanResult.issues" stripe max-height="440" empty-text="当前筛选范围未发现数据质量问题">
             <el-table-column label="严重程度" width="105"><template #default="{ row }"><el-tag :type="row.severity === 'error' ? 'danger' : 'warning'">{{ row.severity === 'error' ? '错误' : '警告' }}</el-tag></template></el-table-column>
-            <el-table-column prop="rule_name" label="规则名称" min-width="190" show-overflow-tooltip />
+            <el-table-column prop="rule_name" label="规则名称" min-width="160" show-overflow-tooltip />
             <el-table-column label="对象类型" width="110"><template #default="{ row }">{{ row.resource_type === 'asset' ? '网络资产' : '业务系统' }}</template></el-table-column>
             <el-table-column label="资源" min-width="210"><template #default="{ row }"><strong>{{ row.resource_name || '未命名资源' }}</strong><div class="table-subtext">{{ row.resource_id }}</div></template></el-table-column>
             <el-table-column prop="organization_name" label="所属组织" min-width="190" />
-            <el-table-column label="检查项" min-width="210"><template #default="{ row }">{{ qualityTargetLabel(row) }}</template></el-table-column>
+            <el-table-column label="检查项" min-width="120"><template #default="{ row }">{{ qualityTargetLabel(row) }}</template></el-table-column>
             <el-table-column label="操作" width="100" fixed="right" align="right" header-align="right" class-name="table-action-column"><template #default="{ row }"><router-link :to="resourceRoute(row)"><el-button link type="primary">前往台账</el-button></router-link></template></el-table-column>
           </el-table>
         </template>
@@ -534,15 +537,15 @@ onMounted(load)
       <div class="panel data-table-panel quality-rule-panel">
         <div class="quality-section-heading compact"><div><h2>规则配置</h2><p>集团可配置字段必填、长期未更新和资产到期规则；错误用于重点整改，警告用于一般提醒。</p></div></div>
         <el-table v-loading="ruleLoading" :data="ruleItems" stripe max-height="620" empty-text="暂未配置数据质量规则">
-          <el-table-column prop="rule_name" label="规则名称" min-width="200"><template #default="{ row }"><strong>{{ row.rule_name }}</strong><div class="table-subtext">{{ row.description || qualityTargetLabel(row) }}</div></template></el-table-column>
-          <el-table-column label="对象" width="120"><template #default="{ row }">{{ row.resource_type === 'asset' ? '网络资产' : '业务系统' }}</template></el-table-column>
-          <el-table-column label="类型" width="120"><template #default="{ row }">{{ row.rule_type === 'stale' ? '长期未更新' : row.rule_type === 'expiry' ? '资产到期' : '字段必填' }}</template></el-table-column>
-          <el-table-column label="检查项" min-width="190"><template #default="{ row }">{{ qualityTargetLabel(row) }}</template></el-table-column>
-          <el-table-column label="生效条件" min-width="260"><template #default="{ row }"><span class="condition-summary">{{ ruleConditionSummary(row) }}</span></template></el-table-column>
-          <el-table-column label="级别" width="100"><template #default="{ row }"><el-tag :type="row.severity === 'error' ? 'danger' : 'warning'">{{ row.severity === 'error' ? '错误' : '警告' }}</el-tag></template></el-table-column>
-          <el-table-column prop="sort_order" label="排序" width="90" />
-          <el-table-column label="状态" width="100"><template #default="{ row }"><el-tag :type="row.is_enabled ? 'success' : 'info'">{{ row.is_enabled ? '启用' : '停用' }}</el-tag></template></el-table-column>
-          <el-table-column label="操作" width="120" fixed="right" align="right" header-align="right" class-name="table-action-column"><template #default="{ row }"><el-button link type="primary" @click="openRuleEdit(row)">编辑</el-button><el-button link :type="row.is_enabled ? 'warning' : 'success'" :loading="saving" @click="toggleRule(row)">{{ row.is_enabled ? '停用' : '启用' }}</el-button></template></el-table-column>
+          <el-table-column prop="rule_name" label="规则名称" min-width="160"><template #default="{ row }"><strong>{{ row.rule_name }}</strong><div class="table-subtext">{{ row.description || qualityTargetLabel(row) }}</div></template></el-table-column>
+          <el-table-column label="对象" width="90"><template #default="{ row }">{{ row.resource_type === 'asset' ? '网络资产' : '业务系统' }}</template></el-table-column>
+          <el-table-column label="类型" width="100"><template #default="{ row }">{{ row.rule_type === 'stale' ? '长期未更新' : row.rule_type === 'expiry' ? '资产到期' : '字段必填' }}</template></el-table-column>
+          <el-table-column label="检查项" min-width="120"><template #default="{ row }">{{ qualityTargetLabel(row) }}</template></el-table-column>
+          <el-table-column label="生效条件" min-width="150"><template #default="{ row }"><span class="condition-summary">{{ ruleConditionSummary(row) }}</span></template></el-table-column>
+          <el-table-column label="级别" width="75"><template #default="{ row }"><el-tag :type="row.severity === 'error' ? 'danger' : 'warning'">{{ row.severity === 'error' ? '错误' : '警告' }}</el-tag></template></el-table-column>
+          <el-table-column prop="sort_order" label="排序" width="65" />
+          <el-table-column label="状态" width="85"><template #default="{ row }"><el-tag :type="row.is_enabled ? 'success' : 'info'">{{ row.is_enabled ? '启用' : '停用' }}</el-tag></template></el-table-column>
+          <el-table-column label="操作" width="88" fixed="right" align="right" header-align="right" class-name="table-action-column"><template #default="{ row }"><RowActions :label="`操作：${row.name || row.title || row.code || row.display_name || row.id}`"><el-button link type="primary" @click="openRuleEdit(row)">编辑</el-button><el-button link :type="row.is_enabled ? 'warning' : 'success'" :loading="saving" @click="toggleRule(row)">{{ row.is_enabled ? '停用' : '启用' }}</el-button></RowActions></template></el-table-column>
         </el-table>
         <div class="table-pagination">
           <el-pagination background layout="total, sizes, prev, pager, next" :total="ruleTotal" :current-page="rulePage" :page-size="rulePageSize" :page-sizes="[20, 50, 100]" @current-change="handleRulePageChange" @size-change="handleRulePageSizeChange" />

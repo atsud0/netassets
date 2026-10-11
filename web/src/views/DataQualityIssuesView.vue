@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import RowActions from '../components/RowActions.vue'
 import { computed, onMounted, reactive, ref } from 'vue'
 import { ElMessage, ElMessageBox, type TableInstance } from 'element-plus'
 import { useRouter } from 'vue-router'
@@ -379,7 +380,9 @@ onMounted(async () => {
 <template>
   <section class="page-stack">
     <div class="page-heading">
-      <div><span class="eyebrow">DATA QUALITY REMEDIATION</span><h1>质量整改</h1><p>{{ isGroupAdmin ? '查看全集团质量问题，复核子公司整改结果并管理豁免。' : '处理授权组织范围内的数据质量问题，并提交集团总部复核。' }}</p></div>
+      <div>
+      <h1>质量整改</h1>
+      </div>
       <el-button v-if="isGroupAdmin" type="primary" @click="router.push('/data-governance')">执行质量巡检</el-button>
     </div>
 
@@ -407,14 +410,14 @@ onMounted(async () => {
       <div class="quality-issue-table-scroll">
         <el-table ref="issueTableRef" v-loading="loading" :data="items" row-key="id" stripe max-height="560" empty-text="当前范围暂无数据质量问题" @selection-change="handleSelectionChange">
           <el-table-column type="selection" width="46" :reserve-selection="true" />
-        <el-table-column label="问题" min-width="230"><template #default="scope"><el-button class="table-link" link type="primary" @click="openDetail(scope.row)">{{ scope.row.rule_name }}</el-button><div class="muted-text">检查项：{{ targetLabel(scope.row.target_field, scope.row) }}</div></template></el-table-column>
-        <el-table-column label="资源" min-width="190"><template #default="scope"><strong>{{ scope.row.resource_name }}</strong><div class="muted-text">{{ resourceTypeLabel(scope.row.resource_type) }}</div></template></el-table-column>
-        <el-table-column prop="organization_name" label="责任组织" min-width="170" />
+        <el-table-column label="问题" min-width="190"><template #default="scope"><el-button class="table-link" link type="primary" @click="openDetail(scope.row)">{{ scope.row.rule_name }}</el-button><div class="muted-text">检查项：{{ targetLabel(scope.row.target_field, scope.row) }}</div></template></el-table-column>
+        <el-table-column label="资源 / 组织" min-width="180"><template #default="scope"><strong>{{ scope.row.resource_name }}</strong><div class="muted-text">{{ resourceTypeLabel(scope.row.resource_type) }}</div><span class="list-secondary">{{ scope.row.organization_name }}</span></template></el-table-column>
+
         <el-table-column label="级别" width="86"><template #default="scope"><el-tag :type="scope.row.severity === 'error' ? 'danger' : 'warning'">{{ severityLabel(scope.row.severity) }}</el-tag></template></el-table-column>
         <el-table-column label="状态" width="100"><template #default="scope"><el-tag :type="statusTypes[scope.row.status] as any">{{ statusLabels[scope.row.status] }}</el-tag></template></el-table-column>
-        <el-table-column label="负责人" min-width="110"><template #default="scope">{{ scope.row.assignee_display_name || '未指派' }}</template></el-table-column>
-        <el-table-column label="最近发现" width="155"><template #default="scope">{{ formatTime(scope.row.last_detected_at) }}</template></el-table-column>
-        <el-table-column label="操作" fixed="right" width="210" align="right" header-align="right" class-name="table-action-column"><template #default="scope"><div class="row-actions">
+        <el-table-column label="负责人" min-width="100"><template #default="scope">{{ scope.row.assignee_display_name || '未指派' }}</template></el-table-column>
+        <el-table-column label="最近发现" width="135"><template #default="scope">{{ formatTime(scope.row.last_detected_at) }}</template></el-table-column>
+        <el-table-column label="操作" fixed="right" width="88" align="right" header-align="right" class-name="table-action-column"><template #default="scope"><RowActions :direct="!isGroupAdmin && !['pending', 'in_progress'].includes(scope.row.status)" :label="`操作：${scope.row.name || scope.row.title || scope.row.code || scope.row.display_name || scope.row.id}`"><div class="row-actions">
           <el-button v-if="scope.row.status === 'pending'" link type="primary" @click="openAction('start', scope.row)">开始整改</el-button>
           <el-button v-if="scope.row.status === 'in_progress'" link type="primary" @click="openAction('assign', scope.row)">调整负责人</el-button>
           <el-button v-if="['pending','in_progress'].includes(scope.row.status)" link type="success" @click="openAction('submit', scope.row)">提交复核</el-button>
@@ -422,7 +425,7 @@ onMounted(async () => {
           <el-button v-if="isGroupAdmin && scope.row.status === 'pending_review'" link type="warning" @click="openAction('return', scope.row)">退回</el-button>
           <el-button v-if="isGroupAdmin && ['pending','in_progress','pending_review'].includes(scope.row.status)" link type="warning" @click="openAction('exempt', scope.row)">豁免</el-button>
           <el-button v-if="isGroupAdmin && ['closed','exempted'].includes(scope.row.status)" link type="primary" @click="openAction('reopen', scope.row)">重新打开</el-button>
-          </div></template></el-table-column>
+          </div></RowActions></template></el-table-column>
         </el-table>
       </div>
       <div class="table-pagination">

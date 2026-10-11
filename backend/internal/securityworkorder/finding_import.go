@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/url"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -116,17 +117,19 @@ func (s *Service) ImportFindings(ctx context.Context, principal auth.Principal, 
 		return FindingImportResult{}, ErrForbidden
 	}
 	testBatchID = strings.TrimSpace(testBatchID)
-	if !validUUID(testBatchID) {
+	if testBatchID != "" && !validUUID(testBatchID) {
 		return FindingImportResult{}, ErrInvalid
 	}
 	var batchCode, batchName, batchStatus string
-	if err := s.pool.QueryRow(ctx, `SELECT batch_code, batch_name, status FROM security_test_batches WHERE id::text=$1`, testBatchID).Scan(&batchCode, &batchName, &batchStatus); errors.Is(err, pgx.ErrNoRows) {
-		return FindingImportResult{}, ErrNotFound
-	} else if err != nil {
-		return FindingImportResult{}, fmt.Errorf("load finding import batch: %w", err)
-	}
-	if batchStatus != "authorized" && batchStatus != "in_progress" && batchStatus != "completed" {
-		return FindingImportResult{}, ErrState
+	if testBatchID != "" {
+		if err := s.pool.QueryRow(ctx, `SELECT batch_code, batch_name, status FROM security_test_batches WHERE id::text=$1`, testBatchID).Scan(&batchCode, &batchName, &batchStatus); errors.Is(err, pgx.ErrNoRows) {
+			return FindingImportResult{}, ErrNotFound
+		} else if err != nil {
+			return FindingImportResult{}, fmt.Errorf("load finding import batch: %w", err)
+		}
+		if batchStatus != "authorized" && batchStatus != "in_progress" && batchStatus != "completed" {
+			return FindingImportResult{}, ErrState
+		}
 	}
 
 	rows, fileType, err := readFindingImportRows(fileName, reader)
@@ -144,7 +147,12 @@ func (s *Service) ImportFindings(ctx context.Context, principal auth.Principal, 
 		}
 	}
 
-	scopes, err := s.loadFindingImportScopes(ctx, testBatchID)
+	var scopes []findingImportScope
+	if testBatchID != "" {
+		scopes, err = s.loadFindingImportScopes(ctx, testBatchID)
+	} else {
+		scopes, err = s.loadFindingImportAssetScopes(ctx)
+	}
 	if err != nil {
 		return FindingImportResult{}, err
 	}
@@ -181,15 +189,22 @@ func (s *Service) ImportFindings(ctx context.Context, principal auth.Principal, 
 		input.BusinessSystemID = scope.BusinessSystemID
 
 		var duplicate bool
-		if err := s.pool.QueryRow(ctx, `
-			SELECT EXISTS(SELECT 1 FROM security_findings
-			WHERE test_batch_id::text=$1 AND asset_id::text=$2 AND lower(btrim(title))=lower(btrim($3)))`,
-			testBatchID, scope.AssetID, input.Title).Scan(&duplicate); err != nil {
+		duplicateQuery := `SELECT EXISTS(SELECT 1 FROM security_findings
+			WHERE test_batch_id::text=$1 AND asset_id::text=$2 AND lower(btrim(title))=lower(btrim($3)))`
+		duplicateArgs := []any{testBatchID, scope.AssetID, input.Title}
+		duplicateMessage := "同一测试批次、资产和漏洞标题的安全发现已存在"
+		if testBatchID == "" {
+			duplicateQuery = `SELECT EXISTS(SELECT 1 FROM security_findings
+				WHERE test_batch_id IS NULL AND asset_id::text=$1 AND lower(btrim(title))=lower(btrim($2)))`
+			duplicateArgs = []any{scope.AssetID, input.Title}
+			duplicateMessage = "同一资产和漏洞标题的安全发现已存在"
+		}
+		if err := s.pool.QueryRow(ctx, duplicateQuery, duplicateArgs...).Scan(&duplicate); err != nil {
 			return FindingImportResult{}, fmt.Errorf("check duplicate imported finding: %w", err)
 		}
 		if duplicate {
 			result.DuplicateCount++
-			result.Errors = append(result.Errors, FindingImportError{Row: rowNumber, Code: "duplicate", Message: "同一测试批次、资产和漏洞标题的安全发现已存在"})
+			result.Errors = append(result.Errors, FindingImportError{Row: rowNumber, Code: "duplicate", Message: duplicateMessage})
 			continue
 		}
 
@@ -238,12 +253,12 @@ func (s *Service) saveFindingImportResult(ctx context.Context, principal auth.Pr
 	if err := tx.QueryRow(ctx, `
 		INSERT INTO security_finding_imports
 		(test_batch_id, file_name, file_type, status, total_count, success_count, failure_count, duplicate_count, pending_count, errors, created_by)
-		VALUES ($1::uuid,$2,$3,$4,$5,$6,$7,$8,$9,$10::jsonb,$11::uuid) RETURNING id::text`,
+		VALUES (NULLIF($1,'')::uuid,$2,$3,$4,$5,$6,$7,$8,$9,$10::jsonb,$11::uuid) RETURNING id::text`,
 		result.TestBatchID, result.FileName, result.FileType, result.Status, result.TotalCount, result.SuccessCount,
 		result.FailureCount, result.DuplicateCount, result.PendingCount, string(errorsJSON), principal.UserID).Scan(&id); err != nil {
 		return "", fmt.Errorf("save finding import result: %w", err)
 	}
-	if err := insertFindingImportCandidates(ctx, tx, id, result.TestBatchID, candidates); err != nil {
+	if err := insertFindingImportCandidates(ctx, tx, id, result.TestBatchID, result.FileName, principal.UserID, candidates); err != nil {
 		return "", err
 	}
 	organizationID := principalOrganizationID(principal)
@@ -275,7 +290,7 @@ func (s *Service) SearchFindingImports(ctx context.Context, principal auth.Princ
 		       i.total_count, i.success_count, i.failure_count, i.duplicate_count, i.pending_count, i.errors::text,
 		       COALESCE(u.display_name,''), i.created_at, count(*) OVER ()
 		FROM security_finding_imports i
-		JOIN security_test_batches b ON b.id=i.test_batch_id
+		LEFT JOIN security_test_batches b ON b.id=i.test_batch_id
 		LEFT JOIN users u ON u.id=i.created_by
 		ORDER BY i.created_at DESC LIMIT $1 OFFSET $2`, page.PageSize, page.Offset())
 	if err != nil {
@@ -317,6 +332,12 @@ func readFindingImportRows(fileName string, reader io.Reader) ([][]string, strin
 		csvReader.TrimLeadingSpace = true
 		rows, err := csvReader.ReadAll()
 		return rows, "csv", err
+	case ".json":
+		data, err := io.ReadAll(reader)
+		if err != nil {
+			return nil, "", err
+		}
+		return readFindingImportJSON(data)
 	case ".xlsx":
 		file, err := excelize.OpenReader(reader)
 		if err != nil {
@@ -332,6 +353,226 @@ func readFindingImportRows(fileName string, reader io.Reader) ([][]string, strin
 	default:
 		return nil, "", ErrInvalid
 	}
+}
+
+type findingJSONAsset struct {
+	Type  string `json:"type"`
+	Label string `json:"label"`
+	Value string `json:"value"`
+}
+
+// UnmarshalJSON accepts both the structured asset objects emitted by the
+// finding service and the compact string form used by older exports.
+func (asset *findingJSONAsset) UnmarshalJSON(data []byte) error {
+	var value string
+	if err := json.Unmarshal(data, &value); err == nil {
+		asset.Label = value
+		return nil
+	}
+	var object struct {
+		Type  string `json:"type"`
+		Label string `json:"label"`
+		Value string `json:"value"`
+	}
+	if err := json.Unmarshal(data, &object); err != nil {
+		return err
+	}
+	asset.Type = object.Type
+	asset.Label = object.Label
+	asset.Value = object.Value
+	return nil
+}
+
+type findingJSONRecord struct {
+	ID                string             `json:"id"`
+	FindingID         string             `json:"finding_id"`
+	Title             string             `json:"title"`
+	Name              string             `json:"name"`
+	Severity          string             `json:"severity"`
+	VulnerabilityType string             `json:"vulnerability_type"`
+	VulnClass         string             `json:"vulnclass"`
+	Description       string             `json:"description"`
+	Summary           string             `json:"summary"`
+	Report            string             `json:"report"`
+	Evidence          string             `json:"evidence"`
+	RemediationAdvice string             `json:"remediation_advice"`
+	Remediation       string             `json:"remediation"`
+	DiscoveredAt      string             `json:"discovered_at"`
+	CreatedAt         string             `json:"created_at"`
+	Timestamp         string             `json:"ts"`
+	Assets            []findingJSONAsset `json:"assets"`
+	AssetType         string             `json:"asset_type"`
+	AssetValue        string             `json:"asset_value"`
+}
+
+// readFindingImportJSON accepts the native security-finding export shape: an
+// array of findings with name/severity/summary/evidence/assets fields. One
+// row is generated per asset so every exported target can be matched to the
+// authorized test scope independently.
+func readFindingImportJSON(data []byte) ([][]string, string, error) {
+	var records []findingJSONRecord
+	parseErr := json.Unmarshal(data, &records)
+	if parseErr != nil {
+		// Some scanners emit a literal backslash before non-JSON escape
+		// characters inside report text. Repair only those invalid escapes,
+		// preserving valid JSON escapes, so the import can still consume that
+		// export. Valid JSON takes the untouched fast path above.
+		data = repairInvalidJSONEscapes(data)
+		parseErr = json.Unmarshal(data, &records)
+	}
+	if parseErr != nil {
+		var envelope struct {
+			Findings []findingJSONRecord `json:"findings"`
+		}
+		if envelopeErr := json.Unmarshal(data, &envelope); envelopeErr != nil || len(envelope.Findings) == 0 {
+			return nil, "", parseErr
+		}
+		records = envelope.Findings
+	}
+	headers := []string{"资产类型", "资产值", "漏洞标题", "严重等级", "漏洞类型", "漏洞描述", "验证证据", "整改建议", "发现时间"}
+	rows := make([][]string, 1, len(records)+1)
+	rows[0] = headers
+	for _, record := range records {
+		title := strings.TrimSpace(record.Title)
+		if title == "" {
+			title = strings.TrimSpace(record.Name)
+		}
+		if title == "" {
+			identifier := firstNonEmptyImportValue(record.FindingID, record.ID)
+			if identifier != "" {
+				title = "漏洞发现 #" + identifier
+			} else {
+				title = "未命名漏洞发现"
+			}
+		}
+		vulnerabilityType := strings.TrimSpace(record.VulnerabilityType)
+		if vulnerabilityType == "" {
+			vulnerabilityType = strings.TrimSpace(record.VulnClass)
+		}
+		description := strings.TrimSpace(record.Description)
+		if description == "" {
+			description = strings.TrimSpace(record.Summary)
+		}
+		if description == "" {
+			description = strings.TrimSpace(record.Report)
+		}
+		evidence := strings.TrimSpace(record.Evidence)
+		advice := strings.TrimSpace(record.RemediationAdvice)
+		if advice == "" {
+			advice = strings.TrimSpace(record.Remediation)
+		}
+		discoveredAt := firstNonEmptyImportValue(record.DiscoveredAt, record.CreatedAt, record.Timestamp)
+		assets := record.Assets
+		if len(assets) == 0 && (record.AssetType != "" || record.AssetValue != "") {
+			assets = []findingJSONAsset{{Type: record.AssetType, Value: record.AssetValue}}
+		}
+		if len(assets) == 0 {
+			assets = []findingJSONAsset{{Type: "other", Value: "未提供资产"}}
+		}
+		for _, item := range assets {
+			assetType, assetValue := normalizeFindingJSONAsset(item.Type, firstNonEmptyImportValue(item.Value, item.Label))
+			rows = append(rows, []string{assetType, assetValue, title, record.Severity, vulnerabilityType, description, evidence, advice, discoveredAt})
+		}
+	}
+	if len(rows) < 2 {
+		return nil, "", ErrInvalid
+	}
+	return rows, "json", nil
+}
+
+func firstNonEmptyImportValue(values ...string) string {
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			return strings.TrimSpace(value)
+		}
+	}
+	return ""
+}
+
+func normalizeFindingJSONAsset(assetType, value string) (string, string) {
+	assetType = strings.ToLower(strings.TrimSpace(assetType))
+	value = strings.TrimSpace(value)
+	switch assetType {
+	case "subdomain", "domain", "host":
+		return "domain", strings.TrimSuffix(value, ".")
+	case "ip", "ip_address", "ipv4", "ipv6":
+		return "ip", strings.TrimSpace(strings.Split(value, "/")[0])
+	case "endpoint", "url", "uri", "link":
+		// Endpoint labels commonly start with "GET "; retain the URL itself.
+		parts := strings.Fields(value)
+		if len(parts) > 1 && !strings.Contains(parts[0], "://") {
+			value = strings.TrimSpace(strings.Join(parts[1:], " "))
+		}
+		if parsed, err := url.Parse(value); err == nil && parsed.Host != "" {
+			return "url", value
+		}
+		return "other", value
+	case "service", "port":
+		return "service", value
+	default:
+		return "other", value
+	}
+}
+
+func repairInvalidJSONEscapes(data []byte) []byte {
+	// Walk strings as a small lexer instead of looking backwards at the output
+	// buffer.  Looking backwards is subtly wrong after an invalid escape has
+	// been removed: a later quote can then be mistaken for the end of the
+	// string.  This is intentionally only a repair fallback; valid JSON is
+	// still handled by encoding/json without modification.
+	out := make([]byte, 0, len(data))
+	inString := false
+	for i := 0; i < len(data); {
+		c := data[i]
+		if !inString {
+			out = append(out, c)
+			i++
+			if c == '"' {
+				inString = true
+			}
+			continue
+		}
+
+		if c == '"' {
+			out = append(out, c)
+			i++
+			inString = false
+			continue
+		}
+		if c != '\\' {
+			out = append(out, c)
+			i++
+			continue
+		}
+
+		// Preserve valid JSON escapes as a complete token.  For a malformed
+		// escape, drop only the slash and keep scanning the following character
+		// as normal report text (for example, \\c.target.example).
+		if i+1 >= len(data) {
+			i++
+			continue
+		}
+		next := data[i+1]
+		switch next {
+		case '"', '\\', '/', 'b', 'f', 'n', 'r', 't':
+			out = append(out, c, next)
+			i += 2
+		case 'u':
+			if i+5 < len(data) && isJSONHex(data[i+2]) && isJSONHex(data[i+3]) && isJSONHex(data[i+4]) && isJSONHex(data[i+5]) {
+				out = append(out, data[i:i+6]...)
+				i += 6
+			} else {
+				i++
+			}
+		default:
+			i++
+		}
+	}
+	return out
+}
+
+func isJSONHex(c byte) bool {
+	return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')
 }
 
 func nonEmptyImportRows(rows [][]string) [][]string {
@@ -401,7 +642,7 @@ func findingInputFromImportRow(row []string, headers map[string]int, batchID str
 		return FindingInput{}, "", "", &findingImportRowError{"invalid_discovered_at", "发现时间格式不正确，建议使用 YYYY-MM-DD HH:mm:ss"}
 	}
 	input := FindingInput{
-		Title: value("title"), Severity: severity, Status: "open", TestBatchID: batchID,
+		Title: value("title"), Severity: severity, Status: "pending", TestBatchID: batchID,
 		VulnerabilityType: value("vulnerability_type"), Description: value("description"), Evidence: value("evidence"),
 		RemediationAdvice: value("remediation_advice"), Source: "import", DiscoveredAt: discoveredAt,
 	}

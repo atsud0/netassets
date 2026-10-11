@@ -48,7 +48,7 @@ func registerSecurityWorkOrderRoutes(api *gin.RouterGroup, requireAuth gin.Handl
 		c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, 11<<20)
 		fileHeader, err := c.FormFile("file")
 		if err != nil || fileHeader.Size <= 0 || fileHeader.Size > 10<<20 {
-			writeAPIError(c, http.StatusBadRequest, "invalid_import_file", "请选择不超过 10MB 的 CSV 或 XLSX 文件")
+			writeAPIError(c, http.StatusBadRequest, "invalid_import_file", "请选择不超过 10MB 的 CSV、XLSX 或 JSON 文件")
 			return
 		}
 		file, err := fileHeader.Open()
@@ -88,7 +88,7 @@ func registerSecurityWorkOrderRoutes(api *gin.RouterGroup, requireAuth gin.Handl
 	findings.POST("/import-candidates/:id/link", func(c *gin.Context) {
 		var input securityworkorder.FindingImportCandidateLinkInput
 		if err := c.ShouldBindJSON(&input); err != nil {
-			writeAPIError(c, http.StatusBadRequest, "invalid_request", "请选择测试批次授权资产")
+			writeAPIError(c, http.StatusBadRequest, "invalid_request", "请选择要关联的资产")
 			return
 		}
 		item, err := service.LinkFindingImportCandidate(c.Request.Context(), mustPrincipal(c), c.Param("id"), input, c.GetString("request_id"), c.ClientIP())
@@ -110,6 +110,21 @@ func registerSecurityWorkOrderRoutes(api *gin.RouterGroup, requireAuth gin.Handl
 			return
 		}
 		c.JSON(http.StatusOK, gin.H{"item": item})
+	})
+
+	findings.GET("/summary", func(c *gin.Context) {
+		result, err := service.SummarizeFindings(c.Request.Context(), mustPrincipal(c), c.Query("organization_id"))
+		switch {
+		case errors.Is(err, securityworkorder.ErrForbidden):
+			writeAPIError(c, http.StatusForbidden, "forbidden", "当前账号无权查看该组织的安全发现汇总")
+		case errors.Is(err, securityworkorder.ErrInvalid):
+			writeAPIError(c, http.StatusBadRequest, "invalid_filter", "安全发现组织筛选条件不正确")
+		case err != nil:
+			logger.Error("summarize security findings", "error", err, "request_id", c.GetString("request_id"))
+			writeAPIError(c, http.StatusInternalServerError, "internal_error", "读取安全发现汇总失败")
+		default:
+			c.JSON(http.StatusOK, gin.H{"summary": result})
+		}
 	})
 
 	findings.GET("", func(c *gin.Context) {

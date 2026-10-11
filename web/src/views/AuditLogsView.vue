@@ -152,9 +152,7 @@ onMounted(async () => {
   <section>
     <div class="page-heading">
       <div>
-        <p class="eyebrow">AUDIT & TRACEABILITY</p>
         <h1>审计日志</h1>
-        <p>集团统一查询登录、组织、用户、台账、导入导出和填报审核操作，便于追踪责任人与操作结果。</p>
       </div>
     </div>
 
@@ -197,12 +195,12 @@ onMounted(async () => {
       </div>
       <!-- 审计记录可切换至每页 100 条；限制表格高度并由 Element Plus 提供独立纵向滚动。 -->
       <el-table :data="items" row-key="id" empty-text="暂无审计日志" :max-height="480">
-        <el-table-column label="操作时间" min-width="172"><template #default="scope">{{ formatTime(scope.row.created_at) }}</template></el-table-column>
-        <el-table-column label="操作" min-width="150"><template #default="scope"><div class="audit-action-cell"><strong>{{ scope.row.action_label }}</strong><span>{{ scope.row.action }}</span></div></template></el-table-column>
-        <el-table-column label="操作人" min-width="160"><template #default="scope"><div class="audit-action-cell"><strong>{{ actorName(scope.row) }}</strong><span>{{ scope.row.username || '账号已删除' }}</span></div></template></el-table-column>
-        <el-table-column label="所属组织" min-width="180"><template #default="scope">{{ scope.row.organization_name || '—' }}</template></el-table-column>
-        <el-table-column label="资源" min-width="180"><template #default="scope"><div class="audit-action-cell"><strong>{{ scope.row.resource_type_label || '—' }}</strong><span class="audit-resource-id">{{ scope.row.resource_id || '—' }}</span></div></template></el-table-column>
-        <el-table-column prop="summary" label="摘要" min-width="190"><template #default="scope">{{ scope.row.summary || '—' }}</template></el-table-column>
+        <el-table-column label="操作时间" min-width="150"><template #default="scope">{{ formatTime(scope.row.created_at) }}</template></el-table-column>
+        <el-table-column label="操作" min-width="135"><template #default="scope"><div class="audit-action-cell"><strong>{{ scope.row.action_label }}</strong><span>{{ scope.row.action }}</span></div></template></el-table-column>
+        <el-table-column label="操作人 / 组织" min-width="145"><template #default="scope"><div class="audit-action-cell"><strong>{{ actorName(scope.row) }}</strong><span>{{ scope.row.username || '账号已删除' }}</span></div><span class="list-secondary">{{ scope.row.organization_name || '—' }}</span></template></el-table-column>
+
+        <el-table-column label="资源" min-width="150"><template #default="scope"><div class="audit-action-cell"><strong>{{ scope.row.resource_type_label || '—' }}</strong><span class="audit-resource-id">{{ scope.row.resource_id || '—' }}</span></div></template></el-table-column>
+        <el-table-column prop="summary" label="摘要" min-width="160"><template #default="scope">{{ scope.row.summary || '—' }}</template></el-table-column>
         <el-table-column label="结果" width="86"><template #default="scope"><el-tag :type="scope.row.result === 'success' ? 'success' : 'danger'" effect="plain">{{ scope.row.result_label }}</el-tag></template></el-table-column>
         <el-table-column label="详情" width="82" fixed="right" align="right" header-align="right" class-name="table-action-column"><template #default="scope"><el-button link type="primary" @click="showDetail(scope.row)">查看</el-button></template></el-table-column>
       </el-table>

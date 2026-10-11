@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net"
 	"net/url"
+	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
@@ -27,6 +28,7 @@ type pendingFindingImportCandidate struct {
 	NormalizedValue       string
 	Input                 FindingInput
 	SuggestedScopeAssetID string
+	SuggestedAssetID      string
 	MatchMethod           string
 	MatchConfidence       int
 }
@@ -51,9 +53,11 @@ type FindingImportCandidate struct {
 	DiscoveredAt              time.Time         `json:"discovered_at"`
 	Status                    string            `json:"status"`
 	SuggestedScopeAssetID     string            `json:"suggested_scope_asset_id,omitempty"`
+	SuggestedAssetID          string            `json:"suggested_asset_id,omitempty"`
 	SuggestedAssetValue       string            `json:"suggested_asset_value,omitempty"`
 	SuggestedOrganizationName string            `json:"suggested_organization_name,omitempty"`
 	MatchedScopeAssetID       string            `json:"matched_scope_asset_id,omitempty"`
+	MatchedAssetID            string            `json:"matched_asset_id,omitempty"`
 	MatchedAssetValue         string            `json:"matched_asset_value,omitempty"`
 	MatchedOrganizationName   string            `json:"matched_organization_name,omitempty"`
 	MatchMethod               string            `json:"match_method,omitempty"`
@@ -77,6 +81,7 @@ type FindingImportCandidateFilter struct {
 
 type FindingImportCandidateLinkInput struct {
 	ScopeAssetID string `json:"scope_asset_id"`
+	AssetID      string `json:"asset_id"`
 	ReviewNote   string `json:"review_note"`
 }
 
@@ -126,6 +131,50 @@ func (s *Service) loadFindingImportScopes(ctx context.Context, batchID string) (
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("iterate finding import scopes: %w", err)
+	}
+	return items, nil
+}
+
+func (s *Service) loadFindingImportAssetScopes(ctx context.Context) ([]findingImportScope, error) {
+	rows, err := s.pool.Query(ctx, `
+		SELECT a.id::text, a.id::text, owner.organization_id::text,
+		       COALESCE(system.business_system_id::text, ''), a.asset_type,
+		       a.asset_value, owner.organization_name,
+		       COALESCE(system.business_system_name, '')
+		FROM assets a
+		JOIN LATERAL (
+			SELECT ao.organization_id, o.organization_name
+			FROM asset_organizations ao
+			JOIN organizations o ON o.id=ao.organization_id
+			WHERE ao.asset_id=a.id AND o.status='enabled' AND o.deleted_at IS NULL
+			ORDER BY ao.is_primary DESC, (ao.relationship_type='owner') DESC, ao.created_at
+			LIMIT 1
+		) owner ON true
+		LEFT JOIN LATERAL (
+			SELECT sa.business_system_id, bs.system_name AS business_system_name
+			FROM system_assets sa
+			JOIN business_systems bs ON bs.id=sa.business_system_id AND bs.deleted_at IS NULL
+			WHERE sa.asset_id=a.id
+			ORDER BY sa.is_primary DESC, sa.created_at
+			LIMIT 1
+		) system ON true
+		WHERE a.deleted_at IS NULL
+		ORDER BY a.created_at`)
+	if err != nil {
+		return nil, fmt.Errorf("load finding import assets: %w", err)
+	}
+	defer rows.Close()
+	items := make([]findingImportScope, 0)
+	for rows.Next() {
+		var item findingImportScope
+		if err := rows.Scan(&item.ScopeAssetID, &item.AssetID, &item.OrganizationID, &item.BusinessSystemID,
+			&item.AssetTypeSnapshot, &item.AssetValueSnapshot, &item.OrganizationName, &item.BusinessSystemName); err != nil {
+			return nil, fmt.Errorf("scan finding import asset: %w", err)
+		}
+		items = append(items, item)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate finding import assets: %w", err)
 	}
 	return items, nil
 }
@@ -254,33 +303,85 @@ func newPendingFindingImportCandidate(rowNumber int, row []string, headers map[s
 	return pendingFindingImportCandidate{
 		SourceRowNumber: rowNumber, RawData: rawData, AssetType: assetType, AssetValue: assetValue,
 		NormalizedValue: normalizedValue, Input: input, SuggestedScopeAssetID: suggestion.ScopeAssetID,
-		MatchMethod: method, MatchConfidence: confidence,
+		SuggestedAssetID: suggestion.AssetID, MatchMethod: method, MatchConfidence: confidence,
 	}
 }
 
-func insertFindingImportCandidates(ctx context.Context, tx pgx.Tx, importID, batchID string, candidates []pendingFindingImportCandidate) error {
+func insertFindingImportCandidates(ctx context.Context, tx pgx.Tx, importID, batchID, fileName, createdBy string, candidates []pendingFindingImportCandidate) error {
 	for _, candidate := range candidates {
 		rawData, err := json.Marshal(candidate.RawData)
 		if err != nil {
 			return fmt.Errorf("encode finding import candidate raw data: %w", err)
 		}
+
+		// Keep one asset discovery for the same missing asset even when a file
+		// contains several vulnerabilities for it. The finding candidates below
+		// all point to that discovery and are released together when the asset is
+		// confirmed.
+		var assetCandidateID string
+		if batchID == "" && candidate.SuggestedAssetID == "" {
+			err = tx.QueryRow(ctx, `
+			SELECT id::text FROM asset_candidates
+			WHERE asset_type=$1 AND normalized_value=$2 AND status='pending'
+			ORDER BY created_at LIMIT 1`, candidate.AssetType, candidate.NormalizedValue).Scan(&assetCandidateID)
+			if errors.Is(err, pgx.ErrNoRows) {
+				var suggestedData map[string]any
+				if err := json.Unmarshal(rawData, &suggestedData); err != nil {
+					return fmt.Errorf("decode finding import raw data: %w", err)
+				}
+				if suggestedData == nil {
+					suggestedData = map[string]any{}
+				}
+				suggestedData["source"] = "security_finding_import"
+				suggestedData["finding_import_id"] = importID
+				suggestedData["finding_title"] = candidate.Input.Title
+				suggestedData["severity"] = candidate.Input.Severity
+				suggestedData["vulnerability_type"] = candidate.Input.VulnerabilityType
+				suggestedData["description"] = candidate.Input.Description
+				suggestedData["evidence"] = candidate.Input.Evidence
+				suggestedData["discovered_at"] = candidate.Input.DiscoveredAt.Format(time.RFC3339)
+				suggestedData["organization_pending"] = true
+				suggested, err := json.Marshal(suggestedData)
+				if err != nil {
+					return fmt.Errorf("encode finding asset candidate data: %w", err)
+				}
+				var sourceReference = "漏洞导入：" + filepath.Base(fileName)
+				if len(sourceReference) > 255 {
+					sourceReference = sourceReference[:255]
+				}
+				err = tx.QueryRow(ctx, `
+				INSERT INTO asset_candidates
+					(asset_type, asset_value, normalized_value, suggested_data, organization_id,
+					 source, source_reference, status, created_by)
+				VALUES ($1,$2,$3,$4::jsonb,NULL,'finding_import',NULLIF($5,''),'pending',$6::uuid)
+				RETURNING id::text`, candidate.AssetType, candidate.AssetValue, candidate.NormalizedValue,
+					suggested, sourceReference, createdBy).Scan(&assetCandidateID)
+				if err != nil {
+					return fmt.Errorf("insert finding asset candidate: %w", err)
+				}
+			} else if err != nil {
+				return fmt.Errorf("find existing asset candidate: %w", err)
+			}
+		}
+
 		if _, err := tx.Exec(ctx, `
 			INSERT INTO security_finding_import_candidates (
 				finding_import_id, test_batch_id, source_row_number, raw_data, asset_type, asset_value,
 				normalized_value, title, severity, vulnerability_type, description, evidence,
-				remediation_advice, discovered_at, status, suggested_scope_asset_id, match_method, match_confidence
-			) VALUES ($1::uuid,$2::uuid,$3,$4::jsonb,$5,$6,NULLIF($7,''),$8,$9,NULLIF($10,''),$11,
-			          NULLIF($12,''),NULLIF($13,''),$14,'pending',NULLIF($15,'')::uuid,NULLIF($16,''),NULLIF($17,0))`,
+				remediation_advice, discovered_at, status, suggested_scope_asset_id, suggested_asset_id,
+				asset_candidate_id, match_method, match_confidence
+			) VALUES ($1::uuid,NULLIF($2,'')::uuid,$3,$4::jsonb,$5,$6,NULLIF($7,''),$8,$9,NULLIF($10,''),$11,
+			          NULLIF($12,''),NULLIF($13,''),$14,'pending',NULLIF($15,'')::uuid,NULLIF($16,'')::uuid,
+			          NULLIF($17,'')::uuid,NULLIF($18,''),NULLIF($19,0))`,
 			importID, batchID, candidate.SourceRowNumber, string(rawData), candidate.AssetType, candidate.AssetValue,
 			candidate.NormalizedValue, candidate.Input.Title, candidate.Input.Severity, candidate.Input.VulnerabilityType,
 			candidate.Input.Description, candidate.Input.Evidence, candidate.Input.RemediationAdvice, candidate.Input.DiscoveredAt,
-			candidate.SuggestedScopeAssetID, candidate.MatchMethod, candidate.MatchConfidence); err != nil {
+			candidate.SuggestedScopeAssetID, candidate.SuggestedAssetID, assetCandidateID, candidate.MatchMethod, candidate.MatchConfidence); err != nil {
 			return fmt.Errorf("insert finding import candidate: %w", err)
 		}
 	}
 	return nil
 }
-
 func validFindingImportCandidateStatus(status string) bool {
 	switch status {
 	case "pending", "imported", "ignored", "invalid", "duplicate":
@@ -340,20 +441,27 @@ func (s *Service) SearchFindingImportCandidates(ctx context.Context, principal a
 }
 
 const findingImportCandidateSelect = `
-	SELECT c.id::text, c.finding_import_id::text, c.test_batch_id::text, b.batch_code, b.batch_name,
+	SELECT c.id::text, c.finding_import_id::text, COALESCE(c.test_batch_id::text,''), COALESCE(b.batch_code,''), COALESCE(b.batch_name,''),
 	       c.source_row_number, c.raw_data::text, c.asset_type, c.asset_value, COALESCE(c.normalized_value,''),
 	       c.title, c.severity, COALESCE(c.vulnerability_type,''), c.description, COALESCE(c.evidence,''),
 	       COALESCE(c.remediation_advice,''), c.discovered_at, c.status,
-	       COALESCE(c.suggested_scope_asset_id::text,''), COALESCE(suggested.asset_value_snapshot,''),
-	       COALESCE(suggested.organization_name_snapshot,''), COALESCE(c.matched_scope_asset_id::text,''),
-	       COALESCE(matched.asset_value_snapshot,''), COALESCE(matched.organization_name_snapshot,''),
+	       COALESCE(c.suggested_scope_asset_id::text,''), COALESCE(c.suggested_asset_id::text,''),
+	       COALESCE(suggested.asset_value_snapshot, suggested_asset.asset_value,''),
+	       COALESCE(suggested.organization_name_snapshot, suggested_org.organization_name,''),
+	       COALESCE(c.matched_scope_asset_id::text,''), COALESCE(c.matched_asset_id::text,''),
+	       COALESCE(matched.asset_value_snapshot, matched_asset.asset_value,''),
+	       COALESCE(matched.organization_name_snapshot, matched_org.organization_name,''),
 	       COALESCE(c.match_method,''), COALESCE(c.match_confidence,0), COALESCE(c.review_note,''),
 	       COALESCE(reviewer.display_name,''), c.reviewed_at, COALESCE(c.imported_finding_id::text,''),
 	       COALESCE(f.finding_code,''), c.created_at, c.updated_at, count(*) OVER ()
 	FROM security_finding_import_candidates c
-	JOIN security_test_batches b ON b.id=c.test_batch_id
+	LEFT JOIN security_test_batches b ON b.id=c.test_batch_id
 	LEFT JOIN security_test_scope_assets suggested ON suggested.id=c.suggested_scope_asset_id
+	LEFT JOIN assets suggested_asset ON suggested_asset.id=c.suggested_asset_id
+	LEFT JOIN organizations suggested_org ON suggested_org.id=(SELECT ao.organization_id FROM asset_organizations ao WHERE ao.asset_id=suggested_asset.id ORDER BY ao.is_primary DESC, (ao.relationship_type='owner') DESC LIMIT 1)
 	LEFT JOIN security_test_scope_assets matched ON matched.id=c.matched_scope_asset_id
+	LEFT JOIN assets matched_asset ON matched_asset.id=c.matched_asset_id
+	LEFT JOIN organizations matched_org ON matched_org.id=(SELECT ao.organization_id FROM asset_organizations ao WHERE ao.asset_id=matched_asset.id ORDER BY ao.is_primary DESC, (ao.relationship_type='owner') DESC LIMIT 1)
 	LEFT JOIN users reviewer ON reviewer.id=c.reviewed_by
 	LEFT JOIN security_findings f ON f.id=c.imported_finding_id`
 
@@ -365,8 +473,8 @@ func scanFindingImportCandidate(row pgx.Row, withTotal bool) (FindingImportCandi
 		&item.ID, &item.FindingImportID, &item.TestBatchID, &item.TestBatchCode, &item.TestBatchName,
 		&item.SourceRowNumber, &rawDataText, &item.AssetType, &item.AssetValue, &item.NormalizedValue,
 		&item.Title, &item.Severity, &item.VulnerabilityType, &item.Description, &item.Evidence,
-		&item.RemediationAdvice, &item.DiscoveredAt, &item.Status, &item.SuggestedScopeAssetID,
-		&item.SuggestedAssetValue, &item.SuggestedOrganizationName, &item.MatchedScopeAssetID,
+		&item.RemediationAdvice, &item.DiscoveredAt, &item.Status, &item.SuggestedScopeAssetID, &item.SuggestedAssetID,
+		&item.SuggestedAssetValue, &item.SuggestedOrganizationName, &item.MatchedScopeAssetID, &item.MatchedAssetID,
 		&item.MatchedAssetValue, &item.MatchedOrganizationName, &item.MatchMethod, &item.MatchConfidence,
 		&item.ReviewNote, &item.ReviewedByName, &item.ReviewedAt, &item.ImportedFindingID,
 		&item.ImportedFindingCode, &item.CreatedAt, &item.UpdatedAt,
@@ -403,25 +511,69 @@ func (s *Service) ListFindingImportScopeOptions(ctx context.Context, principal a
 	if !principal.CanManageSecurityFindings() {
 		return nil, ErrForbidden
 	}
-	if !validUUID(strings.TrimSpace(candidateID)) {
+	candidateID = strings.TrimSpace(candidateID)
+	if !validUUID(candidateID) {
 		return nil, ErrInvalid
 	}
-	rows, err := s.pool.Query(ctx, `
-		SELECT scope.id::text, scope.asset_id::text, scope.asset_type_snapshot, scope.asset_value_snapshot,
-		       COALESCE(scope.asset_name_snapshot,''), scope.organization_id::text, scope.organization_code_snapshot,
-		       scope.organization_name_snapshot, COALESCE(scope.business_system_id::text,''),
-		       COALESCE(scope.business_system_code_snapshot,''), COALESCE(scope.business_system_name_snapshot,''),
-		       scope.id=c.suggested_scope_asset_id
-		FROM security_finding_import_candidates c
-		JOIN security_test_scope_assets scope ON scope.batch_id=c.test_batch_id
-		JOIN assets a ON a.id=scope.asset_id AND a.deleted_at IS NULL
-		JOIN organizations o ON o.id=scope.organization_id AND o.status='enabled' AND o.deleted_at IS NULL
-		JOIN asset_organizations ao ON ao.asset_id=a.id AND ao.organization_id=scope.organization_id
-		WHERE c.id=$1::uuid
-		ORDER BY scope.id=c.suggested_scope_asset_id DESC, scope.organization_name_snapshot,
-		         scope.asset_type_snapshot, scope.asset_value_snapshot`, candidateID)
+	var batchID string
+	if err := s.pool.QueryRow(ctx, `SELECT COALESCE(test_batch_id::text,'') FROM security_finding_import_candidates WHERE id=$1::uuid`, candidateID).Scan(&batchID); errors.Is(err, pgx.ErrNoRows) {
+		return nil, ErrNotFound
+	} else if err != nil {
+		return nil, fmt.Errorf("load finding import candidate context: %w", err)
+	}
+
+	var rows pgx.Rows
+	var err error
+	if batchID != "" {
+		rows, err = s.pool.Query(ctx, `
+			SELECT scope.id::text, scope.asset_id::text, scope.asset_type_snapshot, scope.asset_value_snapshot,
+			       COALESCE(scope.asset_name_snapshot,''), scope.organization_id::text, scope.organization_code_snapshot,
+			       scope.organization_name_snapshot, COALESCE(scope.business_system_id::text,''),
+			       COALESCE(scope.business_system_code_snapshot,''), COALESCE(scope.business_system_name_snapshot,''),
+			       COALESCE(scope.id=c.suggested_scope_asset_id, false)
+			FROM security_finding_import_candidates c
+			JOIN security_test_scope_assets scope ON scope.batch_id=c.test_batch_id
+			JOIN assets a ON a.id=scope.asset_id AND a.deleted_at IS NULL
+			JOIN organizations o ON o.id=scope.organization_id AND o.status='enabled' AND o.deleted_at IS NULL
+			JOIN asset_organizations ao ON ao.asset_id=a.id AND ao.organization_id=scope.organization_id
+			WHERE c.id=$1::uuid
+			ORDER BY scope.id=c.suggested_scope_asset_id DESC, scope.organization_name_snapshot,
+			         scope.asset_type_snapshot, scope.asset_value_snapshot`, candidateID)
+	} else {
+		rows, err = s.pool.Query(ctx, `
+			SELECT a.id::text, a.id::text, a.asset_type, a.asset_value,
+			       COALESCE(a.asset_name,''), owner.organization_id::text, owner.organization_code,
+			       owner.organization_name, COALESCE(system.business_system_id::text,''),
+			       COALESCE(system.business_system_code,''), COALESCE(system.business_system_name,''),
+			       (a.asset_type=c.asset_type AND (
+			          (c.normalized_value <> '' AND a.normalized_value=c.normalized_value)
+			          OR (c.normalized_value = '' AND lower(btrim(a.asset_value))=lower(btrim(c.asset_value)))
+			       ))
+			FROM security_finding_import_candidates c
+			JOIN assets a ON a.deleted_at IS NULL
+			JOIN LATERAL (
+				SELECT ao.organization_id, o.organization_code, o.organization_name
+				FROM asset_organizations ao
+				JOIN organizations o ON o.id=ao.organization_id AND o.status='enabled' AND o.deleted_at IS NULL
+				WHERE ao.asset_id=a.id
+				ORDER BY ao.is_primary DESC, (ao.relationship_type='owner') DESC, ao.created_at
+				LIMIT 1
+			) owner ON true
+			LEFT JOIN LATERAL (
+				SELECT sa.business_system_id, bs.system_code AS business_system_code, bs.system_name AS business_system_name
+				FROM system_assets sa
+				JOIN business_systems bs ON bs.id=sa.business_system_id AND bs.deleted_at IS NULL
+				WHERE sa.asset_id=a.id
+				ORDER BY sa.is_primary DESC, sa.created_at
+				LIMIT 1
+			) system ON true
+			WHERE c.id=$1::uuid
+			ORDER BY (a.asset_type=c.asset_type AND a.normalized_value=c.normalized_value) DESC,
+			         owner.organization_name, a.asset_type, a.asset_value
+			LIMIT 200`, candidateID)
+	}
 	if err != nil {
-		return nil, fmt.Errorf("list finding import scope options: %w", err)
+		return nil, fmt.Errorf("list finding import asset options: %w", err)
 	}
 	defer rows.Close()
 	items := make([]FindingImportScopeOption, 0)
@@ -430,21 +582,12 @@ func (s *Service) ListFindingImportScopeOptions(ctx context.Context, principal a
 		if err := rows.Scan(&item.ID, &item.AssetID, &item.AssetType, &item.AssetValue, &item.AssetName,
 			&item.OrganizationID, &item.OrganizationCode, &item.OrganizationName, &item.BusinessSystemID,
 			&item.BusinessSystemCode, &item.BusinessSystemName, &item.Suggested); err != nil {
-			return nil, fmt.Errorf("scan finding import scope option: %w", err)
+			return nil, fmt.Errorf("scan finding import asset option: %w", err)
 		}
 		items = append(items, item)
 	}
 	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("iterate finding import scope options: %w", err)
-	}
-	if len(items) == 0 {
-		var exists bool
-		if err := s.pool.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM security_finding_import_candidates WHERE id=$1::uuid)`, candidateID).Scan(&exists); err != nil {
-			return nil, fmt.Errorf("check finding import candidate: %w", err)
-		}
-		if !exists {
-			return nil, ErrNotFound
-		}
+		return nil, fmt.Errorf("iterate finding import asset options: %w", err)
 	}
 	return items, nil
 }
@@ -455,10 +598,14 @@ func (s *Service) LinkFindingImportCandidate(ctx context.Context, principal auth
 	}
 	id = strings.TrimSpace(id)
 	input.ScopeAssetID = strings.TrimSpace(input.ScopeAssetID)
+	input.AssetID = strings.TrimSpace(input.AssetID)
 	input.ReviewNote = strings.TrimSpace(input.ReviewNote)
-	if !validUUID(id) || !validUUID(input.ScopeAssetID) || len(input.ReviewNote) > 2000 {
+	if !validUUID(id) || len(input.ReviewNote) > 2000 ||
+		(input.ScopeAssetID == "" && input.AssetID == "") ||
+		(input.ScopeAssetID != "" && input.AssetID != "") {
 		return FindingImportCandidate{}, ErrInvalid
 	}
+
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return FindingImportCandidate{}, fmt.Errorf("begin link finding import candidate: %w", err)
@@ -466,7 +613,7 @@ func (s *Service) LinkFindingImportCandidate(ctx context.Context, principal auth
 	defer func() { _ = tx.Rollback(ctx) }()
 	var candidate FindingImportCandidate
 	if err := tx.QueryRow(ctx, `
-		SELECT finding_import_id::text, test_batch_id::text, title, severity, COALESCE(vulnerability_type,''),
+		SELECT finding_import_id::text, COALESCE(test_batch_id::text,''), title, severity, COALESCE(vulnerability_type,''),
 		       description, COALESCE(evidence,''), COALESCE(remediation_advice,''), discovered_at, status
 		FROM security_finding_import_candidates WHERE id=$1::uuid FOR UPDATE`, id).Scan(
 		&candidate.FindingImportID, &candidate.TestBatchID, &candidate.Title, &candidate.Severity,
@@ -479,36 +626,80 @@ func (s *Service) LinkFindingImportCandidate(ctx context.Context, principal auth
 	if candidate.Status != "pending" {
 		return FindingImportCandidate{}, ErrState
 	}
+
+	selectedID := input.ScopeAssetID
+	if candidate.TestBatchID == "" {
+		if input.AssetID == "" {
+			return FindingImportCandidate{}, ErrInvalid
+		}
+		selectedID = input.AssetID
+	}
 	var scope findingImportScope
-	if err := tx.QueryRow(ctx, `
-		SELECT scope.id::text, scope.asset_id::text, scope.organization_id::text,
-		       COALESCE(scope.business_system_id::text,''), scope.asset_type_snapshot,
-		       scope.asset_value_snapshot, scope.organization_name_snapshot,
-		       COALESCE(scope.business_system_name_snapshot,'')
-		FROM security_test_scope_assets scope
-		JOIN assets a ON a.id=scope.asset_id AND a.deleted_at IS NULL
-		JOIN organizations o ON o.id=scope.organization_id AND o.status='enabled' AND o.deleted_at IS NULL
-		JOIN asset_organizations ao ON ao.asset_id=a.id AND ao.organization_id=scope.organization_id
-		WHERE scope.id=$1::uuid AND scope.batch_id=$2::uuid`, input.ScopeAssetID, candidate.TestBatchID).Scan(
-		&scope.ScopeAssetID, &scope.AssetID, &scope.OrganizationID, &scope.BusinessSystemID,
-		&scope.AssetTypeSnapshot, &scope.AssetValueSnapshot, &scope.OrganizationName, &scope.BusinessSystemName); errors.Is(err, pgx.ErrNoRows) {
+	if candidate.TestBatchID != "" {
+		err = tx.QueryRow(ctx, `
+			SELECT scope.id::text, scope.asset_id::text, scope.organization_id::text,
+			       COALESCE(scope.business_system_id::text,''), scope.asset_type_snapshot,
+			       scope.asset_value_snapshot, scope.organization_name_snapshot,
+			       COALESCE(scope.business_system_name_snapshot,'')
+			FROM security_test_scope_assets scope
+			JOIN assets a ON a.id=scope.asset_id AND a.deleted_at IS NULL
+			JOIN organizations o ON o.id=scope.organization_id AND o.status='enabled' AND o.deleted_at IS NULL
+			JOIN asset_organizations ao ON ao.asset_id=a.id AND ao.organization_id=scope.organization_id
+			WHERE scope.id=$1::uuid AND scope.batch_id=$2::uuid`, selectedID, candidate.TestBatchID).Scan(
+			&scope.ScopeAssetID, &scope.AssetID, &scope.OrganizationID, &scope.BusinessSystemID,
+			&scope.AssetTypeSnapshot, &scope.AssetValueSnapshot, &scope.OrganizationName, &scope.BusinessSystemName)
+	} else {
+		err = tx.QueryRow(ctx, `
+			SELECT a.id::text, a.id::text, owner.organization_id::text,
+			       COALESCE(system.business_system_id::text,''), a.asset_type, a.asset_value,
+			       owner.organization_name, COALESCE(system.business_system_name,'')
+			FROM assets a
+			JOIN LATERAL (
+				SELECT ao.organization_id, o.organization_name
+				FROM asset_organizations ao
+				JOIN organizations o ON o.id=ao.organization_id AND o.status='enabled' AND o.deleted_at IS NULL
+				WHERE ao.asset_id=a.id
+				ORDER BY ao.is_primary DESC, (ao.relationship_type='owner') DESC, ao.created_at
+				LIMIT 1
+			) owner ON true
+			LEFT JOIN LATERAL (
+				SELECT sa.business_system_id, bs.system_name AS business_system_name
+				FROM system_assets sa
+				JOIN business_systems bs ON bs.id=sa.business_system_id AND bs.deleted_at IS NULL
+				WHERE sa.asset_id=a.id
+				ORDER BY sa.is_primary DESC, sa.created_at
+				LIMIT 1
+			) system ON true
+			WHERE a.id=$1::uuid AND a.deleted_at IS NULL`, selectedID).Scan(
+			&scope.ScopeAssetID, &scope.AssetID, &scope.OrganizationID, &scope.BusinessSystemID,
+			&scope.AssetTypeSnapshot, &scope.AssetValueSnapshot, &scope.OrganizationName, &scope.BusinessSystemName)
+	}
+	if errors.Is(err, pgx.ErrNoRows) {
 		return FindingImportCandidate{}, ErrNotFound
 	} else if err != nil {
-		return FindingImportCandidate{}, fmt.Errorf("load selected finding import scope: %w", err)
+		return FindingImportCandidate{}, fmt.Errorf("load selected finding import asset: %w", err)
 	}
+
 	var duplicateFindingID string
-	duplicateErr := tx.QueryRow(ctx, `
-		SELECT id::text FROM security_findings
-		WHERE test_batch_id=$1::uuid AND asset_id=$2::uuid AND lower(btrim(title))=lower(btrim($3))
-		ORDER BY created_at LIMIT 1`, candidate.TestBatchID, scope.AssetID, candidate.Title).Scan(&duplicateFindingID)
-	if duplicateErr != nil && !errors.Is(duplicateErr, pgx.ErrNoRows) {
-		return FindingImportCandidate{}, fmt.Errorf("check linked finding duplicate: %w", duplicateErr)
+	if candidate.TestBatchID != "" {
+		err = tx.QueryRow(ctx, `
+			SELECT id::text FROM security_findings
+			WHERE test_batch_id=$1::uuid AND asset_id=$2::uuid AND lower(btrim(title))=lower(btrim($3))
+			ORDER BY created_at LIMIT 1`, candidate.TestBatchID, scope.AssetID, candidate.Title).Scan(&duplicateFindingID)
+	} else {
+		err = tx.QueryRow(ctx, `
+			SELECT id::text FROM security_findings
+			WHERE asset_id=$1::uuid AND lower(btrim(title))=lower(btrim($2))
+			ORDER BY created_at LIMIT 1`, scope.AssetID, candidate.Title).Scan(&duplicateFindingID)
+	}
+	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+		return FindingImportCandidate{}, fmt.Errorf("check linked finding duplicate: %w", err)
 	}
 	status := "imported"
 	findingID := duplicateFindingID
-	if errors.Is(duplicateErr, pgx.ErrNoRows) {
+	if errors.Is(err, pgx.ErrNoRows) {
 		findingInput := FindingInput{
-			Title: candidate.Title, Severity: candidate.Severity, Status: "open",
+			Title: candidate.Title, Severity: candidate.Severity, Status: "pending",
 			AssigneeOrganizationID: scope.OrganizationID, AssetID: scope.AssetID,
 			BusinessSystemID: scope.BusinessSystemID, TestBatchID: candidate.TestBatchID,
 			VulnerabilityType: candidate.VulnerabilityType, Description: candidate.Description,
@@ -524,9 +715,9 @@ func (s *Service) LinkFindingImportCandidate(ctx context.Context, principal auth
 	}
 	if _, err := tx.Exec(ctx, `
 		UPDATE security_finding_import_candidates
-		SET status=$2, matched_scope_asset_id=$3::uuid, review_note=NULLIF($4,''), reviewed_by=$5::uuid,
-		    reviewed_at=now(), imported_finding_id=$6::uuid, updated_at=now()
-		WHERE id=$1::uuid`, id, status, scope.ScopeAssetID, input.ReviewNote, principal.UserID, findingID); err != nil {
+		SET status=$2, matched_scope_asset_id=NULLIF($3,'')::uuid, matched_asset_id=NULLIF($4,'')::uuid,
+		    review_note=NULLIF($5,''), reviewed_by=$6::uuid, reviewed_at=now(), imported_finding_id=$7::uuid, updated_at=now()
+		WHERE id=$1::uuid`, id, status, scope.ScopeAssetID, scope.AssetID, input.ReviewNote, principal.UserID, findingID); err != nil {
 		return FindingImportCandidate{}, fmt.Errorf("update linked finding import candidate: %w", err)
 	}
 	if _, err := tx.Exec(ctx, `UPDATE security_finding_imports SET pending_count=GREATEST(pending_count-1,0) WHERE id=$1::uuid`, candidate.FindingImportID); err != nil {
@@ -563,7 +754,7 @@ func (s *Service) IgnoreFindingImportCandidate(ctx context.Context, principal au
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 	var importID, batchID, status string
-	if err := tx.QueryRow(ctx, `SELECT finding_import_id::text,test_batch_id::text,status FROM security_finding_import_candidates WHERE id=$1::uuid FOR UPDATE`, id).Scan(&importID, &batchID, &status); errors.Is(err, pgx.ErrNoRows) {
+	if err := tx.QueryRow(ctx, `SELECT finding_import_id::text,COALESCE(test_batch_id::text,''),status FROM security_finding_import_candidates WHERE id=$1::uuid FOR UPDATE`, id).Scan(&importID, &batchID, &status); errors.Is(err, pgx.ErrNoRows) {
 		return FindingImportCandidate{}, ErrNotFound
 	} else if err != nil {
 		return FindingImportCandidate{}, fmt.Errorf("lock ignored finding import candidate: %w", err)
@@ -585,4 +776,47 @@ func (s *Service) IgnoreFindingImportCandidate(ctx context.Context, principal au
 		return FindingImportCandidate{}, fmt.Errorf("commit ignore finding import candidate: %w", err)
 	}
 	return s.GetFindingImportCandidate(ctx, principal, id)
+}
+
+// LinkAcceptedAssetCandidate releases all vulnerability imports waiting on an
+// asset discovery after that discovery has been accepted into the asset ledger.
+// The operation is intentionally idempotent: already processed candidates are
+// skipped, so the caller can safely retry after a transient failure.
+func (s *Service) LinkAcceptedAssetCandidate(ctx context.Context, principal auth.Principal, assetCandidateID, assetID, requestID, ipAddress string) error {
+	if !principal.CanManageSecurityFindings() {
+		return ErrForbidden
+	}
+	assetCandidateID = strings.TrimSpace(assetCandidateID)
+	assetID = strings.TrimSpace(assetID)
+	if !validUUID(assetCandidateID) || !validUUID(assetID) {
+		return ErrInvalid
+	}
+	rows, err := s.pool.Query(ctx, `
+		SELECT id::text
+		FROM security_finding_import_candidates
+		WHERE asset_candidate_id=$1::uuid AND status='pending'
+		ORDER BY source_row_number, created_at`, assetCandidateID)
+	if err != nil {
+		return fmt.Errorf("list findings for accepted asset candidate: %w", err)
+	}
+	defer rows.Close()
+	ids := make([]string, 0)
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return fmt.Errorf("scan finding for accepted asset candidate: %w", err)
+		}
+		ids = append(ids, id)
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("iterate findings for accepted asset candidate: %w", err)
+	}
+	for _, id := range ids {
+		if _, err := s.LinkFindingImportCandidate(ctx, principal, id, FindingImportCandidateLinkInput{
+			AssetID: assetID,
+		}, requestID, ipAddress); err != nil {
+			return fmt.Errorf("link finding import candidate %s: %w", id, err)
+		}
+	}
+	return nil
 }

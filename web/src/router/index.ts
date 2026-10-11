@@ -26,12 +26,17 @@ import { useAuthStore } from '../stores/auth'
 const router = createRouter({
   history: createWebHistory(),
   routes: [
+    { path: '/repair/invite', name: 'repair-invite', component: () => import('../views/RepairInvitationView.vue'), meta: { public: true } },
     { path: '/login', name: 'login', component: LoginView, meta: { public: true } },
     {
       path: '/',
       component: AppLayout,
       children: [
         { path: '', redirect: '/dashboard' },
+        { path: 'repair', redirect: '/repair/tasks' },
+        { path: 'repair/tasks', name: 'repair-tasks', component: () => import('../views/RemediationTasksView.vue'), meta: { repair: true } },
+        { path: 'remediation', name: 'remediation', component: () => import('../views/RemediationTasksView.vue'), meta: { anyPermission: ['remediation.assign', 'remediation.review', 'security_workorder.manage'] } },
+        { path: 'remediation-people', name: 'remediation-people', component: () => import('../views/RemediationPeopleView.vue'), meta: { permission: 'remediation.people.manage' } },
         { path: 'dashboard', name: 'dashboard', component: DashboardView },
         { path: 'notifications', name: 'notifications', component: NotificationsView },
         { path: 'organizations', name: 'organizations', component: OrganizationsView, meta: { permission: 'organization.read' } },
@@ -65,11 +70,13 @@ router.beforeEach(async (to) => {
     return { name: 'login', query: { redirect: to.fullPath } }
   }
   if (to.name === 'login' && auth.authenticated) {
-    return { name: auth.user?.must_change_password ? 'profile' : 'dashboard' }
+    return { name: auth.user?.must_change_password ? 'profile' : auth.executionOnly ? 'repair-tasks' : 'dashboard' }
   }
   if (auth.authenticated && auth.user?.must_change_password && to.name !== 'profile') {
     return { name: 'profile', query: { password_change_required: '1' } }
   }
+  if (auth.authenticated && auth.executionOnly && !to.meta.public && !['repair-tasks','profile','notifications'].includes(String(to.name))) return { name: 'repair-tasks' }
+  if (to.meta.repair && !auth.repairEnabled) return { name: 'dashboard' }
   if (to.meta.groupAdminOnly && !auth.isGroupAdmin) {
     return { name: 'dashboard' }
   }

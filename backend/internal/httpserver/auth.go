@@ -268,6 +268,14 @@ func authenticationMiddleware(cfg config.Config, service *auth.Service, logger *
 			c.Abort()
 			return
 		}
+		if principal.ExecutionOnly && !allowsRepairAccountRequest(c.Request.Method, c.Request.URL.Path) {
+			if auditErr := service.RecordRepairBoundaryDenial(c.Request.Context(), principal, c.Request.Method, c.FullPath(), c.GetString("request_id"), c.ClientIP()); auditErr != nil {
+				logger.Error("audit repair account denial", "error", auditErr)
+			}
+			writeAPIError(c, http.StatusForbidden, "repair_account_only", "当前账号仅可访问修复工作台")
+			c.Abort()
+			return
+		}
 		c.Set(principalContextKey, principal)
 		c.Next()
 	}
@@ -329,4 +337,17 @@ func clearSessionCookie(c *gin.Context, cfg config.Config) {
 		Secure:   cfg.SessionCookieSecure,
 		SameSite: http.SameSiteLaxMode,
 	})
+}
+
+func allowsRepairAccountRequest(method, path string) bool {
+	if strings.HasPrefix(path, "/api/v1/repair/tasks") || strings.HasPrefix(path, "/api/v1/notifications") {
+		return true
+	}
+	if path == "/api/v1/repair-invitations/accept-existing" {
+		return method == http.MethodPost
+	}
+	if path == "/api/v1/auth/me" || path == "/api/v1/auth/profile" || path == "/api/v1/auth/profile/password" || path == "/api/v1/auth/logout" || strings.HasPrefix(path, "/api/v1/auth/sessions") {
+		return true
+	}
+	return false
 }

@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import RowActions from '../components/RowActions.vue'
 import { computed, h, onMounted, reactive, ref } from 'vue'
 import { ElMessage, ElMessageBox, type FormInstance, type FormRules } from 'element-plus'
 import { apiClient, getAPIErrorMessage } from '../api/client'
@@ -200,8 +201,7 @@ onMounted(loadOrganizations)
   <section>
     <div class="page-heading">
       <div>
-        <p class="eyebrow">ORGANIZATION STRUCTURE</p><h1>组织架构</h1>
-        <p>以集团为根节点管理子公司、部门和办事处等组织层级，支持整棵子树迁移、启停检查和空组织回收。</p>
+        <h1>组织架构</h1>
       </div>
       <div class="page-heading-actions">
         <el-button :loading="loading" @click="loadOrganizations">刷新</el-button>
@@ -217,26 +217,26 @@ onMounted(loadOrganizations)
     <div class="panel data-table-panel organization-tree-panel" v-loading="loading">
       <div class="panel-title-row"><div><h2>集团组织树</h2><p>展开节点查看完整上下级关系；迁移组织时，其全部下级节点会随组织一起移动。</p></div></div>
       <el-table :data="organizations" row-key="id" default-expand-all :tree-props="{ children: 'children' }" empty-text="暂无组织机构">
-        <el-table-column label="组织名称" min-width="250"><template #default="scope"><div class="organization-name-cell"><strong>{{ scope.row.name }}</strong><span v-if="scope.row.short_name">{{ scope.row.short_name }}</span></div></template></el-table-column>
-        <el-table-column label="组织编码" min-width="150"><template #default="scope"><span class="organization-code-cell">{{ scope.row.code }}</span></template></el-table-column>
+        <el-table-column label="组织" min-width="250"><template #default="scope"><div class="organization-name-cell"><strong>{{ scope.row.name }}</strong><span v-if="scope.row.short_name">{{ scope.row.short_name }}</span></div></template></el-table-column>
+
         <el-table-column label="类型" width="100"><template #default="scope"><el-tag effect="plain">{{ typeLabels[scope.row.type as OrganizationType] }}</el-tag></template></el-table-column>
-        <el-table-column label="负责人 / 联系方式" min-width="190"><template #default="scope"><div class="organization-contact-cell"><span>{{ scope.row.manager || '未填写负责人' }}</span><small>{{ scope.row.contact || '未填写联系方式' }}</small></div></template></el-table-column>
-        <el-table-column label="系统 / 资产" width="130" align="center"><template #default="scope">{{ scope.row.business_system_count }} / {{ scope.row.asset_count }}</template></el-table-column>
+        <el-table-column label="负责人 / 联系方式" min-width="180"><template #default="scope"><div class="organization-contact-cell"><span>{{ scope.row.manager || '未填写负责人' }}</span><small>{{ scope.row.contact || '未填写联系方式' }}</small></div></template></el-table-column>
+        <el-table-column label="系统 / 资产" width="105" align="center"><template #default="scope">{{ scope.row.business_system_count }} / {{ scope.row.asset_count }}</template></el-table-column>
         <el-table-column label="状态" width="96"><template #default="scope"><el-tag :type="scope.row.status === 'enabled' ? 'success' : 'info'" effect="plain">{{ scope.row.status === 'enabled' ? '启用' : '停用' }}</el-tag></template></el-table-column>
-        <el-table-column v-if="canManageOrganizations || auth.isGroupAdmin" label="操作" :width="auth.isGroupAdmin ? 210 : 200" fixed="right" align="right" header-align="right" class-name="table-action-column"><template #default="scope">
+        <el-table-column v-if="canManageOrganizations || auth.isGroupAdmin" label="操作" width="88" fixed="right" align="right" header-align="right" class-name="table-action-column"><template #default="scope"><RowActions :label="`操作：${scope.row.name || scope.row.display_name || scope.row.id}`">
           <div class="table-row-actions organization-actions">
             <el-button v-if="scope.row.can_update" link type="primary" @click="openEditDialog(scope.row)">编辑信息</el-button>
             <el-button v-if="!auth.isGroupAdmin && scope.row.can_create_child" link type="primary" @click="openCreateDialog(scope.row)">新增下级组织</el-button>
             <el-button v-if="auth.isGroupAdmin && scope.row.type !== 'group'" link type="primary" @click="openStructureDialog(scope.row)">调整结构</el-button>
-            <el-dropdown v-if="auth.isGroupAdmin && scope.row.type !== 'group'" trigger="click"><el-button link type="primary" :loading="operatingID === scope.row.id">更多</el-button><template #dropdown><el-dropdown-menu>
-              <el-dropdown-item @click="showImpact(scope.row)">查看影响</el-dropdown-item>
-              <el-dropdown-item v-if="scope.row.status === 'enabled'" @click="disableOrganization(scope.row)">停用组织</el-dropdown-item>
-              <el-dropdown-item v-else @click="enableOrganization(scope.row)">恢复启用</el-dropdown-item>
-              <el-dropdown-item divided :disabled="scope.row.status !== 'disabled'" @click="deleteOrganization(scope.row)">移入回收站</el-dropdown-item>
-              <el-dropdown-item v-if="scope.row.can_create_child" divided @click="openCreateDialog(scope.row)">新增下级组织</el-dropdown-item>
-            </el-dropdown-menu></template></el-dropdown>
+            <template v-if="auth.isGroupAdmin && scope.row.type !== 'group'">
+              <el-button link type="primary" @click="showImpact(scope.row)" :disabled="operatingID === scope.row.id">查看影响</el-button>
+              <el-button link type="primary" v-if="scope.row.status === 'enabled'" @click="disableOrganization(scope.row)" :disabled="operatingID === scope.row.id">停用组织</el-button>
+              <el-button link type="primary" v-else @click="enableOrganization(scope.row)" :disabled="operatingID === scope.row.id">恢复启用</el-button>
+              <el-button link type="danger" :disabled="operatingID === scope.row.id || scope.row.status !== 'disabled'" @click="deleteOrganization(scope.row)">移入回收站</el-button>
+              <el-button link type="primary" v-if="scope.row.can_create_child" @click="openCreateDialog(scope.row)" :disabled="operatingID === scope.row.id">新增下级组织</el-button>
+            </template>
           </div>
-        </template></el-table-column>
+        </RowActions></template></el-table-column>
       </el-table>
     </div>
 
@@ -250,6 +250,7 @@ onMounted(loadOrganizations)
 
     <el-dialog v-model="editDialogVisible" :title="editDialogTitle" width="620px" destroy-on-close @closed="editingOrganization = null">
       <el-alert :title="auth.isGroupAdmin ? '组织编码不随基本信息修改；上级组织和组织类型请使用“调整结构”。' : '可维护组织名称、简称、负责人、联系方式和备注；组织编码、上级组织和组织类型由集团管理员维护。'" type="info" :closable="false" show-icon />
+      <div v-if="editingOrganization" class="organization-system-field"><span>组织编码（系统字段）</span><code>{{ editingOrganization.code }}</code></div>
       <el-form ref="editFormRef" :model="editForm" :rules="editRules" label-position="top" class="dialog-form-with-alert"><div class="form-grid two-columns">
         <el-form-item label="组织名称" prop="name"><el-input v-model="editForm.name" maxlength="255" /></el-form-item><el-form-item label="组织简称"><el-input v-model="editForm.short_name" maxlength="128" /></el-form-item>
         <el-form-item label="负责人"><el-input v-model="editForm.manager" maxlength="128" /></el-form-item><el-form-item label="联系方式"><el-input v-model="editForm.contact" maxlength="255" /></el-form-item>
@@ -270,7 +271,7 @@ onMounted(loadOrganizations)
       <el-form ref="formRef" :model="form" :rules="rules" label-position="top"><div class="form-grid two-columns">
         <el-form-item label="上级组织" prop="parent_id"><el-select v-model="form.parent_id" filterable style="width:100%" placeholder="请选择"><el-option v-for="item in enabledParents" :key="item.id" :label="parentOptionLabel(item)" :value="item.id" /></el-select></el-form-item>
         <el-form-item label="组织类型" prop="type"><el-select v-model="form.type" style="width:100%"><el-option label="子公司" value="subsidiary" /><el-option label="部门" value="department" /><el-option label="其他" value="other" /></el-select></el-form-item>
-        <el-form-item label="组织编码" prop="code"><el-input v-model="form.code" maxlength="64" placeholder="如：SUBSIDIARY_01" /></el-form-item><el-form-item label="组织名称" prop="name"><el-input v-model="form.name" maxlength="255" placeholder="请输入完整名称" /></el-form-item>
+        <el-form-item label="组织编码" prop="code"><el-input v-model="form.code" maxlength="64" placeholder="如：SUBSIDIARY_01" /><div class="muted-text">系统字段，用于接口关联和数据去重；组织列表不显示。</div></el-form-item><el-form-item label="组织名称" prop="name"><el-input v-model="form.name" maxlength="255" placeholder="请输入完整名称" /></el-form-item>
         <el-form-item label="组织简称"><el-input v-model="form.short_name" maxlength="128" /></el-form-item><el-form-item label="负责人"><el-input v-model="form.manager" maxlength="128" /></el-form-item>
         <el-form-item label="联系方式" class="full-span"><el-input v-model="form.contact" maxlength="255" /></el-form-item><el-form-item label="备注" class="full-span"><el-input v-model="form.notes" type="textarea" :rows="3" maxlength="5000" show-word-limit /></el-form-item>
       </div></el-form><template #footer><el-button @click="createDialogVisible = false">取消</el-button><el-button type="primary" :loading="submitting" @click="submit">确认新增</el-button></template>
@@ -286,7 +287,8 @@ onMounted(loadOrganizations)
 .panel-title-row h2 { margin:0 0 6px; font-size:18px; }.panel-title-row p { margin:0; color:var(--text-muted); }
 .organization-name-cell,.organization-contact-cell { display:flex; flex-direction:column; gap:4px; min-width:0; }
 .organization-name-cell span,.organization-contact-cell small { color:var(--text-muted); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
-.organization-code-cell { white-space:nowrap; font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,monospace; }
+.organization-system-field { display:flex; align-items:center; gap:10px; margin-top:16px; color:var(--text-muted); font-size:13px; }
+.organization-system-field code { color:var(--el-text-color-primary); font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,monospace; }
 .organization-actions { display:flex; align-items:center; justify-content:flex-end; gap:12px; min-height:32px; }
 .organization-actions > :deep(.el-button),.organization-actions > :deep(.el-dropdown) { display:inline-flex; align-items:center; height:32px; margin-left:0; }
 .organization-actions :deep(.el-dropdown .el-button) { display:inline-flex; align-items:center; height:32px; margin:0; }

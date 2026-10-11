@@ -194,7 +194,25 @@ running() {
   if [ "${backup_count:-0}" -gt 0 ] 2>/dev/null && [ -n "$backup_manifest" ]; then
     pass "发现 $backup_count 个应用备份，最近备份时间：${backup_created:-清单未记录}"
   else
-    fail '未发现带 manifest.txt 的应用备份；上线前必须完成备份和恢复演练'
+    # make backup stores consistent database + attachment archives on the host.
+    # Accept that documented path only after the restore tool verifies it.
+    host_backup_manifest=''
+    for candidate in "$ROOT_DIR"/backups/netassets-*/manifest.txt; do
+      [ -f "$candidate" ] || continue
+      if [ -z "$host_backup_manifest" ] || [ "$candidate" -nt "$host_backup_manifest" ]; then
+        host_backup_manifest=$candidate
+      fi
+    done
+    if [ -n "$host_backup_manifest" ]; then
+      host_backup_dir=$(dirname "$host_backup_manifest")
+      if "$ROOT_DIR/scripts/restore.sh" --verify-only "$host_backup_dir" >/dev/null 2>&1; then
+        pass "宿主机备份校验通过：$host_backup_dir"
+      else
+        fail "宿主机最近备份校验失败：$host_backup_dir"
+      fi
+    else
+      fail '未发现应用或宿主机备份；上线前必须完成备份和恢复演练'
+    fi
   fi
 }
 

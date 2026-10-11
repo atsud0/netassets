@@ -31,6 +31,7 @@ import (
 	"netassets/internal/notification"
 	"netassets/internal/organization"
 	"netassets/internal/recyclebin"
+	"netassets/internal/remediation"
 	roleDomain "netassets/internal/role"
 	"netassets/internal/savedfilter"
 	"netassets/internal/securityreference"
@@ -78,9 +79,10 @@ func NewWithContext(ctx context.Context, cfg config.Config, pool *pgxpool.Pool, 
 		businessSystemService := businesssystem.NewService(pool)
 		registerBusinessSystemRoutes(api, requireAuth, businessSystemService, customFieldService, logger)
 		assetService := asset.NewService(pool)
+		securityWorkOrderService := securityworkorder.NewService(pool, cfg.DataDir)
 		registerAssetRoutes(api, requireAuth, assetService, customFieldService, logger)
 		registerAssetObservationRoutes(api, requireAuth, assetobservation.NewService(pool), logger)
-		registerAssetCandidateRoutes(api, requireAuth, assetcandidate.NewService(pool, assetService), logger)
+		registerAssetCandidateRoutes(api, requireAuth, assetcandidate.NewService(pool, assetService), securityWorkOrderService, logger)
 		registerNetworkAreaRoutes(api, requireAuth, networkarea.NewService(pool), logger)
 		registerCustomFieldRoutes(api, requireAuth, customFieldService, logger)
 		dataQualityService := dataquality.NewService(pool)
@@ -108,7 +110,8 @@ func NewWithContext(ctx context.Context, cfg config.Config, pool *pgxpool.Pool, 
 		registerSavedFilterRoutes(api, requireAuth, savedfilter.NewService(pool), logger)
 		registerNotificationRoutes(api, requireAuth, notification.NewService(pool), logger)
 		registerSecurityReferenceRoutes(api, requireAuth, securityreference.NewService(pool), logger)
-		registerSecurityWorkOrderRoutes(api, requireAuth, securityworkorder.NewService(pool, cfg.DataDir), logger)
+		registerSecurityWorkOrderRoutes(api, requireAuth, securityWorkOrderService, logger)
+		registerRemediationRoutes(api, requireAuth, remediation.NewService(pool, cfg.DataDir), logger)
 		registerSecurityTestBatchRoutes(api, requireAuth, securitytestbatch.NewService(pool, cfg.DataDir), logger)
 		registerSecurityTestRequestRoutes(api, requireAuth, securitytestrequest.NewService(pool), logger)
 		registerBackupRoutes(api, requireAuth, backupService, logger)

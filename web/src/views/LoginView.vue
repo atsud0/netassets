@@ -22,9 +22,9 @@ async function submit() {
   loading.value = true
   try {
     await auth.login(form.username.trim(), form.password)
-    const redirect = typeof route.query.redirect === 'string' && route.query.redirect.startsWith('/')
+    const redirect = typeof route.query.redirect === 'string' && route.query.redirect.startsWith('/') && !route.query.redirect.startsWith('//')
       ? route.query.redirect
-      : '/dashboard'
+      : auth.homePath
     await router.replace(redirect)
     ElMessage.success('登录成功')
   } catch (error) {

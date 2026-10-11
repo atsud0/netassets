@@ -1,0 +1,387 @@
+package remediation_test
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"io"
+	"log/slog"
+	"os"
+	"strings"
+	"sync"
+	"testing"
+	"time"
+
+	"github.com/jackc/pgx/v5/pgxpool"
+	"netassets/internal/auth"
+	"netassets/internal/bootstrap"
+	"netassets/internal/config"
+	"netassets/internal/notification"
+	"netassets/internal/pagination"
+	"netassets/internal/remediation"
+	"netassets/internal/securityworkorder"
+)
+
+type fixture struct {
+	ctx                                               context.Context
+	pool                                              *pgxpool.Pool
+	s                                                 *remediation.Service
+	orders                                            *securityworkorder.Service
+	group, manager, worker, other                     auth.Principal
+	org, system, order, grant, otherGrant, thirdGrant string
+	findings                                          []string
+	due                                               time.Time
+}
+
+func setup(t *testing.T) *fixture {
+	t.Helper()
+	url := os.Getenv("NETASSETS_TEST_DATABASE_URL")
+	if url == "" {
+		t.Skip("requires a dedicated migrated Podman PostgreSQL database")
+	}
+	ctx := context.Background()
+	pool, err := pgxpool.New(ctx, url)
+	must(t, err)
+	t.Cleanup(pool.Close)
+	// Unique fixtures avoid destructive resets and can coexist with other suites.
+	suffix := strings.ReplaceAll(time.Now().Format("150405.000000000"), ".", "")
+	cfg := config.Config{BootstrapAdminUsername: "repair_root_" + suffix, BootstrapAdminPassword: "Repair-Test-Password-123", BootstrapAdminDisplayName: "集团安全管理员", BootstrapGroupCode: "REPAIR_GROUP_" + suffix, BootstrapGroupName: "修复测试集团"}
+	must(t, bootstrap.Ensure(ctx, pool, cfg, slog.New(slog.NewTextHandler(io.Discard, nil))))
+	authService := auth.NewService(pool, time.Hour)
+	login, err := authService.Login(ctx, auth.LoginInput{Username: cfg.BootstrapAdminUsername, Password: cfg.BootstrapAdminPassword})
+	must(t, err)
+	f := &fixture{ctx: ctx, pool: pool, s: remediation.NewService(pool, t.TempDir()), orders: securityworkorder.NewService(pool), group: login.User, due: time.Now().Add(24 * time.Hour)}
+	must(t, pool.QueryRow(ctx, `INSERT INTO organizations(organization_code,organization_name,organization_type) VALUES($1,'修复子公司','subsidiary') RETURNING id::text`, "RORG_"+suffix).Scan(&f.org))
+	must(t, pool.QueryRow(ctx, `INSERT INTO business_systems(system_code,system_name,owner_organization_id,system_status) VALUES($1,'修复测试系统',$2::uuid,'running') RETURNING id::text`, "RSYS_"+suffix, f.org).Scan(&f.system))
+	var managerID string
+	must(t, pool.QueryRow(ctx, `INSERT INTO users(username,password_hash,display_name) VALUES($1,'not-used','组织管理员') RETURNING id::text`, "manager_"+suffix).Scan(&managerID))
+	_, err = pool.Exec(ctx, `INSERT INTO user_roles(user_id,role_id,organization_id,data_scope) SELECT $1::uuid,id,$2::uuid,'organization' FROM roles WHERE role_key='organization_admin'`, managerID, f.org)
+	must(t, err)
+	f.manager = auth.Principal{UserID: managerID, Permissions: []string{"remediation.assign", "remediation.review", "remediation.people.manage", "vendor.manage"}}
+	vendor, err := f.s.SaveVendor(ctx, f.group, "", f.org, "测试厂商_"+suffix, "项目联系人", "enabled")
+	must(t, err)
+	for i := 0; i < 3; i++ {
+		person, err := f.s.CreatePerson(ctx, f.manager, remediation.PersonInput{OrganizationID: f.org, SystemID: f.system, ParticipantType: "external", VendorID: vendor["id"].(string), Username: []string{"worker_", "other_", "third_"}[i] + suffix, DisplayName: "执行人员", Password: "Repair-Worker-Password-123", ValidUntil: time.Now().Add(7 * 24 * time.Hour)})
+		must(t, err)
+		p := auth.Principal{UserID: person["user_id"].(string)}
+		if i == 0 {
+			f.worker = p
+			f.grant = person["id"].(string)
+		} else if i == 1 {
+			f.other = p
+			f.otherGrant = person["id"].(string)
+		} else {
+			f.thirdGrant = person["id"].(string)
+		}
+	}
+	for i := 0; i < 2; i++ {
+		finding, err := f.orders.CreateFinding(ctx, f.group, securityworkorder.FindingInput{Title: "测试漏洞", Severity: "high", Status: "pending", AssigneeOrganizationID: f.org, BusinessSystemID: f.system, Description: "内部完整材料", Evidence: "内部敏感证据", Source: "manual", DiscoveredAt: time.Now()}, "", "")
+		must(t, err)
+		f.findings = append(f.findings, finding.ID)
+	}
+	order, err := f.orders.CreateWorkOrder(ctx, f.group, securityworkorder.WorkOrderInput{ExecutionMode: "individual", Title: "个人修复验收", AssigneeOrganizationID: f.org, RemediationRequirement: "部署验证", DueAt: f.due, FindingIDs: f.findings}, "", "")
+	must(t, err)
+	f.order = order.ID
+	_, err = f.orders.Issue(ctx, f.group, f.order, securityworkorder.CommentInput{}, "", "")
+	must(t, err)
+	_, err = f.orders.Accept(ctx, f.manager, f.order, securityworkorder.CommentInput{}, "", "")
+	must(t, err)
+	return f
+}
+func must(t *testing.T, err error) {
+	t.Helper()
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+func (f *fixture) assign(t *testing.T, index int, key, grant string) string {
+	t.Helper()
+	out, err := f.s.Assign(f.ctx, f.manager, f.order, key, remediation.AssignInput{FindingID: f.findings[index], GrantID: grant, DueAt: f.due.Add(-time.Hour), TargetEnvironment: "生产", DeploymentRequired: true, Material: remediation.Material{Title: "对外漏洞材料", Severity: "high", Description: "已脱敏描述", Evidence: "可公开复现步骤", Requirement: "部署生产并验证"}})
+	must(t, err)
+	return out["id"].(string)
+}
+func (f *fixture) action(t *testing.T, p auth.Principal, id, action string, in remediation.ActionInput, executor bool) remediation.Object {
+	t.Helper()
+	d, err := f.s.Detail(f.ctx, p, id, executor)
+	must(t, err)
+	in.ExpectedVersion = int(d["version"].(float64))
+	if action == "accept" && in.ExpectedCompletion == nil {
+		target := time.Now().Add(time.Hour)
+		in.ExpectedCompletion = &target
+	}
+	if action == "security-review" && in.VerifiedAt == nil {
+		at := time.Now()
+		in.VerifiedAt = &at
+		in.VerifiedEnvironment = "生产"
+	}
+	out, err := f.s.Act(f.ctx, p, id, action, "submit-key-"+time.Now().Format("150405.000000000"), in, executor)
+	must(t, err)
+	return out
+}
+func (f *fixture) submit(t *testing.T, p auth.Principal, id string) string {
+	now := time.Now()
+	f.action(t, p, id, "submit", remediation.ActionInput{Summary: "修复参数检查", DeploymentStatus: "target", ChangeReference: "release-1", DeployedAt: &now, SelfTestResult: "生产环境复现不再出现"}, true)
+	d, err := f.s.Detail(f.ctx, p, id, true)
+	must(t, err)
+	return d["current_submission_id"].(string)
+}
+func TestRepairLifecycleAndIsolation(t *testing.T) {
+	f := setup(t)
+	id := f.assign(t, 0, "assign-key-1", f.grant)
+	id2 := f.assign(t, 1, "assign-key-2", f.otherGrant)
+	if id != f.assign(t, 0, "assign-key-1", f.grant) {
+		t.Fatal("idempotent assignment changed id")
+	}
+	if _, err := f.s.Detail(f.ctx, f.other, id, true); !errors.Is(err, remediation.ErrNotFound) {
+		t.Fatalf("other worker read task: %v", err)
+	}
+	page, _ := pagination.Normalize(1, 20)
+	list, err := f.s.List(f.ctx, f.worker, remediation.Filter{Mine: true, Page: page})
+	must(t, err)
+	if list.Total != 1 {
+		t.Fatalf("worker sees %d tasks", list.Total)
+	}
+	d, err := f.s.Detail(f.ctx, f.worker, id, true)
+	must(t, err)
+	if d["description"] != "已脱敏描述" || d["evidence"] != "可公开复现步骤" {
+		t.Fatal("unfiltered finding leaked")
+	}
+	f.action(t, f.manager, id, "comment", remediation.ActionInput{Reason: "内部不得公开", Visibility: "internal"}, false)
+	children, err := f.s.Children(f.ctx, f.worker, id, "comments", true, page)
+	must(t, err)
+	if children.Total != 0 {
+		t.Fatal("internal comment leaked")
+	}
+	children, err = f.s.Children(f.ctx, f.worker, id, "events", true, page)
+	must(t, err)
+	for _, e := range children.Items {
+		if e["action"] == "comment" {
+			t.Fatal("internal event leaked")
+		}
+	}
+	f.action(t, f.worker, id, "accept", remediation.ActionInput{}, true)
+	f.action(t, f.other, id2, "accept", remediation.ActionInput{}, true)
+	sub := f.submit(t, f.worker, id)
+	sub2 := f.submit(t, f.other, id2)
+	if err = f.s.CloseOrder(f.ctx, f.group, f.order, "提前关闭"); !errors.Is(err, remediation.ErrConflict) {
+		t.Fatalf("closed incomplete: %v", err)
+	}
+	if _, err = f.orders.Submit(f.ctx, f.manager, f.order, securityworkorder.SubmitInput{RemediationResult: "绕过"}, "", ""); !errors.Is(err, securityworkorder.ErrConflict) {
+		t.Fatalf("legacy submit bypass: %v", err)
+	}
+	f.action(t, f.manager, id, "organization-review", remediation.ActionInput{SubmissionID: sub, Decision: "pass", Reason: "确认已发布", InternalNote: "内部联系信息"}, false)
+	f.action(t, f.manager, id2, "organization-review", remediation.ActionInput{SubmissionID: sub2, Decision: "pass", Reason: "确认已发布"}, false)
+	f.action(t, f.group, id, "security-review", remediation.ActionInput{SubmissionID: sub, Decision: "pass", Reason: "生产版本 release-1 复测通过"}, false)
+	f.action(t, f.group, id2, "security-review", remediation.ActionInput{SubmissionID: sub2, Decision: "return", Reason: "另一路径仍有漏洞"}, false)
+	var first, second string
+	must(t, f.pool.QueryRow(f.ctx, `SELECT status FROM security_findings WHERE id=$1::uuid`, f.findings[0]).Scan(&first))
+	must(t, f.pool.QueryRow(f.ctx, `SELECT status FROM security_findings WHERE id=$1::uuid`, f.findings[1]).Scan(&second))
+	if first != "fixed" || second != "in_progress" {
+		t.Fatalf("partial review: %s %s", first, second)
+	}
+	children, err = f.s.Children(f.ctx, f.worker, id, "submissions", true, page)
+	must(t, err)
+	if strings.Contains(fmtJSON(children.Items), "内部联系信息") {
+		t.Fatal("internal review leaked")
+	}
+	sub3 := f.submit(t, f.other, id2)
+	if sub2 == sub3 {
+		t.Fatal("submission overwritten")
+	}
+	f.action(t, f.manager, id2, "organization-review", remediation.ActionInput{SubmissionID: sub3, Decision: "pass", Reason: "材料齐全"}, false)
+	f.action(t, f.group, id2, "security-review", remediation.ActionInput{SubmissionID: sub3, Decision: "pass", Reason: "生产复测通过"}, false)
+	must(t, f.s.CloseOrder(f.ctx, f.group, f.order, "全部逐项通过"))
+}
+func TestReassignmentRevocationAndProofAttachments(t *testing.T) {
+	f := setup(t)
+	id := f.assign(t, 0, "assign-revoke-1", f.grant)
+	f.action(t, f.worker, id, "accept", remediation.ActionInput{}, true)
+	d, err := f.s.Detail(f.ctx, f.worker, id, true)
+	must(t, err)
+	attachment, err := f.s.Upload(f.ctx, f.worker, id, remediation.AttachmentInput{Name: "proof.txt", Visibility: "participants", Version: int(d["version"].(float64)), Reader: strings.NewReader("修复验证证据")}, true)
+	must(t, err)
+	download, err := f.s.Download(f.ctx, f.worker, id, attachment["id"].(string), true)
+	must(t, err)
+	download.File.Close()
+	f.action(t, f.manager, id, "reassign", remediation.ActionInput{GrantID: f.otherGrant, Reason: "交接给新负责人"}, false)
+	if _, err = f.s.Download(f.ctx, f.worker, id, attachment["id"].(string), true); !errors.Is(err, remediation.ErrNotFound) {
+		t.Fatalf("old worker download: %v", err)
+	}
+	f.action(t, f.other, id, "accept", remediation.ActionInput{}, true)
+	must(t, f.s.UpdateGrant(f.ctx, f.manager, f.otherGrant, "revoked", time.Time{}, "合作结束"))
+	if _, err = f.s.Detail(f.ctx, f.other, id, true); !errors.Is(err, remediation.ErrNotFound) {
+		t.Fatalf("revoked task access: %v", err)
+	}
+	n := notification.NewService(f.pool)
+	page, _ := pagination.Normalize(1, 100)
+	messages, _, err := n.Search(f.ctx, f.other, notification.SearchInput{Page: page})
+	must(t, err)
+	for _, item := range messages.Items {
+		if item.ResourceID == id {
+			t.Fatal("revoked notification leaked")
+		}
+	}
+	// Another grant remains independent of the revoked relationship.
+	people, err := f.s.People(f.ctx, f.manager, f.org, f.system, page)
+	must(t, err)
+	if people.Total != 3 {
+		t.Fatalf("unexpected grant count %d", people.Total)
+	}
+}
+func TestConcurrentAssignmentAndStaleReview(t *testing.T) {
+	f := setup(t)
+	var wg sync.WaitGroup
+	errs := make(chan error, 2)
+	for _, key := range []string{"race-key-a", "race-key-b"} {
+		wg.Add(1)
+		go func(key string) {
+			defer wg.Done()
+			_, err := f.s.Assign(f.ctx, f.manager, f.order, key, remediation.AssignInput{FindingID: f.findings[0], GrantID: f.grant, DueAt: f.due.Add(-time.Hour), TargetEnvironment: "生产", Material: remediation.Material{Title: "测试", Severity: "high", Description: "描述", Requirement: "要求"}})
+			errs <- err
+		}(key)
+	}
+	wg.Wait()
+	close(errs)
+	success, conflict := 0, 0
+	for err := range errs {
+		if err == nil {
+			success++
+		} else if errors.Is(err, remediation.ErrConflict) {
+			conflict++
+		} else {
+			t.Fatal(err)
+		}
+	}
+	if success != 1 || conflict != 1 {
+		t.Fatalf("concurrent assigns: success %d conflict %d", success, conflict)
+	}
+	page, _ := pagination.Normalize(1, 20)
+	list, err := f.s.List(f.ctx, f.worker, remediation.Filter{Mine: true, Page: page})
+	must(t, err)
+	id := list.Items[0]["id"].(string)
+	f.action(t, f.worker, id, "accept", remediation.ActionInput{}, true)
+	sub := f.submit(t, f.worker, id)
+	d, err := f.s.Detail(f.ctx, f.worker, id, true)
+	must(t, err)
+	oldVersion := int(d["version"].(float64))
+	f.action(t, f.worker, id, "withdraw", remediation.ActionInput{SubmissionID: sub, Reason: "补充材料"}, true)
+	_, err = f.s.Act(f.ctx, f.manager, id, "organization-review", "unused-key", remediation.ActionInput{ExpectedVersion: oldVersion, SubmissionID: sub, Decision: "pass", Reason: "过时审核"}, false)
+	if !errors.Is(err, remediation.ErrConflict) {
+		t.Fatalf("stale review: %v", err)
+	}
+}
+
+func fmtJSON(v any) string { b, _ := json.Marshal(v); return string(b) }
+
+func TestInvitationIdentityAndSingleUse(t *testing.T) {
+	f := setup(t)
+	input := remediation.PersonInput{OrganizationID: f.org, SystemID: f.system, ParticipantType: "internal", Username: "invite_" + time.Now().Format("150405000000"), DisplayName: "受邀开发", ValidUntil: time.Now().Add(7 * 24 * time.Hour)}
+	invite, err := f.s.Invite(f.ctx, f.manager, input)
+	must(t, err)
+	result, err := f.s.AcceptInvitation(f.ctx, nil, remediation.AcceptInvitationInput{Token: invite["token"].(string), Password: "Invite-Test-Password-123"})
+	must(t, err)
+	if _, err = f.s.AcceptInvitation(f.ctx, nil, remediation.AcceptInvitationInput{Token: invite["token"].(string), Password: "Invite-Test-Password-123"}); !errors.Is(err, remediation.ErrNotFound) {
+		t.Fatalf("invitation replay: %v", err)
+	}
+	authService := auth.NewService(f.pool, time.Hour)
+	login, err := authService.Login(f.ctx, auth.LoginInput{Username: input.Username, Password: "Invite-Test-Password-123"})
+	must(t, err)
+	if !login.User.ExecutionOnly || !login.User.RepairEnabled || len(login.User.Roles) != 0 || len(login.User.Permissions) != 0 {
+		t.Fatalf("executor got management scope: %+v", login.User)
+	}
+	must(t, f.s.UpdateGrant(f.ctx, f.manager, result["id"].(string), "revoked", time.Time{}, "结束本轮授权"))
+	invite, err = f.s.Invite(f.ctx, f.manager, input)
+	must(t, err)
+	if _, err = f.s.AcceptInvitation(f.ctx, nil, remediation.AcceptInvitationInput{Token: invite["token"].(string), Password: "attacker-password-123"}); !errors.Is(err, remediation.ErrForbidden) {
+		t.Fatalf("existing account linked without owner: %v", err)
+	}
+	if _, err = f.s.AcceptInvitation(f.ctx, &f.other, remediation.AcceptInvitationInput{Token: invite["token"].(string)}); !errors.Is(err, remediation.ErrForbidden) {
+		t.Fatalf("wrong account linked: %v", err)
+	}
+	_, err = f.s.AcceptInvitation(f.ctx, &login.User, remediation.AcceptInvitationInput{Token: invite["token"].(string)})
+	must(t, err)
+	input.Username += "_revoked"
+	invite, err = f.s.Invite(f.ctx, f.manager, input)
+	must(t, err)
+	must(t, f.s.RevokeInvitation(f.ctx, f.manager, invite["id"].(string), "错误邀请"))
+	if _, err = f.s.AcceptInvitation(f.ctx, nil, remediation.AcceptInvitationInput{Token: invite["token"].(string), Password: "Invite-Test-Password-123"}); !errors.Is(err, remediation.ErrNotFound) {
+		t.Fatalf("revoked invitation accepted: %v", err)
+	}
+}
+
+func TestExtensionRiskDispositionAndExpiredGrant(t *testing.T) {
+	f := setup(t)
+	id := f.assign(t, 0, "request-task-key", f.grant)
+	f.action(t, f.worker, id, "accept", remediation.ActionInput{}, true)
+	detail, err := f.s.Detail(f.ctx, f.worker, id, true)
+	must(t, err)
+	version := int(detail["version"].(float64))
+	proposed := f.due.Add(time.Hour)
+	request, err := f.s.Request(f.ctx, f.worker, id, remediation.RequestInput{Type: "extension", Mitigation: "临时限制入口", Reason: "发布窗口调整；已限制受影响入口", ProposedDueAt: &proposed, ExpectedVersion: version})
+	must(t, err)
+	decision := remediation.DecideInput{Decision: "approved", Reason: "允许调整发布窗口", ExpectedVersion: version}
+	if err = f.s.Decide(f.ctx, f.manager, request["id"].(string), decision); !errors.Is(err, remediation.ErrForbidden) {
+		t.Fatalf("organization extended group deadline: %v", err)
+	}
+	must(t, f.s.Decide(f.ctx, f.group, request["id"].(string), decision))
+	var due time.Time
+	must(t, f.pool.QueryRow(f.ctx, `SELECT due_at FROM security_work_orders WHERE id=$1::uuid`, f.order).Scan(&due))
+	if !due.Equal(proposed.Truncate(time.Microsecond)) {
+		t.Fatalf("deadline not updated: %v", due)
+	}
+	detail, err = f.s.Detail(f.ctx, f.worker, id, true)
+	must(t, err)
+	version = int(detail["version"].(float64))
+	request, err = f.s.Request(f.ctx, f.worker, id, remediation.RequestInput{Type: "risk_acceptance", Reason: "等待第三方补丁，已有访问限制", ExpectedVersion: version})
+	must(t, err)
+	until := time.Now().Add(24 * time.Hour)
+	decision = remediation.DecideInput{Decision: "approved", Reason: "限期接受并跟踪补丁", ExpectedVersion: version, RiskUntil: &until}
+	if err = f.s.Decide(f.ctx, f.manager, request["id"].(string), decision); !errors.Is(err, remediation.ErrForbidden) {
+		t.Fatalf("organization accepted risk: %v", err)
+	}
+	must(t, f.s.Decide(f.ctx, f.group, request["id"].(string), decision))
+	detail, err = f.s.Detail(f.ctx, f.worker, id, true)
+	must(t, err)
+	if detail["completion_reason"] != "risk_accepted" {
+		t.Fatalf("wrong completion: %v", detail["completion_reason"])
+	}
+	if _, err = f.s.Act(f.ctx, f.manager, id, "reopen-risk", "", remediation.ActionInput{Reason: "恢复整改", ExpectedVersion: int(detail["version"].(float64))}, false); !errors.Is(err, remediation.ErrForbidden) {
+		t.Fatalf("organization revoked group risk decision: %v", err)
+	}
+	f.action(t, f.group, id, "reopen-risk", remediation.ActionInput{Reason: "补丁已可用，恢复整改"}, false)
+	var findingStatus string
+	must(t, f.pool.QueryRow(f.ctx, `SELECT status FROM security_findings WHERE id=$1::uuid`, f.findings[0]).Scan(&findingStatus))
+	if findingStatus != "in_progress" {
+		t.Fatalf("risk reopen did not restore finding: %s", findingStatus)
+	}
+	// Request-time checks apply even without a scheduler.
+	_, err = f.pool.Exec(f.ctx, `UPDATE remediation_grants SET valid_from=now()-interval '2 days',valid_until=now()-interval '1 day' WHERE id=$1::uuid`, f.grant)
+	must(t, err)
+	if _, err = f.s.Detail(f.ctx, f.worker, id, true); !errors.Is(err, remediation.ErrNotFound) {
+		t.Fatalf("expired grant read: %v", err)
+	}
+}
+
+func TestScopeChangesAndLegacyFindingWriteGuard(t *testing.T) {
+	f := setup(t)
+	id := f.assign(t, 0, "scope-change-key", f.grant)
+	_, err := f.pool.Exec(f.ctx, `UPDATE security_findings SET status='fixed' WHERE id=$1::uuid`, f.findings[0])
+	if err == nil {
+		t.Fatal("legacy raw finding write bypassed task workflow")
+	}
+	var otherOrg string
+	must(t, f.pool.QueryRow(f.ctx, `INSERT INTO organizations(organization_code,organization_name,organization_type) VALUES($1,'其他组织','subsidiary') RETURNING id::text`, "OTHER_"+time.Now().Format("150405.000000000")).Scan(&otherOrg))
+	if _, err = f.s.SaveVendor(f.ctx, f.manager, "", otherOrg, "越权厂商", "", "enabled"); !errors.Is(err, remediation.ErrForbidden) {
+		t.Fatalf("cross-org vendor access: %v", err)
+	}
+	_, err = f.pool.Exec(f.ctx, `UPDATE business_systems SET owner_organization_id=$2::uuid WHERE id=$1::uuid`, f.system, otherOrg)
+	must(t, err)
+	if _, err = f.s.Detail(f.ctx, f.worker, id, true); !errors.Is(err, remediation.ErrNotFound) {
+		t.Fatalf("system transfer retained executor access: %v", err)
+	}
+	detail, err := f.s.Detail(f.ctx, f.manager, id, false)
+	must(t, err)
+	if detail["needs_reassignment"] != true {
+		t.Fatal("administrator not warned of scope change")
+	}
+}

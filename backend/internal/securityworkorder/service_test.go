@@ -19,7 +19,7 @@ func TestNormalizeFindingInputDefaults(t *testing.T) {
 	if input.Title != "未授权访问" || input.Description != "漏洞描述" {
 		t.Fatalf("finding text was not normalized: %+v", input)
 	}
-	if input.Status != "open" || input.Source != "manual" || input.DiscoveredAt.IsZero() {
+	if input.Status != "pending" || input.Source != "manual" || input.DiscoveredAt.IsZero() {
 		t.Fatalf("finding defaults were not applied: %+v", input)
 	}
 	if !validFindingInput(input) {
@@ -29,7 +29,7 @@ func TestNormalizeFindingInputDefaults(t *testing.T) {
 
 func TestFindingRequiresAssetOrBusinessSystem(t *testing.T) {
 	input := FindingInput{
-		Title: "漏洞", Severity: "high", Status: "open",
+		Title: "漏洞", Severity: "high", Status: "pending",
 		AssigneeOrganizationID: "11111111-1111-1111-1111-111111111111",
 		Description:            "描述", Source: "manual", DiscoveredAt: time.Now(),
 	}

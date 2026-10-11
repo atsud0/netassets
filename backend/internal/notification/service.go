@@ -518,7 +518,7 @@ WHERE child.status='enabled' AND child.deleted_at IS NULL
 		sf.risk_accepted_until
 	FROM security_findings sf
 	WHERE $4::boolean
-	  AND sf.status = 'accepted_risk'
+	  AND sf.status = 'risk_accepted'
 	  AND sf.risk_accepted_until IS NOT NULL
 	  AND sf.risk_accepted_until < now()
 
@@ -537,7 +537,7 @@ WHERE child.status='enabled' AND child.deleted_at IS NULL
 		sf.risk_accepted_until
 	FROM security_findings sf
 	WHERE $4::boolean
-	  AND sf.status = 'accepted_risk'
+	  AND sf.status = 'risk_accepted'
 	  AND sf.risk_accepted_until IS NOT NULL
 	  AND sf.risk_accepted_until >= now()
 	  AND sf.risk_accepted_until < now() + interval '3 days'
@@ -649,6 +649,35 @@ WHERE child.status='enabled' AND child.deleted_at IS NULL
 		CASE WHEN ej.status='completed' THEN ej.expires_at ELSE NULL::timestamptz END
 	FROM export_jobs ej
 	WHERE ej.requested_by=$1::uuid AND ej.status IN ('completed','failed')
+ UNION ALL
+ SELECT 'repair_event:'||e.id::text,'remediation',
+ CASE e.action WHEN 'assign' THEN '收到修复任务' WHEN 'reassign' THEN '修复任务已改派' WHEN 'submit' THEN '修复结果待组织确认' WHEN 'organization-review' THEN '组织确认已有结果' WHEN 'security-review' THEN '集团复测已有结果' WHEN 'request.create' THEN '收到修复协作申请' WHEN 'request.decide' THEN '修复申请已有结果' ELSE '修复任务已更新' END,
+ t.task_no||'：'||m.title,'info','remediation_task',t.id::text,
+ CASE WHEN t.assignee_user_id=$1::uuid THEN '/repair/tasks?task_id=' ELSE '/remediation?task_id=' END||t.id::text,e.created_at,t.due_at
+ FROM remediation_task_events e JOIN remediation_tasks t ON t.id=e.task_id
+ JOIN remediation_material_versions m ON m.task_id=t.id AND m.revision=t.material_revision
+ WHERE e.visibility='participants' AND e.actor_id<>$1::uuid AND e.action IN ('assign','reassign','submit','organization-review','security-review','request.create','request.decide','materials','cancel')
+ AND remediation_can_read($1::uuid,t.id)
+ UNION ALL
+ SELECT 'repair_due:'||t.id::text||':'||extract(epoch FROM t.due_at)::bigint::text||':soon','remediation',
+ '修复任务即将到期',t.task_no||'：'||m.title,'warning','remediation_task',t.id::text,
+ CASE WHEN t.assignee_user_id=$1::uuid THEN '/repair/tasks?task_id=' ELSE '/remediation?task_id=' END||t.id::text,t.due_at,t.due_at
+ FROM remediation_tasks t JOIN remediation_material_versions m ON m.task_id=t.id AND m.revision=t.material_revision
+ WHERE t.status NOT IN ('completed','cancelled') AND t.due_at>=now() AND t.due_at<now()+interval '3 days' AND remediation_can_read($1::uuid,t.id)
+ UNION ALL
+ SELECT 'repair_overdue_summary:'||$1::uuid::text||':'||(t.assignee_user_id=$1::uuid)::text||':'||floor(extract(epoch FROM now())/(86400*(SELECT overdue_reminder_days FROM remediation_settings WHERE singleton)))::text,
+ 'remediation','修复任务逾期汇总','当前可见范围内有 '||count(*)::text||' 项未完成任务已逾期，请及时处理。','warning','remediation_summary',$1::uuid::text,
+ CASE WHEN t.assignee_user_id=$1::uuid THEN '/repair/tasks?overdue=true' ELSE '/remediation?overdue=true' END,
+ to_timestamp(floor(extract(epoch FROM now())/(86400*(SELECT overdue_reminder_days FROM remediation_settings WHERE singleton)))*(86400*(SELECT overdue_reminder_days FROM remediation_settings WHERE singleton))),min(t.due_at)
+ FROM remediation_tasks t WHERE t.status NOT IN ('completed','cancelled') AND t.due_at<now() AND remediation_can_read($1::uuid,t.id)
+ GROUP BY (t.assignee_user_id=$1::uuid) UNION ALL
+ SELECT 'repair_reassigned:'||e.id::text,'remediation','修复任务分派已变更','一项任务已转交其他人员，你不再拥有该任务访问权限。','info','remediation_change',e.id::text,'/repair/tasks',e.created_at,NULL::timestamptz
+ FROM remediation_task_events e WHERE e.action='reassign' AND e.details->>'from_user_id'=$1::uuid::text AND e.details->>'to_user_id'<>$1::uuid::text
+ UNION ALL
+ SELECT 'repair_grant:'||g.id::text||':'||extract(epoch FROM g.valid_until)::bigint::text||':'||g.status,'remediation','修复人员授权即将到期或已失效',
+ u.display_name||'的协作授权需要检查','warning','remediation_grant',g.id::text,'/remediation-people',g.valid_until,g.valid_until
+ FROM remediation_grants g JOIN users u ON u.id=g.user_id
+ WHERE (g.valid_until<now()+interval '3 days' OR NOT remediation_grant_valid(g.id,g.user_id,g.organization_id,g.business_system_id)) AND remediation_can_manage($1::uuid,g.organization_id,'remediation.people.manage')
 )
 `
 
@@ -785,7 +814,7 @@ func ValidateCategory(category string) bool {
 		return true
 	}
 	switch strings.TrimSpace(category) {
-	case "export_job", "work_order_review", "work_order_received", "work_order_returned", "work_order_overdue", "work_order_due_soon", "risk_review", "quality_review", "quality_received", "quality_returned", "quality_exemption", CategoryAssetChange, CategoryBusinessSystemChange, CategoryFindingReceived, CategoryInventoryTaskReview, CategoryInventoryTaskReceived, CategoryInventoryTaskReturned, CategoryInventoryTaskDueSoon, CategoryInventoryTaskOverdue, CategoryWorkingVersion, CategorySecurityTestRequest:
+	case "remediation", "export_job", "work_order_review", "work_order_received", "work_order_returned", "work_order_overdue", "work_order_due_soon", "risk_review", "quality_review", "quality_received", "quality_returned", "quality_exemption", CategoryAssetChange, CategoryBusinessSystemChange, CategoryFindingReceived, CategoryInventoryTaskReview, CategoryInventoryTaskReceived, CategoryInventoryTaskReturned, CategoryInventoryTaskDueSoon, CategoryInventoryTaskOverdue, CategoryWorkingVersion, CategorySecurityTestRequest:
 		return true
 	default:
 		return false

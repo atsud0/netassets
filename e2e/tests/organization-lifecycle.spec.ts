@@ -163,7 +163,7 @@ test('集团管理员可管理组织完整生命周期、影响检查和树形�
   await expect(page.getByRole('heading', { name: '组织架构', exact: true })).toBeVisible()
   const table = page.locator('.organization-tree-panel .el-table')
   const headers = (await table.locator('.el-table__header-wrapper').first().locator('th .cell').allTextContents()).map((item) => item.trim())
-  expect(headers).toEqual(expect.arrayContaining(['组织名称', '组织编码', '类型', '状态', '操作']))
+  expect(headers).toEqual(expect.arrayContaining(['组织', '类型', '状态', '操作']))
   expect(headers).not.toContain('上级组织')
   const parentRow = table.locator('.el-table__body-wrapper tbody tr').filter({ hasText: parent.name }).first()
   const childRow = table.locator('.el-table__body-wrapper tbody tr').filter({ hasText: child.name }).first()

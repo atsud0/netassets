@@ -225,7 +225,7 @@ make ps                   # 查看容器状态
 make logs                 # 跟踪应用日志
 make migrate-up           # 执行一次数据库迁移
 make migrate-down         # 回滚一条迁移
-make test                 # 后端和前端单元测试
+make test                 # Podman 内后端测试、修复集成测试及前端测试/构建
 make e2e                  # 容器内运行全部 Playwright 测试
 make e2e-roles            # 容器内运行角色边界回归测试
 make acceptance-preflight # 生产上线前配置验收
@@ -252,25 +252,21 @@ NETASSETS_RESTORE_CONFIRM=YES make restore \
 
 ## 测试
 
-### 后端单元测试
+### Podman 开发与测试
+
+Go、Node.js 和浏览器运行统一使用 Podman，宿主机仅用于编辑代码。
 
 ```bash
-cd backend
-go test ./...
+make test-backend          # 全部后端单元测试 + 修复工作台数据库集成测试
+make test-frontend         # npm ci、前端单元测试及生产构建
+make fmt                   # 容器内 gofmt
 ```
 
-### 前端构建与单元测试
-
-如果宿主机没有 Node.js，可使用 Node 容器：
+上述命令使用 `compose.dev.yaml` 和独立的 `netassets-dev` 项目。测试 PostgreSQL 使用临时内存卷，不连接现有应用数据库；Go 与 npm 依赖使用独立缓存卷。后端其他模块需要数据库的测试默认跳过，修复工作台集成测试单独注入测试数据库地址执行。
 
 ```bash
-podman run --rm \
-  -e HTTP_PROXY=http://host.containers.internal:6152 \
-  -e HTTPS_PROXY=http://host.containers.internal:6152 \
-  -v "$PWD/web:/workspace:Z" \
-  -w /workspace \
-  docker.io/library/node:22-alpine \
-  sh -lc 'npm ci && npm run build && npm test -- --run'
+# 清理开发测试容器；保留工具链缓存卷
+podman compose -p netassets-dev -f compose.dev.yaml down
 ```
 
 ### Playwright 端到端测试
@@ -408,9 +404,20 @@ curl \
 
 - [集团级轻量网络资产管理系统建设方案](docs/集团级轻量网络资产管理系统建设方案.md)
 - [生产上线验收与全角色回归清单](docs/生产上线验收与全角色回归清单.md)
+- [开发人员与外包厂商修复工作台开发方案](docs/开发人员与外包厂商修复工作台开发方案.md)（含实现说明、接口映射与验证结果）
 - [环境变量示例](.env.example)
 - [Podman Compose 配置](compose.yaml)
 - [GitHub Actions 镜像构建](.github/workflows/container-image.yml)
+
+## 个人修复工作台
+
+- 集团创建安全工单时选择「派给具体人员」执行模式，下发给责任组织。
+- 集团管理员统一维护厂商档案、组织合作与成员状态；组织管理员在「修复人员与厂商」创建人员或发出一次性邀请，并配置业务系统及授权期限。
+- 在「修复任务」接收主工单，逐项或批量选择人员，确认共享材料后派发。
+- 执行人员登录后进入 `/repair/tasks`，仅能处理当前有效授权且明确分配给自己的任务。
+- 修复提交先经组织确认，再由集团逐项复测；全部漏洞处置完成后才能关闭主工单。
+
+数据库新增迁移 `00051`、`00052`、`00053`。旧工单默认保持 `organization` 模式，新功能使用 `individual` 模式。部署时须同步更新后端和前端并执行迁移；现有数据升级前按备份流程保存数据库及附件。
 
 ## 后续规划
 
@@ -420,3 +427,5 @@ curl \
 2. 外部扫描器和 CMDB 数据源的定时同步；
 3. 资产发现结果与待确认资产的自动去重、相似匹配和责任组织路由；
 4. 按需接入可信外部资产观测 API 与多观测源合并策略。
+
+修复工作台还支持预计完成时间与阻塞计划、共享材料复核及附件版本、提交差异比较、逐项审核队列、实际复测环境/时间、组织范围统计及可配置逾期汇总。完整实施和恢复演练记录见开发方案第 18 节。迁移 53 回退须恢复匹配的数据库/附件备份及旧镜像。

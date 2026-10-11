@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import RowActions from '../components/RowActions.vue'
 import { computed, onMounted, reactive, ref } from 'vue'
 import { ElMessage, ElMessageBox, type FormInstance, type FormRules } from 'element-plus'
 import { apiClient, getAPIErrorMessage } from '../api/client'
@@ -73,9 +74,6 @@ const groupRoles = computed(() => isGroupAdmin.value ? roleOptions.value.filter(
 const canOmitAppointments = computed(() => isGroupAdmin.value && userForm.global_role_ids.length > 0)
 const userDialogTitle = computed(() => editingUser.value ? `编辑用户：${editingUser.value.display_name}` : '新增用户')
 const roleDialogTitle = computed(() => editingRole.value ? `编辑角色：${editingRole.value.name}` : '新增自定义角色')
-const pageDescription = computed(() => isGroupAdmin.value
-  ? '维护集团统一账号、多个组织任职、主组织和组织范围角色。角色或任职变更后，受影响用户会被强制重新登录。'
-  : '您可管理已授权组织及下级组织范围内的用户、任职和组织角色；集团角色与范围外用户由集团管理员统一管理。')
 
 async function loadUsers(showLoading = true) {
   if (showLoading) listLoading.value = true
@@ -295,7 +293,7 @@ onMounted(load)
 <template>
   <section>
     <div class="page-heading">
-      <div><span class="eyebrow">IDENTITY & ACCESS</span><h1>{{ isGroupAdmin ? '用户与权限' : '用户管理' }}</h1><p>{{ pageDescription }}</p></div>
+      <h1>{{ isGroupAdmin ? '用户与权限' : '用户管理' }}</h1>
       <el-button type="primary" :disabled="!isGroupAdmin && eligibleOrganizations.length === 0" @click="openCreateUser">新增用户</el-button>
     </div>
 
@@ -318,22 +316,22 @@ onMounted(load)
         <div class="panel data-table-panel" v-loading="listLoading">
           <!-- 用户列表可切换至每页 100 条，使用表格内部滚动避免拉长内容页面。 -->
           <el-table :data="users" row-key="id" empty-text="暂无符合条件的可管理用户" :max-height="480">
-            <el-table-column label="用户" min-width="180"><template #default="scope"><div class="organization-name-cell"><strong>{{ scope.row.display_name }}</strong><span>{{ scope.row.username }}</span></div></template></el-table-column>
-            <el-table-column label="联系方式" min-width="210"><template #default="scope"><div>{{ scope.row.mobile_phone || scope.row.office_phone || scope.row.email || '—' }}</div><div v-if="scope.row.email && scope.row.email !== scope.row.mobile_phone" class="form-hint">{{ scope.row.email }}</div></template></el-table-column>
-            <el-table-column label="任职组织" min-width="210"><template #default="scope">{{ appointmentSummary(scope.row) }}</template></el-table-column>
-            <el-table-column label="角色" min-width="210"><template #default="scope">{{ roleSummary(scope.row) }}</template></el-table-column>
-            <el-table-column label="状态" width="120"><template #default="scope"><el-tag :type="statusType(scope.row.status)">{{ statusLabel(scope.row.status) }}</el-tag><el-tag v-if="scope.row.must_change_password" class="temporary-tag" size="small" type="warning">待改密</el-tag></template></el-table-column>
-            <el-table-column label="最近登录" min-width="165"><template #default="scope">{{ formatTime(scope.row.last_login_at) }}</template></el-table-column>
-            <el-table-column label="操作" width="220" fixed="right" align="right" header-align="right" class-name="table-action-column">
-              <template #default="scope">
+            <el-table-column label="用户" min-width="150"><template #default="scope"><div class="organization-name-cell"><strong>{{ scope.row.display_name }}</strong><span>{{ scope.row.username }}</span><small v-if="scope.row.id === auth.user?.id" class="list-secondary">本人资料在账户设置维护</small></div></template></el-table-column>
+            <el-table-column label="联系方式" min-width="180"><template #default="scope"><div>{{ scope.row.mobile_phone || scope.row.office_phone || scope.row.email || '—' }}</div><div v-if="scope.row.email && scope.row.email !== scope.row.mobile_phone" class="form-hint">{{ scope.row.email }}</div></template></el-table-column>
+            <el-table-column label="任职组织 / 角色" min-width="190"><template #default="scope">{{ appointmentSummary(scope.row) }}<span class="list-secondary">{{ roleSummary(scope.row) }}</span></template></el-table-column>
+
+            <el-table-column label="状态" width="105"><template #default="scope"><el-tag :type="statusType(scope.row.status)">{{ statusLabel(scope.row.status) }}</el-tag><el-tag v-if="scope.row.must_change_password" class="temporary-tag" size="small" type="warning">待改密</el-tag></template></el-table-column>
+            <el-table-column label="最近登录" min-width="155"><template #default="scope">{{ formatTime(scope.row.last_login_at) }}</template></el-table-column>
+            <el-table-column label="操作" width="88" fixed="right" align="right" header-align="right" class-name="table-action-column">
+              <template #default="scope"><RowActions :label="`操作：${scope.row.name || scope.row.title || scope.row.code || scope.row.display_name || scope.row.id}`">
                 <el-button link @click="openUserDetail(scope.row)">详情</el-button>
                 <template v-if="scope.row.id !== auth.user?.id">
                   <el-button link type="primary" @click="openEditUser(scope.row)">编辑</el-button>
                   <el-button link type="warning" @click="changeStatus(scope.row)">{{ scope.row.status === 'enabled' ? '停用' : '启用' }}</el-button>
                   <el-button link @click="resetPassword(scope.row)">重置密码</el-button>
                 </template>
-                <span v-else class="self-hint">本人资料请到账户设置维护</span>
-              </template>
+
+              </RowActions></template>
             </el-table-column>
           </el-table>
           <div class="pagination-row"><span>共 {{ total }} 个用户</span><el-pagination background layout="sizes, prev, pager, next" :total="total" :current-page="page" :page-size="pageSize" :page-sizes="[10, 20, 50, 100]" @current-change="changePage" @size-change="changePageSize" /></div>
@@ -343,7 +341,7 @@ onMounted(load)
       <el-tab-pane v-if="isGroupAdmin" label="角色与权限" name="roles">
         <div class="tab-toolbar"><p>系统角色不可编辑或删除；可创建、维护组织范围的自定义角色。</p><el-button type="primary" @click="openCreateRole">新增自定义角色</el-button></div>
         <div class="panel data-table-panel">
-          <el-table :data="roles" row-key="id"><el-table-column prop="name" label="角色名称" min-width="170"><template #default="scope"><strong>{{ scope.row.name }}</strong><div class="form-hint">{{ scope.row.key }}</div></template></el-table-column><el-table-column label="范围" width="110"><template #default="scope">{{ scope.row.scope === 'group' ? '集团' : '组织' }}</template></el-table-column><el-table-column label="状态" width="90"><template #default="scope"><el-tag :type="scope.row.status === 'enabled' ? 'success' : 'info'">{{ scope.row.status === 'enabled' ? '启用' : '停用' }}</el-tag></template></el-table-column><el-table-column label="权限" min-width="300"><template #default="scope"><el-tag v-for="permission in scope.row.permissions" :key="permission.key" class="permission-tag" size="small">{{ permission.name }}</el-tag></template></el-table-column><el-table-column label="使用人数" width="100"><template #default="scope">{{ scope.row.user_count }}</template></el-table-column><el-table-column label="操作" width="120" fixed="right" align="right" header-align="right" class-name="table-action-column"><template #default="scope"><span v-if="scope.row.is_system" class="self-hint">系统角色</span><template v-else><el-button link type="primary" @click="openEditRole(scope.row)">编辑</el-button><el-button link type="danger" @click="deleteRole(scope.row)">删除</el-button></template></template></el-table-column></el-table>
+          <el-table :data="roles" row-key="id"><el-table-column prop="name" label="角色名称" min-width="170"><template #default="scope"><strong>{{ scope.row.name }}</strong><div class="form-hint">{{ scope.row.key }}</div></template></el-table-column><el-table-column label="范围" width="110"><template #default="scope">{{ scope.row.scope === 'group' ? '集团' : '组织' }}</template></el-table-column><el-table-column label="状态" width="105"><template #default="scope"><el-tag :type="scope.row.status === 'enabled' ? 'success' : 'info'">{{ scope.row.status === 'enabled' ? '启用' : '停用' }}</el-tag></template></el-table-column><el-table-column label="权限" min-width="300"><template #default="scope"><el-tag v-for="permission in scope.row.permissions" :key="permission.key" class="permission-tag" size="small">{{ permission.name }}</el-tag></template></el-table-column><el-table-column label="使用人数" width="100"><template #default="scope">{{ scope.row.user_count }}</template></el-table-column><el-table-column label="操作" width="88" fixed="right" align="right" header-align="right" class-name="table-action-column"><template #default="scope"><RowActions :direct="scope.row.is_system === true" :label="`操作：${scope.row.name || scope.row.title || scope.row.code || scope.row.display_name || scope.row.id}`"><span v-if="scope.row.is_system" class="self-hint">系统角色</span><template v-else><el-button link type="primary" @click="openEditRole(scope.row)">编辑</el-button><el-button link type="danger" @click="deleteRole(scope.row)">删除</el-button></template></RowActions></template></el-table-column></el-table>
           <div class="pagination-row"><span>共 {{ roleTotal }} 个角色</span><el-pagination background layout="sizes, prev, pager, next" :total="roleTotal" :current-page="rolePage" :page-size="rolePageSize" :page-sizes="[20, 50, 100]" @current-change="changeRolePage" @size-change="changeRolePageSize" /></div>
         </div>
       </el-tab-pane>

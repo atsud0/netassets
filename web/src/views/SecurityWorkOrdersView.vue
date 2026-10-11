@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import RowActions from '../components/RowActions.vue'
 import { computed, nextTick, onMounted, reactive, ref, watch } from 'vue'
 import type { FormInstance, FormRules } from 'element-plus'
 import { ElMessage, ElMessageBox } from 'element-plus'
@@ -8,6 +9,7 @@ import { useAuthStore } from '../stores/auth'
 import SavedFilterViews from '../components/SavedFilterViews.vue'
 
 interface ListResponse<T> { items: T[]; total: number; page: number; page_size: number }
+interface FindingSummaryStats { total: number; pending: number; critical: number; high: number; medium: number; low: number }
 interface ItemResponse<T> { item: T }
 interface Organization { id: string; code: string; name: string; type: string; status: string }
 interface Asset { id: string; value: string; name?: string; organization_id: string; business_system_id?: string; network_scope: string; status: string }
@@ -35,11 +37,11 @@ interface FindingImportResult {
   created_by_name?: string; created_at?: string
 }
 interface FindingImportCandidate {
-  id: string; finding_import_id: string; test_batch_id: string; test_batch_code: string; test_batch_name: string
+  id: string; finding_import_id: string; test_batch_id?: string; test_batch_code?: string; test_batch_name?: string
   source_row_number: number; asset_type: string; asset_value: string; normalized_value?: string
   title: string; severity: string; vulnerability_type?: string; description: string; evidence?: string; remediation_advice?: string
-  discovered_at: string; status: string; suggested_scope_asset_id?: string; suggested_asset_value?: string
-  suggested_organization_name?: string; matched_scope_asset_id?: string; matched_asset_value?: string
+  discovered_at: string; status: string; suggested_scope_asset_id?: string; suggested_asset_id?: string; suggested_asset_value?: string
+  suggested_organization_name?: string; matched_scope_asset_id?: string; matched_asset_id?: string; matched_asset_value?: string
   matched_organization_name?: string; match_method?: string; match_confidence?: number; review_note?: string
   reviewed_by_name?: string; reviewed_at?: string; imported_finding_id?: string; imported_finding_code?: string
   created_at: string; updated_at: string
@@ -58,6 +60,8 @@ interface WorkOrderAttachment {
   description?: string; uploaded_by?: string; uploaded_by_name?: string; uploader_organization_name?: string; created_at: string
 }
 interface WorkOrder {
+  execution_mode: string
+  remediation_counts: Record<string, number>
   id: string; number: string; title: string; assignee_organization_id: string
   assignee_organization_code: string; assignee_organization_name: string; severity: string; status: string
   description?: string; remediation_requirement: string; due_at: string; overdue: boolean
@@ -78,6 +82,7 @@ const organizations = ref<Organization[]>([])
 const assets = ref<Asset[]>([])
 const systems = ref<BusinessSystem[]>([])
 const findings = ref<Finding[]>([])
+const findingSummary = reactive<FindingSummaryStats>({ total: 0, pending: 0, critical: 0, high: 0, medium: 0, low: 0 })
 const findingOptions = ref<Finding[]>([])
 const workOrders = ref<WorkOrder[]>([])
 const orderPage = ref(1)
@@ -96,7 +101,7 @@ const findingDialogVisible = ref(false)
 const findingFormRef = ref<FormInstance>()
 const editingFindingID = ref('')
 const findingForm = reactive({
-  title: '', severity: 'high', status: 'open', assignee_organization_id: '', asset_id: '', business_system_id: '', test_batch_id: '',
+  title: '', severity: 'high', status: 'pending', assignee_organization_id: '', asset_id: '', business_system_id: '', test_batch_id: '',
   vulnerability_type: '', description: '', evidence: '', remediation_advice: '', source: 'manual', discovered_at: new Date() as Date | string,
 })
 
@@ -125,6 +130,7 @@ const candidateReviewNote = ref('')
 const workOrderDialogVisible = ref(false)
 const workOrderFormRef = ref<FormInstance>()
 const workOrderForm = reactive({
+  execution_mode: 'organization',
   title: '', assignee_organization_id: '', description: '', remediation_requirement: '', due_at: defaultDueAt() as Date | string,
   finding_ids: [] as string[], issue_immediately: true,
 })
@@ -165,7 +171,7 @@ const actionOrder = ref<WorkOrder>()
 const actionForm = reactive({ comment: '', progress: '', remediation_result: '', verification_result: '', return_reason: '' })
 
 const severityLabels: Record<string, string> = { critical: '严重', high: '高危', medium: '中危', low: '低危', info: '提示' }
-const findingStatusLabels: Record<string, string> = { open: '待处置', assigned: '已派单', resolved: '已修复', accepted_risk: '接受风险', false_positive: '误报' }
+const findingStatusLabels: Record<string, string> = { pending: '待处理', in_progress: '处理中', confirmed: '已确认', resolved: '已处理', fixed: '已修复', false_positive: '误报', ignored: '忽略', duplicate: '重复', risk_accepted: '风险接受' }
 const riskActionLabels: Record<string, string> = { accept: '接受风险', review: '复核风险' }
 const orderStatusLabels: Record<string, string> = {
   draft: '草稿', issued: '已下发', in_progress: '整改中', pending_verification: '待复测', returned: '已退回', closed: '已关闭', cancelled: '已取消',
@@ -200,7 +206,7 @@ const enabledOrganizations = computed(() => organizations.value.filter(item => i
 const scopedAssets = computed(() => assets.value.filter(item => item.organization_id === findingForm.assignee_organization_id && item.status !== 'archived' && (!findingForm.test_batch_id || findingBatchScopeAssetIDs.value.includes(item.id))))
 const scopedSystems = computed(() => systems.value.filter(item => item.organization_id === findingForm.assignee_organization_id && item.status !== 'archived'))
 const usableTestBatches = computed(() => testBatches.value.filter(item => ['authorized', 'in_progress', 'completed'].includes(item.status)))
-const orderFindings = computed(() => findingOptions.value.filter(item => item.assignee_organization_id === workOrderForm.assignee_organization_id && item.status === 'open'))
+const orderFindings = computed(() => findingOptions.value.filter(item => item.assignee_organization_id === workOrderForm.assignee_organization_id && ['pending', 'confirmed'].includes(item.status)))
 const currentPage = computed(() => activeTab.value === 'orders' ? orderPage.value : activeTab.value === 'findings' ? findingPage.value : candidatePage.value)
 const currentTotal = computed(() => activeTab.value === 'orders' ? orderTotal.value : activeTab.value === 'findings' ? findingTotal.value : candidateTotal.value)
 const activeOrderCount = computed(() => workOrders.value.filter(item => !['closed', 'cancelled'].includes(item.status)).length)
@@ -308,11 +314,23 @@ async function loadFindingOptions() {
   }
   try {
     const response = await apiClient.get<ListResponse<Finding>>('/security-findings', {
-      params: { page: 1, page_size: 100, status: 'open' },
+      params: { page: 1, page_size: 100 },
     })
     findingOptions.value = response.data.items
   } catch (error) {
     ElMessage.error(getAPIErrorMessage(error, '读取待派单安全发现失败'))
+  }
+}
+
+async function loadFindingSummary() {
+  if (!auth.canManageSecurityFindings && !auth.canManageSecurityWorkOrders) return
+  try {
+    const params: Record<string, string> = {}
+    if (organizationFilter.value) params.organization_id = organizationFilter.value
+    const response = await apiClient.get<{ summary: FindingSummaryStats }>('/security-findings/summary', { params })
+    Object.assign(findingSummary, response.data.summary)
+  } catch (error) {
+    ElMessage.error(getAPIErrorMessage(error, '读取漏洞与安全发现汇总失败'))
   }
 }
 
@@ -346,6 +364,7 @@ async function loadActiveList() {
     } else {
       findings.value = response.data.items as Finding[]
       findingTotal.value = response.data.total
+      await loadFindingSummary()
     }
   } catch (error) {
     ElMessage.error(getAPIErrorMessage(error, '读取安全运营列表失败'))
@@ -422,7 +441,7 @@ function defaultRiskUntil() {
 
 function resetFindingForm() {
   Object.assign(findingForm, {
-    title: '', severity: 'high', status: 'open', assignee_organization_id: defaultOrganizationID(), asset_id: '', business_system_id: '', test_batch_id: '',
+    title: '', severity: 'high', status: 'pending', assignee_organization_id: defaultOrganizationID(), asset_id: '', business_system_id: '', test_batch_id: '',
     vulnerability_type: '', description: '', evidence: '', remediation_advice: '', source: 'manual', discovered_at: new Date(),
   })
 }
@@ -466,7 +485,7 @@ async function saveFinding() {
 }
 
 function openFindingImport() {
-  importTestBatchID.value = usableTestBatches.value[0]?.id ?? ''
+  importTestBatchID.value = ''
   importFile.value = undefined
   importResult.value = undefined
   if (importFileInput.value) importFileInput.value.value = ''
@@ -493,16 +512,12 @@ async function downloadFindingTemplate(format: 'csv' | 'xlsx') {
 }
 
 async function submitFindingImport() {
-  if (!importTestBatchID.value) {
-    ElMessage.warning('请选择安全测试批次')
-    return
-  }
   if (!importFile.value) {
-    ElMessage.warning('请选择 CSV 或 XLSX 文件')
+    ElMessage.warning('请选择 CSV、XLSX 或 JSON 文件')
     return
   }
   const formData = new FormData()
-  formData.append('test_batch_id', importTestBatchID.value)
+  if (importTestBatchID.value) formData.append('test_batch_id', importTestBatchID.value)
   formData.append('file', importFile.value)
   importSubmitting.value = true
   try {
@@ -519,6 +534,7 @@ async function submitFindingImport() {
 }
 
 function resetWorkOrderForm() {
+  workOrderForm.execution_mode = 'organization'
   Object.assign(workOrderForm, {
     title: '', assignee_organization_id: defaultOrganizationID(), description: '', remediation_requirement: '', due_at: defaultDueAt(), finding_ids: [], issue_immediately: true,
   })
@@ -575,7 +591,7 @@ async function submitRiskAction() {
 
 async function revokeFindingRisk(item: Finding) {
   try {
-    await ElMessageBox.confirm(`确定撤销“${item.code}”的风险接受吗？撤销后将恢复为待处置状态。`, '撤销风险接受', { type: 'warning', confirmButtonText: '撤销', cancelButtonText: '取消' })
+    await ElMessageBox.confirm(`确定撤销“${item.code}”的风险接受吗？撤销后将恢复为待处理状态。`, '撤销风险接受', { type: 'warning', confirmButtonText: '撤销', cancelButtonText: '取消' })
     const response = await apiClient.post<ItemResponse<Finding>>(`/security-findings/${item.id}/revoke-risk`)
     selectedFinding.value = response.data.item
     ElMessage.success('风险接受已撤销')
@@ -602,7 +618,7 @@ async function saveWorkOrder() {
   submitting.value = true
   try {
     const response = await apiClient.post<{ item: WorkOrder }>('/security-work-orders', {
-      title: workOrderForm.title, assignee_organization_id: workOrderForm.assignee_organization_id,
+      execution_mode: workOrderForm.execution_mode, title: workOrderForm.title, assignee_organization_id: workOrderForm.assignee_organization_id,
       description: workOrderForm.description, remediation_requirement: workOrderForm.remediation_requirement,
       due_at: new Date(workOrderForm.due_at).toISOString(), finding_ids: workOrderForm.finding_ids,
     })
@@ -821,7 +837,7 @@ function formatFileSize(value: number) {
 
 async function openFindingImportCandidate(item: FindingImportCandidate) {
   selectedCandidate.value = item
-  selectedCandidateScopeAssetID.value = item.suggested_scope_asset_id ?? ''
+  selectedCandidateScopeAssetID.value = (item.test_batch_id ? item.suggested_scope_asset_id : item.suggested_asset_id) ?? ''
   candidateReviewNote.value = ''
   candidateDialogVisible.value = true
   try {
@@ -832,19 +848,19 @@ async function openFindingImportCandidate(item: FindingImportCandidate) {
     }
   } catch (error) {
     candidateScopeOptions.value = []
-    ElMessage.error(getAPIErrorMessage(error, '读取测试批次授权资产失败'))
+    ElMessage.error(getAPIErrorMessage(error, '读取可关联资产失败'))
   }
 }
 
 async function submitFindingImportCandidate() {
   if (!selectedCandidate.value || !selectedCandidateScopeAssetID.value) {
-    ElMessage.warning('请选择当前测试批次内的授权资产')
+    ElMessage.warning('请选择要关联的资产')
     return
   }
   candidateSubmitting.value = true
   try {
     const response = await apiClient.post<ItemResponse<FindingImportCandidate>>(`/security-findings/import-candidates/${selectedCandidate.value.id}/link`, {
-      scope_asset_id: selectedCandidateScopeAssetID.value,
+      ...(selectedCandidate.value.test_batch_id ? { scope_asset_id: selectedCandidateScopeAssetID.value } : { asset_id: selectedCandidateScopeAssetID.value }),
       review_note: candidateReviewNote.value,
     })
     const item = response.data.item
@@ -895,11 +911,11 @@ function actionSuccessLabel(mode: ActionMode) {
 function actionButtonType(mode: ActionMode) { return mode === 'cancel' || mode === 'return' ? 'danger' : 'primary' }
 function severityTag(value: string) { return value === 'critical' ? 'danger' : value === 'high' ? 'danger' : value === 'medium' ? 'warning' : value === 'low' ? 'success' : 'info' }
 function orderStatusTag(value: string) { return value === 'closed' ? 'success' : value === 'returned' || value === 'cancelled' ? 'danger' : value === 'pending_verification' ? 'warning' : value === 'in_progress' ? 'primary' : 'info' }
-function findingStatusTag(value: string) { return value === 'resolved' ? 'success' : value === 'assigned' ? 'warning' : value === 'false_positive' ? 'info' : value === 'accepted_risk' ? 'danger' : 'primary' }
+function findingStatusTag(value: string) { return value === 'fixed' ? 'success' : value === 'resolved' ? 'success' : value === 'in_progress' || value === 'confirmed' ? 'warning' : value === 'false_positive' || value === 'ignored' || value === 'duplicate' ? 'info' : value === 'risk_accepted' ? 'danger' : 'primary' }
 function formatDate(value?: string) { return value ? new Date(value).toLocaleString('zh-CN', { hour12: false }) : '—' }
 function findingTarget(item: FindingSummary | Finding) { return item.asset_value || item.business_system_name || '未关联对象' }
 function riskAcceptanceLabel(item: Finding) {
-  if (item.status !== 'accepted_risk') return ''
+  if (item.status !== 'risk_accepted') return ''
   return item.risk_acceptance_expired ? '已到期，待复核' : '风险接受中'
 }
 async function onTabChange() {
@@ -919,9 +935,7 @@ async function onTabChange() {
   <section class="page-stack" v-loading="loading">
     <div class="page-heading">
       <div>
-        <span class="eyebrow">SECURITY REMEDIATION</span>
         <h1>安全工单</h1>
-        <p>集团基于已填报资产登记漏洞、下发整改要求，子公司在线反馈整改结果，集团复测后关闭。</p>
       </div>
       <div v-if="auth.canManageSecurityFindings || auth.canManageSecurityWorkOrders" class="heading-actions">
         <el-button v-if="auth.canManageSecurityFindings" @click="openFindingImport">批量导入漏洞</el-button>
@@ -930,12 +944,7 @@ async function onTabChange() {
       </div>
     </div>
 
-    <el-alert v-if="auth.hasGroupSecurityRole" type="info" :closable="false" show-icon>
-      <template #title>渗透测试仍在线下或专业工具中执行；本系统保存测试结果和整改协同记录，不直接执行攻击利用。</template>
-    </el-alert>
-    <el-alert v-else type="warning" :closable="false" show-icon>
-      <template #title>这里只显示本组织有权访问的工单。请按期限接收、更新进度并提交整改结果，集团将在系统中记录复测结论。</template>
-    </el-alert>
+    <details class="work-order-guide"><summary>查看协作说明</summary><p>{{ auth.hasGroupSecurityRole?'本平台记录测试结果和整改过程；专业测试由授权人员在对应环境执行。':'仅展示当前组织有权访问的工单，请按期限接收、反馈修复结果并跟进集团复测。' }}</p></details>
 
     <div class="panel security-panel">
       <el-tabs v-model="activeTab" @tab-change="onTabChange">
@@ -945,6 +954,14 @@ async function onTabChange() {
           <template #label>待关联漏洞<el-badge v-if="candidateStatusFilter === 'pending' && candidateTotal" :value="candidateTotal" :max="99" class="candidate-tab-badge" /></template>
         </el-tab-pane>
       </el-tabs>
+      <div v-if="activeTab === 'findings'" class="finding-summary-cards" aria-label="漏洞与安全发现汇总">
+        <div class="finding-summary-card tone-total"><span>发现总数</span><strong>{{ findingSummary.total }}</strong></div>
+        <div class="finding-summary-card tone-pending"><span>待处理</span><strong>{{ findingSummary.pending }}</strong></div>
+        <div class="finding-summary-card tone-critical"><span>严重</span><strong>{{ findingSummary.critical }}</strong></div>
+        <div class="finding-summary-card tone-high"><span>高危</span><strong>{{ findingSummary.high }}</strong></div>
+        <div class="finding-summary-card tone-medium"><span>中危</span><strong>{{ findingSummary.medium }}</strong></div>
+        <div class="finding-summary-card tone-low"><span>低危</span><strong>{{ findingSummary.low }}</strong></div>
+      </div>
       <div v-if="activeTab === 'candidates'" class="filter-bar candidate-filter-bar">
         <el-select v-model="candidateBatchFilter" clearable filterable placeholder="全部测试批次" style="width: 260px">
           <el-option v-for="item in usableTestBatches" :key="item.id" :label="`${item.name}（${item.code}）`" :value="item.id" />
@@ -984,81 +1001,84 @@ async function onTabChange() {
       </div>
 
       <el-table v-if="activeTab === 'orders'" :data="workOrders" row-key="id" empty-text="暂无安全整改工单">
-        <el-table-column label="工单" min-width="230">
-          <template #default="scope"><strong>{{ scope.row.title }}</strong><span class="table-secondary mono-text">{{ scope.row.number }}</span></template>
+        <el-table-column label="工单" min-width="210">
+          <template #default="scope"><el-button link type="primary" class="table-link" @click="openDetail(scope.row)">{{ scope.row.title }}</el-button><span class="table-secondary mono-text">{{ scope.row.number }}</span><span class="list-secondary">{{ scope.row.finding_count }} 项关联发现</span></template>
         </el-table-column>
-        <el-table-column label="责任组织" min-width="170">
+        <el-table-column label="责任组织" min-width="130">
           <template #default="scope">{{ scope.row.assignee_organization_name }}</template>
         </el-table-column>
         <el-table-column label="等级" width="85"><template #default="scope"><el-tag :type="severityTag(scope.row.severity)" effect="dark">{{ severityLabels[scope.row.severity] }}</el-tag></template></el-table-column>
         <el-table-column label="状态" width="115"><template #default="scope"><el-tag :type="orderStatusTag(scope.row.status)" effect="plain">{{ orderStatusLabels[scope.row.status] }}</el-tag></template></el-table-column>
-        <el-table-column label="关联发现" width="100"><template #default="scope">{{ scope.row.finding_count }} 项</template></el-table-column>
-        <el-table-column label="整改期限" min-width="165">
+        <el-table-column label="个人修复进度" min-width="175"><template #default="{ row }"><div v-if="row.execution_mode === 'individual'"><span v-for="(label, key) in {unassigned:'未分派',pending_acceptance:'待接收',in_progress:'修复中',pending_org_review:'组织确认',pending_security_review:'集团复测',verified_fixed:'修复通过',risk_accepted:'接受风险',false_positive:'误报',risk_expired:'风险接受失效'}" :key="key" class="inline-tag" v-show="row.remediation_counts?.[key]">{{label}} {{row.remediation_counts?.[key] || 0}} </span></div><span v-else>组织统一整改</span></template></el-table-column>
+
+        <el-table-column label="整改期限" min-width="130">
           <template #default="scope"><span :class="{ 'overdue-text': scope.row.overdue }">{{ formatDate(scope.row.due_at) }}</span><el-tag v-if="scope.row.overdue" type="danger" size="small" class="inline-tag">逾期</el-tag></template>
         </el-table-column>
-        <el-table-column label="操作" fixed="right" width="220" align="right" header-align="right" class-name="table-action-column">
-          <template #default="scope">
+        <el-table-column label="操作" fixed="right" width="88" align="right" header-align="right" class-name="table-action-column">
+          <template #default="scope"><RowActions :label="`操作：${scope.row.name || scope.row.title || scope.row.code || scope.row.display_name || scope.row.id}`">
             <el-button link type="primary" @click="openDetail(scope.row)">详情</el-button>
+            <el-button v-if="scope.row.execution_mode === 'individual'" link type="primary" @click="$router.push({ path: '/remediation', query: { work_order_id: scope.row.id } })">修复任务</el-button>
             <template v-if="auth.canManageSecurityWorkOrders">
               <el-button v-if="scope.row.status === 'draft'" link type="primary" @click="openAction(scope.row, 'issue')">下发</el-button>
-              <el-button v-if="scope.row.status === 'pending_verification'" link type="danger" @click="openAction(scope.row, 'return')">退回</el-button>
-              <el-button v-if="scope.row.status === 'pending_verification'" link type="success" @click="openAction(scope.row, 'close')">复测通过</el-button>
+              <el-button v-if="scope.row.execution_mode !== 'individual' && scope.row.status === 'pending_verification'" link type="danger" @click="openAction(scope.row, 'return')">退回</el-button>
+              <el-button v-if="scope.row.execution_mode !== 'individual' && scope.row.status === 'pending_verification'" link type="success" @click="openAction(scope.row, 'close')">复测通过</el-button>
               <el-button v-if="!['closed', 'cancelled'].includes(scope.row.status)" link type="danger" @click="openAction(scope.row, 'cancel')">取消</el-button>
             </template>
             <template v-else>
               <el-button v-if="scope.row.status === 'issued'" link type="primary" @click="openAction(scope.row, 'accept')">接收</el-button>
-              <el-button v-if="['in_progress', 'returned'].includes(scope.row.status)" link type="primary" @click="openAction(scope.row, 'progress')">更新进度</el-button>
-              <el-button v-if="['in_progress', 'returned'].includes(scope.row.status)" link type="success" @click="openAction(scope.row, 'submit')">提交复测</el-button>
+              <el-button v-if="scope.row.execution_mode !== 'individual' && ['in_progress', 'returned'].includes(scope.row.status)" link type="primary" @click="openAction(scope.row, 'progress')">更新进度</el-button>
+              <el-button v-if="scope.row.execution_mode !== 'individual' && ['in_progress', 'returned'].includes(scope.row.status)" link type="success" @click="openAction(scope.row, 'submit')">提交复测</el-button>
             </template>
-          </template>
+          </RowActions></template>
         </el-table-column>
       </el-table>
 
-      <el-table v-else-if="activeTab === 'findings'" :data="findings" row-key="id" empty-text="暂无安全发现">
-        <el-table-column label="安全发现" min-width="250">
-          <template #default="scope"><strong>{{ scope.row.title }}</strong><span class="table-secondary mono-text">{{ scope.row.code }} · {{ scope.row.vulnerability_type || '未分类' }}</span></template>
+      <div v-else-if="activeTab === 'findings'" class="finding-list-content"><el-table :data="findings" row-key="id" empty-text="暂无安全发现">
+        <el-table-column label="安全发现" min-width="200">
+          <template #default="scope"><strong>{{ scope.row.title }}</strong><span class="table-secondary mono-text">{{ scope.row.code }} · {{ scope.row.vulnerability_type || '未分类' }}</span><span v-if="scope.row.test_batch_id" class="list-secondary">{{ scope.row.test_batch_name }} · {{ scope.row.test_batch_code }}</span></template>
         </el-table-column>
-        <el-table-column label="责任组织" min-width="170"><template #default="scope">{{ scope.row.assignee_organization_name }}</template></el-table-column>
-        <el-table-column label="关联资产/系统" min-width="210"><template #default="scope">{{ findingTarget(scope.row) }}<span v-if="scope.row.asset_value && scope.row.business_system_name" class="table-secondary">{{ scope.row.business_system_name }}</span></template></el-table-column>
-        <el-table-column label="测试批次" min-width="180"><template #default="scope"><span v-if="scope.row.test_batch_id">{{ scope.row.test_batch_name }}<span class="table-secondary mono-text">{{ scope.row.test_batch_code }}</span></span><span v-else>—</span></template></el-table-column>
+        <el-table-column label="责任组织" min-width="130"><template #default="scope">{{ scope.row.assignee_organization_name }}</template></el-table-column>
+        <el-table-column label="关联资产/系统" min-width="155"><template #default="scope">{{ findingTarget(scope.row) }}<span v-if="scope.row.asset_value && scope.row.business_system_name" class="table-secondary">{{ scope.row.business_system_name }}</span></template></el-table-column>
+
         <el-table-column label="等级" width="85"><template #default="scope"><el-tag :type="severityTag(scope.row.severity)" effect="dark">{{ severityLabels[scope.row.severity] }}</el-tag></template></el-table-column>
-        <el-table-column label="状态" width="135"><template #default="scope"><el-tag :type="findingStatusTag(scope.row.status)" effect="plain">{{ findingStatusLabels[scope.row.status] }}</el-tag><span v-if="scope.row.status === 'accepted_risk'" class="table-secondary risk-state" :class="{ expired: scope.row.risk_acceptance_expired }">{{ riskAcceptanceLabel(scope.row) }}</span></template></el-table-column>
-        <el-table-column label="发现时间" min-width="165"><template #default="scope">{{ formatDate(scope.row.discovered_at) }}</template></el-table-column>
-        <el-table-column label="操作" fixed="right" :width="auth.canManageSecurityFindings || auth.canManageSecurityWorkOrders ? 240 : 80" align="right" header-align="right" class-name="table-action-column">
-          <template #default="scope">
+        <el-table-column label="状态" width="115"><template #default="scope"><el-tag :type="findingStatusTag(scope.row.status)" effect="plain">{{ findingStatusLabels[scope.row.status] }}</el-tag><span v-if="scope.row.status === 'risk_accepted'" class="table-secondary risk-state" :class="{ expired: scope.row.risk_acceptance_expired }">{{ riskAcceptanceLabel(scope.row) }}</span></template></el-table-column>
+        <el-table-column label="发现时间" min-width="135"><template #default="scope">{{ formatDate(scope.row.discovered_at) }}</template></el-table-column>
+        <el-table-column label="操作" fixed="right" width="88" align="right" header-align="right" class-name="table-action-column">
+          <template #default="scope"><RowActions :label="`操作：${scope.row.name || scope.row.title || scope.row.code || scope.row.display_name || scope.row.id}`">
             <el-button link type="primary" @click="openFindingDetail(scope.row)">详情</el-button>
             <template v-if="auth.canManageSecurityFindings || auth.canManageSecurityWorkOrders">
               <el-button v-if="auth.canManageSecurityFindings" link type="primary" @click="openEditFinding(scope.row)">编辑</el-button>
-              <el-button v-if="auth.canManageSecurityWorkOrders && scope.row.status === 'open'" link type="success" @click="openCreateWorkOrder(scope.row)">生成工单</el-button>
-              <el-button v-if="auth.canManageSecurityFindings && ['open', 'resolved'].includes(scope.row.status)" link type="warning" @click="openRiskDialog(scope.row, 'accept')">接受风险</el-button>
-              <el-button v-if="auth.canManageSecurityFindings && scope.row.status === 'accepted_risk'" link type="warning" @click="openRiskDialog(scope.row, 'review')">复核</el-button>
+              <el-button v-if="auth.canManageSecurityWorkOrders && ['pending', 'confirmed'].includes(scope.row.status)" link type="success" @click="openCreateWorkOrder(scope.row)">生成工单</el-button>
+              <el-button v-if="auth.canManageSecurityFindings && ['pending', 'in_progress', 'confirmed', 'resolved', 'fixed'].includes(scope.row.status)" link type="warning" @click="openRiskDialog(scope.row, 'accept')">接受风险</el-button>
+              <el-button v-if="auth.canManageSecurityFindings && scope.row.status === 'risk_accepted'" link type="warning" @click="openRiskDialog(scope.row, 'review')">复核</el-button>
             </template>
-          </template>
+          </RowActions></template>
         </el-table-column>
       </el-table>
 
+      </div>
       <el-table v-else :data="findingImportCandidates" row-key="id" empty-text="暂无待关联漏洞">
-        <el-table-column label="导入行" width="90"><template #default="scope">第 {{ scope.row.source_row_number }} 行</template></el-table-column>
-        <el-table-column label="原始资产标识" min-width="230">
+        <el-table-column label="导入行" width="75"><template #default="scope">第 {{ scope.row.source_row_number }} 行</template></el-table-column>
+        <el-table-column label="原始资产标识" min-width="160">
           <template #default="scope"><strong class="mono-text">{{ scope.row.asset_value }}</strong><span class="table-secondary">{{ assetTypeLabels[scope.row.asset_type] || scope.row.asset_type }}</span></template>
         </el-table-column>
-        <el-table-column label="漏洞信息" min-width="250">
+        <el-table-column label="漏洞信息" min-width="170">
           <template #default="scope"><strong>{{ scope.row.title }}</strong><span class="table-secondary">{{ scope.row.vulnerability_type || '未分类' }} · {{ formatDate(scope.row.discovered_at) }}</span></template>
         </el-table-column>
-        <el-table-column label="测试批次" min-width="190"><template #default="scope">{{ scope.row.test_batch_name }}<span class="table-secondary mono-text">{{ scope.row.test_batch_code }}</span></template></el-table-column>
-        <el-table-column label="系统建议" min-width="230">
+        <el-table-column label="测试批次" min-width="135"><template #default="scope">{{ scope.row.test_batch_name || '未关联测试批次' }}<span v-if="scope.row.test_batch_code" class="table-secondary mono-text">{{ scope.row.test_batch_code }}</span></template></el-table-column>
+        <el-table-column label="系统建议" min-width="135">
           <template #default="scope">
-            <span v-if="scope.row.suggested_scope_asset_id">{{ scope.row.suggested_asset_value }}<span class="table-secondary">{{ scope.row.suggested_organization_name }} · {{ matchMethodLabels[scope.row.match_method || ''] || '相似标识' }} {{ scope.row.match_confidence }}%</span></span>
-            <span v-else class="table-secondary">未找到唯一建议，请人工选择授权资产</span>
+            <span v-if="scope.row.suggested_scope_asset_id || scope.row.suggested_asset_id">{{ scope.row.suggested_asset_value }}<span class="table-secondary">{{ scope.row.suggested_organization_name }} · {{ matchMethodLabels[scope.row.match_method || ''] || '相似标识' }} {{ scope.row.match_confidence }}%</span></span>
+            <span v-else class="table-secondary">未找到唯一建议，请人工选择资产</span>
           </template>
         </el-table-column>
-        <el-table-column label="状态" width="105"><template #default="scope"><el-tag :type="candidateStatusTag(scope.row.status)" effect="plain">{{ candidateStatusLabels[scope.row.status] || scope.row.status }}</el-tag></template></el-table-column>
-        <el-table-column label="处理结果" min-width="180"><template #default="scope"><span v-if="scope.row.imported_finding_code" class="mono-text">{{ scope.row.imported_finding_code }}</span><span v-else-if="scope.row.review_note">{{ scope.row.review_note }}</span><span v-else>—</span></template></el-table-column>
-        <el-table-column label="操作" fixed="right" width="150" align="right" header-align="right" class-name="table-action-column">
-          <template #default="scope">
+        <el-table-column label="状态 / 结果" width="115"><template #default="scope"><el-tag :type="candidateStatusTag(scope.row.status)" effect="plain">{{ candidateStatusLabels[scope.row.status] || scope.row.status }}</el-tag><span class="list-secondary">{{ scope.row.imported_finding_code || scope.row.review_note || '—' }}</span></template></el-table-column>
+
+        <el-table-column label="操作" fixed="right" width="88" align="right" header-align="right" class-name="table-action-column">
+          <template #default="scope"><RowActions :direct="scope.row.status !== 'pending'" :label="`操作：${scope.row.name || scope.row.title || scope.row.code || scope.row.display_name || scope.row.id}`">
             <template v-if="scope.row.status === 'pending'"><el-button link type="primary" @click="openFindingImportCandidate(scope.row)">关联资产</el-button><el-button link type="danger" @click="ignoreFindingImportCandidate(scope.row)">忽略</el-button></template>
             <span v-else class="table-secondary">{{ scope.row.reviewed_by_name || '已处理' }}</span>
-          </template>
+          </RowActions></template>
         </el-table-column>
       </el-table>
 
@@ -1082,7 +1102,7 @@ async function onTabChange() {
           <div><span class="mono-text">{{ selectedFinding.code }}</span><h2>{{ selectedFinding.title }}</h2></div>
           <div class="finding-detail-tags"><el-tag :type="severityTag(selectedFinding.severity)" effect="dark">{{ severityLabels[selectedFinding.severity] }}</el-tag><el-tag :type="findingStatusTag(selectedFinding.status)" effect="plain">{{ findingStatusLabels[selectedFinding.status] }}</el-tag></div>
         </div>
-        <el-alert v-if="selectedFinding.status === 'accepted_risk' && selectedFinding.risk_acceptance_expired" title="风险接受已到期，请集团安全运营人员及时复核、延长有效期或撤销风险接受。" type="error" :closable="false" show-icon class="detail-alert" />
+        <el-alert v-if="selectedFinding.status === 'risk_accepted' && selectedFinding.risk_acceptance_expired" title="风险接受已到期，请集团安全运营人员及时复核、延长有效期或撤销风险接受。" type="error" :closable="false" show-icon class="detail-alert" />
         <el-descriptions :column="2" border>
           <el-descriptions-item label="责任组织">{{ selectedFinding.assignee_organization_name }}</el-descriptions-item>
           <el-descriptions-item label="漏洞类型">{{ selectedFinding.vulnerability_type || '未分类' }}</el-descriptions-item>
@@ -1095,7 +1115,7 @@ async function onTabChange() {
         <div v-if="selectedFinding.evidence" class="detail-block"><h3>验证证据</h3><p>{{ selectedFinding.evidence }}</p></div>
         <div v-if="selectedFinding.remediation_advice" class="detail-block"><h3>整改建议</h3><p>{{ selectedFinding.remediation_advice }}</p></div>
         <div v-if="selectedFinding.risk_accepted_at" class="detail-block risk-acceptance-card" :class="{ expired: selectedFinding.risk_acceptance_expired }">
-          <div class="detail-block-heading"><h3>风险接受记录</h3><el-tag v-if="selectedFinding.status === 'accepted_risk'" :type="selectedFinding.risk_acceptance_expired ? 'danger' : 'warning'">{{ riskAcceptanceLabel(selectedFinding) }}</el-tag><el-tag v-else type="info">已撤销</el-tag></div>
+          <div class="detail-block-heading"><h3>风险接受记录</h3><el-tag v-if="selectedFinding.status === 'risk_accepted'" :type="selectedFinding.risk_acceptance_expired ? 'danger' : 'warning'">{{ riskAcceptanceLabel(selectedFinding) }}</el-tag><el-tag v-else type="info">已撤销</el-tag></div>
           <el-descriptions :column="1" border size="small">
             <el-descriptions-item label="接受原因">{{ selectedFinding.risk_acceptance_reason || '—' }}</el-descriptions-item>
             <el-descriptions-item label="接受人/时间">{{ selectedFinding.risk_accepted_by_name || '—' }} · {{ formatDate(selectedFinding.risk_accepted_at) }}</el-descriptions-item>
@@ -1104,10 +1124,10 @@ async function onTabChange() {
           </el-descriptions>
         </div>
         <div v-if="auth.canManageSecurityFindings || auth.canManageSecurityWorkOrders" class="finding-detail-actions">
-          <el-button v-if="auth.canManageSecurityFindings && ['open', 'resolved'].includes(selectedFinding.status)" type="warning" @click="openRiskDialog(selectedFinding, 'accept')">接受风险</el-button>
-          <el-button v-if="auth.canManageSecurityFindings && selectedFinding.status === 'accepted_risk'" type="warning" @click="openRiskDialog(selectedFinding, 'review')">复核并延长有效期</el-button>
-          <el-button v-if="auth.canManageSecurityFindings && selectedFinding.status === 'accepted_risk'" type="danger" plain @click="revokeFindingRisk(selectedFinding)">撤销风险接受</el-button>
-          <el-button v-if="auth.canManageSecurityWorkOrders && selectedFinding.status === 'open'" type="primary" @click="openCreateWorkOrder(selectedFinding)">生成整改工单</el-button>
+          <el-button v-if="auth.canManageSecurityFindings && ['pending', 'in_progress', 'confirmed', 'resolved', 'fixed'].includes(selectedFinding.status)" type="warning" @click="openRiskDialog(selectedFinding, 'accept')">接受风险</el-button>
+          <el-button v-if="auth.canManageSecurityFindings && selectedFinding.status === 'risk_accepted'" type="warning" @click="openRiskDialog(selectedFinding, 'review')">复核并延长有效期</el-button>
+          <el-button v-if="auth.canManageSecurityFindings && selectedFinding.status === 'risk_accepted'" type="danger" plain @click="revokeFindingRisk(selectedFinding)">撤销风险接受</el-button>
+          <el-button v-if="auth.canManageSecurityWorkOrders && ['pending', 'confirmed'].includes(selectedFinding.status)" type="primary" @click="openCreateWorkOrder(selectedFinding)">生成整改工单</el-button>
         </div>
       </div>
     </el-drawer>
@@ -1134,7 +1154,7 @@ async function onTabChange() {
           <el-form-item label="关联网络资产"><el-select v-model="findingForm.asset_id" clearable filterable style="width:100%" placeholder="URL、IP、域名等"><el-option v-for="item in scopedAssets" :key="item.id" :label="`${item.name || item.value}（${item.value}）`" :value="item.id" /></el-select></el-form-item>
           <el-form-item label="关联业务系统"><el-select v-model="findingForm.business_system_id" clearable filterable style="width:100%" placeholder="可与网络资产同时选择"><el-option v-for="item in scopedSystems" :key="item.id" :label="`${item.name}（${item.code}）`" :value="item.id" /></el-select></el-form-item>
           <el-form-item label="发现时间" prop="discovered_at"><el-date-picker v-model="findingForm.discovered_at" type="datetime" style="width:100%" /></el-form-item>
-          <el-form-item v-if="editingFindingID" label="发现状态"><el-select v-model="findingForm.status" style="width:100%" :disabled="findingForm.status === 'accepted_risk'"><el-option v-for="(label, value) in findingStatusLabels" :key="value" :label="label" :value="value" :disabled="value === 'accepted_risk'" /></el-select><small v-if="findingForm.status === 'accepted_risk'" class="form-help">风险接受状态请通过详情中的风险操作维护</small></el-form-item>
+          <el-form-item v-if="editingFindingID" label="发现状态"><el-select v-model="findingForm.status" style="width:100%" :disabled="findingForm.status === 'risk_accepted'"><el-option v-for="(label, value) in findingStatusLabels" :key="value" :label="label" :value="value" :disabled="value === 'risk_accepted'" /></el-select><small v-if="findingForm.status === 'risk_accepted'" class="form-help">风险接受状态请通过详情中的风险操作维护</small></el-form-item>
         </div>
         <el-form-item label="漏洞描述" prop="description"><el-input v-model="findingForm.description" type="textarea" :rows="4" placeholder="描述漏洞位置、触发条件和影响" /></el-form-item>
         <el-form-item label="验证证据"><el-input v-model="findingForm.evidence" type="textarea" :rows="3" placeholder="请脱敏填写请求路径、响应现象或证据位置，不要录入明文口令" /></el-form-item>
@@ -1144,12 +1164,12 @@ async function onTabChange() {
     </el-dialog>
 
     <el-dialog v-model="importDialogVisible" title="批量导入漏洞与安全发现" width="860px" destroy-on-close>
-      <el-alert type="info" :closable="false" show-icon title="导入时必须选择已授权、测试中或已完成的测试批次；系统按批次授权范围匹配资产并自动确定责任组织和业务系统。" />
+      <el-alert type="info" :closable="false" show-icon title="测试批次可选：选择后按批次授权范围匹配资产；不选择时按全局资产台账匹配。资产尚未建档的有效漏洞会进入待关联列表。支持 CSV、XLSX 以及安全测试导出的 JSON。" />
       <div class="import-toolbar">
-        <el-select v-model="importTestBatchID" filterable placeholder="选择安全测试批次" style="min-width:320px">
+        <el-select v-model="importTestBatchID" clearable filterable placeholder="测试批次（可选）" style="min-width:320px">
           <el-option v-for="item in usableTestBatches" :key="item.id" :label="`${item.name}（${item.code}，${item.asset_count} 项资产）`" :value="item.id" />
         </el-select>
-        <input ref="importFileInput" type="file" accept=".csv,.xlsx" @change="selectFindingImportFile" />
+        <input ref="importFileInput" type="file" accept=".csv,.xlsx,.json" @change="selectFindingImportFile" />
         <el-button type="primary" :loading="importSubmitting" @click="submitFindingImport">开始导入</el-button>
       </div>
       <div class="template-links">标准列：资产类型、资产值、漏洞标题、严重等级、漏洞类型、漏洞描述、验证证据、整改建议、发现时间。<el-button link type="primary" @click="downloadFindingTemplate('xlsx')">下载 XLSX 模板</el-button><el-button link type="primary" @click="downloadFindingTemplate('csv')">下载 CSV 模板</el-button></div>
@@ -1168,7 +1188,7 @@ async function onTabChange() {
       </div>
       <div class="detail-block"><h3>最近导入历史</h3>
         <el-table :data="findingImports.slice(0, 10)" size="small" empty-text="暂无导入记录">
-          <el-table-column label="文件" prop="file_name" min-width="160" /><el-table-column label="测试批次" min-width="190"><template #default="scope">{{ scope.row.test_batch_name }}<span class="table-secondary mono-text">{{ scope.row.test_batch_code }}</span></template></el-table-column>
+          <el-table-column label="文件" prop="file_name" min-width="160" /><el-table-column label="测试批次" min-width="135"><template #default="scope">{{ scope.row.test_batch_name || '未关联测试批次' }}<span v-if="scope.row.test_batch_code" class="table-secondary mono-text">{{ scope.row.test_batch_code }}</span></template></el-table-column>
           <el-table-column label="结果" min-width="230"><template #default="scope">成功 {{ scope.row.success_count }} / 待关联 {{ scope.row.pending_count }} / 重复 {{ scope.row.duplicate_count }} / 失败 {{ scope.row.failure_count }}</template></el-table-column>
           <el-table-column label="导入时间" width="165"><template #default="scope">{{ formatDate(scope.row.created_at) }}</template></el-table-column>
         </el-table>
@@ -1176,11 +1196,11 @@ async function onTabChange() {
       <template #footer><el-button @click="importDialogVisible = false">关闭</el-button></template>
     </el-dialog>
 
-    <el-dialog v-model="candidateDialogVisible" title="关联漏洞到测试范围资产" width="760px" destroy-on-close>
+    <el-dialog v-model="candidateDialogVisible" title="关联漏洞到资产" width="760px" destroy-on-close>
       <template v-if="selectedCandidate">
-        <el-alert type="warning" :closable="false" show-icon title="系统只允许关联当前安全测试批次中的授权资产；相似匹配仅作为建议，不会自动入库。" />
+        <el-alert type="warning" :closable="false" show-icon :title="selectedCandidate.test_batch_id ? '系统只允许关联当前安全测试批次中的授权资产；相似匹配仅作为建议，不会自动入库。' : '当前导入未关联测试批次，将从全局资产台账中选择资产；系统建议仅供参考，不会自动入库。'" />
         <el-descriptions :column="2" border class="candidate-descriptions">
-          <el-descriptions-item label="测试批次">{{ selectedCandidate.test_batch_name }}（{{ selectedCandidate.test_batch_code }}）</el-descriptions-item>
+          <el-descriptions-item label="测试批次">{{ selectedCandidate.test_batch_name || '未关联测试批次' }}<span v-if="selectedCandidate.test_batch_code">（{{ selectedCandidate.test_batch_code }}）</span></el-descriptions-item>
           <el-descriptions-item label="原文件行号">第 {{ selectedCandidate.source_row_number }} 行</el-descriptions-item>
           <el-descriptions-item label="原始资产类型">{{ assetTypeLabels[selectedCandidate.asset_type] || selectedCandidate.asset_type }}</el-descriptions-item>
           <el-descriptions-item label="原始资产值"><span class="mono-text">{{ selectedCandidate.asset_value }}</span></el-descriptions-item>
@@ -1188,8 +1208,8 @@ async function onTabChange() {
           <el-descriptions-item label="漏洞描述" :span="2"><span class="candidate-description-text">{{ selectedCandidate.description }}</span></el-descriptions-item>
         </el-descriptions>
         <el-form label-position="top" class="candidate-link-form">
-          <el-form-item label="关联授权资产（必选）">
-            <el-select v-model="selectedCandidateScopeAssetID" filterable style="width:100%" placeholder="请选择当前批次授权资产">
+          <el-form-item label="关联资产（必选）">
+            <el-select v-model="selectedCandidateScopeAssetID" filterable style="width:100%" :placeholder="selectedCandidate.test_batch_id ? '请选择当前批次授权资产' : '请选择全局资产台账中的资产'">
               <el-option v-for="item in candidateScopeOptions" :key="item.id" :value="item.id" :label="`${item.asset_value} · ${item.organization_name}${item.business_system_name ? ` · ${item.business_system_name}` : ''}`">
                 <div class="candidate-option"><span><el-tag v-if="item.suggested" size="small" type="warning">系统建议</el-tag>{{ item.asset_value }}</span><small>{{ item.organization_name }}{{ item.business_system_name ? ` · ${item.business_system_name}` : '' }}</small></div>
               </el-option>
@@ -1207,9 +1227,10 @@ async function onTabChange() {
           <el-form-item label="工单标题" prop="title"><el-input v-model="workOrderForm.title" maxlength="255" /></el-form-item>
           <el-form-item label="责任组织" prop="assignee_organization_id"><el-select v-model="workOrderForm.assignee_organization_id" filterable style="width:100%"><el-option v-for="item in enabledOrganizations" :key="item.id" :label="item.name" :value="item.id" /></el-select></el-form-item>
           <el-form-item label="整改期限" prop="due_at"><el-date-picker v-model="workOrderForm.due_at" type="datetime" style="width:100%" /></el-form-item>
+          <el-form-item label="执行方式"><el-radio-group v-model="workOrderForm.execution_mode"><el-radio value="organization">组织统一整改</el-radio><el-radio value="individual">组织派给具体人员</el-radio></el-radio-group></el-form-item>
           <el-form-item label="下发方式"><el-switch v-model="workOrderForm.issue_immediately" active-text="保存后立即下发" inactive-text="先保存草稿" /></el-form-item>
         </div>
-        <el-form-item label="关联安全发现" prop="finding_ids"><el-select v-model="workOrderForm.finding_ids" multiple filterable collapse-tags style="width:100%" placeholder="仅显示该组织待处置的发现"><el-option v-for="item in orderFindings" :key="item.id" :label="`[${severityLabels[item.severity]}] ${item.code} ${item.title} · ${findingTarget(item)}`" :value="item.id" /></el-select></el-form-item>
+        <el-form-item label="关联安全发现" prop="finding_ids"><el-select v-model="workOrderForm.finding_ids" multiple filterable collapse-tags style="width:100%" placeholder="仅显示该组织待处理的发现"><el-option v-for="item in orderFindings" :key="item.id" :label="`[${severityLabels[item.severity]}] ${item.code} ${item.title} · ${findingTarget(item)}`" :value="item.id" /></el-select></el-form-item>
         <el-form-item label="背景说明"><el-input v-model="workOrderForm.description" type="textarea" :rows="3" /></el-form-item>
         <el-form-item label="整改要求" prop="remediation_requirement"><el-input v-model="workOrderForm.remediation_requirement" type="textarea" :rows="4" placeholder="明确整改要求、验证口径和提交材料" /></el-form-item>
       </el-form>
@@ -1283,6 +1304,14 @@ async function onTabChange() {
 
 <style scoped>
 .security-panel { overflow: hidden; }
+.finding-summary-cards { display:grid; grid-template-columns:repeat(6, minmax(110px, 1fr)); gap:12px; margin:14px 0 18px; }
+.finding-summary-card { min-height:78px; padding:14px 16px; border:1px solid var(--line); border-radius:12px; background:#fff; display:flex; flex-direction:column; justify-content:space-between; box-shadow:0 2px 8px rgba(15,23,42,.03); }
+.finding-summary-card span { color:var(--muted); font-size:13px; }
+.finding-summary-card strong { color:var(--navy); font-size:27px; line-height:1; }
+.finding-summary-card.tone-pending { border-color:#fed7aa; background:#fffaf3; }.finding-summary-card.tone-pending strong,.finding-summary-card.tone-high strong { color:#c2410c; }
+.finding-summary-card.tone-critical { border-color:#fecaca; background:#fff5f5; }.finding-summary-card.tone-critical strong { color:#b91c1c; }
+.finding-summary-card.tone-medium { border-color:#fde68a; background:#fffdf2; }.finding-summary-card.tone-medium strong { color:#b45309; }
+.finding-summary-card.tone-low { border-color:#bbf7d0; background:#f5fff8; }.finding-summary-card.tone-low strong { color:#15803d; }
 .work-order-saved-views { margin:-8px 0 0; padding-top:12px; border-top:1px dashed var(--line); }
 .work-order-stat-list { justify-content: flex-start; margin: 12px 0 18px; padding-top: 12px; border-top: 1px dashed var(--line); }
 .filter-bar { display: flex; flex-wrap: wrap; gap: 10px; margin: 4px 0 18px; }
@@ -1332,4 +1361,9 @@ async function onTabChange() {
 .finding-detail-actions { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 24px; }
 .risk-form { margin-top: 18px; }
 @media (max-width: 900px) { .import-stat-grid { grid-template-columns: repeat(2, 1fr); } .heading-actions { width: 100%; } .attachment-upload-box { grid-template-columns: 1fr; } }
+@media (max-width: 620px) { .finding-summary-cards { grid-template-columns:repeat(2, 1fr); } }
+</style>
+
+<style scoped>
+.page-stack>.page-heading { margin-bottom:0; }.work-order-guide { color:var(--muted);font-size:12px; }.work-order-guide summary { cursor:pointer; }.work-order-guide p { line-height:1.7; }.security-panel { padding:8px 20px 20px; }.work-order-stat-list { margin:12px 0;padding:10px 0; }.work-order-saved-views { margin:0;padding-top:8px; }
 </style>

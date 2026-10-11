@@ -1,6 +1,6 @@
 <script setup lang="ts">
+import RowActions from '../components/RowActions.vue'
 import { onMounted, ref } from 'vue'
-import { ArrowDown } from '@element-plus/icons-vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { backupDownloadURL, createBackup, deleteBackup, listBackups, type BackupItem, verifyBackup } from '../api/backups'
 import { getAPIErrorMessage } from '../api/client'
@@ -149,7 +149,7 @@ onMounted(() => { void loadBackups() })
         <el-button type="primary" @click="createNewBackup">创建首个备份</el-button>
       </el-empty>
       <el-table v-else :data="backups" stripe class="backup-table">
-        <el-table-column label="备份编号" min-width="280">
+        <el-table-column label="备份编号" min-width="250">
           <template #default="{ row }"><code class="backup-id">{{ row.id }}</code></template>
         </el-table-column>
         <el-table-column label="创建时间" min-width="180">
@@ -164,21 +164,16 @@ onMounted(() => { void loadBackups() })
         <el-table-column label="状态" width="110">
           <template #default="{ row }"><el-tag :type="row.verified ? 'success' : 'info'">{{ row.verified ? '已校验' : '未校验' }}</el-tag></template>
         </el-table-column>
-        <el-table-column label="操作" width="190" fixed="right" align="right" header-align="right" class-name="table-action-column">
-          <template #default="{ row }">
+        <el-table-column label="操作" width="88" fixed="right" align="right" header-align="right" class-name="table-action-column">
+          <template #default="{ row }"><RowActions :label="`操作：${row.name || row.display_name || row.id}`">
             <el-button link type="primary" :loading="verifyingID === row.id" @click="verify(row)">校验</el-button>
-            <el-dropdown trigger="click">
-              <el-button link type="primary">下载<el-icon class="el-icon--right"><ArrowDown /></el-icon></el-button>
-              <template #dropdown>
-                <el-dropdown-menu>
-                  <el-dropdown-item><a :href="backupDownloadURL(row.id, 'database')">数据库备份</a></el-dropdown-item>
-                  <el-dropdown-item><a :href="backupDownloadURL(row.id, 'attachments')">附件归档</a></el-dropdown-item>
-                  <el-dropdown-item><a :href="backupDownloadURL(row.id, 'manifest')">校验清单</a></el-dropdown-item>
-                </el-dropdown-menu>
-              </template>
-            </el-dropdown>
+
+                  <a class="row-download-link" :href="backupDownloadURL(row.id, 'database')">数据库备份</a>
+                  <a class="row-download-link" :href="backupDownloadURL(row.id, 'attachments')">附件归档</a>
+                  <a class="row-download-link" :href="backupDownloadURL(row.id, 'manifest')">校验清单</a>
+
             <el-button link type="danger" :loading="deletingID === row.id" @click="remove(row)">删除</el-button>
-          </template>
+          </RowActions></template>
         </el-table-column>
       </el-table>
       <div v-if="total > 0" class="table-pagination">

@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import RowActions from '../components/RowActions.vue'
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { useRoute, useRouter } from 'vue-router'
@@ -106,9 +107,7 @@ onBeforeUnmount(() => { if (timer !== undefined) window.clearInterval(timer) })
   <section>
     <div class="page-heading">
       <div>
-        <span class="eyebrow">BACKGROUND EXPORTS</span>
         <h1>导出任务</h1>
-        <p>大型 XLSX 文件在后台分页生成，仅任务申请人可查看和下载；文件生成后保留 7 天。</p>
       </div>
       <div class="page-heading-actions">
         <el-button :loading="loading" @click="load()">刷新</el-button>
@@ -128,18 +127,18 @@ onBeforeUnmount(() => { if (timer !== undefined) window.clearInterval(timer) })
 
     <div class="panel data-table-panel" v-loading="loading">
       <el-table :data="items" row-key="id" empty-text="暂无后台导出任务">
-        <el-table-column label="导出内容" min-width="180">
-          <template #default="scope"><div class="job-name" :data-job-id="scope.row.id"><strong>{{ resourceLabels[scope.row.resource_type] }}</strong><span>{{ scope.row.file_name || 'XLSX 后台导出' }}</span></div></template>
+        <el-table-column label="导出内容" min-width="190">
+          <template #default="scope"><div class="job-name" :data-job-id="scope.row.id"><strong>{{ resourceLabels[scope.row.resource_type] }}</strong><span>{{ scope.row.file_name || 'XLSX 后台导出' }}</span></div><span class="list-secondary">{{ formatSize(scope.row.file_size) }}</span></template>
         </el-table-column>
-        <el-table-column label="状态" width="120"><template #default="scope"><el-tag :type="statusTag(scope.row.status)" effect="plain">{{ statusLabels[scope.row.status] }}</el-tag></template></el-table-column>
-        <el-table-column label="进度" min-width="190">
+        <el-table-column label="状态" width="100"><template #default="scope"><el-tag :type="statusTag(scope.row.status)" effect="plain">{{ statusLabels[scope.row.status] }}</el-tag></template></el-table-column>
+        <el-table-column label="进度" min-width="150">
           <template #default="scope"><el-progress :percentage="progress(scope.row)" :status="scope.row.status === 'failed' ? 'exception' : scope.row.status === 'completed' ? 'success' : undefined" /><span class="progress-copy">{{ scope.row.processed_rows }} / {{ scope.row.total_rows }} 条</span></template>
         </el-table-column>
-        <el-table-column label="文件" min-width="125"><template #default="scope">{{ formatSize(scope.row.file_size) }}</template></el-table-column>
-        <el-table-column label="创建 / 完成时间" min-width="220"><template #default="scope"><div class="job-name"><strong>{{ formatTime(scope.row.created_at) }}</strong><span>{{ scope.row.completed_at ? `完成：${formatTime(scope.row.completed_at)}` : '尚未完成' }}</span></div></template></el-table-column>
-        <el-table-column label="有效期 / 失败原因" min-width="230"><template #default="scope"><span v-if="scope.row.error_message" class="error-copy">{{ scope.row.error_message }}</span><span v-else>{{ scope.row.expires_at ? `保留至 ${formatTime(scope.row.expires_at)}` : '—' }}</span></template></el-table-column>
-        <el-table-column label="操作" width="120" fixed="right" align="right" header-align="right" class-name="table-action-column">
-          <template #default="scope"><el-button link type="primary" :disabled="scope.row.status !== 'completed'" :loading="downloadingID === scope.row.id" @click="download(scope.row)">下载</el-button><el-button link type="danger" :disabled="scope.row.status === 'running'" :loading="deletingID === scope.row.id" @click="remove(scope.row)">删除</el-button></template>
+
+        <el-table-column label="创建 / 完成时间" min-width="175"><template #default="scope"><div class="job-name"><strong>{{ formatTime(scope.row.created_at) }}</strong><span>{{ scope.row.completed_at ? `完成：${formatTime(scope.row.completed_at)}` : '尚未完成' }}</span></div></template></el-table-column>
+        <el-table-column label="有效期 / 失败原因" min-width="175"><template #default="scope"><span v-if="scope.row.error_message" class="error-copy">{{ scope.row.error_message }}</span><span v-else>{{ scope.row.expires_at ? `保留至 ${formatTime(scope.row.expires_at)}` : '—' }}</span></template></el-table-column>
+        <el-table-column label="操作" width="88" fixed="right" align="right" header-align="right" class-name="table-action-column">
+          <template #default="scope"><RowActions :label="`操作：${scope.row.name || scope.row.title || scope.row.code || scope.row.display_name || scope.row.id}`"><el-button link type="primary" :disabled="scope.row.status !== 'completed'" :loading="downloadingID === scope.row.id" @click="download(scope.row)">下载</el-button><el-button link type="danger" :disabled="scope.row.status === 'running'" :loading="deletingID === scope.row.id" @click="remove(scope.row)">删除</el-button></RowActions></template>
         </el-table-column>
       </el-table>
       <div v-if="total > 0" class="table-pagination"><el-pagination background layout="total, sizes, prev, pager, next" :total="total" :current-page="page" :page-size="pageSize" :page-sizes="[20, 50, 100]" @current-change="changePage" @size-change="changePageSize" /></div>

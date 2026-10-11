@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import RowActions from '../components/RowActions.vue'
 import { computed, onMounted, reactive, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox, type FormInstance, type FormRules, type UploadFile, type UploadFiles } from 'element-plus'
@@ -55,6 +56,7 @@ interface DetailResponse { item: Asset }
 const auth = useAuthStore()
 const route = useRoute()
 const router = useRouter()
+const extendedColumns = ref(false)
 const loading = ref(false)
 const submitting = ref(false)
 const importing = ref(false)
@@ -959,18 +961,14 @@ onMounted(() => {
     </el-alert>
     <div class="page-heading">
       <div>
-        <span class="eyebrow">NETWORK ASSETS</span>
         <h1>网络资产</h1>
-        <p>集团统一维护域名、IP、URL 和网络服务，子公司仅管理授权组织范围内的数据。</p>
       </div>
       <div class="button-row ledger-page-actions asset-page-actions">
         <el-dropdown v-if="!inventoryMode">
           <el-button :loading="exporting">导出台账</el-button>
           <template #dropdown><el-dropdown-menu><el-dropdown-item @click="exportLedger('xlsx')">导出 XLSX</el-dropdown-item><el-dropdown-item @click="exportLedger('csv')">导出 CSV</el-dropdown-item><el-dropdown-item divided @click="queueXLSXExport">后台生成 XLSX</el-dropdown-item></el-dropdown-menu></template>
         </el-dropdown>
-        <el-button v-if="auth.isGroupAdmin && !inventoryMode" @click="openAreaManagement">网络区域配置</el-button>
-        <el-button v-if="!inventoryMode" @click="openImportHistory">导入记录</el-button>
-        <el-button v-if="!inventoryMode" @click="openImportDialog">批量导入</el-button>
+        <el-dropdown v-if="!inventoryMode" trigger="click"><el-button>更多操作</el-button><template #dropdown><el-dropdown-menu><el-dropdown-item @click="openImportDialog">批量导入</el-dropdown-item><el-dropdown-item @click="openImportHistory">导入记录</el-dropdown-item><el-dropdown-item v-if="auth.isGroupAdmin" divided @click="openAreaManagement">网络区域配置</el-dropdown-item></el-dropdown-menu></template></el-dropdown>
         <el-button type="primary" @click="openCreateDialog">新增资产</el-button>
       </div>
     </div>
@@ -988,7 +986,7 @@ onMounted(() => {
           <el-option v-for="item in enabledOrganizations" :key="item.id" :label="item.name" :value="item.id" />
         </el-select>
         <el-button @click="resetAndLoadAssets">查询</el-button>
-        <span class="asset-filter-count">共 {{ total }} 条</span>
+        <el-button text :aria-pressed="extendedColumns" @click="extendedColumns=!extendedColumns">{{ extendedColumns?'精简字段':'更多字段' }}</el-button><span class="asset-filter-count">共 {{ total }} 条</span>
       </div>
       <SavedFilterViews v-if="!inventoryMode" ref="savedFilterViews" page-key="assets" :current-filters="currentAssetFilters" @apply="applySavedAssetFilters" />
     </div>
@@ -999,14 +997,14 @@ onMounted(() => {
         <el-tag type="warning" effect="plain">待提交</el-tag>
       </div>
       <el-table :data="draftAssets" row-key="id" empty-text="尚未选择需要上报的网络资产">
-        <el-table-column label="资产名称" min-width="180"><template #default="scope"><el-button link type="primary" class="table-link" @click="openEditDialog(scope.row)">{{ scope.row.name || '未命名资产' }}</el-button></template></el-table-column>
-        <el-table-column label="资产值" min-width="230"><template #default="scope"><span class="mono-text">{{ scope.row.value }}</span></template></el-table-column>
+        <el-table-column label="资产 / 访问标识" min-width="240"><template #default="scope"><el-button link type="primary" class="table-link" @click="openEditDialog(scope.row)">{{ scope.row.name || '未命名资产' }}</el-button><span class="list-secondary mono-text">{{ scope.row.value }}</span></template></el-table-column>
+
         <el-table-column label="类型" width="95"><template #default="scope">{{ typeLabel(scope.row.type) }}</template></el-table-column>
         <el-table-column prop="business_system_name" label="业务系统" min-width="150"><template #default="scope">{{ scope.row.business_system_name || '未绑定' }}</template></el-table-column>
         <el-table-column label="暴露范围" width="105"><template #default="scope">{{ scopeLabel(scope.row.network_scope) }}</template></el-table-column>
         <el-table-column label="变更类型" width="90"><template #default="scope"><el-tag :type="scope.row.operation === 'delete' ? 'danger' : scope.row.operation === 'update' ? 'warning' : 'success'" effect="plain">{{ draftOperationLabels[scope.row.operation || 'create'] }}</el-tag></template></el-table-column>
         <el-table-column label="上报状态" width="105"><template #default="scope"><el-tag type="warning" effect="plain">{{ draftStatusLabels[scope.row.draft_status || 'editing'] || scope.row.draft_status }}</el-tag></template></el-table-column>
-        <el-table-column label="操作" width="210" fixed="right" align="right" header-align="right" class-name="table-action-column"><template #default="scope"><el-button link type="primary" @click="openWorkingVersionDiff(scope.row)">查看变更</el-button><el-button v-if="scope.row.operation !== 'delete'" link type="primary" :disabled="scope.row.draft_status === 'submitted'" @click="openEditDialog(scope.row)">编辑</el-button><el-button link type="danger" :disabled="scope.row.draft_status === 'submitted'" @click="removeDraft(scope.row)">取消上报</el-button></template></el-table-column>
+        <el-table-column label="操作" width="88" fixed="right" align="right" header-align="right" class-name="table-action-column"><template #default="scope"><RowActions :label="`操作：${scope.row.name || scope.row.title || scope.row.code || scope.row.display_name || scope.row.id}`"><el-button link type="primary" @click="openWorkingVersionDiff(scope.row)">查看变更</el-button><el-button v-if="scope.row.operation !== 'delete'" link type="primary" :disabled="scope.row.draft_status === 'submitted'" @click="openEditDialog(scope.row)">编辑</el-button><el-button link type="danger" :disabled="scope.row.draft_status === 'submitted'" @click="removeDraft(scope.row)">取消上报</el-button></RowActions></template></el-table-column>
       </el-table>
       <div v-if="draftTotal > 0" class="table-pagination">
         <el-pagination background layout="total, sizes, prev, pager, next" :total="draftTotal" :current-page="draftPage" :page-size="draftPageSize" :page-sizes="[20, 50, 100]" @current-change="handleDraftPageChange" @size-change="handleDraftPageSizeChange" />
@@ -1018,7 +1016,7 @@ onMounted(() => {
         <div><strong>选择上报</strong><span>已选择 {{ selectedAssets.length }} 个未上报网络资产，单次最多 200 个</span></div>
         <div class="batch-toolbar-actions"><el-button type="primary" :loading="batchLoading" :disabled="selectedAssets.length === 0" @click="batchSelectWorkspaceAssets">批量纳入本次上报</el-button></div>
       </div>
-      <div v-else class="batch-toolbar">
+      <div v-else-if="selectedAssets.length" class="batch-toolbar">
         <div><strong>批量操作</strong><span>已选择 {{ selectedAssets.length }} 个资产；设置网络区域时需选择同一组织的资产</span></div>
         <div class="batch-toolbar-actions">
           <el-select v-model="batchStatusValue" aria-label="批量设置状态" :disabled="selectedAssets.length === 0 || batchLoading" placeholder="批量设置状态" style="width: 150px" @change="applyBatchStatus">
@@ -1041,31 +1039,25 @@ onMounted(() => {
       </div>
       <el-table :data="assets" row-key="id" empty-text="暂无网络资产" @selection-change="handleSelectionChange">
         <el-table-column type="selection" width="46" :selectable="canSelectAsset" />
-        <el-table-column label="资产名称" min-width="180">
-          <template #default="scope"><el-button link type="primary" class="table-link" @click="openDetail(scope.row)">{{ scope.row.name || '未命名资产' }}</el-button></template>
-        </el-table-column>
-        <el-table-column label="资产值" min-width="230">
-          <template #default="scope"><span class="mono-text">{{ scope.row.value }}</span></template>
+        <el-table-column label="资产 / 访问标识" min-width="240">
+          <template #default="scope"><el-button link type="primary" class="table-link" @click="openDetail(scope.row)">{{ scope.row.name || '未命名资产' }}</el-button><div class="table-secondary mono-text">{{ scope.row.value }}</div></template>
         </el-table-column>
         <el-table-column label="类型" width="95"><template #default="scope">{{ typeLabel(scope.row.type) }}</template></el-table-column>
-        <el-table-column prop="organization_name" label="所属组织" min-width="150" />
-        <el-table-column label="业务系统" min-width="150"><template #default="scope"><span v-if="scope.row.business_system_id">{{ scope.row.business_system_name }}</span><span v-else class="muted-text">未绑定</span></template></el-table-column>
-        <el-table-column label="责任人账号" min-width="150"><template #default="scope"><div v-if="scope.row.owner_user_id" class="organization-name-cell"><strong>{{ scope.row.owner_user_display_name || scope.row.owner_username }}</strong><span>{{ scope.row.owner_username }}</span></div><span v-else class="muted-text">未绑定</span></template></el-table-column>
-        <el-table-column label="环境 / 暴露范围" width="145"><template #default="scope">{{ environmentLabel(scope.row.environment) }} / {{ scopeLabel(scope.row.network_scope) }}</template></el-table-column>
-        <el-table-column label="网络区域" min-width="135"><template #default="scope"><span>{{ scope.row.network_area_name || '未指定' }}</span></template></el-table-column>
-        <el-table-column label="有效期" min-width="185"><template #default="scope"><el-tag :type="expiryTag(scope.row.expires_at)" effect="plain">{{ expiryLabel(scope.row.expires_at) }}</el-tag></template></el-table-column>
-        <el-table-column label="状态" width="90"><template #default="scope"><el-tag :type="statusTag(scope.row.status)" effect="plain">{{ statusLabel(scope.row.status) }}</el-tag></template></el-table-column>
+
+        <el-table-column label="业务归属" min-width="175"><template #default="scope"><span v-if="scope.row.business_system_id">{{ scope.row.business_system_name }}</span><el-tag v-else type="warning" size="small">待补全业务系统</el-tag><div class="table-secondary">{{ scope.row.organization_name }}</div></template></el-table-column>
+        <el-table-column label="责任人" min-width="110"><template #default="scope"><div v-if="scope.row.owner_user_id" class="organization-name-cell"><strong>{{ scope.row.owner_user_display_name || scope.row.owner_username }}</strong><span>{{ scope.row.owner_username }}</span></div><span v-else class="muted-text">未绑定</span></template></el-table-column>
+        <el-table-column v-if="extendedColumns" label="环境 / 暴露范围" width="145"><template #default="scope">{{ environmentLabel(scope.row.environment) }} / {{ scopeLabel(scope.row.network_scope) }}</template></el-table-column>
+        <el-table-column v-if="extendedColumns" label="网络区域" min-width="135"><template #default="scope"><span>{{ scope.row.network_area_name || '未指定' }}</span></template></el-table-column>
+        <el-table-column v-if="extendedColumns" label="有效期" min-width="185"><template #default="scope"><el-tag :type="expiryTag(scope.row.expires_at)" effect="plain">{{ expiryLabel(scope.row.expires_at) }}</el-tag></template></el-table-column>
+        <el-table-column label="状态" width="90"><template #default="scope"><el-tag :type="statusTag(scope.row.status)" effect="plain">{{ statusLabel(scope.row.status) }}</el-tag><span v-if="inventoryMode && scope.row.is_working_copy && scope.row.task_id" class="list-secondary">{{ scope.row.task_id === inventoryTaskID ? '已纳入本次上报' : '已纳入其他任务' }}</span></template></el-table-column>
         <el-table-column v-if="!auth.isGroupAdmin && !inventoryMode" label="上报状态" width="130"><template #default="scope"><el-tag :type="scope.row.reporting_status === 'reported' ? 'success' : 'warning'" effect="plain">{{ reportingStatusLabels[scope.row.reporting_status || 'reported'] }}</el-tag></template></el-table-column>
-        <el-table-column label="重要程度" width="95"><template #default="scope"><el-tag :type="importanceTag(scope.row.importance)" effect="plain">{{ importanceLabel(scope.row.importance) }}</el-tag></template></el-table-column>
-        <el-table-column label="来源" width="75"><template #default="scope">{{ sourceLabel(scope.row.source) }}</template></el-table-column>
-        <el-table-column label="操作" width="210" fixed="right" align="right" header-align="right" class-name="table-action-column">
-          <template #default="scope">
-            <template v-if="!inventoryMode">
-              <template v-if="scope.row.is_working_copy"><el-button link type="primary" @click="openWorkingVersionDiff(scope.row)">查看变更</el-button><el-button link type="primary" @click="openEditDialog(scope.row)">编辑</el-button><el-button link type="danger" @click="removeAsset(scope.row)">删除</el-button></template>
-              <template v-else><el-button link type="primary" @click="openChangeHistory(scope.row)">历史</el-button><el-button link type="primary" @click="openEditDialog(scope.row)">编辑</el-button><el-button link :type="scope.row.status === 'archived' ? 'success' : 'warning'" @click="toggleArchive(scope.row)">{{ scope.row.status === 'archived' ? '启用' : '归档' }}</el-button><el-button link type="danger" @click="removeAsset(scope.row)">删除</el-button></template>
-            </template>
-            <template v-else><template v-if="scope.row.is_working_copy"><el-button link type="primary" @click="openWorkingVersionDiff(scope.row)">查看变更</el-button><el-button v-if="!scope.row.task_id" link type="primary" @click="selectWorkspaceAsset(scope.row)">选择上报</el-button><el-tag v-else-if="scope.row.task_id === inventoryTaskID" type="success" effect="plain">已纳入本次上报</el-tag><el-tag v-else type="info" effect="plain">已纳入其他任务</el-tag></template><template v-else><el-button link type="primary" @click="openEditDialog(scope.row)">修改后上报</el-button><el-button link type="danger" @click="requestAssetDeletion(scope.row)">申请下线</el-button></template></template>
-          </template>
+        <el-table-column v-if="extendedColumns" label="重要程度" width="95"><template #default="scope"><el-tag :type="importanceTag(scope.row.importance)" effect="plain">{{ importanceLabel(scope.row.importance) }}</el-tag></template></el-table-column>
+        <el-table-column v-if="extendedColumns" label="来源" width="75"><template #default="scope">{{ sourceLabel(scope.row.source) }}</template></el-table-column>
+        <el-table-column label="操作" width="88" fixed="right" align="right" header-align="right" class-name="table-action-column">
+          <template #default="scope"><RowActions :label="`操作：${scope.row.name || scope.row.display_name || scope.row.id}`">
+            <template v-if="!inventoryMode"><el-button link type="primary" @click="openEditDialog(scope.row)">编辑</el-button><el-button link type="primary" @click="openDetail(scope.row)">查看详情</el-button><el-button link type="primary" v-if="scope.row.is_working_copy" @click="openWorkingVersionDiff(scope.row)">查看变更</el-button><el-button link type="primary" v-else @click="openChangeHistory(scope.row)">变更历史</el-button><el-button link type="primary" v-if="!scope.row.is_working_copy" @click="toggleArchive(scope.row)">{{ scope.row.status === 'archived' ? '启用' : '归档' }}</el-button><el-button link type="danger" @click="removeAsset(scope.row)">删除资产</el-button></template>
+            <template v-else><template v-if="scope.row.is_working_copy"><el-button link type="primary" @click="openWorkingVersionDiff(scope.row)">查看变更</el-button><el-button v-if="!scope.row.task_id" link type="primary" @click="selectWorkspaceAsset(scope.row)">选择上报</el-button></template><template v-else><el-button link type="primary" @click="openEditDialog(scope.row)">修改后上报</el-button><el-button link type="danger" @click="requestAssetDeletion(scope.row)">申请下线</el-button></template></template>
+          </RowActions></template>
         </el-table-column>
       </el-table>
       <div class="table-pagination">
@@ -1238,3 +1230,7 @@ onMounted(() => {
     </el-drawer>
   </section>
 </template>
+
+<style scoped>
+.network-asset-filter-controls,.network-asset-filter-controls.with-organization-filter { display:flex;flex-wrap:wrap;gap:10px; }.network-asset-filter-controls>.el-input { flex:1;min-width:220px; }.network-asset-filter-controls>.el-select { width:140px; }.network-asset-filter-controls>.el-select:last-of-type { width:170px; }.network-asset-filter-controls .el-button { margin-left:0; }.mono-text { overflow-wrap:anywhere; }@media(max-width:760px) { .network-asset-filter-controls>.el-input { flex-basis:100%; }.asset-page-actions { flex-wrap:wrap; }.batch-toolbar { align-items:flex-start; } }
+</style>

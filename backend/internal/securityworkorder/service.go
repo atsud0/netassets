@@ -83,6 +83,15 @@ type FindingInput struct {
 	DiscoveredAt           time.Time `json:"discovered_at"`
 }
 
+type FindingSummaryStats struct {
+	Total    int `json:"total"`
+	Pending  int `json:"pending"`
+	Critical int `json:"critical"`
+	High     int `json:"high"`
+	Medium   int `json:"medium"`
+	Low      int `json:"low"`
+}
+
 type FindingSummary struct {
 	ID                 string `json:"id"`
 	Code               string `json:"code"`
@@ -111,6 +120,8 @@ type Event struct {
 }
 
 type WorkOrder struct {
+	ExecutionMode            string           `json:"execution_mode"`
+	RemediationCounts        json.RawMessage  `json:"remediation_counts"`
 	ID                       string           `json:"id"`
 	Number                   string           `json:"number"`
 	Title                    string           `json:"title"`
@@ -150,6 +161,7 @@ type WorkOrderSearchFilter struct {
 }
 
 type WorkOrderInput struct {
+	ExecutionMode          string    `json:"execution_mode"`
 	Title                  string    `json:"title"`
 	AssigneeOrganizationID string    `json:"assignee_organization_id"`
 	Description            string    `json:"description"`
@@ -201,6 +213,56 @@ func NewService(pool *pgxpool.Pool, storageDirs ...string) *Service {
 	return &Service{pool: pool, storageDir: storageDir}
 }
 
+// SummarizeFindings returns counts using the same visibility rules as the findings list.
+func (s *Service) SummarizeFindings(ctx context.Context, principal auth.Principal, organizationID string) (FindingSummaryStats, error) {
+	organizationID = strings.TrimSpace(organizationID)
+	if organizationID != "" {
+		if !validUUID(organizationID) {
+			return FindingSummaryStats{}, ErrInvalid
+		}
+		allowed, err := access.CanAccessOrganization(ctx, s.pool, principal, organizationID)
+		if err != nil {
+			return FindingSummaryStats{}, err
+		}
+		if !allowed {
+			return FindingSummaryStats{}, ErrForbidden
+		}
+	}
+	var result FindingSummaryStats
+	err := s.pool.QueryRow(ctx, accessibleCTE+`
+		SELECT count(*)::int,
+		       count(*) FILTER (WHERE f.status = 'pending')::int,
+		       count(*) FILTER (WHERE f.severity = 'critical')::int,
+		       count(*) FILTER (WHERE f.severity = 'high')::int,
+		       count(*) FILTER (WHERE f.severity = 'medium')::int,
+		       count(*) FILTER (WHERE f.severity = 'low')::int
+		FROM security_findings f
+		WHERE (
+		        $2::boolean
+		        OR (
+		            (
+		                (f.asset_id IS NOT NULL AND EXISTS (SELECT 1 FROM finding_permission_accessible scope WHERE scope.permission_key = 'asset.manage' AND scope.id = f.assignee_organization_id))
+		                OR (f.asset_id IS NULL AND f.business_system_id IS NOT NULL AND EXISTS (SELECT 1 FROM finding_permission_accessible scope WHERE scope.permission_key = 'system.manage' AND scope.id = f.assignee_organization_id))
+		            )
+		            OR (
+		                f.assignee_organization_id IN (SELECT id FROM accessible)
+		                AND EXISTS (
+		                    SELECT 1 FROM security_work_order_findings visible_link
+		                    JOIN security_work_orders visible_order ON visible_order.id = visible_link.work_order_id
+		                    WHERE visible_link.finding_id = f.id AND visible_order.issued_at IS NOT NULL
+		                )
+		    )
+		  )
+		)
+		AND ($3::text = '' OR f.assignee_organization_id::text = $3)`,
+		principal.UserID, principal.CanManageSecurityFindings(), organizationID).Scan(
+		&result.Total, &result.Pending, &result.Critical, &result.High, &result.Medium, &result.Low)
+	if err != nil {
+		return FindingSummaryStats{}, fmt.Errorf("summarize security findings: %w", err)
+	}
+	return result, nil
+}
+
 func (s *Service) ListFindings(ctx context.Context, principal auth.Principal, organizationID, status string) ([]Finding, error) {
 	// Kept for internal compatibility. HTTP collection endpoints must use SearchFindings.
 	result, err := s.SearchFindings(ctx, principal, organizationID, status, pagination.Query{Page: 1, PageSize: pagination.MaxPageSize})
@@ -238,7 +300,7 @@ func (s *Service) SearchFindings(ctx context.Context, principal auth.Principal, 
 		       f.risk_accepted_at, f.risk_accepted_until, COALESCE(f.risk_acceptance_reason, ''),
 		       COALESCE(risk_acceptor.display_name, ''), COALESCE(f.risk_accepted_from_status, ''),
 		       f.risk_reviewed_at, COALESCE(risk_reviewer.display_name, ''), COALESCE(f.risk_review_comment, ''),
-		       (f.status = 'accepted_risk' AND f.risk_accepted_until IS NOT NULL AND f.risk_accepted_until < now()),
+		       (f.status = 'risk_accepted' AND f.risk_accepted_until IS NOT NULL AND f.risk_accepted_until < now()),
 		       count(*) OVER ()
 		FROM security_findings f
 		JOIN organizations o ON o.id = f.assignee_organization_id
@@ -334,7 +396,7 @@ func (s *Service) CreateFinding(ctx context.Context, principal auth.Principal, i
 	if !validFindingInput(input) {
 		return Finding{}, ErrInvalid
 	}
-	if input.Status == "accepted_risk" {
+	if input.Status == "risk_accepted" {
 		return Finding{}, ErrConflict
 	}
 	if err := s.validateReferences(ctx, input.AssigneeOrganizationID, input.AssetID, input.BusinessSystemID); err != nil {
@@ -413,6 +475,9 @@ func (s *Service) createFindingInTx(ctx context.Context, tx pgx.Tx, principal au
 }
 
 func (s *Service) UpdateFinding(ctx context.Context, principal auth.Principal, id string, input FindingInput, requestID, ipAddress string) (Finding, error) {
+	if err := s.guardPersonalFinding(ctx, id); err != nil {
+		return Finding{}, err
+	}
 	if !principal.CanManageSecurityFindings() {
 		return Finding{}, ErrForbidden
 	}
@@ -445,10 +510,10 @@ func (s *Service) UpdateFinding(ctx context.Context, principal auth.Principal, i
 		return Finding{}, ErrConflict
 	}
 	// Risk acceptance is a controlled workflow and must not be bypassed by the
-	// generic edit endpoint. Metadata can still be edited while accepted_risk
+	// generic edit endpoint. Metadata can still be edited while risk_accepted
 	// remains the current status.
-	if (currentStatus == "accepted_risk" && input.Status != "accepted_risk") ||
-		(currentStatus != "accepted_risk" && input.Status == "accepted_risk") {
+	if (currentStatus == "risk_accepted" && input.Status != "risk_accepted") ||
+		(currentStatus != "risk_accepted" && input.Status == "risk_accepted") {
 		return Finding{}, ErrConflict
 	}
 	if err := s.validateReferences(ctx, input.AssigneeOrganizationID, input.AssetID, input.BusinessSystemID); err != nil {
@@ -464,6 +529,17 @@ func (s *Service) UpdateFinding(ctx context.Context, principal auth.Principal, i
 		return Finding{}, fmt.Errorf("begin update finding: %w", err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
+	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtext('netassets-remediation'))`); err != nil {
+		return Finding{}, err
+	}
+	var personalLinked bool
+	if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM remediation_tasks t JOIN security_work_orders w ON w.id=t.work_order_id WHERE t.finding_id=$1::uuid AND t.status<>'cancelled' AND w.status NOT IN ('closed','cancelled'))`, id).Scan(&personalLinked); err != nil {
+		return Finding{}, err
+	}
+	if personalLinked {
+		return Finding{}, ErrConflict
+	}
+
 	command, err := tx.Exec(ctx, `
 		UPDATE security_findings SET title = $2, severity = $3, status = $4,
 		       assignee_organization_id = $5::uuid, asset_id = NULLIF($6, '')::uuid,
@@ -538,6 +614,9 @@ func (s *Service) GetFinding(ctx context.Context, principal auth.Principal, id s
 }
 
 func (s *Service) AcceptRisk(ctx context.Context, principal auth.Principal, id string, input RiskAcceptanceInput, requestID, ipAddress string) (Finding, error) {
+	if err := s.guardPersonalFinding(ctx, id); err != nil {
+		return Finding{}, err
+	}
 	if !principal.CanManageSecurityFindings() {
 		return Finding{}, ErrForbidden
 	}
@@ -550,6 +629,17 @@ func (s *Service) AcceptRisk(ctx context.Context, principal auth.Principal, id s
 		return Finding{}, fmt.Errorf("begin accept finding risk: %w", err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
+	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtext('netassets-remediation'))`); err != nil {
+		return Finding{}, err
+	}
+	var personalLinked bool
+	if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM remediation_tasks t JOIN security_work_orders w ON w.id=t.work_order_id WHERE t.finding_id=$1::uuid AND t.status<>'cancelled' AND w.status NOT IN ('closed','cancelled'))`, id).Scan(&personalLinked); err != nil {
+		return Finding{}, err
+	}
+	if personalLinked {
+		return Finding{}, ErrConflict
+	}
+
 	var organizationID, previousStatus, previousFromStatus string
 	var activelyLinked bool
 	if err := tx.QueryRow(ctx, `
@@ -564,19 +654,19 @@ func (s *Service) AcceptRisk(ctx context.Context, principal auth.Principal, id s
 	} else if err != nil {
 		return Finding{}, fmt.Errorf("load finding risk acceptance: %w", err)
 	}
-	if previousStatus != "open" && previousStatus != "assigned" && previousStatus != "resolved" && previousStatus != "accepted_risk" {
+	if previousStatus != "pending" && previousStatus != "in_progress" && previousStatus != "confirmed" && previousStatus != "resolved" && previousStatus != "fixed" && previousStatus != "risk_accepted" {
 		return Finding{}, ErrState
 	}
-	if activelyLinked && previousStatus != "accepted_risk" {
+	if activelyLinked && previousStatus != "risk_accepted" {
 		return Finding{}, ErrConflict
 	}
 	fromStatus := previousStatus
-	if previousStatus == "accepted_risk" && previousFromStatus != "" {
+	if previousStatus == "risk_accepted" && previousFromStatus != "" {
 		fromStatus = previousFromStatus
 	}
 	if _, err := tx.Exec(ctx, `
 		UPDATE security_findings
-		SET status = 'accepted_risk', risk_accepted_at = now(), risk_accepted_until = $2,
+		SET status = 'risk_accepted', risk_accepted_at = now(), risk_accepted_until = $2,
 		    risk_acceptance_reason = $3, risk_accepted_by = $4::uuid, risk_accepted_from_status = $5,
 		    risk_reviewed_at = NULL, risk_reviewed_by = NULL, risk_review_comment = NULL,
 		    updated_by = $4::uuid, updated_at = now()
@@ -585,7 +675,7 @@ func (s *Service) AcceptRisk(ctx context.Context, principal auth.Principal, id s
 	}
 	if err := writeAudit(ctx, tx, principal, organizationID, "security_finding.accept_risk", "security_finding", id,
 		"接受安全发现风险", map[string]any{
-			"finding_id": id, "previous_status": previousStatus, "new_status": "accepted_risk",
+			"finding_id": id, "previous_status": previousStatus, "new_status": "risk_accepted",
 			"reason": input.Reason, "risk_accepted_until": input.AcceptedUntil,
 		}, requestID, ipAddress); err != nil {
 		return Finding{}, err
@@ -597,6 +687,9 @@ func (s *Service) AcceptRisk(ctx context.Context, principal auth.Principal, id s
 }
 
 func (s *Service) RevokeRisk(ctx context.Context, principal auth.Principal, id, requestID, ipAddress string) (Finding, error) {
+	if err := s.guardPersonalFinding(ctx, id); err != nil {
+		return Finding{}, err
+	}
 	if !principal.CanManageSecurityFindings() {
 		return Finding{}, ErrForbidden
 	}
@@ -608,6 +701,17 @@ func (s *Service) RevokeRisk(ctx context.Context, principal auth.Principal, id, 
 		return Finding{}, fmt.Errorf("begin revoke finding risk: %w", err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
+	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtext('netassets-remediation'))`); err != nil {
+		return Finding{}, err
+	}
+	var personalLinked bool
+	if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM remediation_tasks t JOIN security_work_orders w ON w.id=t.work_order_id WHERE t.finding_id=$1::uuid AND t.status<>'cancelled' AND w.status NOT IN ('closed','cancelled'))`, id).Scan(&personalLinked); err != nil {
+		return Finding{}, err
+	}
+	if personalLinked {
+		return Finding{}, ErrConflict
+	}
+
 	var organizationID, previousStatus, fromStatus string
 	var acceptedUntil *time.Time
 	if err := tx.QueryRow(ctx, `
@@ -617,11 +721,11 @@ func (s *Service) RevokeRisk(ctx context.Context, principal auth.Principal, id, 
 	} else if err != nil {
 		return Finding{}, fmt.Errorf("load finding risk revocation: %w", err)
 	}
-	if previousStatus != "accepted_risk" {
+	if previousStatus != "risk_accepted" {
 		return Finding{}, ErrState
 	}
-	if fromStatus != "open" && fromStatus != "assigned" && fromStatus != "resolved" {
-		fromStatus = "open"
+	if fromStatus != "pending" && fromStatus != "in_progress" && fromStatus != "confirmed" && fromStatus != "resolved" && fromStatus != "fixed" {
+		fromStatus = "pending"
 	}
 	if _, err := tx.Exec(ctx, `UPDATE security_findings SET status = $2, updated_by = $3::uuid, updated_at = now() WHERE id::text = $1`, id, fromStatus, principal.UserID); err != nil {
 		return Finding{}, fmt.Errorf("revoke finding risk: %w", err)
@@ -641,6 +745,9 @@ func (s *Service) RevokeRisk(ctx context.Context, principal auth.Principal, id, 
 }
 
 func (s *Service) ReviewRisk(ctx context.Context, principal auth.Principal, id string, input RiskReviewInput, requestID, ipAddress string) (Finding, error) {
+	if err := s.guardPersonalFinding(ctx, id); err != nil {
+		return Finding{}, err
+	}
 	if !principal.CanManageSecurityFindings() {
 		return Finding{}, ErrForbidden
 	}
@@ -653,6 +760,17 @@ func (s *Service) ReviewRisk(ctx context.Context, principal auth.Principal, id s
 		return Finding{}, fmt.Errorf("begin review finding risk: %w", err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
+	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtext('netassets-remediation'))`); err != nil {
+		return Finding{}, err
+	}
+	var personalLinked bool
+	if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM remediation_tasks t JOIN security_work_orders w ON w.id=t.work_order_id WHERE t.finding_id=$1::uuid AND t.status<>'cancelled' AND w.status NOT IN ('closed','cancelled'))`, id).Scan(&personalLinked); err != nil {
+		return Finding{}, err
+	}
+	if personalLinked {
+		return Finding{}, ErrConflict
+	}
+
 	var organizationID, previousStatus string
 	var currentUntil *time.Time
 	if err := tx.QueryRow(ctx, `
@@ -662,7 +780,7 @@ func (s *Service) ReviewRisk(ctx context.Context, principal auth.Principal, id s
 	} else if err != nil {
 		return Finding{}, fmt.Errorf("load finding risk review: %w", err)
 	}
-	if previousStatus != "accepted_risk" {
+	if previousStatus != "risk_accepted" {
 		return Finding{}, ErrState
 	}
 	effectiveUntil := currentUntil
@@ -877,6 +995,12 @@ func (s *Service) CreateWorkOrder(ctx context.Context, principal auth.Principal,
 		return WorkOrder{}, ErrForbidden
 	}
 	normalizeWorkOrderInput(&input)
+	if input.ExecutionMode == "" {
+		input.ExecutionMode = "organization"
+	}
+	if input.ExecutionMode != "organization" && input.ExecutionMode != "individual" {
+		return WorkOrder{}, ErrInvalid
+	}
 	if !validWorkOrderInput(input) {
 		return WorkOrder{}, ErrInvalid
 	}
@@ -906,10 +1030,10 @@ func (s *Service) CreateWorkOrder(ctx context.Context, principal auth.Principal,
 	var id string
 	if err := tx.QueryRow(ctx, `
 		INSERT INTO security_work_orders (work_order_no, title, assignee_organization_id, severity, description,
-		                                  remediation_requirement, due_at, created_by, updated_by)
-		VALUES ($1, $2, $3::uuid, $4, NULLIF($5, ''), $6, $7, $8::uuid, $8::uuid)
+		                                  remediation_requirement, due_at, created_by, updated_by, execution_mode)
+		VALUES ($1, $2, $3::uuid, $4, NULLIF($5, ''), $6, $7, $8::uuid, $8::uuid, $9)
 		RETURNING id::text`, number, input.Title, input.AssigneeOrganizationID, severity, input.Description,
-		input.RemediationRequirement, input.DueAt, principal.UserID).Scan(&id); err != nil {
+		input.RemediationRequirement, input.DueAt, principal.UserID, input.ExecutionMode).Scan(&id); err != nil {
 		return WorkOrder{}, fmt.Errorf("insert security work order: %w", err)
 	}
 	for _, findingID := range input.FindingIDs {
@@ -943,9 +1067,9 @@ func (s *Service) Issue(ctx context.Context, principal auth.Principal, id string
 			return fmt.Errorf("set work order issued time: %w", err)
 		}
 		if _, err := tx.Exec(ctx, `
-			UPDATE security_findings SET status = 'assigned', updated_at = now(), updated_by = $2::uuid
+			UPDATE security_findings SET status = 'in_progress', updated_at = now(), updated_by = $2::uuid
 			WHERE id IN (SELECT finding_id FROM security_work_order_findings WHERE work_order_id::text = $1)
-			  AND status = 'open'`, id, principal.UserID); err != nil {
+			  AND status IN ('pending', 'confirmed')`, id, principal.UserID); err != nil {
 			return fmt.Errorf("assign security findings: %w", err)
 		}
 		return nil
@@ -1013,9 +1137,9 @@ func (s *Service) Review(ctx context.Context, principal auth.Principal, id strin
 			return err
 		}
 		_, err := tx.Exec(ctx, `
-			UPDATE security_findings SET status = 'resolved', updated_at = now(), updated_by = $2::uuid
+			UPDATE security_findings SET status = 'fixed', updated_at = now(), updated_by = $2::uuid
 			WHERE id IN (SELECT finding_id FROM security_work_order_findings WHERE work_order_id::text = $1)
-			  AND status = 'assigned'`, id, principal.UserID)
+			  AND status = 'in_progress'`, id, principal.UserID)
 		return err
 	})
 }
@@ -1033,9 +1157,9 @@ func (s *Service) Cancel(ctx context.Context, principal auth.Principal, id strin
 			return err
 		}
 		_, err := tx.Exec(ctx, `
-			UPDATE security_findings f SET status = 'open', updated_at = now(), updated_by = $2::uuid
+			UPDATE security_findings f SET status = 'pending', updated_at = now(), updated_by = $2::uuid
 			WHERE f.id IN (SELECT finding_id FROM security_work_order_findings WHERE work_order_id::text = $1)
-			  AND f.status = 'assigned'
+			  AND f.status = 'in_progress'
 			  AND NOT EXISTS (
 				SELECT 1 FROM security_work_order_findings other_link
 				JOIN security_work_orders other ON other.id = other_link.work_order_id
@@ -1057,11 +1181,36 @@ func (s *Service) transition(ctx context.Context, principal auth.Principal, id s
 		return WorkOrder{}, fmt.Errorf("begin work order transition: %w", err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
-	var fromStatus, organizationID, number string
-	if err := tx.QueryRow(ctx, `SELECT status, assignee_organization_id::text, work_order_no FROM security_work_orders WHERE id::text = $1 FOR UPDATE`, id).Scan(&fromStatus, &organizationID, &number); errors.Is(err, pgx.ErrNoRows) {
+	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtext('netassets-remediation'))`); err != nil {
+		return WorkOrder{}, err
+	}
+	var fromStatus, organizationID, number, executionMode string
+	if err := tx.QueryRow(ctx, `SELECT status, assignee_organization_id::text, work_order_no, execution_mode FROM security_work_orders WHERE id::text = $1 FOR UPDATE`, id).Scan(&fromStatus, &organizationID, &number, &executionMode); errors.Is(err, pgx.ErrNoRows) {
 		return WorkOrder{}, ErrNotFound
 	} else if err != nil {
 		return WorkOrder{}, fmt.Errorf("lock security work order: %w", err)
+	}
+	if executionMode == "individual" {
+		if action == "submit" || action == "progress" || action == "return" || action == "close" {
+			return WorkOrder{}, ErrConflict
+		}
+		if action == "accept" {
+			allowed, err := access.CanOperateOrganization(ctx, s.pool, principal, organizationID, "remediation.assign")
+			if err != nil {
+				return WorkOrder{}, err
+			}
+			if !allowed {
+				return WorkOrder{}, ErrForbidden
+			}
+		}
+		if action == "cancel" {
+			if _, err := tx.Exec(ctx, `UPDATE remediation_submissions SET lifecycle_status='cancelled' WHERE lifecycle_status='current' AND task_id IN (SELECT id FROM remediation_tasks WHERE work_order_id=$1::uuid)`, id); err != nil {
+				return WorkOrder{}, err
+			}
+			if _, err := tx.Exec(ctx, `UPDATE remediation_tasks SET status='cancelled',version=version+1,updated_at=now() WHERE work_order_id=$1::uuid AND status NOT IN ('completed','cancelled')`, id); err != nil {
+				return WorkOrder{}, err
+			}
+		}
 	}
 	allowed, err := access.CanAccessOrganization(ctx, s.pool, principal, organizationID)
 	if err != nil {
@@ -1111,7 +1260,7 @@ func (s *Service) getFinding(ctx context.Context, id string) (Finding, error) {
 		       f.risk_accepted_at, f.risk_accepted_until, COALESCE(f.risk_acceptance_reason, ''),
 		       COALESCE(risk_acceptor.display_name, ''), COALESCE(f.risk_accepted_from_status, ''),
 		       f.risk_reviewed_at, COALESCE(risk_reviewer.display_name, ''), COALESCE(f.risk_review_comment, ''),
-		       (f.status = 'accepted_risk' AND f.risk_accepted_until IS NOT NULL AND f.risk_accepted_until < now())
+		       (f.status = 'risk_accepted' AND f.risk_accepted_until IS NOT NULL AND f.risk_accepted_until < now())
 		FROM security_findings f
 		JOIN organizations o ON o.id = f.assignee_organization_id
 		LEFT JOIN assets a ON a.id = f.asset_id
@@ -1199,7 +1348,7 @@ func validateFindingsForWorkOrder(ctx context.Context, tx pgx.Tx, organizationID
 		SELECT id::text, severity
 		FROM security_findings
 		WHERE id = ANY($1::uuid[]) AND assignee_organization_id::text = $2
-		  AND status IN ('open', 'assigned')
+		  AND status IN ('pending', 'confirmed', 'in_progress')
 		FOR UPDATE`, findingIDs, organizationID)
 	if err != nil {
 		return "", fmt.Errorf("load work order findings: %w", err)
@@ -1284,7 +1433,7 @@ const workOrderSelect = `
 	       COALESCE(wo.verification_result, ''), COALESCE(wo.return_reason, ''),
 	       COALESCE(u.display_name, ''),
 	       (SELECT count(*) FROM security_work_order_findings link WHERE link.work_order_id = wo.id),
-	       wo.created_at, wo.updated_at
+	       wo.created_at, wo.updated_at, wo.execution_mode,CASE WHEN wo.execution_mode='individual' THEN remediation_order_counts(wo.id) ELSE '{}'::jsonb END
 	FROM security_work_orders wo
 	JOIN organizations o ON o.id = wo.assignee_organization_id
 	LEFT JOIN users u ON u.id = wo.created_by
@@ -1313,7 +1462,7 @@ func scanWorkOrderWithTotal(row rowScanner, item *WorkOrder, total *int) error {
 		&item.Description, &item.RemediationRequirement, &item.DueAt, &item.Overdue,
 		&item.IssuedAt, &item.AcceptedAt, &item.SubmittedAt, &item.VerifiedAt, &item.ClosedAt,
 		&item.CancelledAt, &item.RemediationProgress, &item.RemediationResult, &item.VerificationResult,
-		&item.ReturnReason, &item.CreatedByName, &item.FindingCount, &item.CreatedAt, &item.UpdatedAt)
+		&item.ReturnReason, &item.CreatedByName, &item.FindingCount, &item.CreatedAt, &item.UpdatedAt, &item.ExecutionMode, &item.RemediationCounts)
 }
 
 func scanFinding(row rowScanner, item *Finding) error {
@@ -1333,7 +1482,7 @@ func scanWorkOrder(row rowScanner, item *WorkOrder) error {
 		&item.Description, &item.RemediationRequirement, &item.DueAt, &item.Overdue,
 		&item.IssuedAt, &item.AcceptedAt, &item.SubmittedAt, &item.VerifiedAt, &item.ClosedAt,
 		&item.CancelledAt, &item.RemediationProgress, &item.RemediationResult, &item.VerificationResult,
-		&item.ReturnReason, &item.CreatedByName, &item.FindingCount, &item.CreatedAt, &item.UpdatedAt)
+		&item.ReturnReason, &item.CreatedByName, &item.FindingCount, &item.CreatedAt, &item.UpdatedAt, &item.ExecutionMode, &item.RemediationCounts)
 }
 
 func loadWorkOrder(ctx context.Context, q queryer, id string) (WorkOrder, error) {
@@ -1391,7 +1540,7 @@ func normalizeFindingInput(input *FindingInput) {
 	input.RemediationAdvice = strings.TrimSpace(input.RemediationAdvice)
 	input.Source = strings.TrimSpace(input.Source)
 	if input.Status == "" {
-		input.Status = "open"
+		input.Status = "pending"
 	}
 	if input.Source == "" {
 		input.Source = "manual"
@@ -1442,7 +1591,7 @@ func validSeverity(value string) bool {
 }
 
 func validFindingStatus(value string) bool {
-	return value == "open" || value == "assigned" || value == "resolved" || value == "accepted_risk" || value == "false_positive"
+	return value == "pending" || value == "in_progress" || value == "confirmed" || value == "resolved" || value == "fixed" || value == "false_positive" || value == "duplicate" || value == "risk_accepted" || value == "ignored"
 }
 
 func validWorkOrderStatus(value string) bool {
@@ -1505,4 +1654,18 @@ func workOrderActionSummary(action string) string {
 		return label
 	}
 	return "更新安全工单"
+}
+
+func (s *Service) guardPersonalFinding(ctx context.Context, id string) error {
+	if !validUUID(id) {
+		return ErrInvalid
+	}
+	var linked bool
+	if err := s.pool.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM remediation_tasks t JOIN security_work_orders w ON w.id=t.work_order_id WHERE t.finding_id=$1::uuid AND t.status<>'cancelled' AND w.status NOT IN ('closed','cancelled'))`, id).Scan(&linked); err != nil {
+		return err
+	}
+	if linked {
+		return ErrConflict
+	}
+	return nil
 }

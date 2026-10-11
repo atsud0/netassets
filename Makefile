@@ -1,6 +1,7 @@
 SHELL := /bin/sh
 COMPOSE := podman compose
 E2E_COMPOSE := podman compose -p netassets-e2e -f compose.e2e.yaml
+DEV_COMPOSE := podman compose -p netassets-dev -f compose.dev.yaml
 
 .PHONY: help up down build logs ps test test-backend test-frontend e2e e2e-roles acceptance-preflight acceptance-running fmt migrate-up migrate-down backup restore-verify restore cleanup-e2e
 
@@ -10,7 +11,8 @@ help:
 	  'make down           Stop the application' \
 	  'make build          Build application images' \
 	  'make logs           Follow application logs' \
-	  'make test           Run backend and frontend unit tests' \
+	  'make test           Run tests and frontend build in isolated Podman containers' \
+	  'make fmt            Format Go code inside Podman' \
 	  'make e2e            Run Playwright tests in a container' \
 	  'make e2e-roles      Run all built-in role boundary regression tests' \
 	  'make acceptance-preflight  Validate production configuration' \
@@ -40,10 +42,10 @@ ps:
 test: test-backend test-frontend
 
 test-backend:
-	cd backend && go test ./...
+	$(DEV_COMPOSE) run --rm backend
 
 test-frontend:
-	podman run --rm -v "$$(pwd)/web:/workspace:Z" -w /workspace node:22-alpine sh -lc 'npm ci && npm test -- --run'
+	$(DEV_COMPOSE) run --rm web
 
 e2e:
 	@$(E2E_COMPOSE) down -v --remove-orphans >/dev/null 2>&1 || true
@@ -66,7 +68,7 @@ acceptance-running:
 	./scripts/production-acceptance.sh --running
 
 fmt:
-	cd backend && gofmt -w ./cmd ./internal
+	$(DEV_COMPOSE) run --rm --no-deps backend gofmt -w ./cmd ./internal
 
 migrate-up:
 	$(COMPOSE) run --rm app /app/netassets-migrate up

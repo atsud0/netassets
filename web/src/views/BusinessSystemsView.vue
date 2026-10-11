@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import RowActions from '../components/RowActions.vue'
 import { computed, onMounted, reactive, ref, watch } from 'vue'
 import { useRoute } from 'vue-router'
 import { ElMessage, ElMessageBox, type FormInstance, type FormRules, type UploadFile, type UploadFiles } from 'element-plus'
@@ -397,6 +398,16 @@ async function loadDetailAssets(systemID: string) {
   } finally { detailAssetLoading.value = false }
 }
 
+async function copySystemCode() {
+  if (!detail.value?.code) return
+  try {
+    await navigator.clipboard.writeText(detail.value.code)
+    ElMessage.success('系统编码已复制')
+  } catch {
+    ElMessage.error('复制系统编码失败，请手动选择复制')
+  }
+}
+
 async function openDetail(row: BusinessSystem) {
   detailVisible.value = true
   detailLoading.value = true
@@ -758,11 +769,11 @@ onMounted(load)
   <section>
     <el-alert v-if="inventoryMode" :title="`正在填报：${inventoryTaskName} · ${inventoryOrganizationName}`" description="这里展示组织工作台账。新增或修改先保存为未上报版本，选择纳入本次任务并提交审核后，才会发布到集团正式台账。" type="warning" :closable="false" show-icon class="inventory-draft-alert" />
     <div class="page-heading">
-      <div><span class="eyebrow">BUSINESS SYSTEMS</span><h1>业务系统</h1><p>登记子公司的业务系统、负责人、系统等级以及个人信息和重要数据属性。</p></div>
-      <div class="button-row ledger-page-actions business-system-page-actions"><el-dropdown v-if="!inventoryMode"><el-button :loading="exporting">导出台账</el-button><template #dropdown><el-dropdown-menu><el-dropdown-item @click="exportLedger('xlsx')">导出 XLSX</el-dropdown-item><el-dropdown-item @click="exportLedger('csv')">导出 CSV</el-dropdown-item><el-dropdown-item divided @click="queueXLSXExport">后台生成 XLSX</el-dropdown-item></el-dropdown-menu></template></el-dropdown><el-button v-if="!inventoryMode" @click="openImportHistory">导入记录</el-button><el-button v-if="!inventoryMode" @click="openImportDialog">批量导入</el-button><el-button v-if="!inventoryMode || !auth.isGroupAdmin" type="primary" :disabled="eligibleOrganizations.length === 0" @click="openCreateDialog">{{ '新增业务系统' }}</el-button></div>
+      <h1>业务系统</h1>
     </div>
+      <div class="button-row ledger-page-actions business-system-page-actions"><el-dropdown v-if="!inventoryMode"><el-button :loading="exporting">导出台账</el-button><template #dropdown><el-dropdown-menu><el-dropdown-item @click="exportLedger('xlsx')">导出 XLSX</el-dropdown-item><el-dropdown-item @click="exportLedger('csv')">导出 CSV</el-dropdown-item><el-dropdown-item divided @click="queueXLSXExport">后台生成 XLSX</el-dropdown-item></el-dropdown-menu></template></el-dropdown><el-button v-if="!inventoryMode" @click="openImportHistory">导入记录</el-button><el-button v-if="!inventoryMode" @click="openImportDialog">批量导入</el-button><el-button v-if="!inventoryMode || !auth.isGroupAdmin" type="primary" :disabled="eligibleOrganizations.length === 0" @click="openCreateDialog">{{ '新增业务系统' }}</el-button></div>
     <div class="panel asset-filter-panel">
-      <el-input v-model="search" clearable placeholder="搜索系统编码、名称、组织或负责人" @keyup.enter="resetAndLoadSystems" @clear="resetAndLoadSystems" />
+      <el-input v-model="search" clearable placeholder="搜索系统名称、组织或负责人，也可输入编码" @keyup.enter="resetAndLoadSystems" @clear="resetAndLoadSystems" />
       <el-select v-model="statusFilter" clearable placeholder="全部状态" @change="resetAndLoadSystems" @clear="resetAndLoadSystems">
         <el-option v-for="(label, value) in statusLabels" :key="value" :label="label" :value="value" />
       </el-select>
@@ -775,13 +786,13 @@ onMounted(load)
     <div v-if="inventoryMode" class="panel data-table-panel inventory-draft-panel" v-loading="loading">
       <div class="table-panel-heading"><div><strong>本次上报内容</strong><span>共 {{ draftTotal }} 个；首次上报、变更上报和下线申请均在审核发布后影响集团正式台账</span></div><el-tag type="warning" effect="plain">待提交</el-tag></div>
       <el-table :data="draftSystems" row-key="id" empty-text="尚未选择需要上报的业务系统">
-        <el-table-column label="系统名称" min-width="190"><template #default="scope"><el-button link type="primary" class="table-link" :disabled="scope.row.draft_status === 'submitted' || scope.row.operation === 'delete'" @click="openEditDialog(scope.row)">{{ scope.row.name }}</el-button></template></el-table-column>
-        <el-table-column label="系统编码" min-width="145"><template #default="scope"><span class="mono-text">{{ scope.row.code }}</span></template></el-table-column>
-        <el-table-column prop="organization_name" label="所属组织" min-width="180" />
-        <el-table-column label="状态/等级" min-width="150"><template #default="scope"><el-tag effect="plain">{{ statusLabel(scope.row.status) }}</el-tag><span class="inline-note">{{ levelLabel(scope.row.level) }}</span></template></el-table-column>
+        <el-table-column label="业务系统" min-width="200"><template #default="scope"><el-button link type="primary" class="table-link" :disabled="scope.row.draft_status === 'submitted' || scope.row.operation === 'delete'" @click="openEditDialog(scope.row)">{{ scope.row.name }}</el-button><span v-if="scope.row.short_name" class="list-secondary">{{ scope.row.short_name }}</span></template></el-table-column>
+
+        <el-table-column prop="organization_name" label="所属组织" min-width="130" />
+        <el-table-column label="状态/等级" min-width="130"><template #default="scope"><el-tag effect="plain">{{ statusLabel(scope.row.status) }}</el-tag><span class="inline-note">{{ levelLabel(scope.row.level) }}</span></template></el-table-column>
         <el-table-column label="变更类型" width="90"><template #default="scope"><el-tag :type="scope.row.operation === 'delete' ? 'danger' : scope.row.operation === 'update' ? 'warning' : 'success'" effect="plain">{{ draftOperationLabels[scope.row.operation || 'create'] }}</el-tag></template></el-table-column>
         <el-table-column label="草稿状态" width="105"><template #default="scope"><el-tag type="warning" effect="plain">{{ draftStatusLabels[scope.row.draft_status || 'editing'] || scope.row.draft_status }}</el-tag></template></el-table-column>
-        <el-table-column label="操作" width="210" fixed="right" align="right" header-align="right" class-name="table-action-column"><template #default="scope"><el-button link type="primary" @click="openWorkingVersionDiff(scope.row)">查看变更</el-button><el-button v-if="scope.row.operation !== 'delete'" link type="primary" :disabled="scope.row.draft_status === 'submitted'" @click="openEditDialog(scope.row)">编辑</el-button><el-button link type="danger" :disabled="scope.row.draft_status === 'submitted'" @click="removeDraft(scope.row)">取消上报</el-button></template></el-table-column>
+        <el-table-column label="操作" width="88" fixed="right" align="right" header-align="right" class-name="table-action-column"><template #default="scope"><RowActions :label="`操作：${scope.row.name || scope.row.title || scope.row.code || scope.row.display_name || scope.row.id}`"><el-button link type="primary" @click="openWorkingVersionDiff(scope.row)">查看变更</el-button><el-button v-if="scope.row.operation !== 'delete'" link type="primary" :disabled="scope.row.draft_status === 'submitted'" @click="openEditDialog(scope.row)">编辑</el-button><el-button link type="danger" :disabled="scope.row.draft_status === 'submitted'" @click="removeDraft(scope.row)">取消上报</el-button></RowActions></template></el-table-column>
       </el-table>
       <div v-if="draftTotal > 0" class="table-pagination"><el-pagination background layout="total, sizes, prev, pager, next" :total="draftTotal" :current-page="draftPage" :page-size="draftPageSize" :page-sizes="[20, 50, 100]" @current-change="handleDraftPageChange" @size-change="handleDraftPageSizeChange" /></div>
     </div>
@@ -808,20 +819,18 @@ onMounted(load)
       </div>
       <el-table v-loading="loading" :data="systems" row-key="id" empty-text="暂无业务系统" @selection-change="handleSelectionChange">
         <el-table-column type="selection" width="46" :selectable="canSelectBusinessSystem" />
-        <el-table-column label="系统名称" min-width="190">
-          <template #default="scope"><el-button link type="primary" class="table-link" @click="openDetail(scope.row)">{{ scope.row.name }}</el-button></template>
+        <el-table-column label="业务系统" min-width="200">
+          <template #default="scope"><el-button link type="primary" class="table-link" @click="openDetail(scope.row)">{{ scope.row.name }}</el-button><span v-if="scope.row.short_name" class="list-secondary">{{ scope.row.short_name }}</span></template>
         </el-table-column>
-        <el-table-column label="系统编码" min-width="145">
-          <template #default="scope"><span class="mono-text">{{ scope.row.code }}</span></template>
-        </el-table-column>
-        <el-table-column prop="organization_name" label="所属组织" min-width="180" />
-        <el-table-column label="状态/等级" min-width="150"><template #default="scope"><el-tag effect="plain">{{ statusLabel(scope.row.status) }}</el-tag><span class="inline-note">{{ levelLabel(scope.row.level) }}</span></template></el-table-column>
-        <el-table-column label="个人信息" min-width="120"><template #default="scope"><el-tag :type="scope.row.contains_personal_information === 'yes' ? 'warning' : 'info'">{{ yesNo(scope.row.contains_personal_information) }}</el-tag></template></el-table-column>
-        <el-table-column label="敏感个人信息" min-width="140"><template #default="scope"><el-tag :type="scope.row.contains_sensitive_personal_information === 'yes' ? 'danger' : 'info'">{{ yesNo(scope.row.contains_sensitive_personal_information) }}</el-tag></template></el-table-column>
-        <el-table-column label="数据量超 10 万" min-width="135"><template #default="scope">{{ yesNo(scope.row.data_volume_over_100k) }}</template></el-table-column>
-        <el-table-column prop="owner_name" label="负责人" min-width="110"><template #default="scope">{{ scope.row.owner_name || '—' }}</template></el-table-column>
+
+        <el-table-column prop="organization_name" label="所属组织" min-width="130" />
+        <el-table-column label="状态/等级" min-width="130"><template #default="scope"><el-tag effect="plain">{{ statusLabel(scope.row.status) }}</el-tag><span class="inline-note">{{ levelLabel(scope.row.level) }}</span><span v-if="inventoryMode && scope.row.is_working_copy && scope.row.task_id" class="list-secondary">{{ scope.row.task_id === inventoryTaskID ? '已纳入本次上报' : '已纳入其他任务' }}</span></template></el-table-column>
+        <el-table-column label="数据安全" min-width="155"><template #default="scope"><span>个人信息：{{ yesNo(scope.row.contains_personal_information) }}</span><span class="list-secondary">敏感信息：{{ yesNo(scope.row.contains_sensitive_personal_information) }} · 超 10 万：{{ yesNo(scope.row.data_volume_over_100k) }}</span></template></el-table-column>
+
+
+        <el-table-column prop="owner_name" label="负责人" min-width="90"><template #default="scope">{{ scope.row.owner_name || '—' }}</template></el-table-column>
         <el-table-column v-if="!auth.isGroupAdmin && !inventoryMode" label="上报状态" width="130"><template #default="scope"><el-tag :type="scope.row.reporting_status === 'reported' ? 'success' : 'warning'" effect="plain">{{ reportingStatusLabels[scope.row.reporting_status || 'reported'] }}</el-tag></template></el-table-column>
-        <el-table-column label="操作" fixed="right" width="210" align="right" header-align="right" class-name="table-action-column"><template #default="scope"><template v-if="!inventoryMode"><template v-if="scope.row.is_working_copy"><el-button link type="primary" @click="openWorkingVersionDiff(scope.row)">查看变更</el-button><el-button link type="primary" @click="openEditDialog(scope.row)">编辑</el-button><el-button link type="danger" @click="remove(scope.row)">删除</el-button></template><template v-else><el-button link type="primary" @click="openChangeHistory(scope.row)">历史</el-button><el-button link type="primary" @click="openEditDialog(scope.row)">编辑</el-button><el-button link :type="scope.row.status === 'archived' ? 'success' : 'warning'" @click="changeArchive(scope.row, scope.row.status !== 'archived')">{{ scope.row.status === 'archived' ? '恢复' : '归档' }}</el-button><el-button link type="danger" @click="remove(scope.row)">删除</el-button></template></template><template v-else><template v-if="scope.row.is_working_copy"><el-button link type="primary" @click="openWorkingVersionDiff(scope.row)">查看变更</el-button><el-button v-if="!scope.row.task_id" link type="primary" @click="selectWorkspaceBusinessSystem(scope.row)">选择上报</el-button><el-tag v-else-if="scope.row.task_id === inventoryTaskID" type="success" effect="plain">已纳入本次上报</el-tag><el-tag v-else type="info" effect="plain">已纳入其他任务</el-tag></template><template v-else><el-button link type="primary" @click="openEditDialog(scope.row)">修改后上报</el-button><el-button link type="danger" @click="requestSystemDeletion(scope.row)">申请下线</el-button></template></template></template></el-table-column>
+        <el-table-column label="操作" fixed="right" width="88" align="right" header-align="right" class-name="table-action-column"><template #default="scope"><RowActions :label="`操作：${scope.row.name || scope.row.title || scope.row.code || scope.row.display_name || scope.row.id}`"><template v-if="!inventoryMode"><template v-if="scope.row.is_working_copy"><el-button link type="primary" @click="openWorkingVersionDiff(scope.row)">查看变更</el-button><el-button link type="primary" @click="openEditDialog(scope.row)">编辑</el-button><el-button link type="danger" @click="remove(scope.row)">删除</el-button></template><template v-else><el-button link type="primary" @click="openChangeHistory(scope.row)">历史</el-button><el-button link type="primary" @click="openEditDialog(scope.row)">编辑</el-button><el-button link :type="scope.row.status === 'archived' ? 'success' : 'warning'" @click="changeArchive(scope.row, scope.row.status !== 'archived')">{{ scope.row.status === 'archived' ? '恢复' : '归档' }}</el-button><el-button link type="danger" @click="remove(scope.row)">删除</el-button></template></template><template v-else><template v-if="scope.row.is_working_copy"><el-button link type="primary" @click="openWorkingVersionDiff(scope.row)">查看变更</el-button><el-button v-if="!scope.row.task_id" link type="primary" @click="selectWorkspaceBusinessSystem(scope.row)">选择上报</el-button></template><template v-else><el-button link type="primary" @click="openEditDialog(scope.row)">修改后上报</el-button><el-button link type="danger" @click="requestSystemDeletion(scope.row)">申请下线</el-button></template></template></RowActions></template></el-table-column>
       </el-table>
       <div class="table-pagination">
         <el-pagination background layout="total, sizes, prev, pager, next" :total="total" :current-page="page" :page-size="pageSize" :page-sizes="[20, 50, 100]" @current-change="handlePageChange" @size-change="handlePageSizeChange" />
@@ -848,7 +857,7 @@ onMounted(load)
         <div class="form-section-title">基本信息</div>
         <div class="form-grid two-columns">
           <el-form-item label="所属组织" prop="organization_id"><el-select v-model="form.organization_id" :disabled="inventoryMode || !auth.isGroupAdmin" style="width:100%"><el-option v-for="item in eligibleOrganizations" :key="item.id" :label="item.name" :value="item.id" /></el-select></el-form-item>
-          <el-form-item label="系统编码" prop="code"><el-input v-model="form.code" placeholder="如：CRM_001" maxlength="64" /></el-form-item>
+          <el-form-item label="系统编码" prop="code"><el-input v-model="form.code" placeholder="如：CRM_001" maxlength="64" /><div class="muted-text">系统字段，用于导入、接口关联和数据去重；日常列表不显示。</div></el-form-item>
           <el-form-item label="系统名称" prop="name"><el-input v-model="form.name" placeholder="请输入系统名称" maxlength="255" /></el-form-item>
           <el-form-item label="系统简称"><el-input v-model="form.short_name" maxlength="128" /></el-form-item>
           <el-form-item label="运行状态"><el-select v-model="form.status" style="width:100%"><el-option label="运行中" value="running" /><el-option label="规划中" value="planning" /><el-option label="暂停" value="suspended" /><el-option label="已下线" value="offline" /><el-option v-if="editingID" label="已归档" value="archived" /></el-select></el-form-item>
@@ -924,7 +933,7 @@ onMounted(load)
     </el-dialog>
 
     <el-dialog v-model="historyDialogVisible" title="业务系统导入记录" width="980px">
-      <el-table v-loading="historyLoading" :data="importHistory" size="small" empty-text="暂无导入记录" max-height="520"><el-table-column prop="created_at" label="时间" width="175" /><el-table-column prop="organization_name" label="所属组织" min-width="150" /><el-table-column prop="file_name" label="文件名" min-width="190" /><el-table-column label="模式" width="130"><template #default="scope">{{ scope.row.import_mode === 'update_working' ? '覆盖为工作版本' : '重复跳过' }}</template></el-table-column><el-table-column label="结果" min-width="280"><template #default="scope">总数 {{ scope.row.total_count }} · 成功 {{ scope.row.success_count }}（新增 {{ scope.row.created_count }} / 更新 {{ scope.row.updated_count }}）· 重复 {{ scope.row.duplicate_count }} · 失败 {{ scope.row.failure_count }}</template></el-table-column><el-table-column prop="created_by_name" label="操作人" width="110" /></el-table>
+      <el-table v-loading="historyLoading" :data="importHistory" size="small" empty-text="暂无导入记录" max-height="520"><el-table-column prop="created_at" label="时间" width="175" /><el-table-column prop="organization_name" label="所属组织" min-width="130" /><el-table-column prop="file_name" label="文件名" min-width="190" /><el-table-column label="模式" width="130"><template #default="scope">{{ scope.row.import_mode === 'update_working' ? '覆盖为工作版本' : '重复跳过' }}</template></el-table-column><el-table-column label="结果" min-width="280"><template #default="scope">总数 {{ scope.row.total_count }} · 成功 {{ scope.row.success_count }}（新增 {{ scope.row.created_count }} / 更新 {{ scope.row.updated_count }}）· 重复 {{ scope.row.duplicate_count }} · 失败 {{ scope.row.failure_count }}</template></el-table-column><el-table-column prop="created_by_name" label="操作人" width="110" /></el-table>
       <div class="table-pagination dialog-pagination">
         <el-pagination background layout="total, sizes, prev, pager, next" :total="importTotal" :current-page="importPage" :page-size="importPageSize" :page-sizes="[20, 50, 100]" @current-change="handleImportPageChange" @size-change="handleImportPageSizeChange" />
       </div>
@@ -934,7 +943,7 @@ onMounted(load)
     <el-drawer v-model="detailVisible" title="业务系统详情" size="620px">
       <div v-loading="detailLoading" class="detail-drawer">
         <template v-if="detail">
-          <div class="detail-hero"><div><span class="eyebrow">SYSTEM PROFILE</span><h2>{{ detail.name }}</h2><p>{{ detail.code }} · {{ detail.organization_name }}</p></div><el-tag effect="plain">{{ statusLabel(detail.status) }}</el-tag></div>
+          <div class="detail-hero"><div><span class="eyebrow">SYSTEM PROFILE</span><h2>{{ detail.name }}</h2><p>{{ detail.organization_name }}</p><div class="detail-system-code"><span>系统编码（系统字段）</span><code>{{ detail.code }}</code><el-button link type="primary" size="small" @click="copySystemCode">复制</el-button></div></div><el-tag effect="plain">{{ statusLabel(detail.status) }}</el-tag></div>
           <div class="detail-grid"><div><span>系统等级</span><strong>{{ levelLabel(detail.level) }}</strong></div><div><span>负责人</span><strong>{{ detail.owner_name || '未填写' }}</strong></div><div><span>联系方式</span><strong>{{ detail.owner_contact || '未填写' }}</strong></div><div><span>互联网暴露</span><strong>{{ yesNo(detail.internet_exposure) }}</strong></div><div><span>个人信息</span><strong>{{ yesNo(detail.contains_personal_information) }}</strong></div><div><span>敏感个人信息</span><strong>{{ yesNo(detail.contains_sensitive_personal_information) }}</strong></div><div><span>记录数</span><strong>{{ detail.personal_information_record_count ?? '未填写' }}</strong></div><div><span>超过 10 万条</span><strong>{{ yesNo(detail.data_volume_over_100k) }}</strong></div><div><span>重要数据</span><strong>{{ yesNo(detail.contains_important_data) }}</strong></div><div><span>核心数据</span><strong>{{ yesNo(detail.contains_core_data) }}</strong></div><div><span>部署方式</span><strong>{{ detail.deployment_type || '未填写' }}</strong></div><div><span>存储位置</span><strong>{{ detail.data_storage_location || '未填写' }}</strong></div></div>
           <template v-if="detailCustomFields.length">
             <div class="form-section-title">集团自定义字段</div>

@@ -15,6 +15,7 @@ import (
 )
 
 var permissions = map[string]string{
+	"remediation.assign": "分派修复任务", "remediation.review": "确认修复材料", "remediation.people.manage": "管理修复人员授权", "remediation.execute": "执行本人修复任务", "vendor.manage": "管理合作厂商",
 	"organization.read":         "查看组织机构",
 	"organization.create":       "新增组织机构",
 	"organization.update":       "编辑组织机构",
@@ -121,7 +122,7 @@ func Ensure(ctx context.Context, pool *pgxpool.Pool, cfg config.Config, logger *
 		Description string
 		Permissions []string
 	}{
-		{Key: "organization_admin", Name: "子公司管理员", Description: "管理授权组织树内的组织信息、用户、业务系统、网络资产和填报数据", Permissions: []string{"organization.read", "organization.create", "organization.update", "system.manage", "asset.manage", "inventory.manage", "data_quality.manage", "security_test.request", "user.manage"}},
+		{Key: "organization_admin", Name: "子公司管理员", Description: "管理授权组织树内的组织信息、用户、业务系统、网络资产和填报数据", Permissions: []string{"organization.read", "organization.create", "organization.update", "system.manage", "asset.manage", "inventory.manage", "data_quality.manage", "security_test.request", "user.manage", "remediation.assign", "remediation.review", "remediation.people.manage", "vendor.manage"}},
 		{Key: "organization_editor", Name: "子公司填报员", Description: "维护所属组织的业务系统、网络资产和填报数据", Permissions: []string{"organization.read", "system.manage", "asset.manage", "inventory.manage", "security_test.request"}},
 	}
 	for _, role := range organizationRoles {

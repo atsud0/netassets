@@ -162,7 +162,7 @@ async function changePassword() {
     Object.assign(passwordForm, { current_password: '', new_password: '', confirm_password: '' })
     await auth.fetchCurrentUser()
     ElMessage.success('密码已修改，其他登录设备已退出')
-    if (!auth.user?.must_change_password) await router.replace('/dashboard')
+    if (!auth.user?.must_change_password) await router.replace(auth.homePath)
   } catch (error) {
     ElMessage.error(getAPIErrorMessage(error, '修改密码失败'))
   } finally {
@@ -175,9 +175,7 @@ async function changePassword() {
   <section class="profile-page">
     <div class="page-heading">
       <div>
-        <span class="eyebrow">ACCOUNT SETTINGS</span>
         <h1>账户设置</h1>
-        <p>在此维护您自己的显示名称、联系方式和登录密码。组织任职、角色及数据范围由有权限的管理员统一配置。</p>
       </div>
     </div>
 
@@ -244,7 +242,7 @@ async function changePassword() {
       </div>
     </div>
 
-    <APITokenManager v-if="!mustChangePassword" />
+    <APITokenManager v-if="!auth.executionOnly && !mustChangePassword" />
   </section>
 </template>
 

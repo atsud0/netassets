@@ -22,6 +22,7 @@ const pageSize = ref(20)
 const total = ref(0)
 
 const categoryOptions = [
+  { value: 'remediation', label: '修复任务' },
   { value: 'export_job', label: '导出任务' },
   { value: 'asset_change', label: '资产变更' },
   { value: 'business_system_change', label: '系统变更' },
@@ -133,9 +134,7 @@ onMounted(load)
   <section>
     <div class="page-heading">
       <div>
-        <p class="eyebrow">IN-APP NOTIFICATIONS</p>
         <h1>消息中心</h1>
-        <p>集中查看填报任务、台账变更、后台导出、安全发现、安全工单和数据质量整改等组织协作消息。当前仅提供站内提醒，不发送外部通知。</p>
       </div>
       <div class="page-heading-actions">
         <el-button :loading="markingAll" :disabled="!summary.unread_count" @click="markAllRead">全部标记已读</el-button>

@@ -95,7 +95,7 @@ func TestOrganizationAssetManagersCanSeePreWorkOrderFindings(t *testing.T) {
 		INSERT INTO security_findings (
 			finding_code, title, severity, status, assignee_organization_id, asset_id,
 			description, source, created_by, updated_by
-		) VALUES ('F-PRE-WORK-ORDER', '工单下发前安全发现', 'high', 'open', $1::uuid, $2::uuid,
+		) VALUES ('F-PRE-WORK-ORDER', '工单下发前安全发现', 'high', 'pending', $1::uuid, $2::uuid,
 		          '用于验证子公司资产管理员可在工单下发前查看。', 'manual', $3::uuid, $3::uuid)
 		RETURNING id::text
 	`, organizationID, assetID, assetManagerID).Scan(&findingID); err != nil {
