@@ -87,6 +87,9 @@ const areaFormVisible = ref(false)
 const areaSubmitting = ref(false)
 const editingNetworkAreaID = ref('')
 const editingAssetID = ref('')
+// Captured when the edit dialog opens so the backend can reject a save that
+// overwrites a change made by someone else in the meantime.
+const editingExpectedUpdatedAt = ref<string>('')
 const formRef = ref<FormInstance>()
 const assets = ref<Asset[]>([])
 const draftAssets = ref<Asset[]>([])
@@ -362,6 +365,7 @@ function resetForm() {
 }
 function openCreateDialog() {
   editingAssetID.value = ''
+  editingExpectedUpdatedAt.value = ''
   editingIsDraft.value = false
   editingDraftTaskID.value = ''
   editingDraftOrganizationID.value = ''
@@ -378,6 +382,7 @@ function openResourceSubmissionHistory(row: { id: string }) {
 
 function openEditDialog(item: Asset) {
   editingAssetID.value = item.id
+  editingExpectedUpdatedAt.value = item.updated_at ?? ''
   const draftTaskID = item.task_id || (inventoryMode.value && item.is_draft ? inventoryTaskID.value : '')
   editingIsDraft.value = Boolean(draftTaskID)
   editingDraftTaskID.value = draftTaskID
@@ -451,7 +456,16 @@ async function submit() {
     const missing = customFields.value.find((field) => field.is_required && isEmptyCustomValue(customValues[field.field_key]))
     if (missing) { ElMessage.warning(`请填写自定义字段：${missing.field_name}`); return }
     const customPayload = customFields.value.map((field) => ({ field_key: field.field_key, value: customValues[field.field_key] }))
-    const payload = { ...form, organization_id: inventoryMode.value ? inventoryOrganizationID.value : form.organization_id, expires_at: form.expires_at?.toISOString() ?? null, custom_values: customPayload }
+    // Task drafts keep their own update semantics; only the ledger endpoints
+    // implement the optimistic lock, so the guard is only sent on save of an
+    // existing asset and never on create.
+    const payload: Record<string, unknown> = {
+      ...form,
+      organization_id: inventoryMode.value ? inventoryOrganizationID.value : form.organization_id,
+      expires_at: form.expires_at?.toISOString() ?? null,
+      custom_values: customPayload,
+      ...(editingAssetID.value && !editingIsDraft.value && editingExpectedUpdatedAt.value ? { expected_updated_at: editingExpectedUpdatedAt.value } : {}),
+    }
     let response
     if (inventoryMode.value) {
       const draftTaskID = editingDraftTaskID.value || inventoryTaskID.value

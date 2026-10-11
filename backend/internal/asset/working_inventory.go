@@ -12,6 +12,7 @@ import (
 	"netassets/internal/access"
 	"netassets/internal/auth"
 	"netassets/internal/customfield"
+	"netassets/internal/inventorydraft"
 	"netassets/internal/notification"
 	"netassets/internal/pagination"
 )
@@ -58,7 +59,7 @@ func (s *Service) searchWorkingCreates(ctx context.Context, p auth.Principal, f 
  LEFT JOIN users u ON u.id=ao.owner_user_id LEFT JOIN asset_network_areas na ON na.id=a.network_area_id
  LEFT JOIN LATERAL (SELECT b.id,b.system_code,b.system_name FROM system_assets sa JOIN business_systems b ON b.id=sa.business_system_id WHERE sa.asset_id=a.id AND b.deleted_at IS NULL ORDER BY sa.is_primary DESC,sa.created_at LIMIT 1) bs ON true
  WHERE a.deleted_at IS NULL AND o.id IN (SELECT id FROM accessible)
-   AND NOT EXISTS (SELECT 1 FROM inventory_asset_drafts d WHERE d.source_asset_id=a.id AND d.organization_id=o.id AND d.draft_status IN ('editing','submitted','returned'))
+   AND NOT EXISTS (SELECT 1 FROM inventory_asset_drafts d WHERE d.source_asset_id=a.id AND d.organization_id=o.id AND d.draft_status IN `+inventorydraft.ActiveSQL+`)
  UNION ALL
  SELECT d.id::text,d.asset_type,d.asset_value,d.normalized_value,COALESCE(d.asset_name,''),o.id::text,o.organization_code,o.organization_name,
  COALESCE(wb.id::text,b.id::text,''),COALESCE(wb.system_code,b.system_code,''),COALESCE(wb.system_name,b.system_name,''),d.environment,d.network_scope,
@@ -68,8 +69,8 @@ func (s *Service) searchWorkingCreates(ctx context.Context, p auth.Principal, f 
  true,COALESCE(d.source_asset_id::text,''),COALESCE(d.task_id::text,''),d.draft_status,d.operation,d.custom_values
  FROM inventory_asset_drafts d JOIN organizations o ON o.id=d.organization_id LEFT JOIN users u ON u.id=d.owner_user_id
  LEFT JOIN asset_network_areas na ON na.id=d.network_area_id LEFT JOIN business_systems b ON b.id=d.business_system_id AND b.deleted_at IS NULL
- LEFT JOIN inventory_business_system_drafts wb ON wb.id=d.business_system_draft_id AND wb.draft_status IN ('editing','submitted','returned')
- WHERE d.organization_id IN (SELECT id FROM accessible) AND d.draft_status IN ('editing','submitted','returned')
+ LEFT JOIN inventory_business_system_drafts wb ON wb.id=d.business_system_draft_id AND wb.draft_status IN `+inventorydraft.ActiveSQL+`
+ WHERE d.organization_id IN (SELECT id FROM accessible) AND d.draft_status IN `+inventorydraft.ActiveSQL+`
 )
 SELECT id,asset_type,asset_value,normalized_value,asset_name,organization_id,organization_code,organization_name,business_system_id,business_system_code,business_system_name,
  environment,network_scope,network_area_id,network_area_name,status,importance,source,owner_user_id,owner_username,owner_display_name,owner_name,notes,expires_at,created_at,updated_at,
@@ -127,8 +128,8 @@ SELECT d.id::text,d.asset_type,d.asset_value,d.normalized_value,COALESCE(d.asset
  true,COALESCE(d.source_asset_id::text,''),COALESCE(d.task_id::text,''),d.draft_status,d.operation,d.custom_values
 FROM inventory_asset_drafts d JOIN organizations o ON o.id=d.organization_id LEFT JOIN users u ON u.id=d.owner_user_id
 LEFT JOIN asset_network_areas na ON na.id=d.network_area_id LEFT JOIN business_systems b ON b.id=d.business_system_id AND b.deleted_at IS NULL
-LEFT JOIN inventory_business_system_drafts wb ON wb.id=d.business_system_draft_id AND wb.draft_status IN ('editing','submitted','returned')
-WHERE `+predicate+` AND d.organization_id IN (SELECT id FROM accessible) AND d.draft_status IN ('editing','submitted','returned')`, p.UserID, id)
+LEFT JOIN inventory_business_system_drafts wb ON wb.id=d.business_system_draft_id AND wb.draft_status IN `+inventorydraft.ActiveSQL+`
+WHERE `+predicate+` AND d.organization_id IN (SELECT id FROM accessible) AND d.draft_status IN `+inventorydraft.ActiveSQL+``, p.UserID, id)
 	var a Asset
 	var raw []byte
 	err := row.Scan(&a.ID, &a.Type, &a.Value, &a.NormalizedValue, &a.Name, &a.OrganizationID, &a.OrganizationCode, &a.OrganizationName, &a.BusinessSystemID, &a.BusinessSystemCode, &a.BusinessSystemName, &a.Environment, &a.NetworkScope, &a.NetworkAreaID, &a.NetworkAreaName, &a.Status, &a.Importance, &a.Source, &a.OwnerUserID, &a.OwnerUsername, &a.OwnerUserDisplayName, &a.OwnerName, &a.Notes, &a.ExpiresAt, &a.CreatedAt, &a.UpdatedAt, &a.ReportingStatus, &a.IsWorkingCopy, &a.PublishedID, &a.TaskID, &a.DraftStatus, &a.Operation, &raw)
@@ -191,7 +192,7 @@ func (s *Service) createUnreportedWithSource(ctx context.Context, p auth.Princip
 		return Asset{}, e
 	}
 	var duplicate bool
-	e = tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM assets WHERE asset_type=$1 AND normalized_value=$2 AND deleted_at IS NULL) OR EXISTS(SELECT 1 FROM inventory_asset_drafts WHERE asset_type=$1 AND normalized_value=$2 AND draft_status IN ('editing','submitted','returned'))`, in.Type, normalized).Scan(&duplicate)
+	e = tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM assets WHERE asset_type=$1 AND normalized_value=$2 AND deleted_at IS NULL) OR EXISTS(SELECT 1 FROM inventory_asset_drafts WHERE asset_type=$1 AND normalized_value=$2 AND draft_status IN `+inventorydraft.ActiveSQL+`)`, in.Type, normalized).Scan(&duplicate)
 	if e != nil {
 		return Asset{}, e
 	}
@@ -248,11 +249,14 @@ func (s *Service) updateWorking(ctx context.Context, p auth.Principal, id string
 	if e != nil {
 		return Asset{}, e
 	}
-	r, e := tx.Exec(ctx, `UPDATE inventory_asset_drafts SET asset_type=$2,asset_value=$3,normalized_value=$4,asset_name=NULLIF($5,''),environment=$6,network_scope=$7,network_area_id=NULLIF($8,'')::uuid,business_system_id=NULLIF($9,'')::uuid,business_system_draft_id=NULLIF($10,'')::uuid,status=$11,importance=$12,owner_user_id=NULLIF($13,'')::uuid,owner_name=NULLIF($14,''),notes=NULLIF($15,''),expires_at=$16,custom_values=$17::jsonb,draft_status='editing',updated_by=$18::uuid,updated_at=now() WHERE id::text=$1 AND task_id IS NULL AND operation IN ('create','update') AND draft_status IN ('editing','returned')`, id, in.Type, in.Value, normalized, in.Name, in.Environment, in.NetworkScope, in.NetworkAreaID, bs, bsd, in.Status, in.Importance, in.OwnerUserID, in.OwnerName, in.Notes, in.ExpiresAt, raw, p.UserID)
+	r, e := tx.Exec(ctx, `UPDATE inventory_asset_drafts SET asset_type=$2,asset_value=$3,normalized_value=$4,asset_name=NULLIF($5,''),environment=$6,network_scope=$7,network_area_id=NULLIF($8,'')::uuid,business_system_id=NULLIF($9,'')::uuid,business_system_draft_id=NULLIF($10,'')::uuid,status=$11,importance=$12,owner_user_id=NULLIF($13,'')::uuid,owner_name=NULLIF($14,''),notes=NULLIF($15,''),expires_at=$16,custom_values=$17::jsonb,draft_status='editing',updated_by=$18::uuid,updated_at=now() WHERE id::text=$1 AND task_id IS NULL AND operation IN ('create','update') AND draft_status IN `+inventorydraft.EditableSQL+` AND ($19::timestamptz IS NULL OR updated_at=$19::timestamptz)`, id, in.Type, in.Value, normalized, in.Name, in.Environment, in.NetworkScope, in.NetworkAreaID, bs, bsd, in.Status, in.Importance, in.OwnerUserID, in.OwnerName, in.Notes, in.ExpiresAt, raw, p.UserID, in.ExpectedUpdatedAt)
 	if e != nil {
 		return Asset{}, mapUnreportedDB(e)
 	}
 	if r.RowsAffected() == 0 {
+		if in.ExpectedUpdatedAt != nil {
+			return Asset{}, ErrEditConflict
+		}
 		return Asset{}, ErrNotFound
 	}
 	if _, e = tx.Exec(ctx, `INSERT INTO audit_logs(user_id,organization_id,action,resource_type,resource_id,summary,details,request_ip,request_id) VALUES($1::uuid,$2::uuid,'asset.working_update','asset',$3,'编辑网络资产工作版本',jsonb_build_object('published_id',$4::text),NULLIF($5,'')::inet,NULLIF($6,''))`, p.UserID, in.OrganizationID, id, cur.PublishedID, ip, requestID); e != nil {
@@ -323,7 +327,7 @@ func (s *Service) deleteWorking(ctx context.Context, p auth.Principal, id, reque
 		return ErrForbidden
 	}
 	if cur.Operation == "create" {
-		r, e := s.pool.Exec(ctx, `UPDATE inventory_asset_drafts SET draft_status='discarded',updated_by=$2::uuid,updated_at=now() WHERE id::text=$1 AND task_id IS NULL AND operation='create' AND draft_status IN ('editing','returned')`, id, p.UserID)
+		r, e := s.pool.Exec(ctx, `UPDATE inventory_asset_drafts SET draft_status='discarded',updated_by=$2::uuid,updated_at=now() WHERE id::text=$1 AND task_id IS NULL AND operation='create' AND draft_status IN `+inventorydraft.EditableSQL+``, id, p.UserID)
 		if e != nil {
 			return e
 		}
@@ -332,7 +336,7 @@ func (s *Service) deleteWorking(ctx context.Context, p auth.Principal, id, reque
 		}
 		return nil
 	}
-	r, e := s.pool.Exec(ctx, `UPDATE inventory_asset_drafts SET operation='delete',draft_status='editing',updated_by=$2::uuid,updated_at=now() WHERE id::text=$1 AND task_id IS NULL AND source_asset_id IS NOT NULL AND draft_status IN ('editing','returned')`, id, p.UserID)
+	r, e := s.pool.Exec(ctx, `UPDATE inventory_asset_drafts SET operation='delete',draft_status='editing',updated_by=$2::uuid,updated_at=now() WHERE id::text=$1 AND task_id IS NULL AND source_asset_id IS NOT NULL AND draft_status IN `+inventorydraft.EditableSQL+``, id, p.UserID)
 	if e != nil {
 		return e
 	}
@@ -420,7 +424,7 @@ func validateUnreportedReferences(ctx context.Context, q interface {
 	bs, bsd := "", ""
 	if in.BusinessSystemID != "" {
 		var d bool
-		if e := q.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM inventory_business_system_drafts WHERE id::text=$1 AND organization_id::text=$2 AND operation<>'delete' AND draft_status IN ('editing','submitted','returned'))`, in.BusinessSystemID, in.OrganizationID).Scan(&d); e != nil {
+		if e := q.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM inventory_business_system_drafts WHERE id::text=$1 AND organization_id::text=$2 AND operation<>'delete' AND draft_status IN `+inventorydraft.ActiveSQL+`)`, in.BusinessSystemID, in.OrganizationID).Scan(&d); e != nil {
 			return "", "", e
 		}
 		if d {

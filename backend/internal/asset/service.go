@@ -26,6 +26,7 @@ import (
 	"netassets/internal/customfield"
 	"netassets/internal/exportfile"
 	"netassets/internal/importmapping"
+	"netassets/internal/inventorydraft"
 	"netassets/internal/notification"
 	"netassets/internal/pagination"
 )
@@ -1527,7 +1528,7 @@ func normalizeImportMode(principal auth.Principal, mode string) (string, error) 
 
 func (s *Service) findImportUpdateTarget(ctx context.Context, organizationID, assetType, normalizedValue string) (importUpdateTarget, bool, error) {
 	var target importUpdateTarget
-	err := s.pool.QueryRow(ctx, `SELECT id::text,'draft',draft_status,COALESCE(task_id::text,''),operation FROM inventory_asset_drafts WHERE organization_id=$1::uuid AND asset_type=$2 AND normalized_value=$3 AND draft_status IN('editing','submitted','returned') ORDER BY updated_at DESC LIMIT 1`, organizationID, assetType, normalizedValue).Scan(&target.ID, &target.Kind, &target.DraftStatus, &target.TaskID, &target.Operation)
+	err := s.pool.QueryRow(ctx, `SELECT id::text,'draft',draft_status,COALESCE(task_id::text,''),operation FROM inventory_asset_drafts WHERE organization_id=$1::uuid AND asset_type=$2 AND normalized_value=$3 AND draft_status IN`+inventorydraft.ActiveSQL+` ORDER BY updated_at DESC LIMIT 1`, organizationID, assetType, normalizedValue).Scan(&target.ID, &target.Kind, &target.DraftStatus, &target.TaskID, &target.Operation)
 	if err == nil {
 		return target, true, nil
 	}
@@ -1537,7 +1538,7 @@ func (s *Service) findImportUpdateTarget(ctx context.Context, organizationID, as
 	var formalID string
 	err = s.pool.QueryRow(ctx, `SELECT a.id::text FROM assets a JOIN asset_organizations ao ON ao.asset_id=a.id AND ao.is_primary=true AND ao.relationship_type='owner' WHERE ao.organization_id=$1::uuid AND a.asset_type=$2 AND a.normalized_value=$3 AND a.deleted_at IS NULL LIMIT 1`, organizationID, assetType, normalizedValue).Scan(&formalID)
 	if err == nil {
-		err = s.pool.QueryRow(ctx, `SELECT id::text,'draft',draft_status,COALESCE(task_id::text,''),operation FROM inventory_asset_drafts WHERE source_asset_id=$1::uuid AND draft_status IN('editing','submitted','returned') ORDER BY updated_at DESC LIMIT 1`, formalID).Scan(&target.ID, &target.Kind, &target.DraftStatus, &target.TaskID, &target.Operation)
+		err = s.pool.QueryRow(ctx, `SELECT id::text,'draft',draft_status,COALESCE(task_id::text,''),operation FROM inventory_asset_drafts WHERE source_asset_id=$1::uuid AND draft_status IN`+inventorydraft.ActiveSQL+` ORDER BY updated_at DESC LIMIT 1`, formalID).Scan(&target.ID, &target.Kind, &target.DraftStatus, &target.TaskID, &target.Operation)
 		if err == nil {
 			return target, true, nil
 		}
@@ -1550,7 +1551,7 @@ func (s *Service) findImportUpdateTarget(ctx context.Context, organizationID, as
 		return target, false, err
 	}
 	var duplicate bool
-	err = s.pool.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM assets WHERE asset_type=$1 AND normalized_value=$2 AND deleted_at IS NULL) OR EXISTS(SELECT 1 FROM inventory_asset_drafts WHERE asset_type=$1 AND normalized_value=$2 AND draft_status IN('editing','submitted','returned'))`, assetType, normalizedValue).Scan(&duplicate)
+	err = s.pool.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM assets WHERE asset_type=$1 AND normalized_value=$2 AND deleted_at IS NULL) OR EXISTS(SELECT 1 FROM inventory_asset_drafts WHERE asset_type=$1 AND normalized_value=$2 AND draft_status IN`+inventorydraft.ActiveSQL+`)`, assetType, normalizedValue).Scan(&duplicate)
 	return target, duplicate, err
 }
 
@@ -1747,7 +1748,7 @@ func (s *Service) PreviewImport(ctx context.Context, principal auth.Principal, o
 			if err := s.pool.QueryRow(ctx, `SELECT EXISTS (
 				SELECT 1 FROM assets WHERE asset_type = $1 AND normalized_value = $2 AND deleted_at IS NULL
 			) OR EXISTS (
-				SELECT 1 FROM inventory_asset_drafts WHERE asset_type = $1 AND normalized_value = $2 AND draft_status IN ('editing','submitted','returned')
+				SELECT 1 FROM inventory_asset_drafts WHERE asset_type = $1 AND normalized_value = $2 AND draft_status IN `+inventorydraft.ActiveSQL+`
 			)`, input.Type, normalizedValue).Scan(&duplicateInLedger); err != nil {
 				return ImportResult{}, fmt.Errorf("check preview asset duplicate: %w", err)
 			}
@@ -1950,7 +1951,7 @@ func (s *Service) createImported(ctx context.Context, principal auth.Principal, 
 		return Asset{}, err
 	}
 	var workingDuplicate bool
-	if err := s.pool.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM inventory_asset_drafts WHERE asset_type=$1 AND normalized_value=$2 AND draft_status IN ('editing','submitted','returned'))`, input.Type, normalized).Scan(&workingDuplicate); err != nil {
+	if err := s.pool.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM inventory_asset_drafts WHERE asset_type=$1 AND normalized_value=$2 AND draft_status IN `+inventorydraft.ActiveSQL+`)`, input.Type, normalized).Scan(&workingDuplicate); err != nil {
 		return Asset{}, fmt.Errorf("check imported asset working duplicate: %w", err)
 	}
 	if workingDuplicate {
@@ -1969,7 +1970,7 @@ func (s *Service) resolveImportBusinessSystem(ctx context.Context, organizationI
 			SELECT id::text
 			FROM inventory_business_system_drafts
 			WHERE lower(system_code)=lower($1) AND organization_id=$2::uuid
-			  AND operation<>'delete' AND draft_status IN ('editing','submitted','returned')
+			  AND operation<>'delete' AND draft_status IN `+inventorydraft.ActiveSQL+`
 			ORDER BY CASE WHEN source_system_id IS NULL THEN 0 ELSE 1 END, updated_at DESC
 			LIMIT 1
 		`, systemCode, organizationID).Scan(&draftID)

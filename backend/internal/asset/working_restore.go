@@ -6,6 +6,7 @@ import (
 
 	"netassets/internal/access"
 	"netassets/internal/auth"
+	"netassets/internal/inventorydraft"
 	"netassets/internal/notification"
 )
 
@@ -85,7 +86,7 @@ func (s *Service) restoreWorking(ctx context.Context, principal auth.Principal, 
 		    expires_at=$16, custom_values=$17::jsonb, draft_status='editing',
 		    updated_by=$18::uuid, updated_at=now()
 		WHERE id::text=$1 AND task_id IS NULL AND source_asset_id IS NOT NULL
-		  AND draft_status IN ('editing','returned')
+		  AND draft_status IN `+inventorydraft.EditableSQL+`
 	`, current.ID, input.Type, input.Value, normalizedValue, input.Name, input.Environment, input.NetworkScope,
 		input.NetworkAreaID, businessSystemID, businessSystemDraftID, input.Status, input.Importance,
 		input.OwnerUserID, input.OwnerName, input.Notes, input.ExpiresAt, customValues, principal.UserID)

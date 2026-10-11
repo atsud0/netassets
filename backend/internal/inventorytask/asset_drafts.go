@@ -14,6 +14,7 @@ import (
 	"netassets/internal/asset"
 	"netassets/internal/auth"
 	"netassets/internal/customfield"
+	"netassets/internal/inventorydraft"
 	"netassets/internal/notification"
 	"netassets/internal/pagination"
 )
@@ -262,12 +263,12 @@ func (s *Service) createAssetChangeDraft(ctx context.Context, principal auth.Pri
 	err = tx.QueryRow(ctx, `
 		INSERT INTO inventory_asset_drafts(task_id,organization_id,operation,source_asset_id,asset_type,asset_value,normalized_value,asset_name,environment,network_scope,network_area_id,business_system_id,business_system_draft_id,status,importance,source,owner_user_id,owner_name,notes,expires_at,custom_values,created_by,updated_by)
 		VALUES($1::uuid,$2::uuid,$3,$4::uuid,$5,$6,$7,NULLIF($8,''),$9,$10,NULLIF($11,'')::uuid,NULLIF($12,'')::uuid,NULLIF($13,'')::uuid,$14,$15,$16,NULLIF($17,'')::uuid,NULLIF($18,''),NULLIF($19,''),$20,$21::jsonb,$22::uuid,$22::uuid)
-		ON CONFLICT (organization_id,source_asset_id) WHERE source_asset_id IS NOT NULL AND draft_status IN ('editing','submitted','returned') DO UPDATE SET
+		ON CONFLICT (organization_id,source_asset_id) WHERE source_asset_id IS NOT NULL AND draft_status IN `+inventorydraft.ActiveSQL+` DO UPDATE SET
 		operation=EXCLUDED.operation,asset_type=EXCLUDED.asset_type,asset_value=EXCLUDED.asset_value,normalized_value=EXCLUDED.normalized_value,asset_name=EXCLUDED.asset_name,
 		environment=EXCLUDED.environment,network_scope=EXCLUDED.network_scope,network_area_id=EXCLUDED.network_area_id,business_system_id=EXCLUDED.business_system_id,business_system_draft_id=EXCLUDED.business_system_draft_id,
 		status=EXCLUDED.status,importance=EXCLUDED.importance,source=EXCLUDED.source,owner_user_id=EXCLUDED.owner_user_id,owner_name=EXCLUDED.owner_name,notes=EXCLUDED.notes,expires_at=EXCLUDED.expires_at,custom_values=EXCLUDED.custom_values,
 		draft_status='editing',updated_by=EXCLUDED.updated_by,updated_at=now()
-		WHERE inventory_asset_drafts.draft_status IN ('editing','returned') RETURNING id::text
+		WHERE inventory_asset_drafts.draft_status IN `+inventorydraft.EditableSQL+` RETURNING id::text
 	`, taskID, organizationID, operation, sourceAssetID, current.Type, current.Value, normalizedValue, current.Name, current.Environment, current.NetworkScope, current.NetworkAreaID, current.BusinessSystemID, currentSystemDraftID, current.Status, current.Importance, currentSource, current.OwnerUserID, current.OwnerName, current.Notes, current.ExpiresAt, customValues, principal.UserID).Scan(&id)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return AssetDraft{}, ErrState
@@ -345,7 +346,7 @@ func (s *Service) UpdateAssetDraft(ctx context.Context, principal auth.Principal
 		       environment=$9,network_scope=$10,network_area_id=NULLIF($11,'')::uuid,business_system_id=NULLIF($12,'')::uuid,business_system_draft_id=NULLIF($13,'')::uuid,
 		       status=$14,importance=$15,owner_user_id=NULLIF($16,'')::uuid,owner_name=NULLIF($17,''),notes=NULLIF($18,''),
 		       expires_at=$19,custom_values=$20::jsonb,draft_status='editing',updated_by=$21::uuid,updated_at=now()
-		WHERE id::text=$4 AND task_id::text=$1 AND organization_id::text=$2 AND operation IN ('create','update') AND draft_status IN ('editing','returned')
+		WHERE id::text=$4 AND task_id::text=$1 AND organization_id::text=$2 AND operation IN ('create','update') AND draft_status IN `+inventorydraft.EditableSQL+`
 	`, taskID, organizationID, principal.UserID, draftID, input.Type, input.Value, normalizedValue, input.Name,
 		input.Environment, input.NetworkScope, input.NetworkAreaID, input.BusinessSystemID, systemDraftID, input.Status, input.Importance,
 		input.OwnerUserID, input.OwnerName, input.Notes, input.ExpiresAt, customValues, principal.UserID)
@@ -382,11 +383,11 @@ func (s *Service) DeleteAssetDraft(ctx context.Context, principal auth.Principal
 	}
 	var label string
 	unselected := false
-	err = tx.QueryRow(ctx, `UPDATE inventory_asset_drafts SET task_id=NULL,selected_at=NULL,updated_by=$4::uuid,updated_at=now() WHERE id::text=$1 AND task_id::text=$2 AND organization_id::text=$3 AND selected_at IS NOT NULL AND draft_status IN ('editing','returned') RETURNING COALESCE(NULLIF(asset_name,''),asset_value)`, draftID, taskID, organizationID, principal.UserID).Scan(&label)
+	err = tx.QueryRow(ctx, `UPDATE inventory_asset_drafts SET task_id=NULL,selected_at=NULL,updated_by=$4::uuid,updated_at=now() WHERE id::text=$1 AND task_id::text=$2 AND organization_id::text=$3 AND selected_at IS NOT NULL AND draft_status IN `+inventorydraft.EditableSQL+` RETURNING COALESCE(NULLIF(asset_name,''),asset_value)`, draftID, taskID, organizationID, principal.UserID).Scan(&label)
 	if err == nil {
 		unselected = true
 	} else if errors.Is(err, pgx.ErrNoRows) {
-		result, deleteErr := tx.Exec(ctx, `DELETE FROM inventory_asset_drafts WHERE id::text=$1 AND task_id::text=$2 AND organization_id::text=$3 AND draft_status IN ('editing','returned')`, draftID, taskID, organizationID)
+		result, deleteErr := tx.Exec(ctx, `DELETE FROM inventory_asset_drafts WHERE id::text=$1 AND task_id::text=$2 AND organization_id::text=$3 AND draft_status IN `+inventorydraft.EditableSQL+``, draftID, taskID, organizationID)
 		if deleteErr != nil {
 			return fmt.Errorf("delete inventory asset draft: %w", deleteErr)
 		}
