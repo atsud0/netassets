@@ -66,6 +66,20 @@ type Finding struct {
 	RiskReviewedByName       string     `json:"risk_reviewed_by_name,omitempty"`
 	RiskReviewComment        string     `json:"risk_review_comment,omitempty"`
 	RiskAcceptanceExpired    bool       `json:"risk_acceptance_expired"`
+	// PendingAssetDraftID is the unpublished working version this finding waits
+	// on. It is echoed back to the UI so a pending row can say which draft will
+	// resolve it once published.
+	PendingAssetDraftID string `json:"pending_asset_draft_id,omitempty"`
+	// AssetDeleted reports that the asset this finding hangs on has been soft
+	// deleted. The finding is not unlinked and not lost: the vulnerability was
+	// real, the asset was retired. Without this flag the list shows an empty
+	// asset cell that is indistinguishable from a finding that was never linked,
+	// so the row looks broken and nobody can tell which case it is.
+	AssetDeleted bool `json:"asset_deleted,omitempty"`
+	// AssetLinkState is the single word the UI needs: live, pending (waiting on an
+	// unpublished working version), retired (asset soft deleted) or unlinked (no
+	// asset was ever decided).
+	AssetLinkState string `json:"asset_link_state,omitempty"`
 }
 
 type FindingInput struct {
@@ -89,6 +103,43 @@ type FindingInput struct {
 	PendingAssetDraftID string `json:"pending_asset_draft_id,omitempty"`
 }
 
+// validFindingAssetLinkState keeps the API filter vocabulary identical to the
+// values findingAssetLinkState can emit, so a bad filter is rejected instead of
+// silently returning an empty page.
+func validFindingAssetLinkState(state string) bool {
+	switch state {
+	case "live", "pending", "retired", "unlinked":
+		return true
+	default:
+		return false
+	}
+}
+
+// findingAssetLinkStateFilter mirrors findingAssetLinkState in SQL so filtering
+// by asset_link_state returns exactly the rows the UI would label with that
+// state. The placeholder carries the requested value; an empty value means no filtering.
+func findingAssetLinkStateFilter(findingAlias, assetAlias, placeholder string) string {
+	return "AND (" + placeholder + "::text = ''\n" +
+		"    OR (" + placeholder + "::text = 'live' AND " + findingAlias + ".asset_id IS NOT NULL AND " + assetAlias + ".deleted_at IS NULL)\n" +
+		"    OR (" + placeholder + "::text = 'retired' AND " + findingAlias + ".asset_id IS NOT NULL AND " + assetAlias + ".deleted_at IS NOT NULL)\n" +
+		"    OR (" + placeholder + "::text = 'pending' AND " + findingAlias + ".asset_id IS NULL AND " + findingAlias + ".pending_asset_draft_id IS NOT NULL)\n" +
+		"    OR (" + placeholder + "::text = 'unlinked' AND " + findingAlias + ".asset_id IS NULL AND " + findingAlias + ".pending_asset_draft_id IS NULL)\n" +
+		"  )"
+}
+
+func findingAssetLinkState(assetID, pendingDraftID string, assetDeleted bool) string {
+	switch {
+	case assetID != "" && assetDeleted:
+		return "retired"
+	case assetID != "":
+		return "live"
+	case pendingDraftID != "":
+		return "pending"
+	default:
+		return "unlinked"
+	}
+}
+
 type FindingSummaryStats struct {
 	Total    int `json:"total"`
 	Pending  int `json:"pending"`
@@ -99,16 +150,21 @@ type FindingSummaryStats struct {
 }
 
 type FindingSummary struct {
-	ID                 string `json:"id"`
-	Code               string `json:"code"`
-	Title              string `json:"title"`
-	Severity           string `json:"severity"`
-	Status             string `json:"status"`
-	AssetID            string `json:"asset_id,omitempty"`
-	AssetValue         string `json:"asset_value,omitempty"`
-	AssetName          string `json:"asset_name,omitempty"`
-	BusinessSystemID   string `json:"business_system_id,omitempty"`
-	BusinessSystemName string `json:"business_system_name,omitempty"`
+	ID             string `json:"id"`
+	Code           string `json:"code"`
+	Title          string `json:"title"`
+	Severity       string `json:"severity"`
+	Status         string `json:"status"`
+	AssetID        string `json:"asset_id,omitempty"`
+	AssetValue     string `json:"asset_value,omitempty"`
+	AssetName      string `json:"asset_name,omitempty"`
+	AssetLinkState string `json:"asset_link_state,omitempty"`
+	// PendingAssetDraftID and AssetDeleted are the inputs to AssetLinkState; the
+	// work order finding list surfaces them so a row can explain its own state.
+	PendingAssetDraftID string `json:"pending_asset_draft_id,omitempty"`
+	AssetDeleted        bool   `json:"asset_deleted,omitempty"`
+	BusinessSystemID    string `json:"business_system_id,omitempty"`
+	BusinessSystemName  string `json:"business_system_name,omitempty"`
 }
 
 type Event struct {
@@ -271,14 +327,15 @@ func (s *Service) SummarizeFindings(ctx context.Context, principal auth.Principa
 
 func (s *Service) ListFindings(ctx context.Context, principal auth.Principal, organizationID, status string) ([]Finding, error) {
 	// Kept for internal compatibility. HTTP collection endpoints must use SearchFindings.
-	result, err := s.SearchFindings(ctx, principal, organizationID, status, pagination.Query{Page: 1, PageSize: pagination.MaxPageSize})
+	result, err := s.SearchFindings(ctx, principal, organizationID, status, "", pagination.Query{Page: 1, PageSize: pagination.MaxPageSize})
 	return result.Items, err
 }
 
 // SearchFindings applies database pagination before findings are hydrated and serialized.
-func (s *Service) SearchFindings(ctx context.Context, principal auth.Principal, organizationID, status string, page pagination.Query) (pagination.Result[Finding], error) {
+func (s *Service) SearchFindings(ctx context.Context, principal auth.Principal, organizationID, status, assetLinkState string, page pagination.Query) (pagination.Result[Finding], error) {
 	organizationID = strings.TrimSpace(organizationID)
 	status = strings.TrimSpace(status)
+	assetLinkState = strings.TrimSpace(assetLinkState)
 	if organizationID != "" {
 		if !validUUID(organizationID) {
 			return pagination.Result[Finding]{}, ErrInvalid
@@ -294,10 +351,14 @@ func (s *Service) SearchFindings(ctx context.Context, principal auth.Principal, 
 	if status != "" && !validFindingStatus(status) {
 		return pagination.Result[Finding]{}, ErrInvalid
 	}
+	if assetLinkState != "" && !validFindingAssetLinkState(assetLinkState) {
+		return pagination.Result[Finding]{}, ErrInvalid
+	}
 	rows, err := s.pool.Query(ctx, accessibleCTE+`
 		SELECT f.id::text, f.finding_code, f.title, f.severity, f.status,
 		       o.id::text, o.organization_code, o.organization_name,
 		       COALESCE(a.id::text, ''), COALESCE(a.asset_value, ''), COALESCE(a.asset_name, ''),
+		       COALESCE(f.pending_asset_draft_id::text, ''), (a.id IS NOT NULL AND a.deleted_at IS NOT NULL),
 		       COALESCE(bs.id::text, ''), COALESCE(bs.system_code, ''), COALESCE(bs.system_name, ''),
 		       COALESCE(tb.id::text, ''), COALESCE(tb.batch_code, ''), COALESCE(tb.batch_name, ''),
 		       COALESCE(f.vulnerability_type, ''), f.description, COALESCE(f.evidence, ''),
@@ -341,8 +402,9 @@ func (s *Service) SearchFindings(ctx context.Context, principal auth.Principal, 
 		      )
 		  AND ($3::text = '' OR f.assignee_organization_id::text = $3)
 		  AND ($4::text = '' OR f.status = $4)
+		  `+findingAssetLinkStateFilter("f", "a", "$5")+`
 		ORDER BY f.discovered_at DESC, f.created_at DESC
-		LIMIT $5 OFFSET $6`, principal.UserID, principal.CanManageSecurityFindings(), organizationID, status, page.PageSize, page.Offset())
+		LIMIT $6 OFFSET $7`, principal.UserID, principal.CanManageSecurityFindings(), organizationID, status, assetLinkState, page.PageSize, page.Offset())
 	if err != nil {
 		return pagination.Result[Finding]{}, fmt.Errorf("search security findings: %w", err)
 	}
@@ -362,6 +424,7 @@ func (s *Service) SearchFindings(ctx context.Context, principal auth.Principal, 
 	if pagination.NeedsTotalFallback(len(items), page) {
 		if err := s.pool.QueryRow(ctx, accessibleCTE+`
             SELECT count(*) FROM security_findings f
+            LEFT JOIN assets a ON a.id = f.asset_id
             WHERE (
                     $2::boolean
                     OR (
@@ -387,7 +450,8 @@ func (s *Service) SearchFindings(ctx context.Context, principal auth.Principal, 
                   )
               AND ($3::text = '' OR f.assignee_organization_id::text = $3)
               AND ($4::text = '' OR f.status = $4)
-        `, principal.UserID, principal.CanManageSecurityFindings(), organizationID, status).Scan(&total); err != nil {
+              `+findingAssetLinkStateFilter("f", "a", "$5")+`
+        `, principal.UserID, principal.CanManageSecurityFindings(), organizationID, status, assetLinkState).Scan(&total); err != nil {
 			return pagination.Result[Finding]{}, fmt.Errorf("count security findings: %w", err)
 		}
 	}
@@ -929,6 +993,7 @@ func (s *Service) SearchWorkOrderFindings(ctx context.Context, principal auth.Pr
 	rows, err := s.pool.Query(ctx, `
 		SELECT f.id::text, f.finding_code, f.title, f.severity, f.status,
 		       COALESCE(a.id::text, ''), COALESCE(a.asset_value, ''), COALESCE(a.asset_name, ''),
+		       COALESCE(f.pending_asset_draft_id::text, ''), (a.id IS NOT NULL AND a.deleted_at IS NOT NULL),
 		       COALESCE(bs.id::text, ''), COALESCE(bs.system_name, '')
 		FROM security_work_order_findings link
 		JOIN security_findings f ON f.id = link.finding_id
@@ -946,9 +1011,10 @@ func (s *Service) SearchWorkOrderFindings(ctx context.Context, principal auth.Pr
 	for rows.Next() {
 		var item FindingSummary
 		if err := rows.Scan(&item.ID, &item.Code, &item.Title, &item.Severity, &item.Status,
-			&item.AssetID, &item.AssetValue, &item.AssetName, &item.BusinessSystemID, &item.BusinessSystemName); err != nil {
+			&item.AssetID, &item.AssetValue, &item.AssetName, &item.PendingAssetDraftID, &item.AssetDeleted, &item.BusinessSystemID, &item.BusinessSystemName); err != nil {
 			return pagination.Result[FindingSummary]{}, fmt.Errorf("scan work order finding: %w", err)
 		}
+		item.AssetLinkState = findingAssetLinkState(item.AssetID, item.PendingAssetDraftID, item.AssetDeleted)
 		items = append(items, item)
 	}
 	if err := rows.Err(); err != nil {
@@ -1258,6 +1324,7 @@ func (s *Service) getFinding(ctx context.Context, id string) (Finding, error) {
 		SELECT f.id::text, f.finding_code, f.title, f.severity, f.status,
 		       o.id::text, o.organization_code, o.organization_name,
 		       COALESCE(a.id::text, ''), COALESCE(a.asset_value, ''), COALESCE(a.asset_name, ''),
+		       COALESCE(f.pending_asset_draft_id::text, ''), (a.id IS NOT NULL AND a.deleted_at IS NOT NULL),
 		       COALESCE(bs.id::text, ''), COALESCE(bs.system_code, ''), COALESCE(bs.system_name, ''),
 		       COALESCE(tb.id::text, ''), COALESCE(tb.batch_code, ''), COALESCE(tb.batch_name, ''),
 		       COALESCE(f.vulnerability_type, ''), f.description, COALESCE(f.evidence, ''),
@@ -1453,13 +1520,20 @@ type queryer interface {
 }
 
 func scanFindingWithTotal(row rowScanner, item *Finding, total *int) error {
-	return row.Scan(&item.ID, &item.Code, &item.Title, &item.Severity, &item.Status,
+	if err := row.Scan(&item.ID, &item.Code, &item.Title, &item.Severity, &item.Status,
 		&item.AssigneeOrganizationID, &item.AssigneeOrganizationCode, &item.AssigneeOrganizationName,
-		&item.AssetID, &item.AssetValue, &item.AssetName, &item.BusinessSystemID, &item.BusinessSystemCode,
+		&item.AssetID, &item.AssetValue, &item.AssetName, &item.PendingAssetDraftID, &item.AssetDeleted,
+		&item.BusinessSystemID, &item.BusinessSystemCode,
 		&item.BusinessSystemName, &item.TestBatchID, &item.TestBatchCode, &item.TestBatchName, &item.VulnerabilityType, &item.Description, &item.Evidence,
 		&item.RemediationAdvice, &item.Source, &item.DiscoveredAt, &item.CreatedByName, &item.CreatedAt, &item.UpdatedAt,
 		&item.RiskAcceptedAt, &item.RiskAcceptedUntil, &item.RiskAcceptanceReason, &item.RiskAcceptedByName,
-		&item.RiskAcceptedFromStatus, &item.RiskReviewedAt, &item.RiskReviewedByName, &item.RiskReviewComment, &item.RiskAcceptanceExpired, total)
+		&item.RiskAcceptedFromStatus, &item.RiskReviewedAt, &item.RiskReviewedByName, &item.RiskReviewComment, &item.RiskAcceptanceExpired, total); err != nil {
+		return err
+	}
+	// Derive the single word the UI branches on so every listing and detail view
+	// reports the same asset-link state without repeating the CASE expression.
+	item.AssetLinkState = findingAssetLinkState(item.AssetID, item.PendingAssetDraftID, item.AssetDeleted)
+	return nil
 }
 
 func scanWorkOrderWithTotal(row rowScanner, item *WorkOrder, total *int) error {
@@ -1474,12 +1548,17 @@ func scanWorkOrderWithTotal(row rowScanner, item *WorkOrder, total *int) error {
 func scanFinding(row rowScanner, item *Finding) error {
 	err := row.Scan(&item.ID, &item.Code, &item.Title, &item.Severity, &item.Status,
 		&item.AssigneeOrganizationID, &item.AssigneeOrganizationCode, &item.AssigneeOrganizationName,
-		&item.AssetID, &item.AssetValue, &item.AssetName, &item.BusinessSystemID, &item.BusinessSystemCode,
+		&item.AssetID, &item.AssetValue, &item.AssetName, &item.PendingAssetDraftID, &item.AssetDeleted,
+		&item.BusinessSystemID, &item.BusinessSystemCode,
 		&item.BusinessSystemName, &item.TestBatchID, &item.TestBatchCode, &item.TestBatchName, &item.VulnerabilityType, &item.Description, &item.Evidence,
 		&item.RemediationAdvice, &item.Source, &item.DiscoveredAt, &item.CreatedByName, &item.CreatedAt, &item.UpdatedAt,
 		&item.RiskAcceptedAt, &item.RiskAcceptedUntil, &item.RiskAcceptanceReason, &item.RiskAcceptedByName,
 		&item.RiskAcceptedFromStatus, &item.RiskReviewedAt, &item.RiskReviewedByName, &item.RiskReviewComment, &item.RiskAcceptanceExpired)
-	return err
+	if err != nil {
+		return err
+	}
+	item.AssetLinkState = findingAssetLinkState(item.AssetID, item.PendingAssetDraftID, item.AssetDeleted)
+	return nil
 }
 
 func scanWorkOrder(row rowScanner, item *WorkOrder) error {

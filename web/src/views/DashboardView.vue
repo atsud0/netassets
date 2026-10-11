@@ -49,6 +49,7 @@ interface TestCoverage {
 }
 interface SecurityOverview {
   pending_asset_finding_count: number
+  retired_asset_finding_count: number
   finding_severity: SecurityBreakdown[]
   finding_status: SecurityBreakdown[]
   finding_trend: SecurityTrendPoint[]
@@ -78,6 +79,7 @@ const summary = ref<DashboardSummary>({
 })
 const overview = ref<SecurityOverview>({
   pending_asset_finding_count: 0,
+  retired_asset_finding_count: 0,
   finding_severity: [], finding_status: [], finding_trend: [], organization_performance: [],
   test_coverage: {
     public_asset_count: 0, tested_public_asset_count: 0, public_asset_coverage_rate: 0,
@@ -122,8 +124,8 @@ function findingStatusType(status: string) {
 function severityType(severity: string) {
   return severity === 'critical' ? 'danger' : severity === 'high' ? 'warning' : severity === 'medium' ? 'primary' : 'info'
 }
-function toFindings(status?: string) {
-  void router.push({ path: '/security-work-orders', query: { tab: 'findings', ...(status ? { status } : {}) } })
+function toFindings(status?: string, assetLinkState?: string) {
+  void router.push({ path: '/security-work-orders', query: { tab: 'findings', ...(status ? { status } : {}), ...(assetLinkState ? { asset_link_state: assetLinkState } : {}) } })
 }
 function toWorkOrders(status?: string, overdueOnly = false) {
   void router.push({ path: '/security-work-orders', query: { tab: 'orders', ...(status ? { status } : {}), ...(overdueOnly ? { overdue: '1' } : {}) } })
@@ -181,6 +183,9 @@ onMounted(() => { void load();void loadRepair() })
         </button>
         <button class="security-highlight-card clickable" type="button" @click="toFindings(FINDING_STATUS_PENDING)">
           <span>待关联资产</span><strong>{{ overview.pending_asset_finding_count }}</strong><small>资产仍在工作版本待发布</small>
+        </button>
+        <button v-if="overview.retired_asset_finding_count > 0" class="security-highlight-card clickable" type="button" @click="toFindings(undefined, 'retired')">
+          <span>资产已下线</span><strong>{{ overview.retired_asset_finding_count }}</strong><small>漏洞保留追溯，无需重建资产</small>
         </button>
         <button class="security-highlight-card danger clickable" type="button" @click="toWorkOrders(undefined, true)">
           <span>逾期整改工单</span><strong>{{ summary.overdue_work_order_count }}</strong><small>点击查看已逾期工单</small>

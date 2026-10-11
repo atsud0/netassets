@@ -102,22 +102,74 @@ func TestOrganizationAssetManagersCanSeePreWorkOrderFindings(t *testing.T) {
 		t.Fatalf("insert security finding: %v", err)
 	}
 
+	// A finding whose asset was soft deleted must stay visible and be reported as
+	// retired, not as unlinked: the vulnerability was real and the row must not
+	// look like data loss.
+	var retiredFindingID string
+	if err := pool.QueryRow(ctx, `
+		INSERT INTO security_findings (
+			finding_code, title, severity, status, assignee_organization_id, asset_id,
+			description, source, created_by, updated_by
+		) VALUES ('F-RETIRED-ASSET', '资产已下线后的安全发现', 'high', 'pending', $1::uuid, $2::uuid,
+		          '用于验证软删除资产后漏洞记录仍然保留并标记为已下线。', 'manual', $3::uuid, $3::uuid)
+		RETURNING id::text
+	`, organizationID, assetID, assetManagerID).Scan(&retiredFindingID); err != nil {
+		t.Fatalf("insert retired-asset finding: %v", err)
+	}
+	if _, err := pool.Exec(ctx, `UPDATE assets SET deleted_at = now() WHERE id = $1::uuid`, assetID); err != nil {
+		t.Fatalf("soft delete asset: %v", err)
+	}
+
 	service := NewService(pool, t.TempDir())
 	page, _ := pagination.Normalize(1, 20)
 	assetManager := auth.Principal{UserID: assetManagerID, Permissions: []string{"asset.manage"}}
-	result, err := service.SearchFindings(ctx, assetManager, organizationID, "", page)
+	result, err := service.SearchFindings(ctx, assetManager, organizationID, "", "", page)
 	if err != nil {
 		t.Fatalf("SearchFindings(asset manager) error = %v", err)
 	}
-	if result.Total != 1 || len(result.Items) != 1 || result.Items[0].ID != findingID {
-		t.Fatalf("asset manager findings = total %d items %+v, want pre-work-order finding", result.Total, result.Items)
+	if result.Total != 2 || len(result.Items) != 2 {
+		t.Fatalf("asset manager findings = total %d items %+v, want live and retired findings", result.Total, result.Items)
+	}
+	states := map[string]string{}
+	for _, item := range result.Items {
+		states[item.ID] = item.AssetLinkState
+	}
+	if states[findingID] != "retired" {
+		t.Fatalf("soft deleted asset finding state = %q, want retired; items=%+v states=%+v findingID=%s", states[findingID], result.Items, states, findingID)
+	}
+	if states[retiredFindingID] != "retired" {
+		t.Fatalf("retired finding state = %q, want retired", states[retiredFindingID])
+	}
+	retiredOnly, err := service.SearchFindings(ctx, assetManager, organizationID, "", "retired", page)
+	if err != nil {
+		t.Fatalf("SearchFindings(retired filter) error = %v", err)
+	}
+	if retiredOnly.Total != 2 {
+		t.Fatalf("retired filter total = %d, want 2", retiredOnly.Total)
+	}
+	liveOnly, err := service.SearchFindings(ctx, assetManager, organizationID, "", "live", page)
+	if err != nil {
+		t.Fatalf("SearchFindings(live filter) error = %v", err)
+	}
+	if liveOnly.Total != 0 || len(liveOnly.Items) != 0 {
+		t.Fatalf("live filter = total %d items %d, want none after soft delete", liveOnly.Total, len(liveOnly.Items))
+	}
+	if _, err := service.SearchFindings(ctx, assetManager, organizationID, "", "bogus", page); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("SearchFindings(bogus link state) error = %v, want ErrInvalid", err)
 	}
 	if _, err := service.GetFinding(ctx, assetManager, findingID); err != nil {
 		t.Fatalf("GetFinding(asset manager) error = %v", err)
 	}
+	detail, err := service.GetFinding(ctx, assetManager, retiredFindingID)
+	if err != nil {
+		t.Fatalf("GetFinding(retired) error = %v", err)
+	}
+	if detail.AssetLinkState != "retired" || !detail.AssetDeleted || detail.AssetID == "" {
+		t.Fatalf("retired detail = state %q deleted %v asset %q, want retired state with asset retained", detail.AssetLinkState, detail.AssetDeleted, detail.AssetID)
+	}
 
 	systemManager := auth.Principal{UserID: systemManagerID, Permissions: []string{"system.manage"}}
-	systemResult, err := service.SearchFindings(ctx, systemManager, organizationID, "", page)
+	systemResult, err := service.SearchFindings(ctx, systemManager, organizationID, "", "", page)
 	if err != nil {
 		t.Fatalf("SearchFindings(system-only manager) error = %v", err)
 	}

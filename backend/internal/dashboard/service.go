@@ -111,7 +111,11 @@ type SecurityOverview struct {
 	// PendingAssetFindingCount is 待关联资产: findings that belong to an asset
 	// working version which has not been published yet, so they are tracked
 	// before the asset register catches up.
-	PendingAssetFindingCount int64                             `json:"pending_asset_finding_count"`
+	PendingAssetFindingCount int64 `json:"pending_asset_finding_count"`
+	// RetiredAssetFindingCount is findings whose asset was soft deleted. The
+	// finding survives on purpose because the vulnerability was real, but the
+	// asset is gone, so the row needs its own state instead of an empty asset cell.
+	RetiredAssetFindingCount int64                             `json:"retired_asset_finding_count"`
 	FindingSeverity          []SecurityBreakdown               `json:"finding_severity"`
 	FindingStatus            []SecurityBreakdown               `json:"finding_status"`
 	FindingTrend             []SecurityTrendPoint              `json:"finding_trend"`
@@ -309,6 +313,14 @@ func (s *Service) GetSecurityOverview(ctx context.Context, principal auth.Princi
 		return SecurityOverview{}, fmt.Errorf("load security pending asset findings: %w", err)
 	}
 
+	if err := s.pool.QueryRow(ctx, scopeCTE+`
+		SELECT count(*) FROM security_findings f
+		JOIN assets retired_asset ON retired_asset.id = f.asset_id
+		WHERE `+retiredAssetFinding("f", "retired_asset")+` AND `+findingVisible("f")+`
+	`, principal.UserID, principal.CanViewGroupSecurityDashboard()).Scan(&result.RetiredAssetFindingCount); err != nil {
+		return SecurityOverview{}, fmt.Errorf("load security retired asset findings: %w", err)
+	}
+
 	trendRows, err := s.pool.Query(ctx, scopeCTE+`
 		SELECT to_char(days.day, 'YYYY-MM-DD'),
 			count(DISTINCT new_finding.id),
@@ -415,6 +427,15 @@ func (s *Service) GetSecurityOverview(ctx context.Context, principal auth.Princi
 // confirmed the draft that will register it.
 func pendingAssetFinding(alias string) string {
 	return alias + `.asset_id IS NULL AND ` + alias + `.pending_asset_draft_id IS NOT NULL`
+}
+
+// retiredAssetFinding matches findings whose asset was soft deleted. Such a
+// finding keeps its asset_id, so it is neither unlinked nor pending: the asset
+// existed, was classified, and was then retired on purpose. Counting it as
+// "待关联资产" would push the organization to re-register an asset they already
+// retired, so it gets its own indicator.
+func retiredAssetFinding(findingAlias, assetAlias string) string {
+	return findingAlias + `.asset_id IS NOT NULL AND ` + assetAlias + `.deleted_at IS NOT NULL`
 }
 
 func percentage(numerator, denominator int64) int64 {

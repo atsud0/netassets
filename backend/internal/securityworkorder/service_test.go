@@ -155,3 +155,67 @@ func TestRiskAcceptanceValidation(t *testing.T) {
 		t.Fatal("future risk acceptance should be valid")
 	}
 }
+
+// A finding can be linked to a live asset, to a working version that has not been
+// published yet, to an asset that has since been retired, or to nothing at all.
+// The four cases look identical in the API unless the server says which one it is:
+// an empty asset cell on a retired asset reads exactly like a finding that was
+// never linked, and reviewers cannot tell whether the data is broken or expected.
+func TestFindingAssetLinkState(t *testing.T) {
+	const (
+		draftID = "11111111-1111-1111-1111-111111111111"
+		assetID = "22222222-2222-2222-2222-222222222222"
+	)
+	cases := []struct {
+		name           string
+		assetID        string
+		pendingDraftID string
+		assetDeleted   bool
+		want           string
+	}{
+		{name: "live asset", assetID: assetID, want: "live"},
+		{name: "asset soft deleted", assetID: assetID, assetDeleted: true, want: "retired"},
+		{name: "waiting on unpublished working version", pendingDraftID: draftID, want: "pending"},
+		{name: "never linked", want: "unlinked"},
+		// Publishing clears the draft in the same transaction, so a row carrying
+		// both means the asset is live and the draft column is stale. The live
+		// asset is the actionable fact.
+		{name: "asset set means live even if draft column is stale", assetID: assetID, pendingDraftID: draftID, want: "live"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := findingAssetLinkState(tc.assetID, tc.pendingDraftID, tc.assetDeleted); got != tc.want {
+				t.Fatalf("findingAssetLinkState() = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// The filter must cover exactly the four states the vocabulary emits, otherwise
+// the dashboard shortcut silently shows the wrong rows.
+func TestValidFindingAssetLinkState(t *testing.T) {
+	for _, state := range []string{"live", "pending", "retired", "unlinked"} {
+		if !validFindingAssetLinkState(state) {
+			t.Fatalf("validFindingAssetLinkState(%q) = false, want true", state)
+		}
+	}
+	for _, state := range []string{"", "LIVE", "retired_asset", "deleted", "unknown"} {
+		if validFindingAssetLinkState(state) {
+			t.Fatalf("validFindingAssetLinkState(%q) = true, want false", state)
+		}
+	}
+}
+
+func TestFindingAssetLinkStateFilterCoversEveryState(t *testing.T) {
+	fragment := findingAssetLinkStateFilter("f", "a", "$5")
+	for _, state := range []string{"live", "pending", "retired", "unlinked"} {
+		if !strings.Contains(fragment, "'"+state+"'") {
+			t.Fatalf("filter fragment missing %q branch:\n%s", state, fragment)
+		}
+	}
+	// The empty placeholder branch must short-circuit so an unfiltered search
+	// keeps returning every row.
+	if !strings.Contains(fragment, "= ''") {
+		t.Fatalf("filter fragment missing the no-op empty value branch:\n%s", fragment)
+	}
+}

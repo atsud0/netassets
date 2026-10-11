@@ -24,6 +24,7 @@ interface BusinessSystem { id: string; code: string; name: string; organization_
 interface FindingSummary {
   id: string; code: string; title: string; severity: string; status: string
   asset_id?: string; asset_value?: string; asset_name?: string; business_system_id?: string; business_system_name?: string
+  asset_link_state?: string; pending_asset_draft_id?: string; asset_deleted?: boolean
 }
 interface Finding extends FindingSummary {
   assignee_organization_id: string; assignee_organization_code: string; assignee_organization_name: string
@@ -101,6 +102,7 @@ const testBatches = ref<SecurityTestBatch[]>([])
 const findingBatchScopeAssetIDs = ref<string[]>([])
 const organizationFilter = ref('')
 const statusFilter = ref('')
+const assetLinkStateFilter = ref('')
 const overdueOnly = ref(false)
 const savedFilterViews = ref<InstanceType<typeof SavedFilterViews>>()
 
@@ -266,13 +268,14 @@ function applyRouteFilters() {
   if (tab === 'findings' || tab === 'orders' || (tab === 'candidates' && auth.canManageSecurityFindings)) activeTab.value = tab
   organizationFilter.value = typeof route.query.organization_id === 'string' ? route.query.organization_id : ''
   statusFilter.value = typeof route.query.status === 'string' ? route.query.status : ''
+  assetLinkStateFilter.value = typeof route.query.asset_link_state === 'string' ? route.query.asset_link_state : ''
   overdueOnly.value = route.query.overdue === '1'
 }
 
 onMounted(async () => {
   applyRouteFilters()
   await nextTick()
-  const hasRouteContext = ['organization_id', 'status', 'overdue', 'work_order_id', 'finding_id'].some(key => route.query[key] !== undefined)
+  const hasRouteContext = ['organization_id', 'status', 'overdue', 'work_order_id', 'finding_id', 'asset_link_state'].some(key => route.query[key] !== undefined)
   if (activeTab.value === 'orders' && !hasRouteContext) {
     const defaultFilters = await savedFilterViews.value?.initialize()
     if (defaultFilters) setWorkOrderFilters(defaultFilters)
@@ -361,6 +364,7 @@ async function loadActiveList() {
     }
     if (organizationFilter.value) params.organization_id = organizationFilter.value
     if (statusFilter.value) params.status = statusFilter.value
+    if (!isOrders && assetLinkStateFilter.value) params.asset_link_state = assetLinkStateFilter.value
     if (isOrders && overdueOnly.value) params.overdue = true
     const endpoint = isOrders ? '/security-work-orders' : '/security-findings'
     const response = await apiClient.get<ListResponse<WorkOrder | Finding>>(endpoint, { params })
@@ -407,6 +411,7 @@ function resetFilters() {
   } else {
     organizationFilter.value = ''
     statusFilter.value = ''
+    assetLinkStateFilter.value = ''
     overdueOnly.value = false
   }
   applyFilter()
@@ -919,7 +924,27 @@ function severityTag(value: string) { return value === 'critical' ? 'danger' : v
 function orderStatusTag(value: string) { return value === 'closed' ? 'success' : value === 'returned' || value === 'cancelled' ? 'danger' : value === 'pending_verification' ? 'warning' : value === 'in_progress' ? 'primary' : 'info' }
 function findingStatusTag(value: string) { return findingStatusTagType(value) }
 function formatDate(value?: string) { return value ? new Date(value).toLocaleString('zh-CN', { hour12: false }) : '—' }
-function findingTarget(item: FindingSummary | Finding) { return item.asset_value || item.business_system_name || '未关联对象' }
+// A finding can be linked to a live asset, waiting on an unpublished working
+// version, pointing at a retired asset, or never linked at all. All four used to
+// render as "未关联对象", which made an expected state look like broken data.
+const assetLinkStateLabels: Record<string, string> = {
+  live: '已关联资产',
+  pending: '待关联资产',
+  retired: '资产已下线',
+  unlinked: '未关联对象',
+}
+function assetLinkStateLabel(state?: string) { return assetLinkStateLabels[state ?? ''] ?? '未关联对象' }
+// pending and retired are informational, not errors: the finding is fine in both
+// cases and a red tag would train reviewers to ignore the tag.
+function assetLinkStateTagType(state?: string) {
+  return state === 'pending' ? 'warning' : state === 'retired' ? 'info' : 'primary'
+}
+function findingTarget(item: FindingSummary | Finding) {
+  // A retired asset keeps its value, so the reviewer still sees which host was
+  // affected; the tag next to it explains that the asset is gone.
+  if (item.asset_value) return item.asset_value
+  return item.business_system_name || assetLinkStateLabel(item.asset_link_state)
+}
 function riskAcceptanceLabel(item: Finding) {
   if (item.status !== FINDING_STATUS_RISK_ACCEPTED) return ''
   return item.risk_acceptance_expired ? '已到期，待复核' : '风险接受中'
@@ -930,6 +955,7 @@ async function onTabChange() {
   } else {
     organizationFilter.value = ''
     statusFilter.value = ''
+    assetLinkStateFilter.value = ''
     overdueOnly.value = false
   }
   if (activeTab.value === 'orders') await savedFilterViews.value?.loadViews()
@@ -994,6 +1020,9 @@ async function onTabChange() {
             <el-option v-for="(label, value) in findingStatusLabels" :key="value" :label="label" :value="value" />
           </template>
         </el-select>
+        <el-select v-if="activeTab === 'findings'" v-model="assetLinkStateFilter" clearable placeholder="全部关联状态" style="width: 190px">
+          <el-option v-for="(label, value) in assetLinkStateLabels" :key="value" :label="label" :value="value" />
+        </el-select>
         <el-checkbox v-if="activeTab === 'orders'" v-model="overdueOnly">仅看逾期</el-checkbox>
         <el-button type="primary" plain @click="applyFilter">筛选</el-button>
         <el-button @click="resetFilters">重置</el-button>
@@ -1044,7 +1073,7 @@ async function onTabChange() {
           <template #default="scope"><strong>{{ scope.row.title }}</strong><span class="table-secondary mono-text">{{ scope.row.code }} · {{ scope.row.vulnerability_type || '未分类' }}</span><span v-if="scope.row.test_batch_id" class="list-secondary">{{ scope.row.test_batch_name }} · {{ scope.row.test_batch_code }}</span></template>
         </el-table-column>
         <el-table-column label="责任组织" min-width="130"><template #default="scope">{{ scope.row.assignee_organization_name }}</template></el-table-column>
-        <el-table-column label="关联资产/系统" min-width="155"><template #default="scope">{{ findingTarget(scope.row) }}<span v-if="scope.row.asset_value && scope.row.business_system_name" class="table-secondary">{{ scope.row.business_system_name }}</span></template></el-table-column>
+        <el-table-column label="关联资产/系统" min-width="155"><template #default="scope">{{ findingTarget(scope.row) }}<span v-if="scope.row.asset_value && scope.row.business_system_name" class="table-secondary">{{ scope.row.business_system_name }}</span><el-tag v-if="scope.row.asset_link_state && scope.row.asset_link_state !== 'live'" size="small" :type="assetLinkStateTagType(scope.row.asset_link_state)" class="asset-link-tag">{{ assetLinkStateLabel(scope.row.asset_link_state) }}</el-tag></template></el-table-column>
 
         <el-table-column label="等级" width="85"><template #default="scope"><el-tag :type="severityTag(scope.row.severity)" effect="dark">{{ severityLabels[scope.row.severity] }}</el-tag></template></el-table-column>
         <el-table-column label="状态" width="115"><template #default="scope"><el-tag :type="findingStatusTag(scope.row.status)" effect="plain">{{ findingStatusLabels[scope.row.status] }}</el-tag><span v-if="scope.row.status === FINDING_STATUS_RISK_ACCEPTED" class="table-secondary risk-state" :class="{ expired: scope.row.risk_acceptance_expired }">{{ riskAcceptanceLabel(scope.row) }}</span></template></el-table-column>
@@ -1112,7 +1141,7 @@ async function onTabChange() {
         <el-descriptions :column="2" border>
           <el-descriptions-item label="责任组织">{{ selectedFinding.assignee_organization_name }}</el-descriptions-item>
           <el-descriptions-item label="漏洞类型">{{ selectedFinding.vulnerability_type || '未分类' }}</el-descriptions-item>
-          <el-descriptions-item label="关联对象">{{ findingTarget(selectedFinding) }}</el-descriptions-item>
+          <el-descriptions-item label="关联对象">{{ findingTarget(selectedFinding) }}<el-tag v-if="selectedFinding.asset_link_state && selectedFinding.asset_link_state !== 'live'" size="small" :type="assetLinkStateTagType(selectedFinding.asset_link_state)" class="asset-link-tag">{{ assetLinkStateLabel(selectedFinding.asset_link_state) }}</el-tag><div v-if="selectedFinding.asset_link_state === 'retired'" class="table-secondary">该资产已下线，漏洞记录保留用于追溯，无需重新登记资产。</div><div v-else-if="selectedFinding.asset_link_state === 'pending'" class="table-secondary">资产工作版本尚未发布，发布后自动关联。</div></el-descriptions-item>
           <el-descriptions-item label="业务系统">{{ selectedFinding.business_system_name || '—' }}</el-descriptions-item>
           <el-descriptions-item label="测试批次">{{ selectedFinding.test_batch_name || '—' }}<span v-if="selectedFinding.test_batch_code" class="table-secondary mono-text">{{ selectedFinding.test_batch_code }}</span></el-descriptions-item>
           <el-descriptions-item label="发现时间">{{ formatDate(selectedFinding.discovered_at) }}</el-descriptions-item>
@@ -1366,6 +1395,7 @@ async function onTabChange() {
 .review-comment { margin-top: 6px !important; color: #64748b !important; }
 .finding-detail-actions { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 24px; }
 .risk-form { margin-top: 18px; }
+.asset-link-tag { margin-left: 6px; }
 @media (max-width: 900px) { .import-stat-grid { grid-template-columns: repeat(2, 1fr); } .heading-actions { width: 100%; } .attachment-upload-box { grid-template-columns: 1fr; } }
 @media (max-width: 620px) { .finding-summary-cards { grid-template-columns:repeat(2, 1fr); } }
 </style>

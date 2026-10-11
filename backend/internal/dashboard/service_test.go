@@ -37,3 +37,19 @@ func TestPendingAssetFinding(t *testing.T) {
 		t.Fatalf("pendingAssetFinding(%q) = %q, must only count findings that have a working version", "f", got)
 	}
 }
+
+// A finding on a retired asset is not a pending asset and not an unlinked one. The
+// asset was classified and then deleted on purpose; re-registering it would be
+// wrong advice, so the predicate must require the soft-delete marker rather than
+// a missing asset_id.
+func TestRetiredAssetFinding(t *testing.T) {
+	got := retiredAssetFinding("f", "retired_asset")
+	for _, want := range []string{"f.asset_id IS NOT NULL", "retired_asset.deleted_at IS NOT NULL"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("retiredAssetFinding() = %q, want it to contain %q", got, want)
+		}
+	}
+	if strings.Contains(got, "pending_asset_draft_id") {
+		t.Fatalf("retiredAssetFinding() should not depend on the working version column: %q", got)
+	}
+}

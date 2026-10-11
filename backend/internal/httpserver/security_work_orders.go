@@ -133,7 +133,7 @@ func registerSecurityWorkOrderRoutes(api *gin.RouterGroup, requireAuth gin.Handl
 			writeAPIError(c, http.StatusBadRequest, "invalid_query", "分页参数不正确，page_size 最大为 100")
 			return
 		}
-		result, err := service.SearchFindings(c.Request.Context(), mustPrincipal(c), c.Query("organization_id"), c.Query("status"), page)
+		result, err := service.SearchFindings(c.Request.Context(), mustPrincipal(c), c.Query("organization_id"), c.Query("status"), c.Query("asset_link_state"), page)
 		switch {
 		case errors.Is(err, securityworkorder.ErrForbidden):
 			writeAPIError(c, http.StatusForbidden, "forbidden", "当前账号无权查看该组织的安全发现")
