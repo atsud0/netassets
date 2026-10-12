@@ -21,11 +21,16 @@ import (
 
 type AssetDraft struct {
 	asset.Asset
-	TaskID        string `json:"task_id"`
-	SourceAssetID string `json:"source_asset_id,omitempty"`
-	DraftStatus   string `json:"draft_status"`
-	Operation     string `json:"operation"`
-	IsDraft       bool   `json:"is_draft"`
+	TaskID         string     `json:"task_id"`
+	SourceAssetID  string     `json:"source_asset_id,omitempty"`
+	DraftStatus    string     `json:"draft_status"`
+	Operation      string     `json:"operation"`
+	Version        int        `json:"version"`
+	AssignedTo     string     `json:"assigned_to,omitempty"`
+	LastEditedBy   string     `json:"last_edited_by,omitempty"`
+	TakeoverReason string     `json:"takeover_reason,omitempty"`
+	TakenOverAt    *time.Time `json:"taken_over_at,omitempty"`
+	IsDraft        bool       `json:"is_draft"`
 }
 
 type draftAssignment struct {
@@ -42,17 +47,18 @@ func assetDraftLabel(input asset.CreateInput) string {
 	return strings.TrimSpace(input.Value)
 }
 
-func (s *Service) SearchAssetDrafts(ctx context.Context, principal auth.Principal, taskID, organizationID string, page pagination.Query) (pagination.Result[AssetDraft], error) {
+func (s *Service) SearchAssetDrafts(ctx context.Context, principal auth.Principal, taskID, organizationID string, page pagination.Query, includeDiscarded ...bool) (pagination.Result[AssetDraft], error) {
 	if !principal.HasPermission("inventory.manage") || !principal.HasPermission("asset.manage") {
 		return pagination.Result[AssetDraft]{}, ErrForbidden
 	}
 	if _, err := s.loadDraftAssignment(ctx, s.pool, principal, taskID, organizationID, false, "network_assets"); err != nil {
 		return pagination.Result[AssetDraft]{}, err
 	}
+	showDiscarded := len(includeDiscarded) > 0 && includeDiscarded[0] && principal.HasRole("organization_admin")
 	visibility := ""
 	if principal.HasRole("group_admin") {
 		visibility = " AND draft.draft_status IN ('submitted', 'published')"
-	} else {
+	} else if !showDiscarded {
 		visibility = " AND draft.draft_status <> 'discarded'"
 	}
 	var total int
@@ -60,7 +66,7 @@ func (s *Service) SearchAssetDrafts(ctx context.Context, principal auth.Principa
 		return pagination.Result[AssetDraft]{}, fmt.Errorf("count inventory asset drafts: %w", err)
 	}
 	rows, err := s.pool.Query(ctx, `
-		SELECT draft.id::text, draft.task_id::text, COALESCE(draft.source_asset_id::text,''), draft.operation, draft.draft_status,
+		SELECT draft.id::text, draft.task_id::text, COALESCE(draft.source_asset_id::text,''), draft.operation, draft.draft_status, draft.version, COALESCE(draft.assigned_to::text,''), COALESCE(draft.last_edited_by::text,''), COALESCE(draft.takeover_reason,''), draft.taken_over_at,
 		       draft.asset_type, draft.asset_value, draft.normalized_value, COALESCE(draft.asset_name, ''),
 		       organization.id::text, organization.organization_code, organization.organization_name,
 		       COALESCE(working_system.id::text, system.id::text, ''), COALESCE(working_system.system_code, system.system_code, ''), COALESCE(working_system.system_name, system.system_name, ''),
@@ -111,6 +117,9 @@ func (s *Service) CreateAssetDraft(ctx context.Context, principal auth.Principal
 		return AssetDraft{}, ErrForbidden
 	}
 	input.OrganizationID = organizationID
+	if input.ExpectedVersion != nil && *input.ExpectedVersion <= 0 {
+		return AssetDraft{}, ErrInvalid
+	}
 	normalizedValue, err := asset.PrepareCreateInput(&input)
 	if err != nil {
 		return AssetDraft{}, mapAssetError(err)
@@ -151,8 +160,8 @@ func (s *Service) CreateAssetDraft(ctx context.Context, principal auth.Principal
 		INSERT INTO inventory_asset_drafts (
 			task_id, organization_id, asset_type, asset_value, normalized_value, asset_name,
 			environment, network_scope, network_area_id, business_system_id, business_system_draft_id, status, importance, source,
-			owner_user_id, owner_name, notes, expires_at, custom_values, created_by, updated_by
-		) VALUES ($1::uuid,$2::uuid,$3,$4,$5,NULLIF($6,''),$7,$8,NULLIF($9,'')::uuid,NULLIF($10,'')::uuid,NULLIF($11,'')::uuid,$12,$13,'manual',NULLIF($14,'')::uuid,NULLIF($15,''),NULLIF($16,''),$17,$18::jsonb,$19::uuid,$19::uuid)
+			owner_user_id, owner_name, notes, expires_at, custom_values, created_by, updated_by, assigned_to, last_edited_by
+		) VALUES ($1::uuid,$2::uuid,$3,$4,$5,NULLIF($6,''),$7,$8,NULLIF($9,'')::uuid,NULLIF($10,'')::uuid,NULLIF($11,'')::uuid,$12,$13,'manual',NULLIF($14,'')::uuid,NULLIF($15,''),NULLIF($16,''),$17,$18::jsonb,$19::uuid,$19::uuid,$19::uuid,$19::uuid)
 		RETURNING id::text
 	`, taskID, organizationID, input.Type, input.Value, normalizedValue, input.Name, input.Environment, input.NetworkScope,
 		input.NetworkAreaID, input.BusinessSystemID, systemDraftID, input.Status, input.Importance, input.OwnerUserID, input.OwnerName,
@@ -261,13 +270,13 @@ func (s *Service) createAssetChangeDraft(ctx context.Context, principal auth.Pri
 	}
 	var id string
 	err = tx.QueryRow(ctx, `
-		INSERT INTO inventory_asset_drafts(task_id,organization_id,operation,source_asset_id,asset_type,asset_value,normalized_value,asset_name,environment,network_scope,network_area_id,business_system_id,business_system_draft_id,status,importance,source,owner_user_id,owner_name,notes,expires_at,custom_values,created_by,updated_by)
-		VALUES($1::uuid,$2::uuid,$3,$4::uuid,$5,$6,$7,NULLIF($8,''),$9,$10,NULLIF($11,'')::uuid,NULLIF($12,'')::uuid,NULLIF($13,'')::uuid,$14,$15,$16,NULLIF($17,'')::uuid,NULLIF($18,''),NULLIF($19,''),$20,$21::jsonb,$22::uuid,$22::uuid)
+		INSERT INTO inventory_asset_drafts(task_id,organization_id,operation,source_asset_id,asset_type,asset_value,normalized_value,asset_name,environment,network_scope,network_area_id,business_system_id,business_system_draft_id,status,importance,source,owner_user_id,owner_name,notes,expires_at,custom_values,created_by,updated_by,assigned_to,last_edited_by)
+		VALUES($1::uuid,$2::uuid,$3,$4::uuid,$5,$6,$7,NULLIF($8,''),$9,$10,NULLIF($11,'')::uuid,NULLIF($12,'')::uuid,NULLIF($13,'')::uuid,$14,$15,$16,NULLIF($17,'')::uuid,NULLIF($18,''),NULLIF($19,''),$20,$21::jsonb,$22::uuid,$22::uuid,$22::uuid,$22::uuid)
 		ON CONFLICT (organization_id,source_asset_id) WHERE source_asset_id IS NOT NULL AND draft_status IN `+inventorydraft.ActiveSQL+` DO UPDATE SET
 		operation=EXCLUDED.operation,asset_type=EXCLUDED.asset_type,asset_value=EXCLUDED.asset_value,normalized_value=EXCLUDED.normalized_value,asset_name=EXCLUDED.asset_name,
 		environment=EXCLUDED.environment,network_scope=EXCLUDED.network_scope,network_area_id=EXCLUDED.network_area_id,business_system_id=EXCLUDED.business_system_id,business_system_draft_id=EXCLUDED.business_system_draft_id,
 		status=EXCLUDED.status,importance=EXCLUDED.importance,source=EXCLUDED.source,owner_user_id=EXCLUDED.owner_user_id,owner_name=EXCLUDED.owner_name,notes=EXCLUDED.notes,expires_at=EXCLUDED.expires_at,custom_values=EXCLUDED.custom_values,
-		draft_status='editing',updated_by=EXCLUDED.updated_by,updated_at=now()
+		draft_status='editing',version=inventory_asset_drafts.version+1,last_edited_by=EXCLUDED.last_edited_by,updated_by=EXCLUDED.updated_by,updated_at=now()
 		WHERE inventory_asset_drafts.draft_status IN `+inventorydraft.EditableSQL+` RETURNING id::text
 	`, taskID, organizationID, operation, sourceAssetID, current.Type, current.Value, normalizedValue, current.Name, current.Environment, current.NetworkScope, current.NetworkAreaID, current.BusinessSystemID, currentSystemDraftID, current.Status, current.Importance, currentSource, current.OwnerUserID, current.OwnerName, current.Notes, current.ExpiresAt, customValues, principal.UserID).Scan(&id)
 	if errors.Is(err, pgx.ErrNoRows) {
@@ -306,6 +315,9 @@ func (s *Service) UpdateAssetDraft(ctx context.Context, principal auth.Principal
 		return AssetDraft{}, ErrForbidden
 	}
 	input.OrganizationID = organizationID
+	if input.ExpectedVersion == nil || *input.ExpectedVersion <= 0 {
+		return AssetDraft{}, ErrInvalid
+	}
 	normalizedValue, err := asset.PrepareCreateInput(&input)
 	if err != nil {
 		return AssetDraft{}, mapAssetError(err)
@@ -321,6 +333,9 @@ func (s *Service) UpdateAssetDraft(ctx context.Context, principal auth.Principal
 	defer func() { _ = tx.Rollback(ctx) }()
 	assignment, err := s.loadDraftAssignment(ctx, tx, principal, taskID, organizationID, true, "network_assets")
 	if err != nil {
+		return AssetDraft{}, err
+	}
+	if err := ensureDraftEditor(ctx, tx, principal, "asset", draftID, organizationID); err != nil {
 		return AssetDraft{}, err
 	}
 	if assignment.AssetNetworkScope != "all" && input.NetworkScope != assignment.AssetNetworkScope {
@@ -345,16 +360,16 @@ func (s *Service) UpdateAssetDraft(ctx context.Context, principal auth.Principal
 		UPDATE inventory_asset_drafts SET asset_type=$5,asset_value=$6,normalized_value=$7,asset_name=NULLIF($8,''),
 		       environment=$9,network_scope=$10,network_area_id=NULLIF($11,'')::uuid,business_system_id=NULLIF($12,'')::uuid,business_system_draft_id=NULLIF($13,'')::uuid,
 		       status=$14,importance=$15,owner_user_id=NULLIF($16,'')::uuid,owner_name=NULLIF($17,''),notes=NULLIF($18,''),
-		       expires_at=$19,custom_values=$20::jsonb,draft_status='editing',updated_by=$21::uuid,updated_at=now()
-		WHERE id::text=$4 AND task_id::text=$1 AND organization_id::text=$2 AND operation IN ('create','update') AND draft_status IN `+inventorydraft.EditableSQL+`
+		       expires_at=$19,custom_values=$20::jsonb,draft_status='editing',version=version+1,updated_by=$21::uuid,last_edited_by=$21::uuid,updated_at=now()
+		WHERE id::text=$4 AND task_id::text=$1 AND organization_id::text=$2 AND operation IN ('create','update') AND draft_status IN `+inventorydraft.EditableSQL+` AND version=$22
 	`, taskID, organizationID, principal.UserID, draftID, input.Type, input.Value, normalizedValue, input.Name,
 		input.Environment, input.NetworkScope, input.NetworkAreaID, input.BusinessSystemID, systemDraftID, input.Status, input.Importance,
-		input.OwnerUserID, input.OwnerName, input.Notes, input.ExpiresAt, customValues, principal.UserID)
+		input.OwnerUserID, input.OwnerName, input.Notes, input.ExpiresAt, customValues, principal.UserID, input.ExpectedVersion)
 	if err != nil {
 		return AssetDraft{}, mapDraftDatabaseError(err)
 	}
 	if result.RowsAffected() == 0 {
-		return AssetDraft{}, ErrState
+		return AssetDraft{}, draftCASFailure(ctx, tx, "inventory_asset_drafts", draftID, taskID, organizationID, *input.ExpectedVersion)
 	}
 	if err := writeDraftAudit(ctx, tx, principal, organizationID, taskID, draftID, "inventory_asset_draft.update", "更新填报资产草稿", input.Value, requestID, ipAddress); err != nil {
 		return AssetDraft{}, err
@@ -369,7 +384,7 @@ func (s *Service) UpdateAssetDraft(ctx context.Context, principal auth.Principal
 	return item, nil
 }
 
-func (s *Service) DeleteAssetDraft(ctx context.Context, principal auth.Principal, taskID, organizationID, draftID, requestID, ipAddress string) error {
+func (s *Service) DeleteAssetDraft(ctx context.Context, principal auth.Principal, taskID, organizationID, draftID string, expectedVersion int, requestID, ipAddress string) error {
 	if !principal.HasPermission("inventory.manage") || !principal.HasPermission("asset.manage") || principal.HasRole("group_admin") {
 		return ErrForbidden
 	}
@@ -378,21 +393,27 @@ func (s *Service) DeleteAssetDraft(ctx context.Context, principal auth.Principal
 		return fmt.Errorf("begin inventory asset draft delete: %w", err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
+	if expectedVersion <= 0 {
+		return ErrInvalid
+	}
 	if _, err := s.loadDraftAssignment(ctx, tx, principal, taskID, organizationID, true, "network_assets"); err != nil {
+		return err
+	}
+	if err := ensureDraftEditor(ctx, tx, principal, "asset", draftID, organizationID); err != nil {
 		return err
 	}
 	var label string
 	unselected := false
-	err = tx.QueryRow(ctx, `UPDATE inventory_asset_drafts SET task_id=NULL,selected_at=NULL,updated_by=$4::uuid,updated_at=now() WHERE id::text=$1 AND task_id::text=$2 AND organization_id::text=$3 AND selected_at IS NOT NULL AND draft_status IN `+inventorydraft.EditableSQL+` RETURNING COALESCE(NULLIF(asset_name,''),asset_value)`, draftID, taskID, organizationID, principal.UserID).Scan(&label)
+	err = tx.QueryRow(ctx, `UPDATE inventory_asset_drafts SET task_id=NULL,selected_at=NULL,version=version+1,last_edited_by=$4::uuid,updated_by=$4::uuid,updated_at=now() WHERE id::text=$1 AND task_id::text=$2 AND organization_id::text=$3 AND selected_at IS NOT NULL AND draft_status IN `+inventorydraft.EditableSQL+` AND version=$5 RETURNING COALESCE(NULLIF(asset_name,''),asset_value)`, draftID, taskID, organizationID, principal.UserID, expectedVersion).Scan(&label)
 	if err == nil {
 		unselected = true
 	} else if errors.Is(err, pgx.ErrNoRows) {
-		result, deleteErr := tx.Exec(ctx, `DELETE FROM inventory_asset_drafts WHERE id::text=$1 AND task_id::text=$2 AND organization_id::text=$3 AND draft_status IN `+inventorydraft.EditableSQL+``, draftID, taskID, organizationID)
+		result, deleteErr := tx.Exec(ctx, `UPDATE inventory_asset_drafts SET draft_status='discarded',version=version+1,last_edited_by=$4::uuid,updated_by=$4::uuid,updated_at=now() WHERE id::text=$1 AND task_id::text=$2 AND organization_id::text=$3 AND draft_status IN `+inventorydraft.EditableSQL+` AND version=$5`, draftID, taskID, organizationID, principal.UserID, expectedVersion)
 		if deleteErr != nil {
-			return fmt.Errorf("delete inventory asset draft: %w", deleteErr)
+			return fmt.Errorf("discard inventory asset draft: %w", deleteErr)
 		}
 		if result.RowsAffected() == 0 {
-			return ErrState
+			return draftCASFailure(ctx, tx, "inventory_asset_drafts", draftID, taskID, organizationID, expectedVersion)
 		}
 	} else {
 		return fmt.Errorf("unselect inventory asset draft: %w", err)
@@ -455,6 +476,48 @@ func (s *Service) loadDraftAssignment(ctx context.Context, q queryRower, princip
 		return draftAssignment{}, fmt.Errorf("load inventory draft assignment: %w", err)
 	}
 	return item, nil
+}
+
+// ensureDraftEditor enforces object ownership in addition to task/organization access.
+// Organization administrators may take over an organization's draft; ordinary
+// contributors may edit only drafts they created or that were explicitly assigned.
+func ensureDraftEditor(ctx context.Context, q queryRower, principal auth.Principal, resource, draftID, organizationID string) error {
+	table := "inventory_asset_drafts"
+	if resource == "business_system" {
+		table = "inventory_business_system_drafts"
+	}
+	var createdBy, assignedTo, status, draftOrganization string
+	query := `SELECT COALESCE(created_by::text,''), COALESCE(assigned_to::text,''), draft_status, organization_id::text FROM ` + table + ` WHERE id::text=$1`
+	if err := q.QueryRow(ctx, query, draftID).Scan(&createdBy, &assignedTo, &status, &draftOrganization); errors.Is(err, pgx.ErrNoRows) {
+		return ErrNotFound
+	} else if err != nil {
+		return fmt.Errorf("load draft editor assignment: %w", err)
+	}
+	if draftOrganization != organizationID {
+		return ErrForbidden
+	}
+	if status != "editing" && status != "returned" {
+		return ErrState
+	}
+	if principal.HasRole("organization_admin") || principal.HasRole("group_admin") {
+		return nil
+	}
+	if principal.UserID == "" || (principal.UserID != createdBy && principal.UserID != assignedTo) {
+		return ErrForbidden
+	}
+	return nil
+}
+
+func writeDraftTakeoverAudit(ctx context.Context, tx pgx.Tx, principal auth.Principal, resource, organizationID, taskID, draftID, reason, requestID, ipAddress string) error {
+	resourceType := "inventory_asset_draft"
+	if resource == "business_system" {
+		resourceType = "inventory_business_system_draft"
+	}
+	_, err := tx.Exec(ctx, `INSERT INTO audit_logs (user_id,organization_id,action,resource_type,resource_id,summary,details,request_ip,request_id) VALUES ($1::uuid,$2::uuid,$3,$4,$5,$6,jsonb_build_object('task_id',$7::text,'reason',$8::text,'assigned_to',$1::text),NULLIF($9,'')::inet,NULLIF($10,''))`, principal.UserID, organizationID, "inventory."+resource+"_draft.takeover", resourceType, draftID, "接管填报草稿", taskID, reason, ipAddress, requestID)
+	if err != nil {
+		return fmt.Errorf("write draft takeover audit: %w", err)
+	}
+	return nil
 }
 
 func resolveBusinessSystemReference(ctx context.Context, q queryRower, organizationID, referenceID string) (formalID, draftID string, err error) {
@@ -520,7 +583,7 @@ func validateDraftReferences(ctx context.Context, q queryRower, organizationID s
 
 func loadAssetDraft(ctx context.Context, q queryRower, draftID string) (AssetDraft, error) {
 	row := q.QueryRow(ctx, `
-		SELECT draft.id::text, draft.task_id::text, COALESCE(draft.source_asset_id::text,''), draft.operation, draft.draft_status,
+		SELECT draft.id::text, draft.task_id::text, COALESCE(draft.source_asset_id::text,''), draft.operation, draft.draft_status, draft.version, COALESCE(draft.assigned_to::text,''), COALESCE(draft.last_edited_by::text,''), COALESCE(draft.takeover_reason,''), draft.taken_over_at,
 		       draft.asset_type, draft.asset_value, draft.normalized_value, COALESCE(draft.asset_name, ''),
 		       organization.id::text, organization.organization_code, organization.organization_name,
 		       COALESCE(working_system.id::text, system.id::text, ''), COALESCE(working_system.system_code, system.system_code, ''), COALESCE(working_system.system_name, system.system_name, ''),
@@ -540,7 +603,7 @@ func loadAssetDraft(ctx context.Context, q queryRower, draftID string) (AssetDra
 func scanAssetDraft(row rowScanner) (AssetDraft, error) {
 	var item AssetDraft
 	var customValues []byte
-	err := row.Scan(&item.ID, &item.TaskID, &item.SourceAssetID, &item.Operation, &item.DraftStatus,
+	err := row.Scan(&item.ID, &item.TaskID, &item.SourceAssetID, &item.Operation, &item.DraftStatus, &item.Version, &item.AssignedTo, &item.LastEditedBy, &item.TakeoverReason, &item.TakenOverAt,
 		&item.Type, &item.Value, &item.NormalizedValue, &item.Name,
 		&item.OrganizationID, &item.OrganizationCode, &item.OrganizationName,
 		&item.BusinessSystemID, &item.BusinessSystemCode, &item.BusinessSystemName,
@@ -736,7 +799,7 @@ func publishAssetDrafts(ctx context.Context, tx pgx.Tx, principal auth.Principal
 			}
 		}
 	}
-	if _, err := tx.Exec(ctx, `UPDATE inventory_asset_drafts SET draft_status='published',published_at=now(),updated_by=$3::uuid,updated_at=now() WHERE task_id::text=$1 AND organization_id::text=$2 AND draft_status='submitted'`, taskID, organizationID, principal.UserID); err != nil {
+	if _, err := tx.Exec(ctx, `UPDATE inventory_asset_drafts SET draft_status='published',published_at=now(),version=version+1,last_edited_by=$3::uuid,updated_by=$3::uuid,updated_at=now() WHERE task_id::text=$1 AND organization_id::text=$2 AND draft_status='submitted'`, taskID, organizationID, principal.UserID); err != nil {
 		return fmt.Errorf("mark asset drafts published: %w", err)
 	}
 	return nil

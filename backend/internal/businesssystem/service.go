@@ -34,6 +34,8 @@ var (
 	ErrConflict               = errors.New("conflict")
 	ErrInUse                  = errors.New("in use")
 	ErrInvalid                = errors.New("invalid input")
+	ErrEditConflict           = errors.New("working version has been updated by another user")
+	ErrVersionRequired        = errors.New("expected_version is required")
 	ErrExportTooLarge         = errors.New("synchronous xlsx export too large")
 	codePattern               = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_-]{1,63}$`)
 	businessSystemUUIDPattern = regexp.MustCompile(`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$`)
@@ -71,6 +73,10 @@ type BusinessSystem struct {
 	TaskID                               string              `json:"task_id,omitempty"`
 	DraftStatus                          string              `json:"draft_status,omitempty"`
 	Operation                            string              `json:"operation,omitempty"`
+	Version                              int                 `json:"version"`
+	AssignedTo                           string              `json:"assigned_to,omitempty"`
+	LastEditedBy                         string              `json:"last_edited_by,omitempty"`
+	TakeoverReason                       string              `json:"takeover_reason,omitempty"`
 	CustomValues                         []customfield.Value `json:"custom_values,omitempty"`
 }
 
@@ -95,6 +101,11 @@ type CreateInput struct {
 	DataStorageLocation                  string              `json:"data_storage_location"`
 	SecurityNotes                        string              `json:"security_notes"`
 	CustomValues                         []customfield.Value `json:"custom_values,omitempty"`
+	// ExpectedVersion is only meaningful for working-version (draft) writes. It
+	// carries the optimistic-lock value the client last saw; direct working-space
+	// updates and deletes must reject stale writes instead of silently
+	// overwriting another editor's change.
+	ExpectedVersion *int `json:"expected_version,omitempty"`
 }
 
 type ImportError struct {
@@ -972,10 +983,10 @@ func (s *Service) SetArchived(ctx context.Context, principal auth.Principal, sys
 	return item, nil
 }
 
-func (s *Service) Delete(ctx context.Context, principal auth.Principal, systemID, requestID, ipAddress string) error {
+func (s *Service) Delete(ctx context.Context, principal auth.Principal, systemID string, expectedVersion *int, requestID, ipAddress string) error {
 	if usesWorkingInventory(principal) {
 		if _, err := s.getWorking(ctx, principal, systemID); err == nil {
-			return s.deleteWorking(ctx, principal, systemID)
+			return s.deleteWorking(ctx, principal, systemID, expectedVersion, requestID, ipAddress)
 		}
 	}
 	if !principal.HasPermission("system.manage") {

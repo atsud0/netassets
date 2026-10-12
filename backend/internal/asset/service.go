@@ -32,13 +32,17 @@ import (
 )
 
 var (
-	ErrForbidden      = errors.New("forbidden")
-	ErrNotFound       = errors.New("not found")
-	ErrConflict       = errors.New("conflict")
-	ErrEditConflict   = errors.New("edit conflict")
-	ErrInvalid        = errors.New("invalid input")
-	ErrTaskBound      = errors.New("asset is bound to an inventory task")
-	ErrExportTooLarge = errors.New("synchronous xlsx export too large")
+	ErrForbidden    = errors.New("forbidden")
+	ErrNotFound     = errors.New("not found")
+	ErrConflict     = errors.New("conflict")
+	ErrEditConflict = errors.New("edit conflict")
+	// ErrVersionRequired is returned when a working-version write arrives without
+	// the optimistic-lock value. Silently treating a missing version as "no lock"
+	// is what let two填报员 overwrite each other before the CAS existed.
+	ErrVersionRequired = errors.New("expected_version is required")
+	ErrInvalid         = errors.New("invalid input")
+	ErrTaskBound       = errors.New("asset is bound to an inventory task")
+	ErrExportTooLarge  = errors.New("synchronous xlsx export too large")
 )
 
 const MaxImportRows = 5000
@@ -84,6 +88,10 @@ type Asset struct {
 	TaskID               string              `json:"task_id,omitempty"`
 	DraftStatus          string              `json:"draft_status,omitempty"`
 	Operation            string              `json:"operation,omitempty"`
+	Version              int                 `json:"version"`
+	AssignedTo           string              `json:"assigned_to,omitempty"`
+	LastEditedBy         string              `json:"last_edited_by,omitempty"`
+	TakeoverReason       string              `json:"takeover_reason,omitempty"`
 	CustomValues         []customfield.Value `json:"custom_values,omitempty"`
 }
 
@@ -104,6 +112,7 @@ type CreateInput struct {
 	ExpiresAt         *time.Time          `json:"expires_at"`
 	CustomValues      []customfield.Value `json:"custom_values,omitempty"`
 	ExpectedUpdatedAt *time.Time          `json:"expected_updated_at,omitempty"`
+	ExpectedVersion   *int                `json:"expected_version,omitempty"`
 }
 
 type ImportError struct {
@@ -1176,10 +1185,14 @@ func (s *Service) Update(ctx context.Context, principal auth.Principal, assetID 
 	return s.Get(ctx, principal, assetID)
 }
 
-func (s *Service) Delete(ctx context.Context, principal auth.Principal, assetID, requestID, ipAddress string) error {
+// Delete removes an asset from the point of view of the caller. For
+// organization users that means the working ledger (draft discard or an offline
+// request), which is why the call accepts the optimistic-lock value the client
+// last saw; group administrators still delete the published ledger directly.
+func (s *Service) Delete(ctx context.Context, principal auth.Principal, assetID string, expectedVersion *int, requestID, ipAddress string) error {
 	if usesWorkingInventory(principal) {
 		if _, err := s.getWorking(ctx, principal, assetID); err == nil {
-			return s.deleteWorking(ctx, principal, assetID, requestID, ipAddress)
+			return s.deleteWorking(ctx, principal, assetID, expectedVersion, requestID, ipAddress)
 		}
 	}
 	if !principal.HasPermission("asset.manage") {

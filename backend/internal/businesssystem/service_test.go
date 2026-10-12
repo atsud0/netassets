@@ -394,3 +394,19 @@ func TestNormalizeSelectedExportIDs(t *testing.T) {
 		t.Fatalf("oversized selection error = %v, want ErrInvalid", err)
 	}
 }
+
+func TestCheckExpectedVersionRequiresAndMatchesWorkingVersion(t *testing.T) {
+	current := BusinessSystem{Version: 7}
+
+	if err := checkExpectedVersion(current, nil); !errors.Is(err, ErrVersionRequired) {
+		t.Fatalf("missing expected version = %v, want ErrVersionRequired", err)
+	}
+	stale := 6
+	if err := checkExpectedVersion(current, &stale); !errors.Is(err, ErrEditConflict) {
+		t.Fatalf("stale expected version = %v, want ErrEditConflict", err)
+	}
+	fresh := 7
+	if err := checkExpectedVersion(current, &fresh); err != nil {
+		t.Fatalf("current expected version = %v, want nil", err)
+	}
+}

@@ -68,6 +68,23 @@ type AcceptInput struct {
 type ReviewInput struct {
 	ReviewNote string `json:"review_note"`
 }
+
+type FollowUp struct {
+	ID               string    `json:"id"`
+	AssetCandidateID string    `json:"asset_candidate_id"`
+	ActorUserID      string    `json:"actor_user_id,omitempty"`
+	ActorName        string    `json:"actor_name,omitempty"`
+	Action           string    `json:"action"`
+	Comment          string    `json:"comment"`
+	RequestID        string    `json:"request_id,omitempty"`
+	CreatedAt        time.Time `json:"created_at"`
+}
+
+type FollowUpInput struct {
+	Action  string `json:"action"`
+	Comment string `json:"comment"`
+}
+
 type DuplicateInput struct {
 	MatchedAssetID string `json:"matched_asset_id"`
 	ReviewNote     string `json:"review_note"`
@@ -93,7 +110,7 @@ func requireGroupAdmin(principal auth.Principal) error {
 // holds asset.manage somewhere, to open the candidate queue. Row-level scope is
 // applied by the query itself rather than here.
 func requireCandidateReader(principal auth.Principal) error {
-	if principal.HasRole("group_admin") || principal.HasPermission("asset.manage") {
+	if principal.CanViewAssetCandidates() || principal.HasPermission("asset.manage") {
 		return nil
 	}
 	return ErrForbidden
@@ -118,7 +135,7 @@ func (s *Service) List(ctx context.Context, principal auth.Principal, status str
                COALESCE((SELECT CASE max(CASE fic.severity WHEN 'critical' THEN 4 WHEN 'high' THEN 3 WHEN 'medium' THEN 2 WHEN 'low' THEN 1 ELSE 0 END) WHEN 4 THEN 'critical' WHEN 3 THEN 'high' WHEN 2 THEN 'medium' WHEN 1 THEN 'low' ELSE '' END FROM security_finding_import_candidates fic WHERE fic.asset_candidate_id=c.id AND fic.status='pending'),'')
         FROM asset_candidates c LEFT JOIN organizations o ON o.id=c.organization_id
         WHERE ($3='' OR c.status=$3) AND ($2::boolean OR c.organization_id IN (SELECT id FROM accessible))
-        ORDER BY CASE WHEN c.status='pending' THEN 0 ELSE 1 END, c.created_at DESC`, principal.UserID, principal.HasRole("group_admin"), status)
+        ORDER BY CASE WHEN c.status='pending' THEN 0 ELSE 1 END, c.created_at DESC`, principal.UserID, principal.CanViewAssetCandidates(), status)
 	if err != nil {
 		return nil, fmt.Errorf("list asset candidates: %w", err)
 	}
@@ -162,7 +179,7 @@ func (s *Service) Search(ctx context.Context, principal auth.Principal, status s
         FROM asset_candidates c LEFT JOIN organizations o ON o.id=c.organization_id
         WHERE ($3='' OR c.status=$3) AND ($2::boolean OR c.organization_id IN (SELECT id FROM accessible))
         ORDER BY CASE WHEN c.status='pending' THEN 0 ELSE 1 END, c.created_at DESC
-        LIMIT $4 OFFSET $5`, principal.UserID, principal.HasRole("group_admin"), status, query.PageSize, query.Offset())
+        LIMIT $4 OFFSET $5`, principal.UserID, principal.CanViewAssetCandidates(), status, query.PageSize, query.Offset())
 	if err != nil {
 		return pagination.Result[Candidate]{}, fmt.Errorf("search asset candidates: %w", err)
 	}
@@ -188,7 +205,7 @@ func (s *Service) Search(ctx context.Context, principal auth.Principal, status s
 		return pagination.Result[Candidate]{}, err
 	}
 	if pagination.NeedsTotalFallback(len(items), query) {
-		if err := s.pool.QueryRow(ctx, candidateScopeCTE+`SELECT count(*) FROM asset_candidates c WHERE ($3='' OR c.status=$3) AND ($2::boolean OR c.organization_id IN (SELECT id FROM accessible))`, principal.UserID, principal.HasRole("group_admin"), status).Scan(&total); err != nil {
+		if err := s.pool.QueryRow(ctx, candidateScopeCTE+`SELECT count(*) FROM asset_candidates c WHERE ($3='' OR c.status=$3) AND ($2::boolean OR c.organization_id IN (SELECT id FROM accessible))`, principal.UserID, principal.CanViewAssetCandidates(), status).Scan(&total); err != nil {
 			return pagination.Result[Candidate]{}, fmt.Errorf("count asset candidates: %w", err)
 		}
 	}
@@ -398,6 +415,89 @@ func (s *Service) Accept(ctx context.Context, principal auth.Principal, id strin
 	}
 	return item, nil
 }
+
+// ListFollowUps returns the collaboration ledger for a candidate. Reading a
+// follow-up never grants the caller the ability to confirm or publish the asset.
+func (s *Service) ListFollowUps(ctx context.Context, p auth.Principal, id string) ([]FollowUp, error) {
+	if err := requireCandidateReader(p); err != nil {
+		return nil, err
+	}
+	if _, err := s.Get(ctx, p, id); err != nil {
+		return nil, err
+	}
+	rows, err := s.pool.Query(ctx, `
+		SELECT f.id::text, f.asset_candidate_id::text, COALESCE(f.actor_user_id::text,''),
+		       COALESCE(u.display_name, u.username, ''), f.action, f.comment,
+		       COALESCE(f.request_id,''), f.created_at
+		FROM asset_candidate_followups f
+		LEFT JOIN users u ON u.id=f.actor_user_id
+		WHERE f.asset_candidate_id=$1::uuid
+		ORDER BY f.created_at DESC, f.id DESC`, id)
+	if err != nil {
+		return nil, fmt.Errorf("list asset candidate follow-ups: %w", err)
+	}
+	defer rows.Close()
+	items := make([]FollowUp, 0)
+	for rows.Next() {
+		var item FollowUp
+		if err := rows.Scan(&item.ID, &item.AssetCandidateID, &item.ActorUserID, &item.ActorName, &item.Action, &item.Comment, &item.RequestID, &item.CreatedAt); err != nil {
+			return nil, fmt.Errorf("scan asset candidate follow-up: %w", err)
+		}
+		items = append(items, item)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+// AddFollowUp records a reminder or handoff request without changing the
+// candidate's review status. This deliberately remains a small audit ledger;
+// assignment and SLA tracking belong to a future workflow, not this endpoint.
+func (s *Service) AddFollowUp(ctx context.Context, p auth.Principal, id string, in FollowUpInput, requestID, ip string) (FollowUp, error) {
+	if !p.CanFollowUpAssetCandidates() {
+		return FollowUp{}, ErrForbidden
+	}
+	candidate, err := s.Get(ctx, p, id)
+	if err != nil {
+		return FollowUp{}, err
+	}
+	in.Action = strings.ToLower(strings.TrimSpace(in.Action))
+	in.Comment = strings.TrimSpace(in.Comment)
+	if in.Action == "" {
+		in.Action = "note"
+	}
+	if in.Action != "note" && in.Action != "reminder" && in.Action != "handoff_request" {
+		return FollowUp{}, ErrInvalid
+	}
+	if in.Comment == "" || len([]rune(in.Comment)) > 4000 {
+		return FollowUp{}, ErrInvalid
+	}
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return FollowUp{}, fmt.Errorf("begin asset candidate follow-up: %w", err)
+	}
+	defer tx.Rollback(ctx)
+	var item FollowUp
+	err = tx.QueryRow(ctx, `
+		INSERT INTO asset_candidate_followups(asset_candidate_id,actor_user_id,action,comment,request_id,request_ip)
+		VALUES($1::uuid,$2::uuid,$3,$4,NULLIF($5,''),NULLIF($6,'')::inet)
+		RETURNING id::text, asset_candidate_id::text, COALESCE(actor_user_id::text,''), action, comment,
+		          COALESCE(request_id,''), created_at`, id, p.UserID, in.Action, in.Comment, requestID, ip).
+		Scan(&item.ID, &item.AssetCandidateID, &item.ActorUserID, &item.Action, &item.Comment, &item.RequestID, &item.CreatedAt)
+	if err != nil {
+		return FollowUp{}, fmt.Errorf("create asset candidate follow-up: %w", err)
+	}
+	item.ActorName = p.DisplayName
+	if err := s.audit(ctx, tx, p, candidate.OrganizationID, "asset_candidate.follow_up", id, "跟进待确认资产", map[string]any{"action": item.Action, "comment": item.Comment}, requestID, ip); err != nil {
+		return FollowUp{}, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return FollowUp{}, fmt.Errorf("commit asset candidate follow-up: %w", err)
+	}
+	return item, nil
+}
+
 func (s *Service) Ignore(ctx context.Context, p auth.Principal, id string, in ReviewInput, rid, ip string) error {
 	return s.review(ctx, p, id, "ignored", "", in.ReviewNote, rid, ip)
 }

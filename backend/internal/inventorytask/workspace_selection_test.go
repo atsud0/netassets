@@ -6,28 +6,27 @@ import (
 	"testing"
 )
 
-func TestNormalizeWorkspaceSelectionIDs(t *testing.T) {
-	ids, err := normalizeWorkspaceSelectionIDs([]string{" draft-a ", "draft-b", "draft-a"})
+func TestNormalizeWorkspaceSelectionItems(t *testing.T) {
+	items, err := normalizeWorkspaceSelectionItems([]WorkspaceSelectionItem{{ID: " draft-a ", ExpectedVersion: 1}, {ID: "draft-b", ExpectedVersion: 2}, {ID: "draft-a", ExpectedVersion: 9}})
 	if err != nil {
-		t.Fatalf("normalizeWorkspaceSelectionIDs returned error: %v", err)
+		t.Fatalf("normalizeWorkspaceSelectionItems returned error: %v", err)
 	}
-	if len(ids) != 2 || ids[0] != "draft-a" || ids[1] != "draft-b" {
-		t.Fatalf("unexpected ids: %#v", ids)
+	if len(items) != 2 || items[0].ID != "draft-a" || items[1].ID != "draft-b" || items[0].ExpectedVersion != 1 {
+		t.Fatalf("unexpected items: %#v", items)
 	}
 }
 
-func TestNormalizeWorkspaceSelectionIDsRejectsInvalidInput(t *testing.T) {
-	if _, err := normalizeWorkspaceSelectionIDs(nil); !errors.Is(err, ErrInvalid) {
-		t.Fatalf("expected ErrInvalid for empty input, got %v", err)
+func TestNormalizeWorkspaceSelectionItemsRejectsInvalidInput(t *testing.T) {
+	for _, input := range [][]WorkspaceSelectionItem{nil, {{ID: "", ExpectedVersion: 1}}, {{ID: "draft-a", ExpectedVersion: 0}}} {
+		if _, err := normalizeWorkspaceSelectionItems(input); !errors.Is(err, ErrInvalid) {
+			t.Fatalf("expected ErrInvalid for %#v, got %v", input, err)
+		}
 	}
-	if _, err := normalizeWorkspaceSelectionIDs([]string{""}); !errors.Is(err, ErrInvalid) {
-		t.Fatalf("expected ErrInvalid for blank id, got %v", err)
-	}
-	tooMany := make([]string, MaxWorkspaceSelectionItems+1)
+	tooMany := make([]WorkspaceSelectionItem, MaxWorkspaceSelectionItems+1)
 	for index := range tooMany {
-		tooMany[index] = fmt.Sprintf("draft-%d", index)
+		tooMany[index] = WorkspaceSelectionItem{ID: fmt.Sprintf("draft-%d", index), ExpectedVersion: 1}
 	}
-	if _, err := normalizeWorkspaceSelectionIDs(tooMany); !errors.Is(err, ErrInvalid) {
+	if _, err := normalizeWorkspaceSelectionItems(tooMany); !errors.Is(err, ErrInvalid) {
 		t.Fatalf("expected ErrInvalid for oversized input, got %v", err)
 	}
 }
@@ -40,6 +39,7 @@ func TestWorkspaceSelectionError(t *testing.T) {
 		{ErrForbidden, "forbidden"},
 		{ErrNotFound, "not_found"},
 		{ErrState, "invalid_state"},
+		{ErrEditConflict, "draft_edit_conflict"},
 		{ErrInvalid, "invalid"},
 		{errors.New("database unavailable"), "internal_error"},
 	} {

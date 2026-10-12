@@ -16,6 +16,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 
+	"netassets/internal/access"
 	"netassets/internal/auth"
 	"netassets/internal/pagination"
 )
@@ -68,7 +69,14 @@ func (s *Service) AddAttachment(ctx context.Context, principal auth.Principal, w
 		return Attachment{}, ErrInvalid
 	}
 	if !principal.CanManageSecurityWorkOrders() {
-		if input.Category != "remediation" || item.Status == "draft" || item.Status == "closed" || item.Status == "cancelled" {
+		allowed, scopeErr := access.CanOperateOrganization(ctx, s.pool, principal, item.AssigneeOrganizationID, auth.PermissionSecurityWorkOrderExecute)
+		if scopeErr != nil {
+			return Attachment{}, scopeErr
+		}
+		// Read permission is deliberately insufficient for uploads. Organization
+		// users may only add remediation evidence while an executable work order
+		// is active; group security roles retain their global management path.
+		if !allowed || input.Category != "remediation" || item.Status == "draft" || item.Status == "closed" || item.Status == "cancelled" {
 			return Attachment{}, ErrForbidden
 		}
 	}
@@ -181,8 +189,14 @@ func (s *Service) DeleteAttachment(ctx context.Context, principal auth.Principal
 	if err != nil {
 		return err
 	}
-	if !principal.CanManageSecurityWorkOrders() && (attachment.UploadedBy != principal.UserID || order.Status == "closed" || order.Status == "cancelled") {
-		return ErrForbidden
+	if !principal.CanManageSecurityWorkOrders() {
+		allowed, scopeErr := access.CanOperateOrganization(ctx, s.pool, principal, order.AssigneeOrganizationID, auth.PermissionSecurityWorkOrderExecute)
+		if scopeErr != nil {
+			return scopeErr
+		}
+		if !allowed || attachment.UploadedBy != principal.UserID || order.Status == "closed" || order.Status == "cancelled" {
+			return ErrForbidden
+		}
 	}
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {

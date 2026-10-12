@@ -57,7 +57,7 @@ func setup(t *testing.T) *fixture {
 	must(t, pool.QueryRow(ctx, `INSERT INTO users(username,password_hash,display_name) VALUES($1,'not-used','组织管理员') RETURNING id::text`, "manager_"+suffix).Scan(&managerID))
 	_, err = pool.Exec(ctx, `INSERT INTO user_roles(user_id,role_id,organization_id,data_scope) SELECT $1::uuid,id,$2::uuid,'organization' FROM roles WHERE role_key='organization_admin'`, managerID, f.org)
 	must(t, err)
-	f.manager = auth.Principal{UserID: managerID, Permissions: []string{"remediation.assign", "remediation.review", "remediation.people.manage", "vendor.manage"}}
+	f.manager = auth.Principal{UserID: managerID, Permissions: []string{"remediation.assign", "remediation.review", "remediation.people.manage", "vendor.manage", auth.PermissionSecurityWorkOrderView, auth.PermissionSecurityWorkOrderExecute}}
 	vendor, err := f.s.SaveVendor(ctx, f.group, "", f.org, "测试厂商_"+suffix, "项目联系人", "enabled")
 	must(t, err)
 	for i := 0; i < 3; i++ {
@@ -84,8 +84,6 @@ func setup(t *testing.T) *fixture {
 	f.order = order.ID
 	_, err = f.orders.Issue(ctx, f.group, f.order, securityworkorder.CommentInput{}, "", "")
 	must(t, err)
-	_, err = f.orders.Accept(ctx, f.manager, f.order, securityworkorder.CommentInput{}, "", "")
-	must(t, err)
 	return f
 }
 func must(t *testing.T, err error) {
@@ -94,6 +92,14 @@ func must(t *testing.T, err error) {
 		t.Fatal(err)
 	}
 }
+func TestIndividualWorkOrderLegacyAcceptIsRejected(t *testing.T) {
+	f := setup(t)
+	_, err := f.orders.Accept(f.ctx, f.manager, f.order, securityworkorder.CommentInput{}, "", "")
+	if !errors.Is(err, securityworkorder.ErrIndividualWorkOrderAction) {
+		t.Fatalf("legacy individual accept error = %v, want ErrIndividualWorkOrderAction", err)
+	}
+}
+
 func (f *fixture) assign(t *testing.T, index int, key, grant string) string {
 	t.Helper()
 	out, err := f.s.Assign(f.ctx, f.manager, f.order, key, remediation.AssignInput{FindingID: f.findings[index], GrantID: grant, DueAt: f.due.Add(-time.Hour), TargetEnvironment: "生产", DeploymentRequired: true, Material: remediation.Material{Title: "对外漏洞材料", Severity: "high", Description: "已脱敏描述", Evidence: "可公开复现步骤", Requirement: "部署生产并验证"}})
@@ -163,6 +169,15 @@ func TestRepairLifecycleAndIsolation(t *testing.T) {
 	f.action(t, f.other, id2, "accept", remediation.ActionInput{}, true)
 	sub := f.submit(t, f.worker, id)
 	sub2 := f.submit(t, f.other, id2)
+	workerDetail, err := f.s.Detail(f.ctx, f.worker, id, true)
+	must(t, err)
+	_, err = f.s.Act(f.ctx, f.worker, id, "organization-review", "self-review-key", remediation.ActionInput{
+		ExpectedVersion: int(workerDetail["version"].(float64)), SubmissionID: sub,
+		Decision: "pass", Reason: "提交人不能自我复核",
+	}, false)
+	if !errors.Is(err, remediation.ErrForbidden) {
+		t.Fatalf("submitter organization review error = %v, want ErrForbidden", err)
+	}
 	if err = f.s.CloseOrder(f.ctx, f.group, f.order, "提前关闭"); !errors.Is(err, remediation.ErrConflict) {
 		t.Fatalf("closed incomplete: %v", err)
 	}

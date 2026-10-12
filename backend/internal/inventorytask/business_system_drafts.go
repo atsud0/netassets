@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
@@ -19,7 +20,8 @@ import (
 
 type BusinessSystemDraftInput struct {
 	businesssystem.CreateInput
-	CustomValues []customfield.Value `json:"custom_values"`
+	CustomValues    []customfield.Value `json:"custom_values"`
+	ExpectedVersion *int                `json:"expected_version,omitempty"`
 }
 
 type BusinessSystemDraft struct {
@@ -28,6 +30,11 @@ type BusinessSystemDraft struct {
 	SourceSystemID string              `json:"source_system_id,omitempty"`
 	DraftStatus    string              `json:"draft_status"`
 	Operation      string              `json:"operation"`
+	Version        int                 `json:"version"`
+	AssignedTo     string              `json:"assigned_to,omitempty"`
+	LastEditedBy   string              `json:"last_edited_by,omitempty"`
+	TakeoverReason string              `json:"takeover_reason,omitempty"`
+	TakenOverAt    *time.Time          `json:"taken_over_at,omitempty"`
 	IsDraft        bool                `json:"is_draft"`
 	CustomValues   []customfield.Value `json:"custom_values"`
 }
@@ -39,16 +46,19 @@ func businessSystemDraftLabel(input businesssystem.CreateInput) string {
 	return strings.TrimSpace(input.Code)
 }
 
-func (s *Service) SearchBusinessSystemDrafts(ctx context.Context, principal auth.Principal, taskID, organizationID string, page pagination.Query) (pagination.Result[BusinessSystemDraft], error) {
+func (s *Service) SearchBusinessSystemDrafts(ctx context.Context, principal auth.Principal, taskID, organizationID string, page pagination.Query, includeDiscarded ...bool) (pagination.Result[BusinessSystemDraft], error) {
 	if !principal.HasPermission("inventory.manage") || !principal.HasPermission("system.manage") {
 		return pagination.Result[BusinessSystemDraft]{}, ErrForbidden
 	}
 	if _, err := s.loadDraftAssignment(ctx, s.pool, principal, taskID, organizationID, false, "business_systems"); err != nil {
 		return pagination.Result[BusinessSystemDraft]{}, err
 	}
-	visibility := " AND draft.draft_status <> 'discarded'"
+	showDiscarded := len(includeDiscarded) > 0 && includeDiscarded[0] && principal.HasRole("organization_admin")
+	visibility := ""
 	if principal.HasRole("group_admin") {
 		visibility = " AND draft.draft_status IN ('submitted','published')"
+	} else if !showDiscarded {
+		visibility = " AND draft.draft_status <> 'discarded'"
 	}
 	var total int
 	if err := s.pool.QueryRow(ctx, `SELECT count(*) FROM inventory_business_system_drafts draft WHERE draft.task_id::text=$1 AND draft.organization_id::text=$2`+visibility, taskID, organizationID).Scan(&total); err != nil {
@@ -110,8 +120,8 @@ func (s *Service) CreateBusinessSystemDraft(ctx context.Context, principal auth.
 			system_status,system_level,deployment_type,internet_exposure,description,
 			contains_personal_information,contains_sensitive_personal_information,personal_information_record_count,
 			data_volume_over_100k,contains_important_data,contains_core_data,data_storage_location,security_notes,
-			custom_values,created_by,updated_by
-		) VALUES ($1::uuid,$2::uuid,$3,$4,NULLIF($5,''),NULLIF($6,''),NULLIF($7,''),$8,$9,NULLIF($10,''),$11,NULLIF($12,''),$13,$14,$15,$16,$17,$18,NULLIF($19,''),NULLIF($20,''),$21::jsonb,$22::uuid,$22::uuid)
+			custom_values,created_by,updated_by,assigned_to,last_edited_by
+		) VALUES ($1::uuid,$2::uuid,$3,$4,NULLIF($5,''),NULLIF($6,''),NULLIF($7,''),$8,$9,NULLIF($10,''),$11,NULLIF($12,''),$13,$14,$15,$16,$17,$18,NULLIF($19,''),NULLIF($20,''),$21::jsonb,$22::uuid,$22::uuid,$22::uuid,$22::uuid)
 		RETURNING id::text
 	`, taskID, organizationID, input.Code, input.Name, input.ShortName, input.OwnerName, input.OwnerContact,
 		input.Status, input.Level, input.DeploymentType, input.InternetExposure, input.Description,
@@ -217,9 +227,9 @@ func (s *Service) createBusinessSystemChangeDraft(ctx context.Context, principal
 			owner_name,owner_contact,system_status,system_level,deployment_type,internet_exposure,description,
 			contains_personal_information,contains_sensitive_personal_information,personal_information_record_count,
 			data_volume_over_100k,contains_important_data,contains_core_data,data_storage_location,security_notes,
-			custom_values,created_by,updated_by
+			custom_values,created_by,updated_by,assigned_to,last_edited_by
 		) VALUES($1::uuid,$2::uuid,$3,$4::uuid,$5,$6,NULLIF($7,''),NULLIF($8,''),NULLIF($9,''),$10,$11,
-			NULLIF($12,''),$13,NULLIF($14,''),$15,$16,$17,$18,$19,$20,NULLIF($21,''),NULLIF($22,''),$23::jsonb,$24::uuid,$24::uuid)
+			NULLIF($12,''),$13,NULLIF($14,''),$15,$16,$17,$18,$19,$20,NULLIF($21,''),NULLIF($22,''),$23::jsonb,$24::uuid,$24::uuid,$24::uuid,$24::uuid)
 		ON CONFLICT(organization_id,source_system_id) WHERE source_system_id IS NOT NULL AND draft_status IN ('editing','submitted','returned') DO UPDATE SET
 			operation=EXCLUDED.operation,system_code=EXCLUDED.system_code,system_name=EXCLUDED.system_name,
 			short_name=EXCLUDED.short_name,owner_name=EXCLUDED.owner_name,owner_contact=EXCLUDED.owner_contact,
@@ -276,6 +286,9 @@ func (s *Service) UpdateBusinessSystemDraft(ctx context.Context, principal auth.
 		return BusinessSystemDraft{}, ErrForbidden
 	}
 	input.OrganizationID = organizationID
+	if input.ExpectedVersion == nil || *input.ExpectedVersion <= 0 {
+		return BusinessSystemDraft{}, ErrInvalid
+	}
 	if err := businesssystem.PrepareCreateInput(&input.CreateInput); err != nil {
 		return BusinessSystemDraft{}, mapBusinessSystemDraftError(err)
 	}
@@ -291,6 +304,9 @@ func (s *Service) UpdateBusinessSystemDraft(ctx context.Context, principal auth.
 	if _, err := s.loadDraftAssignment(ctx, tx, principal, taskID, organizationID, true, "business_systems"); err != nil {
 		return BusinessSystemDraft{}, err
 	}
+	if err := ensureDraftEditor(ctx, tx, principal, "business_system", draftID, organizationID); err != nil {
+		return BusinessSystemDraft{}, err
+	}
 	var duplicate bool
 	if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM business_systems WHERE system_code=$1 AND id<>COALESCE((SELECT source_system_id FROM inventory_business_system_drafts WHERE id::text=$2),gen_random_uuid()) AND deleted_at IS NULL)`, input.Code, draftID).Scan(&duplicate); err != nil {
 		return BusinessSystemDraft{}, fmt.Errorf("check formal business system duplicate: %w", err)
@@ -303,18 +319,18 @@ func (s *Service) UpdateBusinessSystemDraft(ctx context.Context, principal auth.
 			system_status=$9,system_level=$10,deployment_type=NULLIF($11,''),internet_exposure=$12,description=NULLIF($13,''),
 			contains_personal_information=$14,contains_sensitive_personal_information=$15,personal_information_record_count=$16,
 			data_volume_over_100k=$17,contains_important_data=$18,contains_core_data=$19,data_storage_location=NULLIF($20,''),security_notes=NULLIF($21,''),
-			custom_values=$22::jsonb,draft_status='editing',updated_by=$23::uuid,updated_at=now()
-		WHERE id::text=$1 AND task_id::text=$2 AND organization_id::text=$3 AND operation IN ('create','update') AND draft_status IN ('editing','returned')
+			custom_values=$22::jsonb,draft_status='editing',version=version+1,updated_by=$23::uuid,last_edited_by=$23::uuid,updated_at=now()
+		WHERE id::text=$1 AND task_id::text=$2 AND organization_id::text=$3 AND operation IN ('create','update') AND draft_status IN ('editing','returned') AND version=$24
 	`, draftID, taskID, organizationID, input.Code, input.Name, input.ShortName, input.OwnerName, input.OwnerContact,
 		input.Status, input.Level, input.DeploymentType, input.InternetExposure, input.Description,
 		input.ContainsPersonalInformation, input.ContainsSensitivePersonalInformation, input.PersonalInformationRecordCount,
 		input.DataVolumeOver100K, input.ContainsImportantData, input.ContainsCoreData, input.DataStorageLocation, input.SecurityNotes,
-		rawValues, principal.UserID)
+		rawValues, principal.UserID, input.ExpectedVersion)
 	if err != nil {
 		return BusinessSystemDraft{}, mapBusinessSystemDraftDatabaseError(err)
 	}
 	if result.RowsAffected() == 0 {
-		return BusinessSystemDraft{}, ErrNotFound
+		return BusinessSystemDraft{}, draftCASFailure(ctx, tx, "inventory_business_system_drafts", draftID, taskID, organizationID, *input.ExpectedVersion)
 	}
 	if err := writeBusinessSystemDraftAudit(ctx, tx, principal, organizationID, taskID, draftID, "inventory.business_system_draft.update", "更新填报业务系统草稿", input.Code, requestID, ipAddress); err != nil {
 		return BusinessSystemDraft{}, err
@@ -325,7 +341,7 @@ func (s *Service) UpdateBusinessSystemDraft(ctx context.Context, principal auth.
 	return loadBusinessSystemDraft(ctx, s.pool, draftID)
 }
 
-func (s *Service) DeleteBusinessSystemDraft(ctx context.Context, principal auth.Principal, taskID, organizationID, draftID, requestID, ipAddress string) error {
+func (s *Service) DeleteBusinessSystemDraft(ctx context.Context, principal auth.Principal, taskID, organizationID, draftID string, expectedVersion int, requestID, ipAddress string) error {
 	if !principal.HasPermission("inventory.manage") || !principal.HasPermission("system.manage") || principal.HasRole("group_admin") {
 		return ErrForbidden
 	}
@@ -334,7 +350,13 @@ func (s *Service) DeleteBusinessSystemDraft(ctx context.Context, principal auth.
 		return fmt.Errorf("begin delete inventory business system draft: %w", err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
+	if expectedVersion <= 0 {
+		return ErrInvalid
+	}
 	if _, err := s.loadDraftAssignment(ctx, tx, principal, taskID, organizationID, true, "business_systems"); err != nil {
+		return err
+	}
+	if err := ensureDraftEditor(ctx, tx, principal, "business_system", draftID, organizationID); err != nil {
 		return err
 	}
 	var referencedAssets int
@@ -346,10 +368,10 @@ func (s *Service) DeleteBusinessSystemDraft(ctx context.Context, principal auth.
 	}
 	var code, label string
 	unselected := false
-	if err := tx.QueryRow(ctx, `UPDATE inventory_business_system_drafts SET task_id=NULL,selected_at=NULL,updated_by=$4::uuid,updated_at=now() WHERE id::text=$1 AND task_id::text=$2 AND organization_id::text=$3 AND selected_at IS NOT NULL AND draft_status IN ('editing','returned') RETURNING system_code,system_name`, draftID, taskID, organizationID, principal.UserID).Scan(&code, &label); errors.Is(err, pgx.ErrNoRows) {
-		err = tx.QueryRow(ctx, `UPDATE inventory_business_system_drafts SET draft_status='discarded',updated_by=$4::uuid,updated_at=now() WHERE id::text=$1 AND task_id::text=$2 AND organization_id::text=$3 AND draft_status IN ('editing','returned') RETURNING system_code`, draftID, taskID, organizationID, principal.UserID).Scan(&code)
+	if err := tx.QueryRow(ctx, `UPDATE inventory_business_system_drafts SET task_id=NULL,selected_at=NULL,version=version+1,last_edited_by=$4::uuid,updated_by=$4::uuid,updated_at=now() WHERE id::text=$1 AND task_id::text=$2 AND organization_id::text=$3 AND selected_at IS NOT NULL AND draft_status IN ('editing','returned') AND version=$5 RETURNING system_code,system_name`, draftID, taskID, organizationID, principal.UserID, expectedVersion).Scan(&code, &label); errors.Is(err, pgx.ErrNoRows) {
+		err = tx.QueryRow(ctx, `UPDATE inventory_business_system_drafts SET draft_status='discarded',version=version+1,last_edited_by=$4::uuid,updated_by=$4::uuid,updated_at=now() WHERE id::text=$1 AND task_id::text=$2 AND organization_id::text=$3 AND draft_status IN ('editing','returned') AND version=$5 RETURNING system_code`, draftID, taskID, organizationID, principal.UserID, expectedVersion).Scan(&code)
 		if errors.Is(err, pgx.ErrNoRows) {
-			return ErrNotFound
+			return draftCASFailure(ctx, tx, "inventory_business_system_drafts", draftID, taskID, organizationID, expectedVersion)
 		}
 		if err != nil {
 			return fmt.Errorf("discard inventory business system draft: %w", err)
@@ -404,7 +426,7 @@ func validateBusinessSystemDraftOrganization(ctx context.Context, q queryRower, 
 }
 
 const businessSystemDraftSelect = `
-	SELECT draft.id::text,draft.task_id::text,COALESCE(draft.source_system_id::text,''),draft.operation,draft.draft_status,
+	SELECT draft.id::text,draft.task_id::text,COALESCE(draft.source_system_id::text,''),draft.operation,draft.draft_status,draft.version,COALESCE(draft.assigned_to::text,''),COALESCE(draft.last_edited_by::text,''),COALESCE(draft.takeover_reason,''),draft.taken_over_at,
 	       draft.system_code,draft.system_name,COALESCE(draft.short_name,''),organization.id::text,organization.organization_code,organization.organization_name,
 	       COALESCE(draft.owner_name,''),COALESCE(draft.owner_contact,''),draft.system_status,draft.system_level,COALESCE(draft.deployment_type,''),draft.internet_exposure,COALESCE(draft.description,''),
 	       draft.contains_personal_information,draft.contains_sensitive_personal_information,draft.personal_information_record_count,draft.data_volume_over_100k,
@@ -418,7 +440,7 @@ func loadBusinessSystemDraft(ctx context.Context, q queryRower, draftID string) 
 func scanBusinessSystemDraft(row rowScanner) (BusinessSystemDraft, error) {
 	var item BusinessSystemDraft
 	var raw []byte
-	err := row.Scan(&item.ID, &item.TaskID, &item.SourceSystemID, &item.Operation, &item.DraftStatus,
+	err := row.Scan(&item.ID, &item.TaskID, &item.SourceSystemID, &item.Operation, &item.DraftStatus, &item.Version, &item.AssignedTo, &item.LastEditedBy, &item.TakeoverReason, &item.TakenOverAt,
 		&item.Code, &item.Name, &item.ShortName, &item.OrganizationID, &item.OrganizationCode, &item.OrganizationName,
 		&item.OwnerName, &item.OwnerContact, &item.Status, &item.Level, &item.DeploymentType, &item.InternetExposure, &item.Description,
 		&item.ContainsPersonalInformation, &item.ContainsSensitivePersonalInformation, &item.PersonalInformationRecordCount, &item.DataVolumeOver100K,
@@ -546,7 +568,7 @@ func publishBusinessSystemDrafts(ctx context.Context, tx pgx.Tx, principal auth.
 			return fmt.Errorf("write published business system audit: %w", err)
 		}
 	}
-	if _, err := tx.Exec(ctx, `UPDATE inventory_business_system_drafts SET draft_status='published',published_at=now(),updated_by=$3::uuid,updated_at=now() WHERE task_id::text=$1 AND organization_id::text=$2 AND draft_status='submitted'`, taskID, organizationID, principal.UserID); err != nil {
+	if _, err := tx.Exec(ctx, `UPDATE inventory_business_system_drafts SET draft_status='published',published_at=now(),version=version+1,last_edited_by=$3::uuid,updated_by=$3::uuid,updated_at=now() WHERE task_id::text=$1 AND organization_id::text=$2 AND draft_status='submitted'`, taskID, organizationID, principal.UserID); err != nil {
 		return fmt.Errorf("mark business system drafts published: %w", err)
 	}
 	return nil

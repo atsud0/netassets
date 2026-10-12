@@ -1,0 +1,28 @@
+{
+  "checks": [
+    "dashboard",
+    "assets",
+    "orders",
+    "tasks",
+    "people",
+    "empty state and saved filters",
+    "asset secondary actions and expanded fields",
+    "mobile navigation and dashboard",
+    "1280 task layout",
+    "route /systems",
+    "route /inventory-tasks",
+    "route /security-test-requests",
+    "route /security-test-batches",
+    "route /organizations",
+    "route /users",
+    "route /data-governance",
+    "route /data-quality-issues",
+    "route /data-quality-scan-history",
+    "route /asset-candidates",
+    "route /audit-logs",
+    "route /backups",
+    "route /notifications",
+    "route /profile"
+  ],
+  "errors": []
+}

@@ -85,8 +85,16 @@ func (s *Service) Assign(ctx context.Context, p auth.Principal, orderID, key str
 	if previous != nil {
 		return previous, nil
 	}
-	if mode != "individual" || state != "in_progress" || in.DueAt.After(orderDue) {
+	if mode != "individual" || !contains([]string{"issued", "in_progress"}, state) || in.DueAt.After(orderDue) {
 		return nil, ErrConflict
+	}
+	// An individual order is opened by its first concrete task assignment.
+	// Do not call the legacy organization-level /accept transition: that
+	// endpoint is intentionally rejected for individual orders.
+	if state == "issued" {
+		if _, err := tx.Exec(ctx, `UPDATE security_work_orders SET status='in_progress', accepted_at=COALESCE(accepted_at, now()), updated_at=now() WHERE id=$1::uuid`, orderID); err != nil {
+			return nil, err
+		}
 	}
 	var system, severity string
 	err = tx.QueryRow(ctx, `SELECT COALESCE(COALESCE(f.business_system_id,(SELECT sa.business_system_id FROM system_assets sa WHERE sa.asset_id=f.asset_id AND sa.is_primary ORDER BY sa.business_system_id LIMIT 1))::text,''),f.severity FROM security_work_order_findings l
@@ -473,6 +481,13 @@ func (s *Service) Act(ctx context.Context, p auth.Principal, id, action, key str
 			if in.VerifiedAt.Before(submitted) {
 				return nil, ErrInvalid
 			}
+		}
+		var selfReview bool
+		if err = tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM remediation_submissions WHERE id=$1::uuid AND author_id=$2::uuid)`, t.SubmissionID, p.UserID).Scan(&selfReview); err != nil {
+			return nil, err
+		}
+		if selfReview {
+			return nil, ErrForbidden
 		}
 		_, err = tx.Exec(ctx, `INSERT INTO remediation_reviews(submission_id,stage,decision,public_feedback,internal_note,reviewer_id,verified_environment,verified_at) VALUES($1::uuid,$2,$3,$4,$5,$6::uuid,$7,$8)`, t.SubmissionID, stage, in.Decision, in.Reason, in.InternalNote, p.UserID, in.VerifiedEnvironment, in.VerifiedAt)
 		if err != nil {

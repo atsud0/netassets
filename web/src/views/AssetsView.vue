@@ -25,7 +25,7 @@ interface Asset {
   owner_user_id?: string; owner_username?: string; owner_user_display_name?: string
   owner_name?: string; notes?: string; expires_at?: string; created_at: string; updated_at: string
   is_draft?: boolean; draft_status?: 'editing' | 'submitted' | 'returned' | 'published'; task_id?: string
-  source_asset_id?: string; operation?: 'create' | 'update' | 'delete'
+  source_asset_id?: string; operation?: 'create' | 'update' | 'delete'; version?: number
   reporting_status?: 'unreported' | 'pending_review' | 'reported' | 'changed' | 'returned' | 'pending_offline'; is_working_copy?: boolean; published_id?: string
   custom_values?: Array<{ field_key: string; value: unknown }>
 }
@@ -90,6 +90,7 @@ const editingAssetID = ref('')
 // Captured when the edit dialog opens so the backend can reject a save that
 // overwrites a change made by someone else in the meantime.
 const editingExpectedUpdatedAt = ref<string>('')
+const editingExpectedVersion = ref(0)
 const formRef = ref<FormInstance>()
 const assets = ref<Asset[]>([])
 const draftAssets = ref<Asset[]>([])
@@ -366,6 +367,7 @@ function resetForm() {
 function openCreateDialog() {
   editingAssetID.value = ''
   editingExpectedUpdatedAt.value = ''
+  editingExpectedVersion.value = 0
   editingIsDraft.value = false
   editingDraftTaskID.value = ''
   editingDraftOrganizationID.value = ''
@@ -383,6 +385,7 @@ function openResourceSubmissionHistory(row: { id: string }) {
 function openEditDialog(item: Asset) {
   editingAssetID.value = item.id
   editingExpectedUpdatedAt.value = item.updated_at ?? ''
+  editingExpectedVersion.value = item.version ?? 0
   const draftTaskID = item.task_id || (inventoryMode.value && item.is_draft ? inventoryTaskID.value : '')
   editingIsDraft.value = Boolean(draftTaskID)
   editingDraftTaskID.value = draftTaskID
@@ -456,15 +459,18 @@ async function submit() {
     const missing = customFields.value.find((field) => field.is_required && isEmptyCustomValue(customValues[field.field_key]))
     if (missing) { ElMessage.warning(`请填写自定义字段：${missing.field_name}`); return }
     const customPayload = customFields.value.map((field) => ({ field_key: field.field_key, value: customValues[field.field_key] }))
-    // Task drafts keep their own update semantics; only the ledger endpoints
-    // implement the optimistic lock, so the guard is only sent on save of an
-    // existing asset and never on create.
+    // Draft saves use the same optimistic-lock contract as the backend. A
+    // newly created draft has no version yet; existing drafts must echo the
+    // version returned by the last read/save.
     const payload: Record<string, unknown> = {
       ...form,
       organization_id: inventoryMode.value ? inventoryOrganizationID.value : form.organization_id,
       expires_at: form.expires_at?.toISOString() ?? null,
       custom_values: customPayload,
-      ...(editingAssetID.value && !editingIsDraft.value && editingExpectedUpdatedAt.value ? { expected_updated_at: editingExpectedUpdatedAt.value } : {}),
+      // Working versions (task-bound or not) are version-locked; only rows in
+      // the published ledger still use the timestamp comparison.
+      ...(editingAssetID.value && editingExpectedVersion.value > 0 ? { expected_version: editingExpectedVersion.value } : {}),
+      ...(editingAssetID.value && !editingExpectedVersion.value && !editingIsDraft.value && editingExpectedUpdatedAt.value ? { expected_updated_at: editingExpectedUpdatedAt.value } : {}),
     }
     let response
     if (inventoryMode.value) {
@@ -495,7 +501,7 @@ async function submit() {
 
 async function selectWorkspaceAsset(item: Asset) {
   try {
-    await apiClient.post(`/inventory-tasks/${inventoryTaskID.value}/organizations/${inventoryOrganizationID.value}/asset-drafts/${item.id}/select`)
+    await apiClient.post(`/inventory-tasks/${inventoryTaskID.value}/organizations/${inventoryOrganizationID.value}/asset-drafts/${item.id}/select`, { expected_version: item.version })
     ElMessage.success('已选择该网络资产纳入本次上报')
     await refreshAfterMutation()
   } catch (error) { ElMessage.error(getAPIErrorMessage(error, '选择上报网络资产失败')) }
@@ -515,7 +521,7 @@ async function batchSelectWorkspaceAssets() {
     batchLoading.value = true
     const targets = [...selectedAssets.value]
     const response = await apiClient.post<{ result: BatchOperationResult }>(`/inventory-tasks/${inventoryTaskID.value}/organizations/${inventoryOrganizationID.value}/asset-drafts/batch-select`, {
-      ids: targets.map((item) => item.id),
+      items: targets.map((item) => ({ id: item.id, expected_version: item.version })),
     })
     const names = new Map(targets.map((item) => [item.id, item.name || item.value]))
     batchResult.value = {
@@ -547,7 +553,8 @@ async function requestAssetDeletion(item: Asset) {
 async function removeDraft(item: Asset) {
   try {
     await ElMessageBox.confirm(`确认取消任务中的“${draftOperationLabels[item.operation || 'create']}”变更“${item.name || item.value}”吗？`, '取消任务变更', { type: 'warning', confirmButtonText: '确认取消', cancelButtonText: '返回' })
-    await apiClient.delete(`/inventory-tasks/${inventoryTaskID.value}/organizations/${inventoryOrganizationID.value}/asset-drafts/${item.id}`)
+    if (!item.version || item.version <= 0) throw new Error('草稿版本信息缺失，请刷新后重试')
+    await apiClient.delete(`/inventory-tasks/${inventoryTaskID.value}/organizations/${inventoryOrganizationID.value}/asset-drafts/${item.id}`, { params: { expected_version: item.version } })
     ElMessage.success('任务变更已取消')
     await loadAssetDrafts()
   } catch (error) {
@@ -571,7 +578,7 @@ async function runBatchUpdate(payload: { status?: string; network_area_id?: stri
     batchLoading.value = true
     const targets = [...selectedAssets.value]
     const response = await apiClient.patch<{ result: BatchOperationResult }>('/assets/batch', {
-      ids: targets.map((item) => item.id), ...payload,
+      items: targets.map((item) => ({ id: item.id, expected_version: item.version })), ...payload,
     })
     const names = new Map(targets.map((item) => [item.id, item.name || item.value]))
     batchResult.value = {
@@ -625,9 +632,10 @@ async function removeAsset(item: Asset) {
       confirmButtonText: '删除', cancelButtonText: '取消', type: 'error',
     })
     if (item.is_working_copy && item.task_id) {
-      await apiClient.delete(assetDraftEndpoint(item.task_id, item.organization_id, item.id))
+      if (!item.version || item.version <= 0) throw new Error('草稿版本信息缺失，请刷新后重试')
+      await apiClient.delete(assetDraftEndpoint(item.task_id, item.organization_id, item.id), { params: { expected_version: item.version } })
     } else {
-      await apiClient.delete(`/assets/${item.id}`)
+      await apiClient.delete(`/assets/${item.id}`, { params: item.version && item.version > 0 ? { expected_version: item.version } : {} })
     }
     ElMessage.success('网络资产已删除')
     await refreshAfterMutation()

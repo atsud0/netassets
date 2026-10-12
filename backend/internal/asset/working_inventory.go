@@ -54,7 +54,7 @@ func (s *Service) searchWorkingCreates(ctx context.Context, p auth.Principal, f 
  COALESCE(bs.id::text,'') business_system_id,COALESCE(bs.system_code,'') business_system_code,COALESCE(bs.system_name,'') business_system_name,
  a.environment,a.network_scope,COALESCE(na.id::text,'') network_area_id,COALESCE(na.area_name,'') network_area_name,a.status,a.importance,a.source,
  COALESCE(ao.owner_user_id::text,'') owner_user_id,COALESCE(u.username,'') owner_username,COALESCE(u.display_name,'') owner_display_name,COALESCE(ao.owner_name,'') owner_name,
- COALESCE(a.notes,'') notes,a.expires_at,a.created_at,a.updated_at,'reported'::text reporting_status,false is_working_copy,''::text published_id,''::text task_id,''::text draft_status,''::text operation,'[]'::jsonb custom_values
+ COALESCE(a.notes,'') notes,a.expires_at,a.created_at,a.updated_at,'reported'::text reporting_status,false is_working_copy,''::text published_id,''::text task_id,''::text draft_status,''::text operation,0 version,''::text assigned_to,''::text last_edited_by,''::text takeover_reason,'[]'::jsonb custom_values
  FROM assets a JOIN asset_organizations ao ON ao.asset_id=a.id AND ao.is_primary JOIN organizations o ON o.id=ao.organization_id
  LEFT JOIN users u ON u.id=ao.owner_user_id LEFT JOIN asset_network_areas na ON na.id=a.network_area_id
  LEFT JOIN LATERAL (SELECT b.id,b.system_code,b.system_name FROM system_assets sa JOIN business_systems b ON b.id=sa.business_system_id WHERE sa.asset_id=a.id AND b.deleted_at IS NULL ORDER BY sa.is_primary DESC,sa.created_at LIMIT 1) bs ON true
@@ -66,7 +66,7 @@ func (s *Service) searchWorkingCreates(ctx context.Context, p auth.Principal, f 
  COALESCE(na.id::text,''),COALESCE(na.area_name,''),d.status,d.importance,d.source,COALESCE(d.owner_user_id::text,''),COALESCE(u.username,''),COALESCE(u.display_name,''),
  COALESCE(d.owner_name,''),COALESCE(d.notes,''),d.expires_at,d.created_at,d.updated_at,
  CASE WHEN d.draft_status='submitted' THEN 'pending_review' WHEN d.draft_status='returned' THEN 'returned' WHEN d.operation='delete' THEN 'pending_offline' WHEN d.operation='update' THEN 'changed' ELSE 'unreported' END,
- true,COALESCE(d.source_asset_id::text,''),COALESCE(d.task_id::text,''),d.draft_status,d.operation,d.custom_values
+ true,COALESCE(d.source_asset_id::text,''),COALESCE(d.task_id::text,''),d.draft_status,d.operation,d.version,COALESCE(d.assigned_to::text,''),COALESCE(d.last_edited_by::text,''),COALESCE(d.takeover_reason,''),d.custom_values
  FROM inventory_asset_drafts d JOIN organizations o ON o.id=d.organization_id LEFT JOIN users u ON u.id=d.owner_user_id
  LEFT JOIN asset_network_areas na ON na.id=d.network_area_id LEFT JOIN business_systems b ON b.id=d.business_system_id AND b.deleted_at IS NULL
  LEFT JOIN inventory_business_system_drafts wb ON wb.id=d.business_system_draft_id AND wb.draft_status IN `+inventorydraft.ActiveSQL+`
@@ -74,7 +74,7 @@ func (s *Service) searchWorkingCreates(ctx context.Context, p auth.Principal, f 
 )
 SELECT id,asset_type,asset_value,normalized_value,asset_name,organization_id,organization_code,organization_name,business_system_id,business_system_code,business_system_name,
  environment,network_scope,network_area_id,network_area_name,status,importance,source,owner_user_id,owner_username,owner_display_name,owner_name,notes,expires_at,created_at,updated_at,
- reporting_status,is_working_copy,published_id,task_id,draft_status,operation,custom_values,count(*) OVER()
+ reporting_status,is_working_copy,published_id,task_id,draft_status,operation,version,assigned_to,last_edited_by,takeover_reason,custom_values,count(*) OVER()
 FROM ledger WHERE ($2='' OR asset_type=$2) AND ($3='' OR status=$3) AND ($4='' OR organization_id=$4)
  AND ($5='' OR concat_ws(' ',asset_value,asset_name,organization_name,business_system_name,business_system_code,network_area_name,owner_name,owner_username,owner_display_name) ILIKE '%'||$5||'%')
  AND (COALESCE(cardinality($6::text[]),0)=0 OR id=ANY($6::text[]))
@@ -88,7 +88,7 @@ ORDER BY organization_code,asset_type,normalized_value LIMIT $7 OFFSET $8`, p.Us
 	for rows.Next() {
 		var a Asset
 		var raw []byte
-		if err = rows.Scan(&a.ID, &a.Type, &a.Value, &a.NormalizedValue, &a.Name, &a.OrganizationID, &a.OrganizationCode, &a.OrganizationName, &a.BusinessSystemID, &a.BusinessSystemCode, &a.BusinessSystemName, &a.Environment, &a.NetworkScope, &a.NetworkAreaID, &a.NetworkAreaName, &a.Status, &a.Importance, &a.Source, &a.OwnerUserID, &a.OwnerUsername, &a.OwnerUserDisplayName, &a.OwnerName, &a.Notes, &a.ExpiresAt, &a.CreatedAt, &a.UpdatedAt, &a.ReportingStatus, &a.IsWorkingCopy, &a.PublishedID, &a.TaskID, &a.DraftStatus, &a.Operation, &raw, &total); err != nil {
+		if err = rows.Scan(&a.ID, &a.Type, &a.Value, &a.NormalizedValue, &a.Name, &a.OrganizationID, &a.OrganizationCode, &a.OrganizationName, &a.BusinessSystemID, &a.BusinessSystemCode, &a.BusinessSystemName, &a.Environment, &a.NetworkScope, &a.NetworkAreaID, &a.NetworkAreaName, &a.Status, &a.Importance, &a.Source, &a.OwnerUserID, &a.OwnerUsername, &a.OwnerUserDisplayName, &a.OwnerName, &a.Notes, &a.ExpiresAt, &a.CreatedAt, &a.UpdatedAt, &a.ReportingStatus, &a.IsWorkingCopy, &a.PublishedID, &a.TaskID, &a.DraftStatus, &a.Operation, &a.Version, &a.AssignedTo, &a.LastEditedBy, &a.TakeoverReason, &raw, &total); err != nil {
 			return pagination.Result[Asset]{}, fmt.Errorf("scan organization working asset: %w", err)
 		}
 		if err = json.Unmarshal(raw, &a.CustomValues); err != nil {
@@ -125,13 +125,13 @@ func workingAssetInTx(ctx context.Context, tx pgx.Tx, p auth.Principal, id strin
 SELECT d.id::text,d.asset_type,d.asset_value,d.normalized_value,COALESCE(d.asset_name,''),o.id::text,o.organization_code,o.organization_name,
  COALESCE(d.business_system_id::text,''),COALESCE(d.business_system_id::text,''),COALESCE(d.business_system_id::text,''),d.environment,d.network_scope,
  COALESCE(d.network_area_id::text,''),COALESCE(na.area_name,''),d.status,d.importance,d.source,COALESCE(d.owner_user_id::text,''),COALESCE(u.username,''),COALESCE(u.display_name,''),
- COALESCE(d.owner_name,''),COALESCE(d.notes,''),d.expires_at,d.created_at,d.updated_at,'unreported',true,COALESCE(d.source_asset_id::text,''),COALESCE(d.task_id::text,''),d.draft_status,d.operation,d.custom_values
+ COALESCE(d.owner_name,''),COALESCE(d.notes,''),d.expires_at,d.created_at,d.updated_at,'unreported',true,COALESCE(d.source_asset_id::text,''),COALESCE(d.task_id::text,''),d.draft_status,d.operation,d.version,COALESCE(d.assigned_to::text,''),COALESCE(d.last_edited_by::text,''),COALESCE(d.takeover_reason,''),d.custom_values
 FROM inventory_asset_drafts d JOIN organizations o ON o.id=d.organization_id LEFT JOIN users u ON u.id=d.owner_user_id
 LEFT JOIN asset_network_areas na ON na.id=d.network_area_id
 WHERE d.id::text=$1 AND d.draft_status IN `+inventorydraft.ActiveSQL, id)
 	var a Asset
 	var raw []byte
-	if err := row.Scan(&a.ID, &a.Type, &a.Value, &a.NormalizedValue, &a.Name, &a.OrganizationID, &a.OrganizationCode, &a.OrganizationName, &a.BusinessSystemID, &a.BusinessSystemCode, &a.BusinessSystemName, &a.Environment, &a.NetworkScope, &a.NetworkAreaID, &a.NetworkAreaName, &a.Status, &a.Importance, &a.Source, &a.OwnerUserID, &a.OwnerUsername, &a.OwnerUserDisplayName, &a.OwnerName, &a.Notes, &a.ExpiresAt, &a.CreatedAt, &a.UpdatedAt, &a.ReportingStatus, &a.IsWorkingCopy, &a.PublishedID, &a.TaskID, &a.DraftStatus, &a.Operation, &raw); errors.Is(err, pgx.ErrNoRows) {
+	if err := row.Scan(&a.ID, &a.Type, &a.Value, &a.NormalizedValue, &a.Name, &a.OrganizationID, &a.OrganizationCode, &a.OrganizationName, &a.BusinessSystemID, &a.BusinessSystemCode, &a.BusinessSystemName, &a.Environment, &a.NetworkScope, &a.NetworkAreaID, &a.NetworkAreaName, &a.Status, &a.Importance, &a.Source, &a.OwnerUserID, &a.OwnerUsername, &a.OwnerUserDisplayName, &a.OwnerName, &a.Notes, &a.ExpiresAt, &a.CreatedAt, &a.UpdatedAt, &a.ReportingStatus, &a.IsWorkingCopy, &a.PublishedID, &a.TaskID, &a.DraftStatus, &a.Operation, &a.Version, &a.AssignedTo, &a.LastEditedBy, &a.TakeoverReason, &raw); errors.Is(err, pgx.ErrNoRows) {
 		return Asset{}, pgx.ErrNoRows
 	} else if err != nil {
 		return Asset{}, err
@@ -152,14 +152,14 @@ SELECT d.id::text,d.asset_type,d.asset_value,d.normalized_value,COALESCE(d.asset
  COALESCE(na.id::text,''),COALESCE(na.area_name,''),d.status,d.importance,d.source,COALESCE(d.owner_user_id::text,''),COALESCE(u.username,''),COALESCE(u.display_name,''),
  COALESCE(d.owner_name,''),COALESCE(d.notes,''),d.expires_at,d.created_at,d.updated_at,
  CASE WHEN d.draft_status='submitted' THEN 'pending_review' WHEN d.draft_status='returned' THEN 'returned' WHEN d.operation='delete' THEN 'pending_offline' WHEN d.operation='update' THEN 'changed' ELSE 'unreported' END,
- true,COALESCE(d.source_asset_id::text,''),COALESCE(d.task_id::text,''),d.draft_status,d.operation,d.custom_values
+ true,COALESCE(d.source_asset_id::text,''),COALESCE(d.task_id::text,''),d.draft_status,d.operation,d.version,COALESCE(d.assigned_to::text,''),COALESCE(d.last_edited_by::text,''),COALESCE(d.takeover_reason,''),d.custom_values
 FROM inventory_asset_drafts d JOIN organizations o ON o.id=d.organization_id LEFT JOIN users u ON u.id=d.owner_user_id
 LEFT JOIN asset_network_areas na ON na.id=d.network_area_id LEFT JOIN business_systems b ON b.id=d.business_system_id AND b.deleted_at IS NULL
 LEFT JOIN inventory_business_system_drafts wb ON wb.id=d.business_system_draft_id AND wb.draft_status IN `+inventorydraft.ActiveSQL+`
 WHERE `+predicate+` AND d.organization_id IN (SELECT id FROM accessible) AND d.draft_status IN `+inventorydraft.ActiveSQL+``, p.UserID, id)
 	var a Asset
 	var raw []byte
-	err := row.Scan(&a.ID, &a.Type, &a.Value, &a.NormalizedValue, &a.Name, &a.OrganizationID, &a.OrganizationCode, &a.OrganizationName, &a.BusinessSystemID, &a.BusinessSystemCode, &a.BusinessSystemName, &a.Environment, &a.NetworkScope, &a.NetworkAreaID, &a.NetworkAreaName, &a.Status, &a.Importance, &a.Source, &a.OwnerUserID, &a.OwnerUsername, &a.OwnerUserDisplayName, &a.OwnerName, &a.Notes, &a.ExpiresAt, &a.CreatedAt, &a.UpdatedAt, &a.ReportingStatus, &a.IsWorkingCopy, &a.PublishedID, &a.TaskID, &a.DraftStatus, &a.Operation, &raw)
+	err := row.Scan(&a.ID, &a.Type, &a.Value, &a.NormalizedValue, &a.Name, &a.OrganizationID, &a.OrganizationCode, &a.OrganizationName, &a.BusinessSystemID, &a.BusinessSystemCode, &a.BusinessSystemName, &a.Environment, &a.NetworkScope, &a.NetworkAreaID, &a.NetworkAreaName, &a.Status, &a.Importance, &a.Source, &a.OwnerUserID, &a.OwnerUsername, &a.OwnerUserDisplayName, &a.OwnerName, &a.Notes, &a.ExpiresAt, &a.CreatedAt, &a.UpdatedAt, &a.ReportingStatus, &a.IsWorkingCopy, &a.PublishedID, &a.TaskID, &a.DraftStatus, &a.Operation, &a.Version, &a.AssignedTo, &a.LastEditedBy, &a.TakeoverReason, &raw)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return Asset{}, ErrNotFound
 	}
@@ -346,21 +346,23 @@ func (s *Service) updateWorking(ctx context.Context, p auth.Principal, id string
 		return Asset{}, e
 	}
 	// Editing an existing working version can retype or revalue it, so the pair
-	// must be re-reserved rather than assumed still held by this row.
-	if e = s.ensureWorkingValueAvailable(ctx, tx, in.Type, normalized, id); e != nil {
+	// must be re-reserved rather than assumed still held by this row. The
+	// published source is excluded because an unchanged change request keeps the
+	// identity its published asset already holds.
+	if e = s.ensureWorkingValueAvailable(ctx, tx, in.Type, normalized, id, cur.PublishedID); e != nil {
 		return Asset{}, e
 	}
-	r, e := tx.Exec(ctx, `UPDATE inventory_asset_drafts SET asset_type=$2,asset_value=$3,normalized_value=$4,asset_name=NULLIF($5,''),environment=$6,network_scope=$7,network_area_id=NULLIF($8,'')::uuid,business_system_id=NULLIF($9,'')::uuid,business_system_draft_id=NULLIF($10,'')::uuid,status=$11,importance=$12,owner_user_id=NULLIF($13,'')::uuid,owner_name=NULLIF($14,''),notes=NULLIF($15,''),expires_at=$16,custom_values=$17::jsonb,draft_status='editing',updated_by=$18::uuid,updated_at=now() WHERE id::text=$1 AND task_id IS NULL AND operation IN ('create','update') AND draft_status IN `+inventorydraft.EditableSQL+` AND ($19::timestamptz IS NULL OR updated_at=$19::timestamptz)`, id, in.Type, in.Value, normalized, in.Name, in.Environment, in.NetworkScope, in.NetworkAreaID, bs, bsd, in.Status, in.Importance, in.OwnerUserID, in.OwnerName, in.Notes, in.ExpiresAt, raw, p.UserID, in.ExpectedUpdatedAt)
+	if e = checkWorkingExpectedVersion(cur, in.ExpectedVersion); e != nil {
+		return Asset{}, e
+	}
+	r, e := tx.Exec(ctx, `UPDATE inventory_asset_drafts SET asset_type=$2,asset_value=$3,normalized_value=$4,asset_name=NULLIF($5,''),environment=$6::text,network_scope=$7::text,network_area_id=NULLIF($8,'')::uuid,business_system_id=NULLIF($9,'')::uuid,business_system_draft_id=NULLIF($10,'')::uuid,status=$11::text,importance=$12::text,owner_user_id=NULLIF($13,'')::uuid,owner_name=NULLIF($14,''),notes=NULLIF($15,''),expires_at=$16,custom_values=$17::jsonb,draft_status='editing',version=version+1,last_edited_by=$18::uuid,updated_by=$18::uuid,updated_at=now() WHERE id::text=$1 AND task_id IS NULL AND operation IN ('create','update') AND draft_status IN `+inventorydraft.EditableSQL+` AND version=$19`, id, in.Type, in.Value, normalized, in.Name, in.Environment, in.NetworkScope, in.NetworkAreaID, bs, bsd, in.Status, in.Importance, in.OwnerUserID, in.OwnerName, in.Notes, in.ExpiresAt, raw, p.UserID, cur.Version)
 	if e != nil {
 		return Asset{}, mapUnreportedDB(e)
 	}
 	if r.RowsAffected() == 0 {
-		if in.ExpectedUpdatedAt != nil {
-			return Asset{}, ErrEditConflict
-		}
-		return Asset{}, ErrNotFound
+		return Asset{}, workingVersionCASFailure(ctx, tx, id, cur.Version)
 	}
-	if _, e = tx.Exec(ctx, `INSERT INTO audit_logs(user_id,organization_id,action,resource_type,resource_id,summary,details,request_ip,request_id) VALUES($1::uuid,$2::uuid,'asset.working_update','asset',$3,'编辑网络资产工作版本',jsonb_build_object('published_id',$4::text),NULLIF($5,'')::inet,NULLIF($6,''))`, p.UserID, in.OrganizationID, id, cur.PublishedID, ip, requestID); e != nil {
+	if _, e = tx.Exec(ctx, `INSERT INTO audit_logs(user_id,organization_id,action,resource_type,resource_id,summary,details,request_ip,request_id) VALUES($1::uuid,$2::uuid,'asset.working_update','asset',$3,'编辑网络资产工作版本',jsonb_build_object('published_id',$4::text,'version_before',$7::int,'version_after',$7::int + 1),NULLIF($5,'')::inet,NULLIF($6,''))`, p.UserID, in.OrganizationID, id, cur.PublishedID, ip, requestID, cur.Version); e != nil {
 		return Asset{}, e
 	}
 	if e = tx.Commit(ctx); e != nil {
@@ -390,11 +392,11 @@ func (s *Service) createWorkingUpdate(ctx context.Context, p auth.Principal, cur
 	if e != nil {
 		return Asset{}, e
 	}
-	if e = s.ensureWorkingValueAvailable(ctx, tx, in.Type, normalized, ""); e != nil {
+	if e = s.ensureWorkingValueAvailable(ctx, tx, in.Type, normalized, "", ""); e != nil {
 		return Asset{}, e
 	}
 	var id string
-	e = tx.QueryRow(ctx, `INSERT INTO inventory_asset_drafts(task_id,organization_id,operation,source_asset_id,asset_type,asset_value,normalized_value,asset_name,environment,network_scope,network_area_id,business_system_id,business_system_draft_id,status,importance,source,owner_user_id,owner_name,notes,expires_at,custom_values,draft_status,created_by,updated_by) VALUES(NULL,$1::uuid,'update',$2::uuid,$3,$4,$5,NULLIF($6,''),$7,$8,NULLIF($9,'')::uuid,NULLIF($10,'')::uuid,NULLIF($11,'')::uuid,$12,$13,$14,NULLIF($15,'')::uuid,NULLIF($16,''),NULLIF($17,''),$18,$19::jsonb,'editing',$20::uuid,$20::uuid) RETURNING id::text`, in.OrganizationID, current.ID, in.Type, in.Value, normalized, in.Name, in.Environment, in.NetworkScope, in.NetworkAreaID, bs, bsd, in.Status, in.Importance, current.Source, in.OwnerUserID, in.OwnerName, in.Notes, in.ExpiresAt, raw, p.UserID).Scan(&id)
+	e = tx.QueryRow(ctx, `INSERT INTO inventory_asset_drafts(task_id,organization_id,operation,source_asset_id,asset_type,asset_value,normalized_value,asset_name,environment,network_scope,network_area_id,business_system_id,business_system_draft_id,status,importance,source,owner_user_id,owner_name,notes,expires_at,custom_values,draft_status,created_by,updated_by) VALUES(NULL,$1::uuid,'update',$2::uuid,$3,$4,$5,NULLIF($6,''),$7::text,$8::text,NULLIF($9,'')::uuid,NULLIF($10,'')::uuid,NULLIF($11,'')::uuid,$12::text,$13::text,$14,NULLIF($15,'')::uuid,NULLIF($16,''),NULLIF($17,''),$18,$19::jsonb,'editing',$20::uuid,$20::uuid) RETURNING id::text`, in.OrganizationID, current.ID, in.Type, in.Value, normalized, in.Name, in.Environment, in.NetworkScope, in.NetworkAreaID, bs, bsd, in.Status, in.Importance, current.Source, in.OwnerUserID, in.OwnerName, in.Notes, in.ExpiresAt, raw, p.UserID).Scan(&id)
 	if e != nil {
 		return Asset{}, mapUnreportedDB(e)
 	}
@@ -415,7 +417,7 @@ func (s *Service) createWorkingUpdate(ctx context.Context, p auth.Principal, cur
 	return s.getWorking(ctx, p, id)
 }
 
-func (s *Service) deleteWorking(ctx context.Context, p auth.Principal, id, requestID, ip string) error {
+func (s *Service) deleteWorking(ctx context.Context, p auth.Principal, id string, expectedVersion *int, requestID, ip string) error {
 	cur, e := s.getWorking(ctx, p, id)
 	if e != nil {
 		return e
@@ -430,17 +432,62 @@ func (s *Service) deleteWorking(ctx context.Context, p auth.Principal, id, reque
 	if !ok {
 		return ErrForbidden
 	}
-	if cur.Operation == "create" {
-		return s.discardWorkingCreate(ctx, p, id)
+	if e = checkWorkingExpectedVersion(cur, expectedVersion); e != nil {
+		return e
 	}
-	r, e := s.pool.Exec(ctx, `UPDATE inventory_asset_drafts SET operation='delete',draft_status='editing',updated_by=$2::uuid,updated_at=now() WHERE id::text=$1 AND task_id IS NULL AND source_asset_id IS NOT NULL AND draft_status IN `+inventorydraft.EditableSQL+``, id, p.UserID)
+	if cur.Operation == "create" {
+		return s.discardWorkingCreate(ctx, p, id, cur.Version, requestID, ip)
+	}
+	tx, e := s.pool.Begin(ctx)
+	if e != nil {
+		return e
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	r, e := tx.Exec(ctx, `UPDATE inventory_asset_drafts SET operation='delete',draft_status='editing',version=version+1,last_edited_by=$2::uuid,updated_by=$2::uuid,updated_at=now() WHERE id::text=$1 AND task_id IS NULL AND source_asset_id IS NOT NULL AND draft_status IN `+inventorydraft.EditableSQL+` AND version=$3`, id, p.UserID, cur.Version)
 	if e != nil {
 		return e
 	}
 	if r.RowsAffected() == 0 {
-		return ErrNotFound
+		return workingVersionCASFailure(ctx, tx, id, cur.Version)
+	}
+	if _, e = tx.Exec(ctx, `INSERT INTO audit_logs(user_id,organization_id,action,resource_type,resource_id,summary,details,request_ip,request_id) VALUES($1::uuid,$2::uuid,'asset.working_delete_request','asset',$3,'申请下线网络资产工作版本',jsonb_build_object('published_id',$4::text,'version_before',$5::int,'version_after',$5::int + 1),NULLIF($6,'')::inet,NULLIF($7,''))`, p.UserID, cur.OrganizationID, id, cur.PublishedID, cur.Version, ip, requestID); e != nil {
+		return e
+	}
+	return tx.Commit(ctx)
+}
+
+// checkWorkingExpectedVersion makes the optimistic lock mandatory for working
+// versions. A write without expected_version is rejected rather than applied
+// blindly, which is what previously allowed two填报员 to overwrite each other.
+func checkWorkingExpectedVersion(cur Asset, expected *int) error {
+	if expected == nil || *expected <= 0 {
+		return ErrVersionRequired
+	}
+	if *expected != cur.Version {
+		return ErrEditConflict
 	}
 	return nil
+}
+
+// workingVersionCASFailure distinguishes a lost race (409) from a row that is
+// gone or no longer editable, so the client can refresh instead of retrying blind.
+func workingVersionCASFailure(ctx context.Context, tx pgx.Tx, id string, expected int) error {
+	var currentVersion int
+	var status string
+	err := tx.QueryRow(ctx, `SELECT version, draft_status FROM inventory_asset_drafts WHERE id::text=$1`, id).Scan(&currentVersion, &status)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return ErrNotFound
+	}
+	if err != nil {
+		return err
+	}
+	if status != "editing" && status != "returned" {
+		return ErrConflict
+	}
+	if currentVersion != expected {
+		return ErrEditConflict
+	}
+	return ErrConflict
 }
 
 // discardWorkingCreate drops an unpublished "create" working version.
@@ -457,19 +504,25 @@ func (s *Service) deleteWorking(ctx context.Context, p auth.Principal, id, reque
 // returns to a confirmable state, the findings drop back to unlinked so the
 // "pending asset" queue shows them again, and the import rows return to the
 // candidate so they can be re-linked.
-func (s *Service) discardWorkingCreate(ctx context.Context, p auth.Principal, id string) error {
+func (s *Service) discardWorkingCreate(ctx context.Context, p auth.Principal, id string, expectedVersion int, requestID, ip string) error {
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return fmt.Errorf("begin discard working asset create: %w", err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
-	command, err := tx.Exec(ctx, `UPDATE inventory_asset_drafts SET draft_status='discarded',updated_by=$2::uuid,updated_at=now()
-		WHERE id::text=$1 AND task_id IS NULL AND operation='create' AND draft_status IN `+inventorydraft.EditableSQL+``, id, p.UserID)
+	command, err := tx.Exec(ctx, `UPDATE inventory_asset_drafts SET draft_status='discarded',version=version+1,last_edited_by=$2::uuid,updated_by=$2::uuid,updated_at=now()
+		WHERE id::text=$1 AND task_id IS NULL AND operation='create' AND draft_status IN `+inventorydraft.EditableSQL+` AND version=$3`, id, p.UserID, expectedVersion)
 	if err != nil {
 		return fmt.Errorf("discard working asset create: %w", err)
 	}
 	if command.RowsAffected() == 0 {
-		return ErrNotFound
+		return workingVersionCASFailure(ctx, tx, id, expectedVersion)
+	}
+	if _, err := tx.Exec(ctx, `INSERT INTO audit_logs(user_id,organization_id,action,resource_type,resource_id,summary,details,request_ip,request_id)
+		VALUES($1::uuid,(SELECT organization_id FROM inventory_asset_drafts WHERE id=$2::uuid),'asset.working_discard','asset',$2,
+		       '作废未上报网络资产工作版本',jsonb_build_object('version_before',$3::int,'version_after',$3::int + 1),NULLIF($4,'')::inet,NULLIF($5,''))`,
+		p.UserID, id, expectedVersion, ip, requestID); err != nil {
+		return fmt.Errorf("write discard working version audit: %w", err)
 	}
 	// Release the candidate and reopen all of its import rows in one statement.
 	// A candidate can be discarded after the operator has released its findings,
@@ -530,7 +583,7 @@ func (s *Service) createWorkingDelete(ctx context.Context, p auth.Principal, cur
 		return err
 	}
 	var id string
-	err = tx.QueryRow(ctx, `INSERT INTO inventory_asset_drafts(task_id,organization_id,operation,source_asset_id,asset_type,asset_value,normalized_value,asset_name,environment,network_scope,network_area_id,business_system_id,status,importance,source,owner_user_id,owner_name,notes,expires_at,custom_values,draft_status,created_by,updated_by) VALUES(NULL,$1::uuid,'delete',$2::uuid,$3,$4,$5,NULLIF($6,''),$7,$8,NULLIF($9,'')::uuid,NULLIF($10,'')::uuid,$11,$12,$13,NULLIF($14,'')::uuid,NULLIF($15,''),NULLIF($16,''),$17,$18::jsonb,'editing',$19::uuid,$19::uuid) RETURNING id::text`, current.OrganizationID, current.ID, current.Type, current.Value, current.NormalizedValue, current.Name, current.Environment, current.NetworkScope, current.NetworkAreaID, current.BusinessSystemID, current.Status, current.Importance, current.Source, current.OwnerUserID, current.OwnerName, current.Notes, current.ExpiresAt, raw, p.UserID).Scan(&id)
+	err = tx.QueryRow(ctx, `INSERT INTO inventory_asset_drafts(task_id,organization_id,operation,source_asset_id,asset_type,asset_value,normalized_value,asset_name,environment,network_scope,network_area_id,business_system_id,status,importance,source,owner_user_id,owner_name,notes,expires_at,custom_values,draft_status,created_by,updated_by) VALUES(NULL,$1::uuid,'delete',$2::uuid,$3,$4,$5,NULLIF($6,''),$7::text,$8::text,NULLIF($9,'')::uuid,NULLIF($10,'')::uuid,$11,$12,$13,NULLIF($14,'')::uuid,NULLIF($15,''),NULLIF($16,''),$17,$18::jsonb,'editing',$19::uuid,$19::uuid) RETURNING id::text`, current.OrganizationID, current.ID, current.Type, current.Value, current.NormalizedValue, current.Name, current.Environment, current.NetworkScope, current.NetworkAreaID, current.BusinessSystemID, current.Status, current.Importance, current.Source, current.OwnerUserID, current.OwnerName, current.Notes, current.ExpiresAt, raw, p.UserID).Scan(&id)
 	if err != nil {
 		return mapUnreportedDB(err)
 	}
@@ -620,16 +673,21 @@ func mapUnreportedDB(e error) error {
 //
 // excludeDraftID is the row being rewritten, so re-submitting an asset without
 // changing its type or value does not report a conflict against itself.
-func (s *Service) ensureWorkingValueAvailable(ctx context.Context, tx pgx.Tx, assetType, normalizedValue, excludeDraftID string) error {
+// excludePublishedID lets a change request or a restore keep the identity the
+// published ledger already holds. Without it, re-submitting a change or
+// restoring a historical revision of an asset whose published row still has
+// that (type, value) pair would collide with itself.
+func (s *Service) ensureWorkingValueAvailable(ctx context.Context, tx pgx.Tx, assetType, normalizedValue, excludeDraftID, excludePublishedID string) error {
 	var duplicate bool
 	e := tx.QueryRow(ctx, `SELECT EXISTS(
-	 SELECT 1 FROM assets WHERE asset_type=$1 AND normalized_value=$2 AND deleted_at IS NULL
+	 SELECT 1 FROM assets WHERE asset_type=$1::text AND normalized_value=$2::text AND deleted_at IS NULL
+	   AND ($4::text='' OR id::text<>$4::text)
 	) OR EXISTS(
 	 SELECT 1 FROM inventory_asset_drafts
-	 WHERE asset_type=$1 AND normalized_value=$2
+	 WHERE asset_type=$1::text AND normalized_value=$2::text
 	   AND draft_status IN `+inventorydraft.ActiveSQL+`
-	   AND ($3='' OR id::text<>$3)
-	)`, assetType, normalizedValue, excludeDraftID).Scan(&duplicate)
+	   AND ($3::text='' OR id::text<>$3::text)
+	)`, assetType, normalizedValue, excludeDraftID, excludePublishedID).Scan(&duplicate)
 	if e != nil {
 		return e
 	}

@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 
 	"github.com/gin-gonic/gin"
@@ -63,7 +64,7 @@ func registerInventoryTaskRoutes(api *gin.RouterGroup, requireAuth gin.HandlerFu
 			writeAPIError(c, http.StatusBadRequest, "invalid_query", "分页参数不正确，page_size 最大为 100")
 			return
 		}
-		result, err := service.SearchBusinessSystemDrafts(c.Request.Context(), mustPrincipal(c), c.Param("taskID"), c.Param("organizationID"), page)
+		result, err := service.SearchBusinessSystemDrafts(c.Request.Context(), mustPrincipal(c), c.Param("taskID"), c.Param("organizationID"), page, c.Query("include_discarded") == "true")
 		writeInventoryBusinessSystemDraftResult(c, logger, "list inventory business system drafts", result, err)
 	})
 	group.POST("/:taskID/organizations/:organizationID/business-systems/:systemID/update-draft", func(c *gin.Context) {
@@ -98,7 +99,12 @@ func registerInventoryTaskRoutes(api *gin.RouterGroup, requireAuth gin.HandlerFu
 		c.JSON(http.StatusOK, gin.H{"result": result})
 	})
 	group.POST("/:taskID/organizations/:organizationID/business-system-drafts/:draftID/select", func(c *gin.Context) {
-		item, err := service.SelectWorkspaceBusinessSystem(c.Request.Context(), mustPrincipal(c), c.Param("taskID"), c.Param("organizationID"), c.Param("draftID"), c.GetString("request_id"), c.ClientIP())
+		var input inventorytask.WorkspaceSelectionInput
+		if err := c.ShouldBindJSON(&input); err != nil {
+			writeAPIError(c, http.StatusBadRequest, "invalid_request", "选择业务系统需要提供 expected_version")
+			return
+		}
+		item, err := service.SelectWorkspaceBusinessSystem(c.Request.Context(), mustPrincipal(c), c.Param("taskID"), c.Param("organizationID"), c.Param("draftID"), input.ExpectedVersion, c.GetString("request_id"), c.ClientIP())
 		if writeInventoryBusinessSystemDraftError(c, logger, "select workspace business system", err) {
 			return
 		}
@@ -116,6 +122,30 @@ func registerInventoryTaskRoutes(api *gin.RouterGroup, requireAuth gin.HandlerFu
 		}
 		c.JSON(http.StatusCreated, gin.H{"item": item})
 	})
+	group.POST("/:taskID/organizations/:organizationID/business-system-drafts/:draftID/takeover", func(c *gin.Context) {
+		var input inventorytask.DraftTakeoverInput
+		if err := c.ShouldBindJSON(&input); err != nil {
+			writeAPIError(c, http.StatusBadRequest, "invalid_request", "接管草稿需要提供版本号和原因")
+			return
+		}
+		item, err := service.TakeoverBusinessSystemDraft(c.Request.Context(), mustPrincipal(c), c.Param("taskID"), c.Param("organizationID"), c.Param("draftID"), input, c.GetString("request_id"), c.ClientIP())
+		if writeInventoryBusinessSystemDraftError(c, logger, "takeover business system draft", err) {
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"item": item})
+	})
+	group.POST("/:taskID/organizations/:organizationID/business-system-drafts/:draftID/restore", func(c *gin.Context) {
+		expectedVersion, parseErr := parseDraftExpectedVersion(c)
+		if parseErr != nil {
+			writeAPIError(c, http.StatusBadRequest, "invalid_request", "恢复草稿需要提供 expected_version")
+			return
+		}
+		item, err := service.RestoreBusinessSystemDraft(c.Request.Context(), mustPrincipal(c), c.Param("taskID"), c.Param("organizationID"), c.Param("draftID"), expectedVersion, c.GetString("request_id"), c.ClientIP())
+		if writeInventoryBusinessSystemDraftError(c, logger, "restore business system draft", err) {
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"item": item})
+	})
 	group.PATCH("/:taskID/organizations/:organizationID/business-system-drafts/:draftID", func(c *gin.Context) {
 		var input inventorytask.BusinessSystemDraftInput
 		if err := c.ShouldBindJSON(&input); err != nil {
@@ -129,7 +159,12 @@ func registerInventoryTaskRoutes(api *gin.RouterGroup, requireAuth gin.HandlerFu
 		c.JSON(http.StatusOK, gin.H{"item": item})
 	})
 	group.DELETE("/:taskID/organizations/:organizationID/business-system-drafts/:draftID", func(c *gin.Context) {
-		err := service.DeleteBusinessSystemDraft(c.Request.Context(), mustPrincipal(c), c.Param("taskID"), c.Param("organizationID"), c.Param("draftID"), c.GetString("request_id"), c.ClientIP())
+		expectedVersion, parseErr := parseDraftExpectedVersion(c)
+		if parseErr != nil {
+			writeAPIError(c, http.StatusBadRequest, "invalid_request", "取消草稿需要提供 expected_version")
+			return
+		}
+		err := service.DeleteBusinessSystemDraft(c.Request.Context(), mustPrincipal(c), c.Param("taskID"), c.Param("organizationID"), c.Param("draftID"), expectedVersion, c.GetString("request_id"), c.ClientIP())
 		if writeInventoryBusinessSystemDraftError(c, logger, "delete inventory business system draft", err) {
 			return
 		}
@@ -141,7 +176,7 @@ func registerInventoryTaskRoutes(api *gin.RouterGroup, requireAuth gin.HandlerFu
 			writeAPIError(c, http.StatusBadRequest, "invalid_query", "分页参数不正确，page_size 最大为 100")
 			return
 		}
-		result, err := service.SearchAssetDrafts(c.Request.Context(), mustPrincipal(c), c.Param("taskID"), c.Param("organizationID"), page)
+		result, err := service.SearchAssetDrafts(c.Request.Context(), mustPrincipal(c), c.Param("taskID"), c.Param("organizationID"), page, c.Query("include_discarded") == "true")
 		writeInventoryAssetDraftResult(c, logger, "list inventory asset drafts", result, err)
 	})
 	group.POST("/:taskID/organizations/:organizationID/assets/:assetID/update-draft", func(c *gin.Context) {
@@ -176,7 +211,12 @@ func registerInventoryTaskRoutes(api *gin.RouterGroup, requireAuth gin.HandlerFu
 		c.JSON(http.StatusOK, gin.H{"result": result})
 	})
 	group.POST("/:taskID/organizations/:organizationID/asset-drafts/:draftID/select", func(c *gin.Context) {
-		item, err := service.SelectWorkspaceAsset(c.Request.Context(), mustPrincipal(c), c.Param("taskID"), c.Param("organizationID"), c.Param("draftID"), c.GetString("request_id"), c.ClientIP())
+		var input inventorytask.WorkspaceSelectionInput
+		if err := c.ShouldBindJSON(&input); err != nil {
+			writeAPIError(c, http.StatusBadRequest, "invalid_request", "选择网络资产需要提供 expected_version")
+			return
+		}
+		item, err := service.SelectWorkspaceAsset(c.Request.Context(), mustPrincipal(c), c.Param("taskID"), c.Param("organizationID"), c.Param("draftID"), input.ExpectedVersion, c.GetString("request_id"), c.ClientIP())
 		if writeInventoryAssetDraftError(c, logger, "select workspace asset", err) {
 			return
 		}
@@ -194,6 +234,30 @@ func registerInventoryTaskRoutes(api *gin.RouterGroup, requireAuth gin.HandlerFu
 		}
 		c.JSON(http.StatusCreated, gin.H{"item": item})
 	})
+	group.POST("/:taskID/organizations/:organizationID/asset-drafts/:draftID/takeover", func(c *gin.Context) {
+		var input inventorytask.DraftTakeoverInput
+		if err := c.ShouldBindJSON(&input); err != nil {
+			writeAPIError(c, http.StatusBadRequest, "invalid_request", "接管草稿需要提供版本号和原因")
+			return
+		}
+		item, err := service.TakeoverAssetDraft(c.Request.Context(), mustPrincipal(c), c.Param("taskID"), c.Param("organizationID"), c.Param("draftID"), input, c.GetString("request_id"), c.ClientIP())
+		if writeInventoryAssetDraftError(c, logger, "takeover asset draft", err) {
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"item": item})
+	})
+	group.POST("/:taskID/organizations/:organizationID/asset-drafts/:draftID/restore", func(c *gin.Context) {
+		expectedVersion, parseErr := parseDraftExpectedVersion(c)
+		if parseErr != nil {
+			writeAPIError(c, http.StatusBadRequest, "invalid_request", "恢复草稿需要提供 expected_version")
+			return
+		}
+		item, err := service.RestoreAssetDraft(c.Request.Context(), mustPrincipal(c), c.Param("taskID"), c.Param("organizationID"), c.Param("draftID"), expectedVersion, c.GetString("request_id"), c.ClientIP())
+		if writeInventoryAssetDraftError(c, logger, "restore asset draft", err) {
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"item": item})
+	})
 	group.PATCH("/:taskID/organizations/:organizationID/asset-drafts/:draftID", func(c *gin.Context) {
 		var input asset.CreateInput
 		if err := c.ShouldBindJSON(&input); err != nil {
@@ -207,7 +271,12 @@ func registerInventoryTaskRoutes(api *gin.RouterGroup, requireAuth gin.HandlerFu
 		c.JSON(http.StatusOK, gin.H{"item": item})
 	})
 	group.DELETE("/:taskID/organizations/:organizationID/asset-drafts/:draftID", func(c *gin.Context) {
-		err := service.DeleteAssetDraft(c.Request.Context(), mustPrincipal(c), c.Param("taskID"), c.Param("organizationID"), c.Param("draftID"), c.GetString("request_id"), c.ClientIP())
+		expectedVersion, parseErr := parseDraftExpectedVersion(c)
+		if parseErr != nil {
+			writeAPIError(c, http.StatusBadRequest, "invalid_request", "取消草稿需要提供 expected_version")
+			return
+		}
+		err := service.DeleteAssetDraft(c.Request.Context(), mustPrincipal(c), c.Param("taskID"), c.Param("organizationID"), c.Param("draftID"), expectedVersion, c.GetString("request_id"), c.ClientIP())
 		if writeInventoryAssetDraftError(c, logger, "delete inventory asset draft", err) {
 			return
 		}
@@ -539,6 +608,18 @@ func writeInventoryProgressResult(c *gin.Context, logger *slog.Logger, operation
 	}
 }
 
+func parseDraftExpectedVersion(c *gin.Context) (int, error) {
+	value := strings.TrimSpace(c.Query("expected_version"))
+	if value == "" {
+		return 0, fmt.Errorf("expected_version is required")
+	}
+	version, err := strconv.Atoi(value)
+	if err != nil || version <= 0 {
+		return 0, fmt.Errorf("expected_version is invalid")
+	}
+	return version, nil
+}
+
 func writeInventoryBusinessSystemDraftResult(c *gin.Context, logger *slog.Logger, operation string, result any, err error) {
 	if writeInventoryBusinessSystemDraftError(c, logger, operation, err) {
 		return
@@ -558,6 +639,8 @@ func writeInventoryBusinessSystemDraftError(c *gin.Context, logger *slog.Logger,
 		writeAPIError(c, http.StatusConflict, "business_system_draft_conflict", "相同系统编码已存在于正式台账或当前任务草稿中")
 	case errors.Is(err, inventorytask.ErrNotFound):
 		writeAPIError(c, http.StatusNotFound, "business_system_draft_not_found", "填报任务、组织或业务系统草稿不存在")
+	case errors.Is(err, inventorytask.ErrEditConflict):
+		writeAPIError(c, http.StatusConflict, "draft_edit_conflict", "草稿内容已被其他人更新，请刷新后再编辑")
 	case errors.Is(err, inventorytask.ErrState):
 		writeAPIError(c, http.StatusConflict, "invalid_state", "任务当前状态不允许修改业务系统草稿，请先开始填报或等待退回")
 	default:
@@ -586,6 +669,8 @@ func writeInventoryAssetDraftError(c *gin.Context, logger *slog.Logger, operatio
 		writeAPIError(c, http.StatusConflict, "asset_draft_conflict", "相同资产已存在于正式台账或当前任务草稿中")
 	case errors.Is(err, inventorytask.ErrNotFound):
 		writeAPIError(c, http.StatusNotFound, "asset_draft_not_found", "填报任务、组织或资产草稿不存在")
+	case errors.Is(err, inventorytask.ErrEditConflict):
+		writeAPIError(c, http.StatusConflict, "draft_edit_conflict", "草稿内容已被其他人更新，请刷新后再编辑")
 	case errors.Is(err, inventorytask.ErrState):
 		writeAPIError(c, http.StatusConflict, "invalid_state", "任务当前状态不允许修改资产草稿，请先开始填报或等待退回")
 	default:

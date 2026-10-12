@@ -22,20 +22,24 @@ import (
 )
 
 var (
-	ErrForbidden = errors.New("forbidden")
-	ErrNotFound  = errors.New("not found")
-	ErrConflict  = errors.New("conflict")
-	ErrInvalid   = errors.New("invalid input")
-	ErrState     = errors.New("invalid state")
-	uuidPattern  = regexp.MustCompile(`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$`)
+	ErrForbidden                 = errors.New("forbidden")
+	ErrNotFound                  = errors.New("not found")
+	ErrConflict                  = errors.New("conflict")
+	ErrIndividualWorkOrderAction = errors.New("individual work order requires remediation task")
+	ErrInvalid                   = errors.New("invalid input")
+	ErrState                     = errors.New("invalid state")
+	uuidPattern                  = regexp.MustCompile(`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$`)
 )
 
 type Finding struct {
-	ID                       string     `json:"id"`
-	Code                     string     `json:"code"`
-	Title                    string     `json:"title"`
-	Severity                 string     `json:"severity"`
-	Status                   string     `json:"status"`
+	ID       string `json:"id"`
+	Code     string `json:"code"`
+	Title    string `json:"title"`
+	Severity string `json:"severity"`
+	Status   string `json:"status"`
+	// Status is the vulnerability/risk state. These fields are independent dimensions.
+	AssetAssociationStatus   string     `json:"asset_association_status"`
+	RemediationStatus        string     `json:"remediation_status"`
 	AssigneeOrganizationID   string     `json:"assignee_organization_id"`
 	AssigneeOrganizationCode string     `json:"assignee_organization_code"`
 	AssigneeOrganizationName string     `json:"assignee_organization_name"`
@@ -355,7 +359,7 @@ func (s *Service) SearchFindings(ctx context.Context, principal auth.Principal, 
 		return pagination.Result[Finding]{}, ErrInvalid
 	}
 	rows, err := s.pool.Query(ctx, accessibleCTE+`
-		SELECT f.id::text, f.finding_code, f.title, f.severity, f.status,
+		SELECT f.id::text, f.finding_code, f.title, f.severity, f.status, f.asset_link_status, f.remediation_status,
 		       o.id::text, o.organization_code, o.organization_name,
 		       COALESCE(a.id::text, ''), COALESCE(a.asset_value, ''), COALESCE(a.asset_name, ''),
 		       COALESCE(f.pending_asset_draft_id::text, ''), (a.id IS NOT NULL AND a.deleted_at IS NOT NULL),
@@ -906,7 +910,7 @@ func (s *Service) SearchWorkOrdersWithFilter(ctx context.Context, principal auth
 		if !validUUID(filter.OrganizationID) {
 			return pagination.Result[WorkOrder]{}, ErrInvalid
 		}
-		allowed, err := access.CanAccessOrganization(ctx, s.pool, principal, filter.OrganizationID)
+		allowed, err := s.canViewWorkOrder(ctx, principal, filter.OrganizationID)
 		if err != nil {
 			return pagination.Result[WorkOrder]{}, err
 		}
@@ -921,7 +925,7 @@ func (s *Service) SearchWorkOrdersWithFilter(ctx context.Context, principal auth
 	rows, err := s.pool.Query(ctx, accessibleCTE+selectWithTotal+`
 		WHERE (
 		        $2::boolean
-		        OR (wo.assignee_organization_id IN (SELECT id FROM accessible) AND wo.status <> 'draft')
+		        OR (wo.assignee_organization_id IN (SELECT id FROM work_order_accessible) AND wo.status <> 'draft')
 		      )
 		  AND ($3::text = '' OR wo.assignee_organization_id::text = $3)
 		  AND ($4::text = '' OR wo.status = $4)
@@ -950,7 +954,7 @@ func (s *Service) SearchWorkOrdersWithFilter(ctx context.Context, principal auth
             SELECT count(*) FROM security_work_orders wo
             WHERE (
                     $2::boolean
-                    OR (wo.assignee_organization_id IN (SELECT id FROM accessible) AND wo.status <> 'draft')
+                    OR (wo.assignee_organization_id IN (SELECT id FROM work_order_accessible) AND wo.status <> 'draft')
                   )
               AND ($3::text = '' OR wo.assignee_organization_id::text = $3)
               AND ($4::text = '' OR wo.status = $4)
@@ -970,7 +974,7 @@ func (s *Service) GetWorkOrder(ctx context.Context, principal auth.Principal, id
 	if err != nil {
 		return WorkOrder{}, err
 	}
-	allowed, err := access.CanAccessOrganization(ctx, s.pool, principal, item.AssigneeOrganizationID)
+	allowed, err := s.canViewWorkOrder(ctx, principal, item.AssigneeOrganizationID)
 	if err != nil {
 		return WorkOrder{}, err
 	}
@@ -1242,7 +1246,62 @@ func (s *Service) Cancel(ctx context.Context, principal auth.Principal, id strin
 	})
 }
 
+// canViewWorkOrder separates organization visibility from the explicit
+// security-work-order read permission. Group security roles retain global read
+// access; organization roles must be scoped to the assignee organization.
+func (s *Service) canViewWorkOrder(ctx context.Context, principal auth.Principal, organizationID string) (bool, error) {
+	if principal.CanManageSecurityWorkOrders() {
+		return true, nil
+	}
+	return access.CanOperateOrganization(ctx, s.pool, principal, organizationID, auth.PermissionSecurityWorkOrderView)
+}
+
+func (s *Service) authorizeWorkOrderAction(ctx context.Context, principal auth.Principal, organizationID, executionMode, action string) error {
+	if principal.CanManageSecurityWorkOrders() {
+		return nil
+	}
+	permission := ""
+	switch action {
+	case "accept", "progress", "submit":
+		if executionMode == "individual" {
+			// Accept is only an organization-side orchestration step for an
+			// individual work order. The actual task remains separately scoped.
+			permission = "remediation.assign"
+		} else {
+			permission = auth.PermissionSecurityWorkOrderExecute
+		}
+	case "issue":
+		permission = auth.PermissionSecurityWorkOrderAssign
+	case "return":
+		permission = auth.PermissionSecurityWorkOrderReview
+	case "close", "cancel":
+		permission = auth.PermissionSecurityWorkOrderClose
+	default:
+		return ErrForbidden
+	}
+	allowed, err := access.CanOperateOrganization(ctx, s.pool, principal, organizationID, permission)
+	if err != nil {
+		return err
+	}
+	if !allowed {
+		return ErrForbidden
+	}
+	return nil
+}
+
 type transitionExtra func(context.Context, pgx.Tx) error
+
+// individualWorkOrderActionForbidden identifies legacy organization-level
+// transitions that must never mutate an individual work-order container.
+// Individual remediation is driven exclusively by remediation_tasks.
+func individualWorkOrderActionForbidden(action string) bool {
+	switch action {
+	case "accept", "progress", "submit", "return", "close":
+		return true
+	default:
+		return false
+	}
+}
 
 func (s *Service) transition(ctx context.Context, principal auth.Principal, id string, fromStatuses []string, toStatus, action, comment, requestID, ipAddress string, extra transitionExtra) (WorkOrder, error) {
 	if !validUUID(id) {
@@ -1262,18 +1321,20 @@ func (s *Service) transition(ctx context.Context, principal auth.Principal, id s
 	} else if err != nil {
 		return WorkOrder{}, fmt.Errorf("lock security work order: %w", err)
 	}
+	// Authorize before applying any orchestration side effects. In particular,
+	// cancelling an individual work order also cancels its remediation tasks;
+	// an unauthorized caller must never reach those updates.
+	if err := s.authorizeWorkOrderAction(ctx, principal, organizationID, executionMode, action); err != nil {
+		return WorkOrder{}, err
+	}
 	if executionMode == "individual" {
-		if action == "submit" || action == "progress" || action == "return" || action == "close" {
-			return WorkOrder{}, ErrConflict
-		}
-		if action == "accept" {
-			allowed, err := access.CanOperateOrganization(ctx, s.pool, principal, organizationID, "remediation.assign")
-			if err != nil {
-				return WorkOrder{}, err
-			}
-			if !allowed {
-				return WorkOrder{}, ErrForbidden
-			}
+		// Individual work orders are orchestration containers. Concrete
+		// remediation must go through remediation_tasks, never the legacy
+		// organization-level accept/progress/submit fields. Keep accept out of
+		// this path too: otherwise the old /accept endpoint can move the
+		// container forward without a task-level assignment or acceptance.
+		if individualWorkOrderActionForbidden(action) {
+			return WorkOrder{}, fmt.Errorf("%w: %w", ErrConflict, ErrIndividualWorkOrderAction)
 		}
 		if action == "cancel" {
 			if _, err := tx.Exec(ctx, `UPDATE remediation_submissions SET lifecycle_status='cancelled' WHERE lifecycle_status='current' AND task_id IN (SELECT id FROM remediation_tasks WHERE work_order_id=$1::uuid)`, id); err != nil {
@@ -1284,18 +1345,8 @@ func (s *Service) transition(ctx context.Context, principal auth.Principal, id s
 			}
 		}
 	}
-	allowed, err := access.CanAccessOrganization(ctx, s.pool, principal, organizationID)
-	if err != nil {
-		return WorkOrder{}, err
-	}
-	if !allowed {
-		return WorkOrder{}, ErrForbidden
-	}
 	if !contains(fromStatuses, fromStatus) {
 		return WorkOrder{}, ErrState
-	}
-	if !principal.CanManageSecurityWorkOrders() && (action == "issue" || action == "return" || action == "close" || action == "cancel") {
-		return WorkOrder{}, ErrForbidden
 	}
 	if extra != nil {
 		if err := extra(ctx, tx); err != nil {
@@ -1321,7 +1372,7 @@ func (s *Service) transition(ctx context.Context, principal auth.Principal, id s
 func (s *Service) getFinding(ctx context.Context, id string) (Finding, error) {
 	var item Finding
 	err := scanFinding(s.pool.QueryRow(ctx, `
-		SELECT f.id::text, f.finding_code, f.title, f.severity, f.status,
+		SELECT f.id::text, f.finding_code, f.title, f.severity, f.status, f.asset_link_status, f.remediation_status,
 		       o.id::text, o.organization_code, o.organization_name,
 		       COALESCE(a.id::text, ''), COALESCE(a.asset_value, ''), COALESCE(a.asset_name, ''),
 		       COALESCE(f.pending_asset_draft_id::text, ''), (a.id IS NOT NULL AND a.deleted_at IS NOT NULL),
@@ -1465,6 +1516,34 @@ const accessibleCTE = `
 		WHERE ur.user_id = $1::uuid AND ur.organization_id IS NOT NULL
 		  AND ur.data_scope IN ('organization', 'organization_and_descendants')
 		UNION SELECT id FROM descendants
+	), work_order_permission_descendant_roots(id) AS (
+		SELECT ur.organization_id
+		FROM user_roles ur
+		JOIN roles r ON r.id = ur.role_id AND r.status = 'enabled'
+		JOIN role_permissions rp ON rp.role_id = r.id
+		JOIN organizations work_order_root ON work_order_root.id=ur.organization_id AND work_order_root.status='enabled' AND work_order_root.deleted_at IS NULL
+		WHERE ur.user_id = $1::uuid
+		  AND ur.organization_id IS NOT NULL
+		  AND ur.data_scope = 'organization_and_descendants'
+		  AND rp.permission_key IN ('security_workorder.view', 'security_workorder.execute')
+	), work_order_permission_descendants(id) AS (
+		SELECT id FROM work_order_permission_descendant_roots
+		UNION
+		SELECT child.id
+		FROM organizations child
+		JOIN work_order_permission_descendants parent ON child.parent_id = parent.id
+		WHERE child.status='enabled' AND child.deleted_at IS NULL
+	), work_order_accessible(id) AS (
+		SELECT ur.organization_id
+		FROM user_roles ur
+		JOIN roles r ON r.id = ur.role_id AND r.status = 'enabled'
+		JOIN role_permissions rp ON rp.role_id = r.id
+		JOIN organizations work_order_direct ON work_order_direct.id=ur.organization_id AND work_order_direct.status='enabled' AND work_order_direct.deleted_at IS NULL
+		WHERE ur.user_id = $1::uuid
+		  AND ur.organization_id IS NOT NULL
+		  AND ur.data_scope IN ('organization', 'organization_and_descendants')
+		  AND rp.permission_key IN ('security_workorder.view', 'security_workorder.execute')
+		UNION SELECT id FROM work_order_permission_descendants
 	), finding_permission_descendant_roots(permission_key, id) AS (
 		SELECT rp.permission_key, ur.organization_id
 		FROM user_roles ur
@@ -1520,7 +1599,7 @@ type queryer interface {
 }
 
 func scanFindingWithTotal(row rowScanner, item *Finding, total *int) error {
-	if err := row.Scan(&item.ID, &item.Code, &item.Title, &item.Severity, &item.Status,
+	if err := row.Scan(&item.ID, &item.Code, &item.Title, &item.Severity, &item.Status, &item.AssetAssociationStatus, &item.RemediationStatus,
 		&item.AssigneeOrganizationID, &item.AssigneeOrganizationCode, &item.AssigneeOrganizationName,
 		&item.AssetID, &item.AssetValue, &item.AssetName, &item.PendingAssetDraftID, &item.AssetDeleted,
 		&item.BusinessSystemID, &item.BusinessSystemCode,
@@ -1533,6 +1612,9 @@ func scanFindingWithTotal(row rowScanner, item *Finding, total *int) error {
 	// Derive the single word the UI branches on so every listing and detail view
 	// reports the same asset-link state without repeating the CASE expression.
 	item.AssetLinkState = findingAssetLinkState(item.AssetID, item.PendingAssetDraftID, item.AssetDeleted)
+	if item.AssetAssociationStatus == "" {
+		item.AssetAssociationStatus = item.AssetLinkState
+	}
 	return nil
 }
 
@@ -1546,7 +1628,7 @@ func scanWorkOrderWithTotal(row rowScanner, item *WorkOrder, total *int) error {
 }
 
 func scanFinding(row rowScanner, item *Finding) error {
-	err := row.Scan(&item.ID, &item.Code, &item.Title, &item.Severity, &item.Status,
+	err := row.Scan(&item.ID, &item.Code, &item.Title, &item.Severity, &item.Status, &item.AssetAssociationStatus, &item.RemediationStatus,
 		&item.AssigneeOrganizationID, &item.AssigneeOrganizationCode, &item.AssigneeOrganizationName,
 		&item.AssetID, &item.AssetValue, &item.AssetName, &item.PendingAssetDraftID, &item.AssetDeleted,
 		&item.BusinessSystemID, &item.BusinessSystemCode,
@@ -1558,6 +1640,9 @@ func scanFinding(row rowScanner, item *Finding) error {
 		return err
 	}
 	item.AssetLinkState = findingAssetLinkState(item.AssetID, item.PendingAssetDraftID, item.AssetDeleted)
+	if item.AssetAssociationStatus == "" {
+		item.AssetAssociationStatus = item.AssetLinkState
+	}
 	return nil
 }
 

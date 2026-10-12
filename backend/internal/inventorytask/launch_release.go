@@ -91,7 +91,7 @@ func CreateLaunchReleaseSubmission(ctx context.Context, tx pgx.Tx, input LaunchR
 	// in the meantime, the row count mismatch aborts the approval.
 	if len(assetDraftIDs) > 0 {
 		command, err := tx.Exec(ctx, `
-			UPDATE inventory_asset_drafts SET task_id=$1::uuid, updated_by=$2::uuid, updated_at=now()
+			UPDATE inventory_asset_drafts SET task_id=$1::uuid, version=version+1, last_edited_by=$2::uuid, updated_by=$2::uuid, updated_at=now()
 			WHERE id = ANY($3::uuid[]) AND organization_id=$4::uuid
 			  AND task_id IS NULL AND draft_status IN ('editing','returned') AND operation <> 'delete'`,
 			taskID, input.ActorUserID, assetDraftIDs, input.OrganizationID)
@@ -104,7 +104,7 @@ func CreateLaunchReleaseSubmission(ctx context.Context, tx pgx.Tx, input LaunchR
 	}
 	if input.BusinessSystemDraftID != "" {
 		command, err := tx.Exec(ctx, `
-			UPDATE inventory_business_system_drafts SET task_id=$1::uuid, updated_by=$2::uuid, updated_at=now()
+			UPDATE inventory_business_system_drafts SET task_id=$1::uuid, version=version+1, last_edited_by=$2::uuid, updated_by=$2::uuid, updated_at=now()
 			WHERE id=$3::uuid AND organization_id=$4::uuid
 			  AND task_id IS NULL AND draft_status IN ('editing','returned') AND operation <> 'delete'`,
 			taskID, input.ActorUserID, input.BusinessSystemDraftID, input.OrganizationID)
@@ -123,14 +123,14 @@ func CreateLaunchReleaseSubmission(ctx context.Context, tx pgx.Tx, input LaunchR
 	}
 	if _, err := tx.Exec(ctx, `
 		UPDATE inventory_business_system_drafts
-		SET draft_status='submitted', submitted_at=now(), updated_by=$3::uuid, updated_at=now()
+		SET draft_status='submitted', submitted_at=now(), version=version+1, last_edited_by=$3::uuid, updated_by=$3::uuid, updated_at=now()
 		WHERE task_id=$1::uuid AND organization_id=$2::uuid AND draft_status IN ('editing','returned')
 	`, taskID, input.OrganizationID, input.ActorUserID); err != nil {
 		return "", fmt.Errorf("submit launch release business system drafts: %w", err)
 	}
 	if _, err := tx.Exec(ctx, `
 		UPDATE inventory_asset_drafts
-		SET draft_status='submitted', submitted_at=now(), updated_by=$3::uuid, updated_at=now()
+		SET draft_status='submitted', submitted_at=now(), version=version+1, last_edited_by=$3::uuid, updated_by=$3::uuid, updated_at=now()
 		WHERE task_id=$1::uuid AND organization_id=$2::uuid AND draft_status IN ('editing','returned')
 	`, taskID, input.OrganizationID, input.ActorUserID); err != nil {
 		return "", fmt.Errorf("submit launch release asset drafts: %w", err)

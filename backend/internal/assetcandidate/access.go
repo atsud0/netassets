@@ -20,8 +20,8 @@ import (
 var ErrSelfServiceClosed = errors.New("asset candidate self service is closed for this organization")
 
 // candidateScopeCTE mirrors the organization scope used by the asset register:
-// group administrators see every candidate, organization users see the candidates
-// of the organizations they can operate.
+// group administrators and the group security candidate-reader see every candidate,
+// organization users see the candidates of the organizations they can operate.
 const candidateScopeCTE = `
 WITH RECURSIVE descendant_roots(id) AS (
     SELECT ur.organization_id FROM user_roles ur
@@ -175,7 +175,7 @@ func (s *Service) SetSelfServicePolicy(ctx context.Context, principal auth.Princ
 // wider than accepting: an organization needs to see its own discoveries even
 // while headquarters retains the decision.
 func (s *Service) canViewCandidate(ctx context.Context, principal auth.Principal, organizationID string) (bool, error) {
-	if principal.HasRole("group_admin") {
+	if principal.CanViewAssetCandidates() {
 		return true, nil
 	}
 	if !principal.HasPermission("asset.manage") {

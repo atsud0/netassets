@@ -29,6 +29,7 @@ var (
 	ErrState          = errors.New("invalid state")
 	ErrQuality        = errors.New("quality check failed")
 	ErrResourceInUse  = errors.New("resource in use")
+	ErrEditConflict   = errors.New("draft edit conflict")
 )
 
 type OrganizationProgress struct {
@@ -950,14 +951,14 @@ func (s *Service) Submit(ctx context.Context, principal auth.Principal, taskID, 
 	}
 	if _, err := tx.Exec(ctx, `
 		UPDATE inventory_business_system_drafts
-		SET draft_status='submitted', submitted_at=now(), updated_by=$3::uuid, updated_at=now()
+		SET draft_status='submitted', submitted_at=now(), version=version+1, last_edited_by=$3::uuid, updated_by=$3::uuid, updated_at=now()
 		WHERE task_id::text=$1 AND organization_id::text=$2 AND draft_status IN ('editing','returned')
 	`, taskID, organizationID, principal.UserID); err != nil {
 		return OrganizationProgress{}, fmt.Errorf("submit inventory business system drafts: %w", err)
 	}
 	if _, err := tx.Exec(ctx, `
 		UPDATE inventory_asset_drafts
-		SET draft_status='submitted', submitted_at=now(), updated_by=$3::uuid, updated_at=now()
+		SET draft_status='submitted', submitted_at=now(), version=version+1, last_edited_by=$3::uuid, updated_by=$3::uuid, updated_at=now()
 		WHERE task_id::text=$1 AND organization_id::text=$2 AND draft_status IN ('editing','returned')
 	`, taskID, organizationID, principal.UserID); err != nil {
 		return OrganizationProgress{}, fmt.Errorf("submit inventory asset drafts: %w", err)
@@ -1073,10 +1074,10 @@ func (s *Service) Review(ctx context.Context, principal auth.Principal, taskID, 
 		}
 	}
 	if input.Decision == "returned" {
-		if _, err := tx.Exec(ctx, `UPDATE inventory_business_system_drafts SET draft_status='returned',updated_by=$3::uuid,updated_at=now() WHERE task_id::text=$1 AND organization_id::text=$2 AND draft_status='submitted'`, taskID, organizationID, principal.UserID); err != nil {
+		if _, err := tx.Exec(ctx, `UPDATE inventory_business_system_drafts SET draft_status='returned',version=version+1,last_edited_by=$3::uuid,updated_by=$3::uuid,updated_at=now() WHERE task_id::text=$1 AND organization_id::text=$2 AND draft_status='submitted'`, taskID, organizationID, principal.UserID); err != nil {
 			return OrganizationProgress{}, fmt.Errorf("return inventory business system drafts: %w", err)
 		}
-		if _, err := tx.Exec(ctx, `UPDATE inventory_asset_drafts SET draft_status='returned',updated_by=$3::uuid,updated_at=now() WHERE task_id::text=$1 AND organization_id::text=$2 AND draft_status='submitted'`, taskID, organizationID, principal.UserID); err != nil {
+		if _, err := tx.Exec(ctx, `UPDATE inventory_asset_drafts SET draft_status='returned',version=version+1,last_edited_by=$3::uuid,updated_by=$3::uuid,updated_at=now() WHERE task_id::text=$1 AND organization_id::text=$2 AND draft_status='submitted'`, taskID, organizationID, principal.UserID); err != nil {
 			return OrganizationProgress{}, fmt.Errorf("return inventory asset drafts: %w", err)
 		}
 	}

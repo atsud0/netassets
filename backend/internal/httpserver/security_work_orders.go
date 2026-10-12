@@ -461,6 +461,8 @@ func writeWorkOrderResult(c *gin.Context, logger *slog.Logger, operation string,
 		writeAPIError(c, http.StatusNotFound, "not_found", "安全工单、责任组织或关联漏洞不存在或不匹配")
 	case errors.Is(err, securityworkorder.ErrState):
 		writeAPIError(c, http.StatusConflict, "invalid_state", "安全工单当前状态不允许执行该操作")
+	case errors.Is(err, securityworkorder.ErrIndividualWorkOrderAction):
+		writeAPIError(c, http.StatusConflict, "individual_work_order_requires_remediation_task", "individual 工单必须通过整改任务处理")
 	case errors.Is(err, securityworkorder.ErrConflict):
 		writeAPIError(c, http.StatusConflict, "work_order_conflict", "安全工单当前不能执行该操作")
 	case err != nil:

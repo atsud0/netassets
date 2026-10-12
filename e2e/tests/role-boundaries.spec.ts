@@ -52,11 +52,12 @@ async function assertEndpointMatrix(context: BrowserContext, matrix: Record<stri
 }
 
 async function assertNavigation(page: Page, expected: string[], forbidden: string[]) {
+  const navigation = page.getByRole('navigation', { name: '主导航' })
   for (const label of expected) {
-    await expect(page.getByRole('button', { name: label, exact: true }), `应显示导航：${label}`).toBeVisible()
+    await expect(navigation.getByRole('button', { name: label, exact: true }), `应显示导航：${label}`).toBeVisible()
   }
   for (const label of forbidden) {
-    await expect(page.getByRole('button', { name: label, exact: true }), `不应显示导航：${label}`).toHaveCount(0)
+    await expect(navigation.getByRole('button', { name: label, exact: true }), `不应显示导航：${label}`).toHaveCount(0)
   }
 }
 
@@ -142,7 +143,10 @@ test('集团管理员、安全运营、子公司管理员和填报员权限边�
     expect(securitySession.user.organization).toBeUndefined()
     expect(securitySession.user.organizations).toEqual([])
     expect(securitySession.user.permissions.sort()).toEqual([
-      'security_finding.manage', 'security_test.manage', 'security_workorder.manage',
+      'asset_candidate.follow_up', 'asset_candidate.view',
+      'security_finding.manage', 'security_test.manage',
+      'security_workorder.assign', 'security_workorder.close', 'security_workorder.execute',
+      'security_workorder.manage', 'security_workorder.review', 'security_workorder.view',
     ])
     expect(organizationAdminSession.user.roles).toContain('organization_admin')
     expect(organizationAdminSession.user.organization?.id).toBe(organization.id)
@@ -158,6 +162,7 @@ test('集团管理员、安全运营、子公司管理员和填报员权限边�
       '/api/v1/security-test-batches?page=1&page_size=20': 200,
       '/api/v1/security-findings?page=1&page_size=20': 200,
       '/api/v1/security-findings/import-candidates?page=1&page_size=20': 200,
+      '/api/v1/asset-candidates?page=1&page_size=20': 200,
       '/api/v1/security-work-orders?page=1&page_size=20': 200,
       '/api/v1/audit-logs?page=1&page_size=20': 200,
       '/api/v1/backups?page=1&page_size=20': 200,
@@ -189,6 +194,7 @@ test('集团管理员、安全运营、子公司管理员和填报员权限边�
       '/api/v1/business-systems?page=1&page_size=20': 200,
       '/api/v1/security-findings?page=1&page_size=20': 200,
       '/api/v1/security-findings/import-candidates?page=1&page_size=20': 403,
+      '/api/v1/asset-candidates?page=1&page_size=20': 200,
       '/api/v1/security-work-orders?page=1&page_size=20': 200,
       '/api/v1/security-reference/organizations?page=1&page_size=20': 403,
       '/api/v1/security-test-batches?page=1&page_size=20': 403,
@@ -210,6 +216,7 @@ test('集团管理员、安全运营、子公司管理员和填报员权限边�
       '/api/v1/inventory-tasks?page=1&page_size=20': 200,
       '/api/v1/security-findings?page=1&page_size=20': 200,
       '/api/v1/security-findings/import-candidates?page=1&page_size=20': 403,
+      '/api/v1/asset-candidates?page=1&page_size=20': 200,
       '/api/v1/security-work-orders?page=1&page_size=20': 200,
       '/api/v1/users?page=1&page_size=20': 403,
       '/api/v1/roles/assignable?page=1&page_size=20': 403,
@@ -222,14 +229,14 @@ test('集团管理员、安全运营、子公司管理员和填报员权限边�
 
     const adminPage = await adminSession.context.newPage()
     await adminPage.goto('/dashboard')
-    await expect(adminPage.getByRole('heading', { name: '集团安全治理工作台', exact: true })).toBeVisible()
+    await expect(adminPage.getByRole('heading', { name: '今天，先处理关键事项', exact: true })).toBeVisible()
     await assertNavigation(adminPage,
       ['资产治理', '安全运营', '系统设置', '安全测试', '安全工单', '用户和权限', '审计日志', '备份管理'], [])
 
     const securityPage = await securitySession.context.newPage()
     await securityPage.goto('/dashboard')
     await expect(securityPage.getByText('集团安全运营视角', { exact: true })).toBeVisible()
-    await expect(securityPage.getByRole('heading', { name: '集团安全治理工作台', exact: true })).toBeVisible()
+    await expect(securityPage.getByRole('heading', { name: '今天，先处理关键事项', exact: true })).toBeVisible()
     await assertNavigation(securityPage,
       ['安全运营', '安全测试', '安全工单'],
       ['资产治理', '系统设置', '业务系统', '网络资产', '用户和权限', '用户管理', '审计日志', '备份管理'])
@@ -239,7 +246,7 @@ test('集团管理员、安全运营、子公司管理员和填报员权限边�
     const organizationAdminPage = await organizationAdminSession.context.newPage()
     await organizationAdminPage.goto('/dashboard')
     await expect(organizationAdminPage.getByText('所属组织视角', { exact: true })).toBeVisible()
-    await expect(organizationAdminPage.getByRole('heading', { name: '组织安全治理工作台', exact: true })).toBeVisible()
+    await expect(organizationAdminPage.getByRole('heading', { name: '今天，先处理关键事项', exact: true })).toBeVisible()
     await assertNavigation(organizationAdminPage,
       ['资产治理', '安全运营', '系统设置', '业务系统', '网络资产', '填报任务', '质量整改', '安全工单', '组织架构', '用户管理'],
       ['安全测试', '用户和权限', '审计日志', '备份管理'])
@@ -248,7 +255,7 @@ test('集团管理员、安全运营、子公司管理员和填报员权限边�
 
     const editorPage = await editorSession.context.newPage()
     await editorPage.goto('/dashboard')
-    await expect(editorPage.getByRole('heading', { name: '组织安全治理工作台', exact: true })).toBeVisible()
+    await expect(editorPage.getByRole('heading', { name: '今天，先处理关键事项', exact: true })).toBeVisible()
     await assertNavigation(editorPage,
       ['资产治理', '安全运营', '系统设置', '业务系统', '网络资产', '填报任务', '安全工单', '组织架构'],
       ['安全测试', '质量整改', '用户和权限', '用户管理', '审计日志', '备份管理'])

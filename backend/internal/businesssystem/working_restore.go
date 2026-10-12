@@ -89,6 +89,13 @@ func (s *Service) restoreWorking(ctx context.Context, principal auth.Principal, 
 		return BusinessSystem{}, err
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
+	// The restore originates from an immutable submission snapshot, so the draft
+	// version is re-read and locked inside the transaction instead of being
+	// taken from a value resolved outside it.
+	baseVersion, err := lockWorkingVersion(ctx, tx, current.ID)
+	if err != nil {
+		return BusinessSystem{}, err
+	}
 	result, err := tx.Exec(ctx, `
 		UPDATE inventory_business_system_drafts
 		SET operation='update', system_code=$2, system_name=$3, short_name=NULLIF($4,''),
@@ -98,25 +105,40 @@ func (s *Service) restoreWorking(ctx context.Context, principal auth.Principal, 
 		    contains_sensitive_personal_information=$13, personal_information_record_count=$14,
 		    data_volume_over_100k=$15, contains_important_data=$16, contains_core_data=$17,
 		    data_storage_location=NULLIF($18,''), security_notes=NULLIF($19,''),
-		    custom_values=$20::jsonb, draft_status='editing', updated_by=$21::uuid, updated_at=now()
+		    custom_values=$20::jsonb, draft_status='editing', version=version+1,
+		    updated_by=$21::uuid, last_edited_by=$21::uuid, updated_at=now()
 		WHERE id::text=$1 AND task_id IS NULL AND source_system_id IS NOT NULL
 		  AND draft_status IN ('editing','returned')
+		  AND version=$22::int
 	`, current.ID, input.Code, input.Name, input.ShortName, input.OwnerName, input.OwnerContact,
 		input.Status, input.Level, input.DeploymentType, input.InternetExposure, input.Description,
 		input.ContainsPersonalInformation, input.ContainsSensitivePersonalInformation,
 		input.PersonalInformationRecordCount, input.DataVolumeOver100K, input.ContainsImportantData,
-		input.ContainsCoreData, input.DataStorageLocation, input.SecurityNotes, customValues, principal.UserID)
+		input.ContainsCoreData, input.DataStorageLocation, input.SecurityNotes, customValues, principal.UserID, baseVersion)
 	if err != nil {
 		return BusinessSystem{}, mapWorkingDB(err)
 	}
 	if result.RowsAffected() == 0 {
+		var currentVersion int
+		var status string
+		if scanErr := tx.QueryRow(ctx, `SELECT version, draft_status FROM inventory_business_system_drafts WHERE id::text=$1`, current.ID).Scan(&currentVersion, &status); errors.Is(scanErr, pgx.ErrNoRows) {
+			return BusinessSystem{}, ErrNotFound
+		} else if scanErr != nil {
+			return BusinessSystem{}, scanErr
+		}
+		if status == "editing" || status == "returned" {
+			if currentVersion != baseVersion {
+				return BusinessSystem{}, ErrEditConflict
+			}
+			return BusinessSystem{}, ErrConflict
+		}
 		return BusinessSystem{}, ErrConflict
 	}
 	if _, err = tx.Exec(ctx, `
 		INSERT INTO audit_logs(user_id,organization_id,action,resource_type,resource_id,summary,details,request_ip,request_id)
 		VALUES($1::uuid,$2::uuid,'business_system.working_restore','business_system',$3,'以历史版本恢复业务系统工作版本',
-		       jsonb_build_object('published_id',$4::text),NULLIF($5,'')::inet,NULLIF($6,''))
-	`, principal.UserID, input.OrganizationID, current.ID, current.PublishedID, ipAddress, requestID); err != nil {
+		       jsonb_build_object('published_id',$4::text,'version_before',$7::int,'version_after',$7::int + 1),NULLIF($5,'')::inet,NULLIF($6,''))
+	`, principal.UserID, input.OrganizationID, current.ID, current.PublishedID, ipAddress, requestID, baseVersion); err != nil {
 		return BusinessSystem{}, err
 	}
 	if err = notification.WriteEvent(ctx, tx, notification.EventInput{
@@ -161,11 +183,11 @@ func (s *Service) createRestoredWorking(ctx context.Context, principal auth.Prin
 			internet_exposure,description,contains_personal_information,
 			contains_sensitive_personal_information,personal_information_record_count,
 			data_volume_over_100k,contains_important_data,contains_core_data,
-			data_storage_location,security_notes,custom_values,draft_status,created_by,updated_by
+			data_storage_location,security_notes,custom_values,draft_status,created_by,updated_by,version,assigned_to,last_edited_by
 		) VALUES(
 			NULL,$1::uuid,'update',$2::uuid,$3,$4,NULLIF($5,''),NULLIF($6,''),NULLIF($7,''),
 			$8,$9,NULLIF($10,''),$11,NULLIF($12,''),$13,$14,$15,$16,$17,$18,
-			NULLIF($19,''),NULLIF($20,''),$21::jsonb,'editing',$22::uuid,$22::uuid
+			NULLIF($19,''),NULLIF($20,''),$21::jsonb,'editing',$22::uuid,$22::uuid,1,$22::uuid,$22::uuid
 		) RETURNING id::text
 	`, input.OrganizationID, current.ID, input.Code, input.Name, input.ShortName,
 		input.OwnerName, input.OwnerContact, input.Status, input.Level, input.DeploymentType,
@@ -180,7 +202,7 @@ func (s *Service) createRestoredWorking(ctx context.Context, principal auth.Prin
 		INSERT INTO audit_logs(user_id,organization_id,action,resource_type,resource_id,summary,details,request_ip,request_id)
 		VALUES($1::uuid,$2::uuid,'business_system.working_restore','business_system',$3,
 		       '以历史版本恢复业务系统工作版本',
-		       jsonb_build_object('published_id',$4::text),NULLIF($5,'')::inet,NULLIF($6,''))
+		       jsonb_build_object('published_id',$4::text,'version_before',0,'version_after',1),NULLIF($5,'')::inet,NULLIF($6,''))
 	`, principal.UserID, input.OrganizationID, id, current.ID, ipAddress, requestID); err != nil {
 		return BusinessSystem{}, err
 	}
@@ -203,4 +225,19 @@ func mapWorkingNotFound(err error) error {
 		return ErrNotFound
 	}
 	return err
+}
+
+// lockWorkingVersion re-reads the working draft version inside the caller's
+// transaction and holds a row lock until commit, so a stale restore cannot
+// overwrite a concurrent edit.
+func lockWorkingVersion(ctx context.Context, tx pgx.Tx, id string) (int, error) {
+	var version int
+	err := tx.QueryRow(ctx, `SELECT version FROM inventory_business_system_drafts WHERE id::text=$1 FOR UPDATE`, id).Scan(&version)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return 0, ErrNotFound
+	}
+	if err != nil {
+		return 0, err
+	}
+	return version, nil
 }

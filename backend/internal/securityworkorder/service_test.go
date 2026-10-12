@@ -2,10 +2,35 @@ package securityworkorder
 
 import (
 	"bytes"
+	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
 )
+
+func TestIndividualWorkOrderLegacyActionsAreBlocked(t *testing.T) {
+	for _, action := range []string{"accept", "progress", "submit", "return", "close"} {
+		if !individualWorkOrderActionForbidden(action) {
+			t.Fatalf("individual action %q should be blocked", action)
+		}
+	}
+	for _, action := range []string{"cancel", "issue", "create"} {
+		if individualWorkOrderActionForbidden(action) {
+			t.Fatalf("individual action %q should not be classified as a legacy execution action", action)
+		}
+	}
+}
+
+func TestIndividualWorkOrderErrorPreservesConflictSemantics(t *testing.T) {
+	err := fmt.Errorf("%w: %w", ErrConflict, ErrIndividualWorkOrderAction)
+	if !errors.Is(err, ErrConflict) {
+		t.Fatal("individual work-order error must remain a conflict")
+	}
+	if !errors.Is(err, ErrIndividualWorkOrderAction) {
+		t.Fatal("individual work-order error must expose its dedicated sentinel")
+	}
+}
 
 func TestNormalizeFindingInputDefaults(t *testing.T) {
 	input := FindingInput{

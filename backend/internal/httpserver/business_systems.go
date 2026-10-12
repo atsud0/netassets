@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 
 	"github.com/gin-gonic/gin"
@@ -379,6 +380,10 @@ func registerBusinessSystemRoutes(api *gin.RouterGroup, requireAuth gin.HandlerF
 		}
 		item, err := service.Update(c.Request.Context(), mustPrincipal(c), c.Param("id"), input, c.GetString("request_id"), c.ClientIP())
 		switch {
+		case errors.Is(err, businesssystem.ErrVersionRequired):
+			writeAPIError(c, http.StatusBadRequest, "expected_version_required", "编辑业务系统工作版本需要提供 expected_version")
+		case errors.Is(err, businesssystem.ErrEditConflict):
+			writeAPIError(c, http.StatusConflict, "working_version_conflict", "该业务系统工作版本已被其他人更新，请刷新后重试")
 		case errors.Is(err, businesssystem.ErrForbidden):
 			writeAPIError(c, http.StatusForbidden, "forbidden", "当前账号无权编辑该业务系统或变更其所属组织")
 		case errors.Is(err, businesssystem.ErrInvalid):
@@ -407,8 +412,12 @@ func registerBusinessSystemRoutes(api *gin.RouterGroup, requireAuth gin.HandlerF
 	})
 
 	group.DELETE("/:id", func(c *gin.Context) {
-		err := service.Delete(c.Request.Context(), mustPrincipal(c), c.Param("id"), c.GetString("request_id"), c.ClientIP())
+		err := service.Delete(c.Request.Context(), mustPrincipal(c), c.Param("id"), parseBusinessSystemExpectedVersion(c), c.GetString("request_id"), c.ClientIP())
 		switch {
+		case errors.Is(err, businesssystem.ErrVersionRequired):
+			writeAPIError(c, http.StatusBadRequest, "expected_version_required", "删除业务系统工作版本需要提供 expected_version")
+		case errors.Is(err, businesssystem.ErrEditConflict):
+			writeAPIError(c, http.StatusConflict, "working_version_conflict", "该业务系统工作版本已被其他人更新，请刷新后重试")
 		case errors.Is(err, businesssystem.ErrForbidden):
 			writeAPIError(c, http.StatusForbidden, "forbidden", "当前账号无权删除该业务系统")
 		case errors.Is(err, businesssystem.ErrInvalid):
@@ -441,4 +450,19 @@ func handleBusinessSystemStatusResult(c *gin.Context, item businesssystem.Busine
 	default:
 		c.JSON(http.StatusOK, gin.H{"item": item})
 	}
+}
+
+// parseBusinessSystemExpectedVersion reads the optimistic-lock value for direct
+// working-space writes. A missing value is not silently treated as 0: the
+// service layer must reject it so clients cannot drop the CAS check.
+func parseBusinessSystemExpectedVersion(c *gin.Context) *int {
+	raw := strings.TrimSpace(c.Query("expected_version"))
+	if raw == "" {
+		return nil
+	}
+	value, err := strconv.Atoi(raw)
+	if err != nil {
+		return nil
+	}
+	return &value
 }

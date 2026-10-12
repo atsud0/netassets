@@ -35,6 +35,27 @@ func registerAssetCandidateRoutes(api *gin.RouterGroup, requireAuth gin.HandlerF
 		}
 		c.JSON(http.StatusOK, gin.H{"item": item})
 	})
+	group.GET("/:id/follow-ups", func(c *gin.Context) {
+		items, err := service.ListFollowUps(c.Request.Context(), mustPrincipal(c), c.Param("id"))
+		if err != nil {
+			writeAssetCandidateError(c, logger, "list asset candidate follow-ups", err)
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"items": items})
+	})
+	group.POST("/:id/follow-ups", func(c *gin.Context) {
+		var input assetcandidate.FollowUpInput
+		if err := c.ShouldBindJSON(&input); err != nil {
+			writeAPIError(c, http.StatusBadRequest, "invalid_request", "请填写跟进类型和说明")
+			return
+		}
+		item, err := service.AddFollowUp(c.Request.Context(), mustPrincipal(c), c.Param("id"), input, c.GetString("request_id"), c.ClientIP())
+		if err != nil {
+			writeAssetCandidateError(c, logger, "add asset candidate follow-up", err)
+			return
+		}
+		c.JSON(http.StatusCreated, gin.H{"item": item})
+	})
 	group.POST("", func(c *gin.Context) {
 		var input assetcandidate.CreateInput
 		if err := c.ShouldBindJSON(&input); err != nil {

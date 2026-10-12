@@ -237,8 +237,8 @@ func TestUnassignedFindingAndConcurrentCancellation(t *testing.T) {
 	if state != "completed" && state != "cancelled" {
 		t.Fatalf("task still active after cancellation: %s", state)
 	}
-	if state == "completed" && finding != "resolved" {
-		t.Fatal("verified result overwritten by cancellation")
+	if state == "completed" && finding != "fixed" {
+		t.Fatalf("verified result overwritten by cancellation: finding status=%s", finding)
 	}
 }
 
@@ -262,8 +262,6 @@ func TestEightFindingsInternalAndTwoVendorsPartialReview(t *testing.T) {
 	order, err := f.orders.CreateWorkOrder(f.ctx, f.group, securityworkorder.WorkOrderInput{ExecutionMode: "individual", Title: "八项多方修复", AssigneeOrganizationID: f.org, RemediationRequirement: "生产修复", DueAt: f.due, FindingIDs: findings}, "", "")
 	must(t, err)
 	_, err = f.orders.Issue(f.ctx, f.group, order.ID, securityworkorder.CommentInput{}, "", "")
-	must(t, err)
-	_, err = f.orders.Accept(f.ctx, f.manager, order.ID, securityworkorder.CommentInput{}, "", "")
 	must(t, err)
 	f.order = order.ID
 	f.findings = findings

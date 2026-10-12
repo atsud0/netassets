@@ -21,7 +21,7 @@ interface BusinessSystem {
   personal_information_record_count?: number; data_volume_over_100k: string
   contains_important_data: string; contains_core_data: string; data_storage_location?: string; security_notes?: string
   asset_count?: number; created_at: string; updated_at: string
-  task_id?: string; draft_status?: string; operation?: 'create' | 'update' | 'delete'; is_draft?: boolean; source_system_id?: string
+  task_id?: string; draft_status?: string; operation?: 'create' | 'update' | 'delete'; is_draft?: boolean; source_system_id?: string; version?: number
   custom_values?: Array<{ field_key: string; value: unknown }>
   reporting_status?: 'unreported' | 'pending_review' | 'reported' | 'changed' | 'returned' | 'pending_offline'; is_working_copy?: boolean; published_id?: string
 }
@@ -62,6 +62,7 @@ const detailAssetTotal = ref(0)
 const detailCustomFields = ref<CustomField[]>([])
 const editingID = ref('')
 const editingIsDraft = ref(false)
+const editingExpectedVersion = ref(0)
 const formRef = ref<FormInstance>()
 const systems = ref<BusinessSystem[]>([])
 const draftSystems = ref<BusinessSystem[]>([])
@@ -251,6 +252,7 @@ function openCreateDialog() {
   Object.assign(form, emptyForm(), { organization_id: inventoryMode.value ? inventoryOrganizationID.value : (auth.user?.organization?.id ?? eligibleOrganizations.value[0]?.id ?? '') })
   defaultCustomValues()
   editingID.value = ''
+  editingExpectedVersion.value = 0
   editingIsDraft.value = false
   dialogVisible.value = true
 }
@@ -268,6 +270,7 @@ async function openEditDialog(row: BusinessSystem) {
     defaultCustomValues()
     row.custom_values?.forEach((item) => { customValues[item.field_key] = item.value })
     editingID.value = row.id
+    editingExpectedVersion.value = row.version ?? 0
     editingIsDraft.value = Boolean(inventoryMode.value && row.task_id === inventoryTaskID.value)
     dialogVisible.value = true
     return
@@ -287,6 +290,7 @@ async function openEditDialog(row: BusinessSystem) {
     })
     await loadCustomValues(row.id)
     editingID.value = row.id
+    editingExpectedVersion.value = item.version ?? 0
     editingIsDraft.value = false
     dialogVisible.value = true
   } catch (error) { ElMessage.error(getAPIErrorMessage(error, '读取业务系统详情失败')) }
@@ -303,13 +307,13 @@ async function submit() {
     let response
     if (inventoryMode.value) {
       const base = `/inventory-tasks/${inventoryTaskID.value}/organizations/${inventoryOrganizationID.value}/business-system-drafts`
-      const payload = { ...form, organization_id: inventoryOrganizationID.value, custom_values: customPayload }
+      const payload = { ...form, organization_id: inventoryOrganizationID.value, custom_values: customPayload, ...(editingID.value && editingIsDraft.value && editingExpectedVersion.value > 0 ? { expected_version: editingExpectedVersion.value } : {}) }
       if (editingID.value && editingIsDraft.value) response = await apiClient.patch<{ item: BusinessSystem }>(`${base}/${editingID.value}`, payload)
       else response = editingID.value
-        ? await apiClient.patch<{ item: BusinessSystem }>(`/business-systems/${editingID.value}`, payload)
+        ? await apiClient.patch<{ item: BusinessSystem }>(`/business-systems/${editingID.value}`, withWorkingVersion(payload))
         : await apiClient.post<{ item: BusinessSystem }>('/business-systems', payload)
     } else {
-      const payload = { ...form, custom_values: customPayload }
+      const payload = withWorkingVersion({ ...form, custom_values: customPayload })
       response = editingID.value
         ? await apiClient.patch<{ item: BusinessSystem }>(`/business-systems/${editingID.value}`, payload)
         : await apiClient.post<{ item: BusinessSystem }>('/business-systems', payload)
@@ -324,9 +328,17 @@ async function submit() {
   finally { submitting.value = false }
 }
 
+// withWorkingVersion only attaches the optimistic-lock value when the dialog is
+// editing an existing working copy. Published systems are updated through the
+// official path, which must not receive a working-version lock.
+function withWorkingVersion(payload: Record<string, unknown>) {
+  if (!editingID.value || editingExpectedVersion.value <= 0) return payload
+  return { ...payload, expected_version: editingExpectedVersion.value }
+}
+
 async function selectWorkspaceBusinessSystem(row: BusinessSystem) {
   try {
-    await apiClient.post(`/inventory-tasks/${inventoryTaskID.value}/organizations/${inventoryOrganizationID.value}/business-system-drafts/${row.id}/select`)
+    await apiClient.post(`/inventory-tasks/${inventoryTaskID.value}/organizations/${inventoryOrganizationID.value}/business-system-drafts/${row.id}/select`, { expected_version: row.version })
     ElMessage.success('已选择该业务系统纳入本次上报')
     await refreshAfterMutation()
   } catch (error) { ElMessage.error(getAPIErrorMessage(error, '选择上报业务系统失败')) }
@@ -346,7 +358,7 @@ async function batchSelectWorkspaceBusinessSystems() {
     batchLoading.value = true
     const targets = [...selectedSystems.value]
     const response = await apiClient.post<{ result: BatchOperationResult }>(`/inventory-tasks/${inventoryTaskID.value}/organizations/${inventoryOrganizationID.value}/business-system-drafts/batch-select`, {
-      ids: targets.map((item) => item.id),
+      items: targets.map((item) => ({ id: item.id, expected_version: item.version })),
     })
     const names = new Map(targets.map((item) => [item.id, item.name]))
     batchResult.value = {
@@ -366,7 +378,8 @@ async function batchSelectWorkspaceBusinessSystems() {
 async function removeDraft(row: BusinessSystem) {
   try {
     await ElMessageBox.confirm(`确认取消任务中的“${draftOperationLabels[row.operation || 'create']}”变更“${row.name}”吗？`, '取消任务变更', { type: 'warning' })
-    await apiClient.delete(`/inventory-tasks/${inventoryTaskID.value}/organizations/${inventoryOrganizationID.value}/business-system-drafts/${row.id}`)
+    if (!row.version || row.version <= 0) throw new Error('草稿版本信息缺失，请刷新后重试')
+    await apiClient.delete(`/inventory-tasks/${inventoryTaskID.value}/organizations/${inventoryOrganizationID.value}/business-system-drafts/${row.id}`, { params: { expected_version: row.version } })
     ElMessage.success('任务变更已取消')
     await loadDraftSystems()
   } catch (error) { if (error !== 'cancel' && error !== 'close') ElMessage.error(getAPIErrorMessage(error, '删除业务系统草稿失败')) }
@@ -471,7 +484,7 @@ async function runBatchArchive(archive: boolean) {
     )
     batchLoading.value = true
     const response = await apiClient.post<{ result: BatchOperationResult }>('/business-systems/batch/archive', {
-      ids: targets.map((item) => item.id), archived: archive,
+      items: targets.map((item) => ({ id: item.id, expected_version: item.version })), archived: archive,
     })
     const names = new Map(targets.map((item) => [item.id, item.name]))
     batchResult.value = {
@@ -503,7 +516,7 @@ async function changeArchive(row: BusinessSystem, archive: boolean) {
 async function remove(row: BusinessSystem) {
   try {
     await ElMessageBox.confirm(`删除后业务系统将不再展示，确认删除“${row.name}”吗？`, '删除确认', { type: 'warning', confirmButtonText: '确认删除', cancelButtonText: '取消' })
-    await apiClient.delete(`/business-systems/${row.id}`)
+    await apiClient.delete(`/business-systems/${row.id}`, { params: row.version && row.version > 0 ? { expected_version: row.version } : {} })
     ElMessage.success('业务系统已删除')
     await refreshAfterMutation()
     if (detail.value?.id === row.id) detailVisible.value = false

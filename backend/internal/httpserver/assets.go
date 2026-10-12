@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 
 	"github.com/gin-gonic/gin"
@@ -257,6 +258,8 @@ func registerAssetRoutes(api *gin.RouterGroup, requireAuth gin.HandlerFunc, serv
 		}
 		item, err := service.Update(c.Request.Context(), mustPrincipal(c), c.Param("id"), input, c.GetString("request_id"), c.ClientIP())
 		switch {
+		case errors.Is(err, asset.ErrVersionRequired):
+			writeAPIError(c, http.StatusBadRequest, "expected_version_required", "编辑网络资产工作版本需要提供 expected_version")
 		case errors.Is(err, asset.ErrForbidden):
 			writeAPIError(c, http.StatusForbidden, "forbidden", "当前账号无权编辑该资产或变更其所属组织")
 		case errors.Is(err, asset.ErrInvalid):
@@ -276,8 +279,12 @@ func registerAssetRoutes(api *gin.RouterGroup, requireAuth gin.HandlerFunc, serv
 	})
 
 	group.DELETE("/:id", func(c *gin.Context) {
-		err := service.Delete(c.Request.Context(), mustPrincipal(c), c.Param("id"), c.GetString("request_id"), c.ClientIP())
+		err := service.Delete(c.Request.Context(), mustPrincipal(c), c.Param("id"), parseAssetExpectedVersion(c), c.GetString("request_id"), c.ClientIP())
 		switch {
+		case errors.Is(err, asset.ErrVersionRequired):
+			writeAPIError(c, http.StatusBadRequest, "expected_version_required", "删除网络资产工作版本需要提供 expected_version")
+		case errors.Is(err, asset.ErrEditConflict):
+			writeAPIError(c, http.StatusConflict, "asset_edit_conflict", "资产已被其他人修改，请刷新后重试")
 		case errors.Is(err, asset.ErrForbidden):
 			writeAPIError(c, http.StatusForbidden, "forbidden", "当前账号无权删除该资产")
 		case errors.Is(err, asset.ErrNotFound):
@@ -419,4 +426,19 @@ func registerAssetRoutes(api *gin.RouterGroup, requireAuth gin.HandlerFunc, serv
 			c.JSON(http.StatusOK, gin.H{"result": result})
 		}
 	})
+}
+
+// parseAssetExpectedVersion reads the optimistic-lock value for working-version
+// writes. A missing value stays nil so the service layer can reject it instead of
+// silently dropping the concurrency check.
+func parseAssetExpectedVersion(c *gin.Context) *int {
+	raw := strings.TrimSpace(c.Query("expected_version"))
+	if raw == "" {
+		return nil
+	}
+	value, err := strconv.Atoi(raw)
+	if err != nil {
+		return nil
+	}
+	return &value
 }

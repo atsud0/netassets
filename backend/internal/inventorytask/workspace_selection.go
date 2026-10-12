@@ -12,8 +12,17 @@ import (
 
 const MaxWorkspaceSelectionItems = 200
 
+type WorkspaceSelectionInput struct {
+	ExpectedVersion int `json:"expected_version"`
+}
+
+type WorkspaceSelectionItem struct {
+	ID              string `json:"id"`
+	ExpectedVersion int    `json:"expected_version"`
+}
+
 type WorkspaceSelectionBatchInput struct {
-	IDs []string `json:"ids"`
+	Items []WorkspaceSelectionItem `json:"items"`
 }
 
 type WorkspaceSelectionBatchItem struct {
@@ -33,9 +42,12 @@ type WorkspaceSelectionBatchResult struct {
 // SelectWorkspaceAsset binds an organization-local unreported asset to one
 // inventory assignment. The asset remains invisible in the published ledger
 // until the existing submit/review/publish pipeline completes.
-func (s *Service) SelectWorkspaceAsset(ctx context.Context, p auth.Principal, taskID, organizationID, draftID, requestID, ip string) (AssetDraft, error) {
+func (s *Service) SelectWorkspaceAsset(ctx context.Context, p auth.Principal, taskID, organizationID, draftID string, expectedVersion int, requestID, ip string) (AssetDraft, error) {
 	if !p.HasPermission("inventory.manage") || !p.HasPermission("asset.manage") || p.HasRole("group_admin") {
 		return AssetDraft{}, ErrForbidden
+	}
+	if expectedVersion <= 0 {
+		return AssetDraft{}, ErrInvalid
 	}
 	tx, e := s.pool.Begin(ctx)
 	if e != nil {
@@ -47,19 +59,24 @@ func (s *Service) SelectWorkspaceAsset(ctx context.Context, p auth.Principal, ta
 		return AssetDraft{}, e
 	}
 	var scope, systemDraftID string
-	e = tx.QueryRow(ctx, `SELECT network_scope,COALESCE(business_system_draft_id::text,'') FROM inventory_asset_drafts WHERE id::text=$1 AND organization_id::text=$2 AND task_id IS NULL AND draft_status IN ('editing','returned')`, draftID, organizationID).Scan(&scope, &systemDraftID)
+	var currentVersion int
+	e = tx.QueryRow(ctx, `SELECT network_scope,COALESCE(business_system_draft_id::text,''),version FROM inventory_asset_drafts WHERE id::text=$1 AND organization_id::text=$2 AND task_id IS NULL AND draft_status IN ('editing','returned')`, draftID, organizationID).Scan(&scope, &systemDraftID, &currentVersion)
 	if errors.Is(e, pgx.ErrNoRows) {
 		return AssetDraft{}, ErrNotFound
 	}
 	if e != nil {
 		return AssetDraft{}, e
 	}
+	if currentVersion != expectedVersion {
+		return AssetDraft{}, ErrEditConflict
+	}
 	if assignment.AssetNetworkScope != "all" && assignment.AssetNetworkScope != scope {
 		return AssetDraft{}, ErrInvalid
 	}
 	if systemDraftID != "" {
 		var selectedTaskID string
-		e = tx.QueryRow(ctx, `SELECT COALESCE(task_id::text,'') FROM inventory_business_system_drafts WHERE id::text=$1 AND organization_id::text=$2 AND draft_status IN ('editing','returned')`, systemDraftID, organizationID).Scan(&selectedTaskID)
+		var systemVersion int
+		e = tx.QueryRow(ctx, `SELECT COALESCE(task_id::text,''), version FROM inventory_business_system_drafts WHERE id::text=$1 AND organization_id::text=$2 AND draft_status IN ('editing','returned') FOR UPDATE`, systemDraftID, organizationID).Scan(&selectedTaskID, &systemVersion)
 		if errors.Is(e, pgx.ErrNoRows) {
 			return AssetDraft{}, ErrInvalid
 		}
@@ -71,7 +88,10 @@ func (s *Service) SelectWorkspaceAsset(ctx context.Context, p auth.Principal, ta
 			if _, e = s.loadDraftAssignment(ctx, tx, p, taskID, organizationID, true, "business_systems"); e != nil {
 				return AssetDraft{}, ErrInvalid
 			}
-			r, updateErr := tx.Exec(ctx, `UPDATE inventory_business_system_drafts SET task_id=$2::uuid,selected_at=now(),updated_by=$3::uuid,updated_at=now() WHERE id::text=$1 AND organization_id::text=$4 AND task_id IS NULL AND draft_status IN ('editing','returned')`, systemDraftID, taskID, p.UserID, organizationID)
+			// The dependency draft is bound to this task in the same transaction as
+			// the asset. Its version is read and matched inside that transaction so
+			// a concurrent selection cannot be silently overwritten.
+			r, updateErr := tx.Exec(ctx, `UPDATE inventory_business_system_drafts SET task_id=$2::uuid,selected_at=now(),version=version+1,last_edited_by=$3::uuid,updated_by=$3::uuid,updated_at=now() WHERE id::text=$1 AND organization_id::text=$4 AND task_id IS NULL AND draft_status IN ('editing','returned') AND version=$5::int`, systemDraftID, taskID, p.UserID, organizationID, systemVersion)
 			if updateErr != nil {
 				return AssetDraft{}, updateErr
 			}
@@ -86,12 +106,12 @@ func (s *Service) SelectWorkspaceAsset(ctx context.Context, p auth.Principal, ta
 			return AssetDraft{}, ErrInvalid
 		}
 	}
-	r, e := tx.Exec(ctx, `UPDATE inventory_asset_drafts SET task_id=$2::uuid,selected_at=now(),updated_by=$3::uuid,updated_at=now() WHERE id::text=$1 AND organization_id::text=$4 AND task_id IS NULL AND draft_status IN ('editing','returned')`, draftID, taskID, p.UserID, organizationID)
+	r, e := tx.Exec(ctx, `UPDATE inventory_asset_drafts SET task_id=$2::uuid,selected_at=now(),version=version+1,last_edited_by=$3::uuid,updated_by=$3::uuid,updated_at=now() WHERE id::text=$1 AND organization_id::text=$4 AND task_id IS NULL AND draft_status IN ('editing','returned') AND version=$5`, draftID, taskID, p.UserID, organizationID, expectedVersion)
 	if e != nil {
 		return AssetDraft{}, e
 	}
 	if r.RowsAffected() == 0 {
-		return AssetDraft{}, ErrState
+		return AssetDraft{}, ErrEditConflict
 	}
 	if _, e = tx.Exec(ctx, `INSERT INTO audit_logs(user_id,organization_id,action,resource_type,resource_id,summary,details,request_ip,request_id) VALUES($1::uuid,$2::uuid,'inventory.workspace_asset.select','inventory_asset_draft',$3,'选择未上报网络资产纳入填报任务',jsonb_build_object('task_id',$4::text),NULLIF($5,'')::inet,NULLIF($6,''))`, p.UserID, organizationID, draftID, taskID, ip, requestID); e != nil {
 		return AssetDraft{}, fmt.Errorf("audit workspace asset selection: %w", e)
@@ -102,9 +122,12 @@ func (s *Service) SelectWorkspaceAsset(ctx context.Context, p auth.Principal, ta
 	return loadAssetDraft(ctx, s.pool, draftID)
 }
 
-func (s *Service) SelectWorkspaceBusinessSystem(ctx context.Context, p auth.Principal, taskID, organizationID, draftID, requestID, ip string) (BusinessSystemDraft, error) {
+func (s *Service) SelectWorkspaceBusinessSystem(ctx context.Context, p auth.Principal, taskID, organizationID, draftID string, expectedVersion int, requestID, ip string) (BusinessSystemDraft, error) {
 	if !p.HasPermission("inventory.manage") || !p.HasPermission("system.manage") || p.HasRole("group_admin") {
 		return BusinessSystemDraft{}, ErrForbidden
+	}
+	if expectedVersion <= 0 {
+		return BusinessSystemDraft{}, ErrInvalid
 	}
 	tx, e := s.pool.Begin(ctx)
 	if e != nil {
@@ -114,12 +137,12 @@ func (s *Service) SelectWorkspaceBusinessSystem(ctx context.Context, p auth.Prin
 	if _, e = s.loadDraftAssignment(ctx, tx, p, taskID, organizationID, true, "business_systems"); e != nil {
 		return BusinessSystemDraft{}, e
 	}
-	r, e := tx.Exec(ctx, `UPDATE inventory_business_system_drafts SET task_id=$2::uuid,selected_at=now(),updated_by=$3::uuid,updated_at=now() WHERE id::text=$1 AND organization_id::text=$4 AND task_id IS NULL AND draft_status IN ('editing','returned')`, draftID, taskID, p.UserID, organizationID)
+	r, e := tx.Exec(ctx, `UPDATE inventory_business_system_drafts SET task_id=$2::uuid,selected_at=now(),version=version+1,last_edited_by=$3::uuid,updated_by=$3::uuid,updated_at=now() WHERE id::text=$1 AND organization_id::text=$4 AND task_id IS NULL AND draft_status IN ('editing','returned') AND version=$5`, draftID, taskID, p.UserID, organizationID, expectedVersion)
 	if e != nil {
 		return BusinessSystemDraft{}, e
 	}
 	if r.RowsAffected() == 0 {
-		return BusinessSystemDraft{}, ErrState
+		return BusinessSystemDraft{}, ErrEditConflict
 	}
 	if _, e = tx.Exec(ctx, `INSERT INTO audit_logs(user_id,organization_id,action,resource_type,resource_id,summary,details,request_ip,request_id) VALUES($1::uuid,$2::uuid,'inventory.workspace_system.select','inventory_business_system_draft',$3,'选择未上报业务系统纳入填报任务',jsonb_build_object('task_id',$4::text),NULLIF($5,'')::inet,NULLIF($6,''))`, p.UserID, organizationID, draftID, taskID, ip, requestID); e != nil {
 		return BusinessSystemDraft{}, e
@@ -134,21 +157,21 @@ func (s *Service) SelectWorkspaceAssetsBatch(ctx context.Context, p auth.Princip
 	if !p.HasPermission("inventory.manage") || !p.HasPermission("asset.manage") || p.HasRole("group_admin") {
 		return WorkspaceSelectionBatchResult{}, ErrForbidden
 	}
-	ids, err := normalizeWorkspaceSelectionIDs(input.IDs)
+	items, err := normalizeWorkspaceSelectionItems(input.Items)
 	if err != nil {
 		return WorkspaceSelectionBatchResult{}, err
 	}
-	result := WorkspaceSelectionBatchResult{TotalCount: len(ids), Items: make([]WorkspaceSelectionBatchItem, 0, len(ids))}
-	for _, id := range ids {
-		_, itemErr := s.SelectWorkspaceAsset(ctx, p, taskID, organizationID, id, requestID, ip)
+	result := WorkspaceSelectionBatchResult{TotalCount: len(items), Items: make([]WorkspaceSelectionBatchItem, 0, len(items))}
+	for _, item := range items {
+		_, itemErr := s.SelectWorkspaceAsset(ctx, p, taskID, organizationID, item.ID, item.ExpectedVersion, requestID, ip)
 		if itemErr == nil {
 			result.SuccessCount++
-			result.Items = append(result.Items, WorkspaceSelectionBatchItem{ID: id, Success: true, Message: "已纳入本次上报"})
+			result.Items = append(result.Items, WorkspaceSelectionBatchItem{ID: item.ID, Success: true, Message: "已纳入本次上报"})
 			continue
 		}
 		result.FailureCount++
 		code, message := workspaceSelectionError(itemErr)
-		result.Items = append(result.Items, WorkspaceSelectionBatchItem{ID: id, Code: code, Message: message})
+		result.Items = append(result.Items, WorkspaceSelectionBatchItem{ID: item.ID, Code: code, Message: message})
 	}
 	return result, nil
 }
@@ -157,46 +180,46 @@ func (s *Service) SelectWorkspaceBusinessSystemsBatch(ctx context.Context, p aut
 	if !p.HasPermission("inventory.manage") || !p.HasPermission("system.manage") || p.HasRole("group_admin") {
 		return WorkspaceSelectionBatchResult{}, ErrForbidden
 	}
-	ids, err := normalizeWorkspaceSelectionIDs(input.IDs)
+	items, err := normalizeWorkspaceSelectionItems(input.Items)
 	if err != nil {
 		return WorkspaceSelectionBatchResult{}, err
 	}
-	result := WorkspaceSelectionBatchResult{TotalCount: len(ids), Items: make([]WorkspaceSelectionBatchItem, 0, len(ids))}
-	for _, id := range ids {
-		_, itemErr := s.SelectWorkspaceBusinessSystem(ctx, p, taskID, organizationID, id, requestID, ip)
+	result := WorkspaceSelectionBatchResult{TotalCount: len(items), Items: make([]WorkspaceSelectionBatchItem, 0, len(items))}
+	for _, item := range items {
+		_, itemErr := s.SelectWorkspaceBusinessSystem(ctx, p, taskID, organizationID, item.ID, item.ExpectedVersion, requestID, ip)
 		if itemErr == nil {
 			result.SuccessCount++
-			result.Items = append(result.Items, WorkspaceSelectionBatchItem{ID: id, Success: true, Message: "已纳入本次上报"})
+			result.Items = append(result.Items, WorkspaceSelectionBatchItem{ID: item.ID, Success: true, Message: "已纳入本次上报"})
 			continue
 		}
 		result.FailureCount++
 		code, message := workspaceSelectionError(itemErr)
-		result.Items = append(result.Items, WorkspaceSelectionBatchItem{ID: id, Code: code, Message: message})
+		result.Items = append(result.Items, WorkspaceSelectionBatchItem{ID: item.ID, Code: code, Message: message})
 	}
 	return result, nil
 }
 
-func normalizeWorkspaceSelectionIDs(values []string) ([]string, error) {
+func normalizeWorkspaceSelectionItems(values []WorkspaceSelectionItem) ([]WorkspaceSelectionItem, error) {
 	if len(values) == 0 || len(values) > MaxWorkspaceSelectionItems {
 		return nil, ErrInvalid
 	}
-	ids := make([]string, 0, len(values))
+	items := make([]WorkspaceSelectionItem, 0, len(values))
 	seen := make(map[string]struct{}, len(values))
 	for _, value := range values {
-		id := strings.TrimSpace(value)
-		if id == "" {
+		id := strings.TrimSpace(value.ID)
+		if id == "" || value.ExpectedVersion <= 0 {
 			return nil, ErrInvalid
 		}
 		if _, exists := seen[id]; exists {
 			continue
 		}
 		seen[id] = struct{}{}
-		ids = append(ids, id)
+		items = append(items, WorkspaceSelectionItem{ID: id, ExpectedVersion: value.ExpectedVersion})
 	}
-	if len(ids) == 0 {
+	if len(items) == 0 {
 		return nil, ErrInvalid
 	}
-	return ids, nil
+	return items, nil
 }
 
 func workspaceSelectionError(err error) (string, string) {
@@ -205,6 +228,8 @@ func workspaceSelectionError(err error) (string, string) {
 		return "forbidden", "当前账号无权选择该资源"
 	case errors.Is(err, ErrNotFound):
 		return "not_found", "未上报工作版本不存在或已被其他操作处理"
+	case errors.Is(err, ErrEditConflict):
+		return "draft_edit_conflict", "资源内容已被其他人更新，请刷新后重试"
 	case errors.Is(err, ErrState):
 		return "invalid_state", "资源已纳入任务或当前任务状态不允许选择"
 	case errors.Is(err, ErrInvalid):

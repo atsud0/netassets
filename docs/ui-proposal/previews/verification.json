@@ -1,0 +1,12 @@
+{
+  "checks": [
+    "overview",
+    "search, filters, saved view",
+    "review validation and sequential queue",
+    "worker submit → organization confirmation → group verification",
+    "asset filters, personnel dialog",
+    "1280 desktop, 390 mobile, Escape dialog",
+    "full proposal and source screenshots"
+  ],
+  "browserErrors": []
+}

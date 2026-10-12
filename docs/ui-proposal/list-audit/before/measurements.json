@@ -1,0 +1,1886 @@
+[
+  {
+    "route": "security-test-batches",
+    "width": 1440,
+    "tables": [
+      {
+        "width": 1107,
+        "overflow": 253,
+        "columns": [
+          {
+            "label": "批次编号",
+            "width": 170
+          },
+          {
+            "label": "批次名称",
+            "width": 260
+          },
+          {
+            "label": "类型",
+            "width": 110
+          },
+          {
+            "label": "状态",
+            "width": 105
+          },
+          {
+            "label": "测试范围",
+            "width": 145
+          },
+          {
+            "label": "测试单位",
+            "width": 150
+          },
+          {
+            "label": "计划窗口",
+            "width": 230
+          },
+          {
+            "label": "操作",
+            "width": 190
+          }
+        ],
+        "rows": [
+          [
+            "详情"
+          ],
+          [
+            "详情"
+          ],
+          [
+            "详情"
+          ],
+          [
+            "详情",
+            "完成",
+            "取消"
+          ]
+        ]
+      }
+    ]
+  },
+  {
+    "route": "security-test-batches",
+    "width": 1280,
+    "tables": [
+      {
+        "width": 947,
+        "overflow": 413,
+        "columns": [
+          {
+            "label": "批次编号",
+            "width": 170
+          },
+          {
+            "label": "批次名称",
+            "width": 260
+          },
+          {
+            "label": "类型",
+            "width": 110
+          },
+          {
+            "label": "状态",
+            "width": 105
+          },
+          {
+            "label": "测试范围",
+            "width": 145
+          },
+          {
+            "label": "测试单位",
+            "width": 150
+          },
+          {
+            "label": "计划窗口",
+            "width": 230
+          },
+          {
+            "label": "操作",
+            "width": 190
+          }
+        ],
+        "rows": [
+          [
+            "详情"
+          ],
+          [
+            "详情"
+          ],
+          [
+            "详情"
+          ],
+          [
+            "详情",
+            "完成",
+            "取消"
+          ]
+        ]
+      }
+    ]
+  },
+  {
+    "route": "security-test-requests",
+    "width": 1440,
+    "tables": [
+      {
+        "width": 1107,
+        "overflow": 338,
+        "columns": [
+          {
+            "label": "申请编号",
+            "width": 165
+          },
+          {
+            "label": "申请名称",
+            "width": 230
+          },
+          {
+            "label": "申请组织",
+            "width": 140
+          },
+          {
+            "label": "上线系统",
+            "width": 150
+          },
+          {
+            "label": "类型",
+            "width": 100
+          },
+          {
+            "label": "范围",
+            "width": 90
+          },
+          {
+            "label": "未闭环发现",
+            "width": 100
+          },
+          {
+            "label": "状态",
+            "width": 110
+          },
+          {
+            "label": "期望上线",
+            "width": 110
+          },
+          {
+            "label": "操作",
+            "width": 250
+          }
+        ],
+        "rows": []
+      }
+    ]
+  },
+  {
+    "route": "security-test-requests",
+    "width": 1280,
+    "tables": [
+      {
+        "width": 947,
+        "overflow": 498,
+        "columns": [
+          {
+            "label": "申请编号",
+            "width": 165
+          },
+          {
+            "label": "申请名称",
+            "width": 230
+          },
+          {
+            "label": "申请组织",
+            "width": 140
+          },
+          {
+            "label": "上线系统",
+            "width": 150
+          },
+          {
+            "label": "类型",
+            "width": 100
+          },
+          {
+            "label": "范围",
+            "width": 90
+          },
+          {
+            "label": "未闭环发现",
+            "width": 100
+          },
+          {
+            "label": "状态",
+            "width": 110
+          },
+          {
+            "label": "期望上线",
+            "width": 110
+          },
+          {
+            "label": "操作",
+            "width": 250
+          }
+        ],
+        "rows": []
+      }
+    ]
+  },
+  {
+    "route": "security-work-orders",
+    "width": 1440,
+    "tables": [
+      {
+        "width": 1103,
+        "overflow": 252,
+        "columns": [
+          {
+            "label": "工单",
+            "width": 230
+          },
+          {
+            "label": "责任组织",
+            "width": 170
+          },
+          {
+            "label": "等级",
+            "width": 85
+          },
+          {
+            "label": "状态",
+            "width": 115
+          },
+          {
+            "label": "个人修复进度",
+            "width": 270
+          },
+          {
+            "label": "关联发现",
+            "width": 100
+          },
+          {
+            "label": "整改期限",
+            "width": 165
+          },
+          {
+            "label": "操作",
+            "width": 220
+          }
+        ],
+        "rows": [
+          [
+            "详情",
+            "取消"
+          ],
+          [
+            "详情",
+            "退回",
+            "复测通过",
+            "取消"
+          ],
+          [
+            "详情",
+            "取消"
+          ],
+          [
+            "详情",
+            "退回",
+            "复测通过",
+            "取消"
+          ]
+        ]
+      }
+    ]
+  },
+  {
+    "route": "security-work-orders",
+    "width": 1280,
+    "tables": [
+      {
+        "width": 943,
+        "overflow": 412,
+        "columns": [
+          {
+            "label": "工单",
+            "width": 230
+          },
+          {
+            "label": "责任组织",
+            "width": 170
+          },
+          {
+            "label": "等级",
+            "width": 85
+          },
+          {
+            "label": "状态",
+            "width": 115
+          },
+          {
+            "label": "个人修复进度",
+            "width": 270
+          },
+          {
+            "label": "关联发现",
+            "width": 100
+          },
+          {
+            "label": "整改期限",
+            "width": 165
+          },
+          {
+            "label": "操作",
+            "width": 220
+          }
+        ],
+        "rows": [
+          [
+            "详情",
+            "取消"
+          ],
+          [
+            "详情",
+            "退回",
+            "复测通过",
+            "取消"
+          ],
+          [
+            "详情",
+            "取消"
+          ],
+          [
+            "详情",
+            "退回",
+            "复测通过",
+            "取消"
+          ]
+        ]
+      }
+    ]
+  },
+  {
+    "route": "assets",
+    "width": 1440,
+    "tables": [
+      {
+        "width": 1107,
+        "overflow": 0,
+        "columns": [
+          {
+            "label": "",
+            "width": 46
+          },
+          {
+            "label": "资产 / 访问标识",
+            "width": 338
+          },
+          {
+            "label": "类型",
+            "width": 95
+          },
+          {
+            "label": "业务归属",
+            "width": 236
+          },
+          {
+            "label": "责任人",
+            "width": 162
+          },
+          {
+            "label": "状态",
+            "width": 90
+          },
+          {
+            "label": "操作",
+            "width": 140
+          }
+        ],
+        "rows": [
+          [
+            "编辑",
+            "更多"
+          ],
+          [
+            "编辑",
+            "更多"
+          ],
+          [
+            "编辑",
+            "更多"
+          ],
+          [
+            "编辑",
+            "更多"
+          ]
+        ]
+      }
+    ]
+  },
+  {
+    "route": "assets",
+    "width": 1280,
+    "tables": [
+      {
+        "width": 947,
+        "overflow": 0,
+        "columns": [
+          {
+            "label": "",
+            "width": 46
+          },
+          {
+            "label": "资产 / 访问标识",
+            "width": 266
+          },
+          {
+            "label": "类型",
+            "width": 95
+          },
+          {
+            "label": "业务归属",
+            "width": 184
+          },
+          {
+            "label": "责任人",
+            "width": 126
+          },
+          {
+            "label": "状态",
+            "width": 90
+          },
+          {
+            "label": "操作",
+            "width": 140
+          }
+        ],
+        "rows": [
+          [
+            "编辑",
+            "更多"
+          ],
+          [
+            "编辑",
+            "更多"
+          ],
+          [
+            "编辑",
+            "更多"
+          ],
+          [
+            "编辑",
+            "更多"
+          ]
+        ]
+      }
+    ]
+  },
+  {
+    "route": "systems",
+    "width": 1440,
+    "tables": [
+      {
+        "width": 1107,
+        "overflow": 319,
+        "columns": [
+          {
+            "label": "",
+            "width": 46
+          },
+          {
+            "label": "系统名称",
+            "width": 190
+          },
+          {
+            "label": "系统编码",
+            "width": 145
+          },
+          {
+            "label": "所属组织",
+            "width": 180
+          },
+          {
+            "label": "状态/等级",
+            "width": 150
+          },
+          {
+            "label": "个人信息",
+            "width": 120
+          },
+          {
+            "label": "敏感个人信息",
+            "width": 140
+          },
+          {
+            "label": "数据量超 10 万",
+            "width": 135
+          },
+          {
+            "label": "负责人",
+            "width": 110
+          },
+          {
+            "label": "操作",
+            "width": 210
+          }
+        ],
+        "rows": [
+          [
+            "历史",
+            "编辑",
+            "归档",
+            "删除"
+          ],
+          [
+            "历史",
+            "编辑",
+            "归档",
+            "删除"
+          ],
+          [
+            "历史",
+            "编辑",
+            "归档",
+            "删除"
+          ],
+          [
+            "历史",
+            "编辑",
+            "归档",
+            "删除"
+          ]
+        ]
+      }
+    ]
+  },
+  {
+    "route": "systems",
+    "width": 1280,
+    "tables": [
+      {
+        "width": 947,
+        "overflow": 479,
+        "columns": [
+          {
+            "label": "",
+            "width": 46
+          },
+          {
+            "label": "系统名称",
+            "width": 190
+          },
+          {
+            "label": "系统编码",
+            "width": 145
+          },
+          {
+            "label": "所属组织",
+            "width": 180
+          },
+          {
+            "label": "状态/等级",
+            "width": 150
+          },
+          {
+            "label": "个人信息",
+            "width": 120
+          },
+          {
+            "label": "敏感个人信息",
+            "width": 140
+          },
+          {
+            "label": "数据量超 10 万",
+            "width": 135
+          },
+          {
+            "label": "负责人",
+            "width": 110
+          },
+          {
+            "label": "操作",
+            "width": 210
+          }
+        ],
+        "rows": [
+          [
+            "历史",
+            "编辑",
+            "归档",
+            "删除"
+          ],
+          [
+            "历史",
+            "编辑",
+            "归档",
+            "删除"
+          ],
+          [
+            "历史",
+            "编辑",
+            "归档",
+            "删除"
+          ],
+          [
+            "历史",
+            "编辑",
+            "归档",
+            "删除"
+          ]
+        ]
+      }
+    ]
+  },
+  {
+    "route": "inventory-tasks",
+    "width": 1440,
+    "tables": [
+      {
+        "width": 1107,
+        "overflow": 0,
+        "columns": [
+          {
+            "label": "任务名称",
+            "width": 267
+          },
+          {
+            "label": "状态",
+            "width": 105
+          },
+          {
+            "label": "开始时间",
+            "width": 200
+          },
+          {
+            "label": "截止时间",
+            "width": 200
+          },
+          {
+            "label": "提交进度",
+            "width": 205
+          },
+          {
+            "label": "任务操作",
+            "width": 130
+          }
+        ],
+        "rows": [
+          [
+            "下发",
+            "导出"
+          ],
+          [
+            "关闭",
+            "导出"
+          ],
+          [
+            "关闭",
+            "导出"
+          ],
+          [
+            "归档",
+            "导出"
+          ]
+        ]
+      }
+    ]
+  },
+  {
+    "route": "inventory-tasks",
+    "width": 1280,
+    "tables": [
+      {
+        "width": 947,
+        "overflow": 43,
+        "columns": [
+          {
+            "label": "任务名称",
+            "width": 220
+          },
+          {
+            "label": "状态",
+            "width": 105
+          },
+          {
+            "label": "开始时间",
+            "width": 165
+          },
+          {
+            "label": "截止时间",
+            "width": 165
+          },
+          {
+            "label": "提交进度",
+            "width": 205
+          },
+          {
+            "label": "任务操作",
+            "width": 130
+          }
+        ],
+        "rows": [
+          [
+            "下发",
+            "导出"
+          ],
+          [
+            "关闭",
+            "导出"
+          ],
+          [
+            "关闭",
+            "导出"
+          ],
+          [
+            "归档",
+            "导出"
+          ]
+        ]
+      }
+    ]
+  },
+  {
+    "route": "remediation",
+    "width": 1440,
+    "tables": [
+      {
+        "width": 1143,
+        "overflow": 0,
+        "columns": [
+          {
+            "label": "",
+            "width": 42
+          },
+          {
+            "label": "任务 / 漏洞",
+            "width": 272
+          },
+          {
+            "label": "业务归属",
+            "width": 187
+          },
+          {
+            "label": "负责人",
+            "width": 134
+          },
+          {
+            "label": "等级",
+            "width": 75
+          },
+          {
+            "label": "当前状态",
+            "width": 158
+          },
+          {
+            "label": "截止 / 优先级",
+            "width": 175
+          },
+          {
+            "label": "下一步",
+            "width": 100
+          }
+        ],
+        "rows": []
+      }
+    ]
+  },
+  {
+    "route": "remediation",
+    "width": 1280,
+    "tables": [
+      {
+        "width": 983,
+        "overflow": 24,
+        "columns": [
+          {
+            "label": "",
+            "width": 42
+          },
+          {
+            "label": "任务 / 漏洞",
+            "width": 230
+          },
+          {
+            "label": "业务归属",
+            "width": 160
+          },
+          {
+            "label": "负责人",
+            "width": 115
+          },
+          {
+            "label": "等级",
+            "width": 75
+          },
+          {
+            "label": "当前状态",
+            "width": 135
+          },
+          {
+            "label": "截止 / 优先级",
+            "width": 150
+          },
+          {
+            "label": "下一步",
+            "width": 100
+          }
+        ],
+        "rows": []
+      }
+    ]
+  },
+  {
+    "route": "remediation-people",
+    "width": 1440,
+    "tables": [
+      {
+        "width": 1103,
+        "overflow": 0,
+        "columns": [
+          {
+            "label": "人员",
+            "width": 190
+          },
+          {
+            "label": "组织 / 系统",
+            "width": 264
+          },
+          {
+            "label": "身份",
+            "width": 188
+          },
+          {
+            "label": "授权有效期",
+            "width": 226
+          },
+          {
+            "label": "未完成",
+            "width": 90
+          },
+          {
+            "label": "操作",
+            "width": 145
+          }
+        ],
+        "rows": []
+      }
+    ]
+  },
+  {
+    "route": "remediation-people",
+    "width": 1280,
+    "tables": [
+      {
+        "width": 943,
+        "overflow": 0,
+        "columns": [
+          {
+            "label": "人员",
+            "width": 156
+          },
+          {
+            "label": "组织 / 系统",
+            "width": 215
+          },
+          {
+            "label": "身份",
+            "width": 153
+          },
+          {
+            "label": "授权有效期",
+            "width": 184
+          },
+          {
+            "label": "未完成",
+            "width": 90
+          },
+          {
+            "label": "操作",
+            "width": 145
+          }
+        ],
+        "rows": []
+      }
+    ]
+  },
+  {
+    "route": "users",
+    "width": 1440,
+    "tables": [
+      {
+        "width": 1107,
+        "overflow": 208,
+        "columns": [
+          {
+            "label": "用户",
+            "width": 180
+          },
+          {
+            "label": "联系方式",
+            "width": 210
+          },
+          {
+            "label": "任职组织",
+            "width": 210
+          },
+          {
+            "label": "角色",
+            "width": 210
+          },
+          {
+            "label": "状态",
+            "width": 120
+          },
+          {
+            "label": "最近登录",
+            "width": 165
+          },
+          {
+            "label": "操作",
+            "width": 220
+          }
+        ],
+        "rows": [
+          [
+            "详情"
+          ],
+          [
+            "详情",
+            "编辑",
+            "停用",
+            "重置密码"
+          ],
+          [
+            "详情",
+            "编辑",
+            "停用",
+            "重置密码"
+          ],
+          [
+            "详情",
+            "编辑",
+            "停用",
+            "重置密码"
+          ]
+        ]
+      }
+    ]
+  },
+  {
+    "route": "users",
+    "width": 1280,
+    "tables": [
+      {
+        "width": 947,
+        "overflow": 368,
+        "columns": [
+          {
+            "label": "用户",
+            "width": 180
+          },
+          {
+            "label": "联系方式",
+            "width": 210
+          },
+          {
+            "label": "任职组织",
+            "width": 210
+          },
+          {
+            "label": "角色",
+            "width": 210
+          },
+          {
+            "label": "状态",
+            "width": 120
+          },
+          {
+            "label": "最近登录",
+            "width": 165
+          },
+          {
+            "label": "操作",
+            "width": 220
+          }
+        ],
+        "rows": [
+          [
+            "详情"
+          ],
+          [
+            "详情",
+            "编辑",
+            "停用",
+            "重置密码"
+          ],
+          [
+            "详情",
+            "编辑",
+            "停用",
+            "重置密码"
+          ],
+          [
+            "详情",
+            "编辑",
+            "停用",
+            "重置密码"
+          ]
+        ]
+      }
+    ]
+  },
+  {
+    "route": "organizations",
+    "width": 1440,
+    "tables": [
+      {
+        "width": 1107,
+        "overflow": 19,
+        "columns": [
+          {
+            "label": "组织名称",
+            "width": 250
+          },
+          {
+            "label": "组织编码",
+            "width": 150
+          },
+          {
+            "label": "类型",
+            "width": 100
+          },
+          {
+            "label": "负责人 / 联系方式",
+            "width": 190
+          },
+          {
+            "label": "系统 / 资产",
+            "width": 130
+          },
+          {
+            "label": "状态",
+            "width": 96
+          },
+          {
+            "label": "操作",
+            "width": 210
+          }
+        ],
+        "rows": [
+          [
+            "编辑信息"
+          ],
+          [
+            "编辑信息",
+            "调整结构",
+            "更多"
+          ],
+          [
+            "编辑信息",
+            "调整结构",
+            "更多"
+          ],
+          [
+            "编辑信息",
+            "调整结构",
+            "更多"
+          ]
+        ]
+      }
+    ]
+  },
+  {
+    "route": "organizations",
+    "width": 1280,
+    "tables": [
+      {
+        "width": 947,
+        "overflow": 179,
+        "columns": [
+          {
+            "label": "组织名称",
+            "width": 250
+          },
+          {
+            "label": "组织编码",
+            "width": 150
+          },
+          {
+            "label": "类型",
+            "width": 100
+          },
+          {
+            "label": "负责人 / 联系方式",
+            "width": 190
+          },
+          {
+            "label": "系统 / 资产",
+            "width": 130
+          },
+          {
+            "label": "状态",
+            "width": 96
+          },
+          {
+            "label": "操作",
+            "width": 210
+          }
+        ],
+        "rows": [
+          [
+            "编辑信息"
+          ],
+          [
+            "编辑信息",
+            "调整结构",
+            "更多"
+          ],
+          [
+            "编辑信息",
+            "调整结构",
+            "更多"
+          ],
+          [
+            "编辑信息",
+            "调整结构",
+            "更多"
+          ]
+        ]
+      }
+    ]
+  },
+  {
+    "route": "asset-candidates",
+    "width": 1440,
+    "tables": [
+      {
+        "width": 1107,
+        "overflow": 0,
+        "columns": [
+          {
+            "label": "资产线索",
+            "width": 247
+          },
+          {
+            "label": "建议归属",
+            "width": 165
+          },
+          {
+            "label": "来源",
+            "width": 155
+          },
+          {
+            "label": "状态",
+            "width": 120
+          },
+          {
+            "label": "登记时间",
+            "width": 180
+          },
+          {
+            "label": "操作",
+            "width": 240
+          }
+        ],
+        "rows": [
+          [
+            "确认入库",
+            "标记重复",
+            "忽略",
+            "无效"
+          ],
+          [
+            "确认入库",
+            "标记重复",
+            "忽略",
+            "无效"
+          ],
+          [
+            "确认入库",
+            "标记重复",
+            "忽略",
+            "无效"
+          ],
+          [
+            "确认入库",
+            "标记重复",
+            "忽略",
+            "无效"
+          ]
+        ]
+      }
+    ]
+  },
+  {
+    "route": "asset-candidates",
+    "width": 1280,
+    "tables": [
+      {
+        "width": 947,
+        "overflow": 123,
+        "columns": [
+          {
+            "label": "资产线索",
+            "width": 230
+          },
+          {
+            "label": "建议归属",
+            "width": 155
+          },
+          {
+            "label": "来源",
+            "width": 145
+          },
+          {
+            "label": "状态",
+            "width": 120
+          },
+          {
+            "label": "登记时间",
+            "width": 180
+          },
+          {
+            "label": "操作",
+            "width": 240
+          }
+        ],
+        "rows": [
+          [
+            "确认入库",
+            "标记重复",
+            "忽略",
+            "无效"
+          ],
+          [
+            "确认入库",
+            "标记重复",
+            "忽略",
+            "无效"
+          ],
+          [
+            "确认入库",
+            "标记重复",
+            "忽略",
+            "无效"
+          ],
+          [
+            "确认入库",
+            "标记重复",
+            "忽略",
+            "无效"
+          ]
+        ]
+      }
+    ]
+  },
+  {
+    "route": "data-governance",
+    "width": 1440,
+    "tables": [
+      {
+        "width": 1107,
+        "overflow": 0,
+        "columns": [
+          {
+            "label": "字段名称",
+            "width": 269
+          },
+          {
+            "label": "字段类型",
+            "width": 130
+          },
+          {
+            "label": "选项",
+            "width": 268
+          },
+          {
+            "label": "规则",
+            "width": 130
+          },
+          {
+            "label": "排序",
+            "width": 90
+          },
+          {
+            "label": "状态",
+            "width": 100
+          },
+          {
+            "label": "操作",
+            "width": 120
+          }
+        ],
+        "rows": []
+      }
+    ]
+  },
+  {
+    "route": "data-governance",
+    "width": 1280,
+    "tables": [
+      {
+        "width": 947,
+        "overflow": 0,
+        "columns": [
+          {
+            "label": "字段名称",
+            "width": 189
+          },
+          {
+            "label": "字段类型",
+            "width": 130
+          },
+          {
+            "label": "选项",
+            "width": 188
+          },
+          {
+            "label": "规则",
+            "width": 130
+          },
+          {
+            "label": "排序",
+            "width": 90
+          },
+          {
+            "label": "状态",
+            "width": 100
+          },
+          {
+            "label": "操作",
+            "width": 120
+          }
+        ],
+        "rows": []
+      }
+    ]
+  },
+  {
+    "route": "data-quality-issues",
+    "width": 1440,
+    "tables": [
+      {
+        "width": 1099,
+        "overflow": 198,
+        "columns": [
+          {
+            "label": "",
+            "width": 46
+          },
+          {
+            "label": "问题",
+            "width": 230
+          },
+          {
+            "label": "资源",
+            "width": 190
+          },
+          {
+            "label": "责任组织",
+            "width": 170
+          },
+          {
+            "label": "级别",
+            "width": 86
+          },
+          {
+            "label": "状态",
+            "width": 100
+          },
+          {
+            "label": "负责人",
+            "width": 110
+          },
+          {
+            "label": "最近发现",
+            "width": 155
+          },
+          {
+            "label": "操作",
+            "width": 210
+          }
+        ],
+        "rows": [
+          [
+            "通过",
+            "退回",
+            "豁免"
+          ],
+          [
+            "开始整改",
+            "提交复核",
+            "豁免"
+          ],
+          [
+            "开始整改",
+            "提交复核",
+            "豁免"
+          ],
+          [
+            "开始整改",
+            "提交复核",
+            "豁免"
+          ]
+        ]
+      }
+    ]
+  },
+  {
+    "route": "data-quality-issues",
+    "width": 1280,
+    "tables": [
+      {
+        "width": 939,
+        "overflow": 358,
+        "columns": [
+          {
+            "label": "",
+            "width": 46
+          },
+          {
+            "label": "问题",
+            "width": 230
+          },
+          {
+            "label": "资源",
+            "width": 190
+          },
+          {
+            "label": "责任组织",
+            "width": 170
+          },
+          {
+            "label": "级别",
+            "width": 86
+          },
+          {
+            "label": "状态",
+            "width": 100
+          },
+          {
+            "label": "负责人",
+            "width": 110
+          },
+          {
+            "label": "最近发现",
+            "width": 155
+          },
+          {
+            "label": "操作",
+            "width": 210
+          }
+        ],
+        "rows": [
+          [
+            "通过",
+            "退回",
+            "豁免"
+          ],
+          [
+            "开始整改",
+            "提交复核",
+            "豁免"
+          ],
+          [
+            "开始整改",
+            "提交复核",
+            "豁免"
+          ],
+          [
+            "开始整改",
+            "提交复核",
+            "豁免"
+          ]
+        ]
+      }
+    ]
+  },
+  {
+    "route": "data-quality-scan-history",
+    "width": 1440,
+    "tables": [
+      {
+        "width": 1099,
+        "overflow": 81,
+        "columns": [
+          {
+            "label": "执行时间",
+            "width": 170
+          },
+          {
+            "label": "触发方式",
+            "width": 120
+          },
+          {
+            "label": "巡检范围",
+            "width": 190
+          },
+          {
+            "label": "启用规则",
+            "width": 100
+          },
+          {
+            "label": "扫描资源",
+            "width": 110
+          },
+          {
+            "label": "命中问题",
+            "width": 100
+          },
+          {
+            "label": "错误",
+            "width": 80
+          },
+          {
+            "label": "警告",
+            "width": 80
+          },
+          {
+            "label": "自动关闭",
+            "width": 100
+          },
+          {
+            "label": "执行人",
+            "width": 130
+          }
+        ],
+        "rows": [
+          [],
+          [],
+          [],
+          []
+        ]
+      }
+    ]
+  },
+  {
+    "route": "data-quality-scan-history",
+    "width": 1280,
+    "tables": [
+      {
+        "width": 1080,
+        "overflow": 100,
+        "columns": [
+          {
+            "label": "执行时间",
+            "width": 170
+          },
+          {
+            "label": "触发方式",
+            "width": 120
+          },
+          {
+            "label": "巡检范围",
+            "width": 190
+          },
+          {
+            "label": "启用规则",
+            "width": 100
+          },
+          {
+            "label": "扫描资源",
+            "width": 110
+          },
+          {
+            "label": "命中问题",
+            "width": 100
+          },
+          {
+            "label": "错误",
+            "width": 80
+          },
+          {
+            "label": "警告",
+            "width": 80
+          },
+          {
+            "label": "自动关闭",
+            "width": 100
+          },
+          {
+            "label": "执行人",
+            "width": 130
+          }
+        ],
+        "rows": [
+          [],
+          [],
+          [],
+          []
+        ]
+      }
+    ]
+  },
+  {
+    "route": "export-jobs",
+    "width": 1440,
+    "tables": [
+      {
+        "width": 1107,
+        "overflow": 78,
+        "columns": [
+          {
+            "label": "导出内容",
+            "width": 180
+          },
+          {
+            "label": "状态",
+            "width": 120
+          },
+          {
+            "label": "进度",
+            "width": 190
+          },
+          {
+            "label": "文件",
+            "width": 125
+          },
+          {
+            "label": "创建 / 完成时间",
+            "width": 220
+          },
+          {
+            "label": "有效期 / 失败原因",
+            "width": 230
+          },
+          {
+            "label": "操作",
+            "width": 120
+          }
+        ],
+        "rows": []
+      }
+    ]
+  },
+  {
+    "route": "export-jobs",
+    "width": 1280,
+    "tables": [
+      {
+        "width": 947,
+        "overflow": 238,
+        "columns": [
+          {
+            "label": "导出内容",
+            "width": 180
+          },
+          {
+            "label": "状态",
+            "width": 120
+          },
+          {
+            "label": "进度",
+            "width": 190
+          },
+          {
+            "label": "文件",
+            "width": 125
+          },
+          {
+            "label": "创建 / 完成时间",
+            "width": 220
+          },
+          {
+            "label": "有效期 / 失败原因",
+            "width": 230
+          },
+          {
+            "label": "操作",
+            "width": 120
+          }
+        ],
+        "rows": []
+      }
+    ]
+  },
+  {
+    "route": "audit-logs",
+    "width": 1440,
+    "tables": [
+      {
+        "width": 1107,
+        "overflow": 93,
+        "columns": [
+          {
+            "label": "操作时间",
+            "width": 172
+          },
+          {
+            "label": "操作",
+            "width": 150
+          },
+          {
+            "label": "操作人",
+            "width": 160
+          },
+          {
+            "label": "所属组织",
+            "width": 180
+          },
+          {
+            "label": "资源",
+            "width": 180
+          },
+          {
+            "label": "摘要",
+            "width": 190
+          },
+          {
+            "label": "结果",
+            "width": 86
+          },
+          {
+            "label": "详情",
+            "width": 82
+          }
+        ],
+        "rows": [
+          [
+            "查看"
+          ],
+          [
+            "查看"
+          ],
+          [
+            "查看"
+          ],
+          [
+            "查看"
+          ]
+        ]
+      }
+    ]
+  },
+  {
+    "route": "audit-logs",
+    "width": 1280,
+    "tables": [
+      {
+        "width": 947,
+        "overflow": 253,
+        "columns": [
+          {
+            "label": "操作时间",
+            "width": 172
+          },
+          {
+            "label": "操作",
+            "width": 150
+          },
+          {
+            "label": "操作人",
+            "width": 160
+          },
+          {
+            "label": "所属组织",
+            "width": 180
+          },
+          {
+            "label": "资源",
+            "width": 180
+          },
+          {
+            "label": "摘要",
+            "width": 190
+          },
+          {
+            "label": "结果",
+            "width": 86
+          },
+          {
+            "label": "详情",
+            "width": 82
+          }
+        ],
+        "rows": [
+          [
+            "查看"
+          ],
+          [
+            "查看"
+          ],
+          [
+            "查看"
+          ],
+          [
+            "查看"
+          ]
+        ]
+      }
+    ]
+  },
+  {
+    "route": "backups",
+    "width": 1440,
+    "tables": []
+  },
+  {
+    "route": "backups",
+    "width": 1280,
+    "tables": []
+  },
+  {
+    "route": "recycle-bin",
+    "width": 1440,
+    "tables": [
+      {
+        "width": 1107,
+        "overflow": 0,
+        "columns": [
+          {
+            "label": "资源",
+            "width": 333
+          },
+          {
+            "label": "所属组织",
+            "width": 260
+          },
+          {
+            "label": "删除前状态",
+            "width": 173
+          },
+          {
+            "label": "删除时间",
+            "width": 257
+          },
+          {
+            "label": "操作",
+            "width": 84
+          }
+        ],
+        "rows": []
+      }
+    ]
+  },
+  {
+    "route": "recycle-bin",
+    "width": 1280,
+    "tables": [
+      {
+        "width": 947,
+        "overflow": 0,
+        "columns": [
+          {
+            "label": "资源",
+            "width": 282
+          },
+          {
+            "label": "所属组织",
+            "width": 219
+          },
+          {
+            "label": "删除前状态",
+            "width": 146
+          },
+          {
+            "label": "删除时间",
+            "width": 216
+          },
+          {
+            "label": "操作",
+            "width": 84
+          }
+        ],
+        "rows": []
+      }
+    ]
+  }
+]

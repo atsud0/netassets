@@ -43,7 +43,7 @@ func (s *Service) searchWorkingCreates(ctx context.Context, p auth.Principal, f 
  COALESCE(b.owner_name,'') owner_name,COALESCE(b.owner_contact,'') owner_contact,b.system_status,b.system_level,COALESCE(b.deployment_type,'') deployment_type,b.internet_exposure,COALESCE(b.description,'') description,
  p.contains_personal_information,p.contains_sensitive_personal_information,p.personal_information_record_count,p.data_volume_over_100k,p.contains_important_data,p.contains_core_data,
  COALESCE(p.data_storage_location,'') data_storage_location,COALESCE(p.notes,'') security_notes,(SELECT count(*)::int FROM system_assets sa JOIN assets a ON a.id=sa.asset_id AND a.deleted_at IS NULL WHERE sa.business_system_id=b.id) asset_count,
- b.created_at,b.updated_at,'reported'::text reporting_status,false is_working_copy,''::text published_id,''::text task_id,''::text draft_status,''::text operation,'[]'::jsonb custom_values
+ b.created_at,b.updated_at,'reported'::text reporting_status,false is_working_copy,''::text published_id,''::text task_id,''::text draft_status,''::text operation,0 version,''::text assigned_to,''::text last_edited_by,''::text takeover_reason,'[]'::jsonb custom_values
  FROM business_systems b JOIN organizations o ON o.id=b.owner_organization_id JOIN business_system_data_security_profiles p ON p.business_system_id=b.id
  WHERE b.deleted_at IS NULL AND b.owner_organization_id IN (SELECT id FROM accessible)
  AND NOT EXISTS(SELECT 1 FROM inventory_business_system_drafts d WHERE d.source_system_id=b.id AND d.organization_id=b.owner_organization_id AND d.draft_status IN ('editing','submitted','returned'))
@@ -53,13 +53,13 @@ func (s *Service) searchWorkingCreates(ctx context.Context, p auth.Principal, f 
  d.personal_information_record_count,d.data_volume_over_100k,d.contains_important_data,d.contains_core_data,COALESCE(d.data_storage_location,''),COALESCE(d.security_notes,''),
  CASE WHEN d.source_system_id IS NULL THEN 0 ELSE (SELECT count(*)::int FROM system_assets sa JOIN assets a ON a.id=sa.asset_id AND a.deleted_at IS NULL WHERE sa.business_system_id=d.source_system_id) END,
  d.created_at,d.updated_at,CASE WHEN d.draft_status='submitted' THEN 'pending_review' WHEN d.draft_status='returned' THEN 'returned' WHEN d.operation='delete' THEN 'pending_offline' WHEN d.operation='update' THEN 'changed' ELSE 'unreported' END,
- true,COALESCE(d.source_system_id::text,''),COALESCE(d.task_id::text,''),d.draft_status,d.operation,d.custom_values
+ true,COALESCE(d.source_system_id::text,''),COALESCE(d.task_id::text,''),d.draft_status,d.operation,d.version,COALESCE(d.assigned_to::text,''),COALESCE(d.last_edited_by::text,''),COALESCE(d.takeover_reason,''),d.custom_values
  FROM inventory_business_system_drafts d JOIN organizations o ON o.id=d.organization_id
  WHERE d.organization_id IN (SELECT id FROM accessible) AND d.draft_status IN ('editing','submitted','returned')
 )
 SELECT id,system_code,system_name,short_name,organization_id,organization_code,organization_name,owner_name,owner_contact,system_status,system_level,deployment_type,internet_exposure,description,
  contains_personal_information,contains_sensitive_personal_information,personal_information_record_count,data_volume_over_100k,contains_important_data,contains_core_data,data_storage_location,security_notes,asset_count,
- created_at,updated_at,reporting_status,is_working_copy,published_id,task_id,draft_status,operation,custom_values,count(*) OVER()
+ created_at,updated_at,reporting_status,is_working_copy,published_id,task_id,draft_status,operation,version,assigned_to,last_edited_by,takeover_reason,custom_values,count(*) OVER()
 FROM ledger WHERE ($2='' OR organization_id=$2) AND ($3='' OR system_status=$3) AND ($4='' OR concat_ws(' ',system_code,system_name,short_name,organization_name,owner_name,owner_contact) ILIKE '%'||$4||'%')
  AND (COALESCE(cardinality($5::uuid[]),0)=0 OR id::uuid=ANY($5::uuid[]))
 ORDER BY organization_code,system_code LIMIT $6 OFFSET $7`, p.UserID, strings.TrimSpace(f.OrganizationID), strings.TrimSpace(f.Status), strings.TrimSpace(f.Keyword), f.SelectedIDs, page.PageSize, page.Offset())
@@ -72,7 +72,7 @@ ORDER BY organization_code,system_code LIMIT $6 OFFSET $7`, p.UserID, strings.Tr
 	for rows.Next() {
 		var b BusinessSystem
 		var raw []byte
-		if err = rows.Scan(&b.ID, &b.Code, &b.Name, &b.ShortName, &b.OrganizationID, &b.OrganizationCode, &b.OrganizationName, &b.OwnerName, &b.OwnerContact, &b.Status, &b.Level, &b.DeploymentType, &b.InternetExposure, &b.Description, &b.ContainsPersonalInformation, &b.ContainsSensitivePersonalInformation, &b.PersonalInformationRecordCount, &b.DataVolumeOver100K, &b.ContainsImportantData, &b.ContainsCoreData, &b.DataStorageLocation, &b.SecurityNotes, &b.AssetCount, &b.CreatedAt, &b.UpdatedAt, &b.ReportingStatus, &b.IsWorkingCopy, &b.PublishedID, &b.TaskID, &b.DraftStatus, &b.Operation, &raw, &total); err != nil {
+		if err = rows.Scan(&b.ID, &b.Code, &b.Name, &b.ShortName, &b.OrganizationID, &b.OrganizationCode, &b.OrganizationName, &b.OwnerName, &b.OwnerContact, &b.Status, &b.Level, &b.DeploymentType, &b.InternetExposure, &b.Description, &b.ContainsPersonalInformation, &b.ContainsSensitivePersonalInformation, &b.PersonalInformationRecordCount, &b.DataVolumeOver100K, &b.ContainsImportantData, &b.ContainsCoreData, &b.DataStorageLocation, &b.SecurityNotes, &b.AssetCount, &b.CreatedAt, &b.UpdatedAt, &b.ReportingStatus, &b.IsWorkingCopy, &b.PublishedID, &b.TaskID, &b.DraftStatus, &b.Operation, &b.Version, &b.AssignedTo, &b.LastEditedBy, &b.TakeoverReason, &raw, &total); err != nil {
 			return pagination.Result[BusinessSystem]{}, err
 		}
 		if err = json.Unmarshal(raw, &b.CustomValues); err != nil {
@@ -95,11 +95,11 @@ SELECT d.id::text,d.system_code,d.system_name,COALESCE(d.short_name,''),o.id::te
 COALESCE(d.deployment_type,''),d.internet_exposure,COALESCE(d.description,''),d.contains_personal_information,d.contains_sensitive_personal_information,d.personal_information_record_count,d.data_volume_over_100k,d.contains_important_data,d.contains_core_data,
 COALESCE(d.data_storage_location,''),COALESCE(d.security_notes,''),CASE WHEN d.source_system_id IS NULL THEN 0 ELSE (SELECT count(*)::int FROM system_assets sa JOIN assets a ON a.id=sa.asset_id AND a.deleted_at IS NULL WHERE sa.business_system_id=d.source_system_id) END,
 d.created_at,d.updated_at,CASE WHEN d.draft_status='submitted' THEN 'pending_review' WHEN d.draft_status='returned' THEN 'returned' WHEN d.operation='delete' THEN 'pending_offline' WHEN d.operation='update' THEN 'changed' ELSE 'unreported' END,
-true,COALESCE(d.source_system_id::text,''),COALESCE(d.task_id::text,''),d.draft_status,d.operation,d.custom_values
+true,COALESCE(d.source_system_id::text,''),COALESCE(d.task_id::text,''),d.draft_status,d.operation,d.version,COALESCE(d.assigned_to::text,''),COALESCE(d.last_edited_by::text,''),COALESCE(d.takeover_reason,''),d.custom_values
 FROM inventory_business_system_drafts d JOIN organizations o ON o.id=d.organization_id WHERE d.id::text=$2 AND d.organization_id IN(SELECT id FROM accessible) AND d.draft_status IN('editing','submitted','returned')`, p.UserID, id)
 	var b BusinessSystem
 	var raw []byte
-	err := row.Scan(&b.ID, &b.Code, &b.Name, &b.ShortName, &b.OrganizationID, &b.OrganizationCode, &b.OrganizationName, &b.OwnerName, &b.OwnerContact, &b.Status, &b.Level, &b.DeploymentType, &b.InternetExposure, &b.Description, &b.ContainsPersonalInformation, &b.ContainsSensitivePersonalInformation, &b.PersonalInformationRecordCount, &b.DataVolumeOver100K, &b.ContainsImportantData, &b.ContainsCoreData, &b.DataStorageLocation, &b.SecurityNotes, &b.AssetCount, &b.CreatedAt, &b.UpdatedAt, &b.ReportingStatus, &b.IsWorkingCopy, &b.PublishedID, &b.TaskID, &b.DraftStatus, &b.Operation, &raw)
+	err := row.Scan(&b.ID, &b.Code, &b.Name, &b.ShortName, &b.OrganizationID, &b.OrganizationCode, &b.OrganizationName, &b.OwnerName, &b.OwnerContact, &b.Status, &b.Level, &b.DeploymentType, &b.InternetExposure, &b.Description, &b.ContainsPersonalInformation, &b.ContainsSensitivePersonalInformation, &b.PersonalInformationRecordCount, &b.DataVolumeOver100K, &b.ContainsImportantData, &b.ContainsCoreData, &b.DataStorageLocation, &b.SecurityNotes, &b.AssetCount, &b.CreatedAt, &b.UpdatedAt, &b.ReportingStatus, &b.IsWorkingCopy, &b.PublishedID, &b.TaskID, &b.DraftStatus, &b.Operation, &b.Version, &b.AssignedTo, &b.LastEditedBy, &b.TakeoverReason, &raw)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return BusinessSystem{}, ErrNotFound
 	}
@@ -166,7 +166,7 @@ func (s *Service) createUnreported(ctx context.Context, p auth.Principal, in Cre
 		return BusinessSystem{}, ErrConflict
 	}
 	var id string
-	err = tx.QueryRow(ctx, `INSERT INTO inventory_business_system_drafts(task_id,organization_id,operation,system_code,system_name,short_name,owner_name,owner_contact,system_status,system_level,deployment_type,internet_exposure,description,contains_personal_information,contains_sensitive_personal_information,personal_information_record_count,data_volume_over_100k,contains_important_data,contains_core_data,data_storage_location,security_notes,custom_values,draft_status,created_by,updated_by) VALUES(NULL,$1::uuid,'create',$2,$3,NULLIF($4,''),NULLIF($5,''),NULLIF($6,''),$7,$8,NULLIF($9,''),$10,NULLIF($11,''),$12,$13,$14,$15,$16,$17,NULLIF($18,''),NULLIF($19,''),$20::jsonb,'editing',$21::uuid,$21::uuid) RETURNING id::text`, in.OrganizationID, in.Code, in.Name, in.ShortName, in.OwnerName, in.OwnerContact, in.Status, in.Level, in.DeploymentType, in.InternetExposure, in.Description, in.ContainsPersonalInformation, in.ContainsSensitivePersonalInformation, in.PersonalInformationRecordCount, in.DataVolumeOver100K, in.ContainsImportantData, in.ContainsCoreData, in.DataStorageLocation, in.SecurityNotes, raw, p.UserID).Scan(&id)
+	err = tx.QueryRow(ctx, `INSERT INTO inventory_business_system_drafts(task_id,organization_id,operation,system_code,system_name,short_name,owner_name,owner_contact,system_status,system_level,deployment_type,internet_exposure,description,contains_personal_information,contains_sensitive_personal_information,personal_information_record_count,data_volume_over_100k,contains_important_data,contains_core_data,data_storage_location,security_notes,custom_values,draft_status,created_by,updated_by,assigned_to,last_edited_by,version) VALUES(NULL,$1::uuid,'create',$2,$3,NULLIF($4,''),NULLIF($5,''),NULLIF($6,''),$7,$8,NULLIF($9,''),$10,NULLIF($11,''),$12,$13,$14,$15,$16,$17,NULLIF($18,''),NULLIF($19,''),$20::jsonb,'editing',$21::uuid,$21::uuid,$21::uuid,$21::uuid,1) RETURNING id::text`, in.OrganizationID, in.Code, in.Name, in.ShortName, in.OwnerName, in.OwnerContact, in.Status, in.Level, in.DeploymentType, in.InternetExposure, in.Description, in.ContainsPersonalInformation, in.ContainsSensitivePersonalInformation, in.PersonalInformationRecordCount, in.DataVolumeOver100K, in.ContainsImportantData, in.ContainsCoreData, in.DataStorageLocation, in.SecurityNotes, raw, p.UserID).Scan(&id)
 	if err != nil {
 		return BusinessSystem{}, mapWorkingDB(err)
 	}
@@ -198,6 +198,9 @@ func (s *Service) updateWorking(ctx context.Context, p auth.Principal, id string
 	if cur.OrganizationID != in.OrganizationID {
 		return BusinessSystem{}, ErrForbidden
 	}
+	if err = checkExpectedVersion(cur, in.ExpectedVersion); err != nil {
+		return BusinessSystem{}, err
+	}
 	if err = PrepareCreateInput(&in); err != nil {
 		return BusinessSystem{}, err
 	}
@@ -205,12 +208,23 @@ func (s *Service) updateWorking(ctx context.Context, p auth.Principal, id string
 	if err != nil {
 		return BusinessSystem{}, err
 	}
-	r, err := s.pool.Exec(ctx, `UPDATE inventory_business_system_drafts SET system_code=$2,system_name=$3,short_name=NULLIF($4,''),owner_name=NULLIF($5,''),owner_contact=NULLIF($6,''),system_status=$7,system_level=$8,deployment_type=NULLIF($9,''),internet_exposure=$10,description=NULLIF($11,''),contains_personal_information=$12,contains_sensitive_personal_information=$13,personal_information_record_count=$14,data_volume_over_100k=$15,contains_important_data=$16,contains_core_data=$17,data_storage_location=NULLIF($18,''),security_notes=NULLIF($19,''),custom_values=$20::jsonb,draft_status='editing',updated_by=$21::uuid,updated_at=now() WHERE id::text=$1 AND task_id IS NULL AND operation IN('create','update') AND draft_status IN('editing','returned')`, id, in.Code, in.Name, in.ShortName, in.OwnerName, in.OwnerContact, in.Status, in.Level, in.DeploymentType, in.InternetExposure, in.Description, in.ContainsPersonalInformation, in.ContainsSensitivePersonalInformation, in.PersonalInformationRecordCount, in.DataVolumeOver100K, in.ContainsImportantData, in.ContainsCoreData, in.DataStorageLocation, in.SecurityNotes, raw, p.UserID)
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return BusinessSystem{}, err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	r, err := tx.Exec(ctx, `UPDATE inventory_business_system_drafts SET system_code=$2,system_name=$3,short_name=NULLIF($4,''),owner_name=NULLIF($5,''),owner_contact=NULLIF($6,''),system_status=$7,system_level=$8,deployment_type=NULLIF($9,''),internet_exposure=$10,description=NULLIF($11,''),contains_personal_information=$12,contains_sensitive_personal_information=$13,personal_information_record_count=$14,data_volume_over_100k=$15,contains_important_data=$16,contains_core_data=$17,data_storage_location=NULLIF($18,''),security_notes=NULLIF($19,''),custom_values=$20::jsonb,draft_status='editing',version=version+1,last_edited_by=$21::uuid,updated_by=$21::uuid,updated_at=now() WHERE id::text=$1 AND task_id IS NULL AND operation IN('create','update') AND draft_status IN('editing','returned') AND version=$22`, id, in.Code, in.Name, in.ShortName, in.OwnerName, in.OwnerContact, in.Status, in.Level, in.DeploymentType, in.InternetExposure, in.Description, in.ContainsPersonalInformation, in.ContainsSensitivePersonalInformation, in.PersonalInformationRecordCount, in.DataVolumeOver100K, in.ContainsImportantData, in.ContainsCoreData, in.DataStorageLocation, in.SecurityNotes, raw, p.UserID, cur.Version)
 	if err != nil {
 		return BusinessSystem{}, mapWorkingDB(err)
 	}
 	if r.RowsAffected() == 0 {
-		return BusinessSystem{}, ErrNotFound
+		return BusinessSystem{}, workingCASFailure(ctx, tx, id, cur.Version)
+	}
+	if err = writeWorkingAudit(ctx, tx, p, "business_system.working_update", cur.OrganizationID, id, "编辑业务系统工作版本", map[string]any{"version_before": cur.Version, "version_after": cur.Version + 1}, ip, requestID); err != nil {
+		return BusinessSystem{}, err
+	}
+	if err = tx.Commit(ctx); err != nil {
+		return BusinessSystem{}, err
 	}
 	return s.getWorking(ctx, p, id)
 }
@@ -232,7 +246,7 @@ func (s *Service) createWorkingUpdate(ctx context.Context, p auth.Principal, cur
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 	var id string
-	err = tx.QueryRow(ctx, `INSERT INTO inventory_business_system_drafts(task_id,organization_id,operation,source_system_id,system_code,system_name,short_name,owner_name,owner_contact,system_status,system_level,deployment_type,internet_exposure,description,contains_personal_information,contains_sensitive_personal_information,personal_information_record_count,data_volume_over_100k,contains_important_data,contains_core_data,data_storage_location,security_notes,custom_values,draft_status,created_by,updated_by) VALUES(NULL,$1::uuid,'update',$2::uuid,$3,$4,NULLIF($5,''),NULLIF($6,''),NULLIF($7,''),$8,$9,NULLIF($10,''),$11,NULLIF($12,''),$13,$14,$15,$16,$17,$18,NULLIF($19,''),NULLIF($20,''),$21::jsonb,'editing',$22::uuid,$22::uuid) RETURNING id::text`, in.OrganizationID, current.ID, in.Code, in.Name, in.ShortName, in.OwnerName, in.OwnerContact, in.Status, in.Level, in.DeploymentType, in.InternetExposure, in.Description, in.ContainsPersonalInformation, in.ContainsSensitivePersonalInformation, in.PersonalInformationRecordCount, in.DataVolumeOver100K, in.ContainsImportantData, in.ContainsCoreData, in.DataStorageLocation, in.SecurityNotes, raw, p.UserID).Scan(&id)
+	err = tx.QueryRow(ctx, `INSERT INTO inventory_business_system_drafts(task_id,organization_id,operation,source_system_id,system_code,system_name,short_name,owner_name,owner_contact,system_status,system_level,deployment_type,internet_exposure,description,contains_personal_information,contains_sensitive_personal_information,personal_information_record_count,data_volume_over_100k,contains_important_data,contains_core_data,data_storage_location,security_notes,custom_values,draft_status,created_by,updated_by,assigned_to,last_edited_by,version) VALUES(NULL,$1::uuid,'update',$2::uuid,$3,$4,NULLIF($5,''),NULLIF($6,''),NULLIF($7,''),$8,$9,NULLIF($10,''),$11,NULLIF($12,''),$13,$14,$15,$16,$17,$18,NULLIF($19,''),NULLIF($20,''),$21::jsonb,'editing',$22::uuid,$22::uuid,$22::uuid,$22::uuid,1) RETURNING id::text`, in.OrganizationID, current.ID, in.Code, in.Name, in.ShortName, in.OwnerName, in.OwnerContact, in.Status, in.Level, in.DeploymentType, in.InternetExposure, in.Description, in.ContainsPersonalInformation, in.ContainsSensitivePersonalInformation, in.PersonalInformationRecordCount, in.DataVolumeOver100K, in.ContainsImportantData, in.ContainsCoreData, in.DataStorageLocation, in.SecurityNotes, raw, p.UserID).Scan(&id)
 	if err != nil {
 		return BusinessSystem{}, mapWorkingDB(err)
 	}
@@ -250,7 +264,7 @@ func (s *Service) createWorkingUpdate(ctx context.Context, p auth.Principal, cur
 	return s.getWorking(ctx, p, id)
 }
 
-func (s *Service) deleteWorking(ctx context.Context, p auth.Principal, id string) error {
+func (s *Service) deleteWorking(ctx context.Context, p auth.Principal, id string, expectedVersion *int, requestID, ip string) error {
 	cur, err := s.getWorking(ctx, p, id)
 	if err != nil {
 		return err
@@ -265,33 +279,91 @@ func (s *Service) deleteWorking(ctx context.Context, p auth.Principal, id string
 	if !ok {
 		return ErrForbidden
 	}
+	if err = checkExpectedVersion(cur, expectedVersion); err != nil {
+		return err
+	}
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
 	if cur.Operation == "create" {
 		var linked bool
-		err = s.pool.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM inventory_asset_drafts WHERE business_system_draft_id::text=$1 AND draft_status IN('editing','submitted','returned'))`, id).Scan(&linked)
-		if err != nil {
+		if err = tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM inventory_asset_drafts WHERE business_system_draft_id::text=$1 AND draft_status IN('editing','submitted','returned'))`, id).Scan(&linked); err != nil {
 			return err
 		}
 		if linked {
 			return ErrInUse
 		}
-		r, err := s.pool.Exec(ctx, `UPDATE inventory_business_system_drafts SET draft_status='discarded',updated_by=$2::uuid,updated_at=now() WHERE id::text=$1 AND task_id IS NULL AND operation='create' AND draft_status IN('editing','returned')`, id, p.UserID)
+		r, err := tx.Exec(ctx, `UPDATE inventory_business_system_drafts SET draft_status='discarded',version=version+1,last_edited_by=$2::uuid,updated_by=$2::uuid,updated_at=now() WHERE id::text=$1 AND task_id IS NULL AND operation='create' AND draft_status IN('editing','returned') AND version=$3`, id, p.UserID, cur.Version)
 		if err != nil {
 			return err
 		}
 		if r.RowsAffected() == 0 {
-			return ErrNotFound
+			return workingCASFailure(ctx, tx, id, cur.Version)
 		}
-		return nil
+		if err = writeWorkingAudit(ctx, tx, p, "business_system.working_discard", cur.OrganizationID, id, "作废未上报业务系统工作版本", map[string]any{"version_before": cur.Version, "version_after": cur.Version + 1}, ip, requestID); err != nil {
+			return err
+		}
+		return tx.Commit(ctx)
 	}
-	r, err := s.pool.Exec(ctx, `UPDATE inventory_business_system_drafts SET operation='delete',draft_status='editing',updated_by=$2::uuid,updated_at=now() WHERE id::text=$1 AND task_id IS NULL AND source_system_id IS NOT NULL AND draft_status IN('editing','returned')`, id, p.UserID)
+	r, err := tx.Exec(ctx, `UPDATE inventory_business_system_drafts SET operation='delete',draft_status='editing',version=version+1,last_edited_by=$2::uuid,updated_by=$2::uuid,updated_at=now() WHERE id::text=$1 AND task_id IS NULL AND source_system_id IS NOT NULL AND draft_status IN('editing','returned') AND version=$3`, id, p.UserID, cur.Version)
 	if err != nil {
 		return err
 	}
 	if r.RowsAffected() == 0 {
-		return ErrNotFound
+		return workingCASFailure(ctx, tx, id, cur.Version)
+	}
+	if err = writeWorkingAudit(ctx, tx, p, "business_system.working_delete_request", cur.OrganizationID, id, "申请下线业务系统工作版本", map[string]any{"version_before": cur.Version, "version_after": cur.Version + 1, "published_id": cur.PublishedID}, ip, requestID); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
+}
+
+func checkExpectedVersion(cur BusinessSystem, expected *int) error {
+	if expected == nil || *expected <= 0 {
+		return ErrVersionRequired
+	}
+	if *expected != cur.Version {
+		return ErrEditConflict
 	}
 	return nil
 }
+
+// workingCASFailure distinguishes "someone else already advanced this working
+// version" from "the row is gone or no longer editable". Both must be surfaced
+// as 409 by the HTTP layer so the frontend can refresh instead of guessing.
+func workingCASFailure(ctx context.Context, tx pgx.Tx, id string, expected int) error {
+	var currentVersion int
+	var status string
+	err := tx.QueryRow(ctx, `SELECT version, draft_status FROM inventory_business_system_drafts WHERE id::text=$1`, id).Scan(&currentVersion, &status)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return ErrNotFound
+	}
+	if err != nil {
+		return err
+	}
+	if status != "editing" && status != "returned" {
+		return ErrConflict
+	}
+	if currentVersion != expected {
+		return ErrEditConflict
+	}
+	return ErrConflict
+}
+
+func writeWorkingAudit(ctx context.Context, tx pgx.Tx, p auth.Principal, action, organizationID, resourceID, summary string, details map[string]any, ip, requestID string) error {
+	raw, err := json.Marshal(details)
+	if err != nil {
+		return err
+	}
+	_, err = tx.Exec(ctx, `
+		INSERT INTO audit_logs(user_id,organization_id,action,resource_type,resource_id,summary,details,request_ip,request_id)
+		VALUES($1::uuid,$2::uuid,$3,'business_system',$4,$5,$6::jsonb,NULLIF($7,'')::inet,NULLIF($8,''))
+	`, p.UserID, organizationID, action, resourceID, summary, raw, ip, requestID)
+	return err
+}
+
 func (s *Service) createWorkingDelete(ctx context.Context, p auth.Principal, current BusinessSystem) error {
 	ok, err := access.CanOperateOrganization(ctx, s.pool, p, current.OrganizationID, "system.manage")
 	if err != nil {
@@ -321,7 +393,7 @@ func (s *Service) createWorkingDelete(ctx context.Context, p auth.Principal, cur
 		return err
 	}
 	var id string
-	if err = tx.QueryRow(ctx, `INSERT INTO inventory_business_system_drafts(task_id,organization_id,operation,source_system_id,system_code,system_name,short_name,owner_name,owner_contact,system_status,system_level,deployment_type,internet_exposure,description,contains_personal_information,contains_sensitive_personal_information,personal_information_record_count,data_volume_over_100k,contains_important_data,contains_core_data,data_storage_location,security_notes,custom_values,draft_status,created_by,updated_by) VALUES(NULL,$1::uuid,'delete',$2::uuid,$3,$4,NULLIF($5,''),NULLIF($6,''),NULLIF($7,''),$8,$9,NULLIF($10,''),$11,NULLIF($12,''),$13,$14,$15,$16,$17,$18,NULLIF($19,''),NULLIF($20,''),$21::jsonb,'editing',$22::uuid,$22::uuid) RETURNING id::text`, current.OrganizationID, current.ID, current.Code, current.Name, current.ShortName, current.OwnerName, current.OwnerContact, current.Status, current.Level, current.DeploymentType, current.InternetExposure, current.Description, current.ContainsPersonalInformation, current.ContainsSensitivePersonalInformation, current.PersonalInformationRecordCount, current.DataVolumeOver100K, current.ContainsImportantData, current.ContainsCoreData, current.DataStorageLocation, current.SecurityNotes, raw, p.UserID).Scan(&id); err != nil {
+	if err = tx.QueryRow(ctx, `INSERT INTO inventory_business_system_drafts(task_id,organization_id,operation,source_system_id,system_code,system_name,short_name,owner_name,owner_contact,system_status,system_level,deployment_type,internet_exposure,description,contains_personal_information,contains_sensitive_personal_information,personal_information_record_count,data_volume_over_100k,contains_important_data,contains_core_data,data_storage_location,security_notes,custom_values,draft_status,created_by,updated_by,assigned_to,last_edited_by,version) VALUES(NULL,$1::uuid,'delete',$2::uuid,$3,$4,NULLIF($5,''),NULLIF($6,''),NULLIF($7,''),$8,$9,NULLIF($10,''),$11,NULLIF($12,''),$13,$14,$15,$16,$17,$18,NULLIF($19,''),NULLIF($20,''),$21::jsonb,'editing',$22::uuid,$22::uuid,$22::uuid,$22::uuid,1) RETURNING id::text`, current.OrganizationID, current.ID, current.Code, current.Name, current.ShortName, current.OwnerName, current.OwnerContact, current.Status, current.Level, current.DeploymentType, current.InternetExposure, current.Description, current.ContainsPersonalInformation, current.ContainsSensitivePersonalInformation, current.PersonalInformationRecordCount, current.DataVolumeOver100K, current.ContainsImportantData, current.ContainsCoreData, current.DataStorageLocation, current.SecurityNotes, raw, p.UserID).Scan(&id); err != nil {
 		return mapWorkingDB(err)
 	}
 	if err = notification.WriteEvent(ctx, tx, notification.EventInput{

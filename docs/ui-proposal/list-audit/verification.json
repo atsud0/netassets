@@ -1,0 +1,176 @@
+{
+  "viewports": [
+    1280,
+    1440
+  ],
+  "page_count": 18,
+  "max_default_table_overflow_px": 0,
+  "browser_errors": [],
+  "image": "c792f878d494090902ce15fd80c89ce20165a59bbd28fe2e6772ede2033b3a90",
+  "rollback_image": "docker.io/library/netassets-app:before-list-20261003",
+  "business_counts_before_and_after": {
+    "work_orders": 24,
+    "findings": 36,
+    "migration": 53
+  },
+  "comparison_1280": [
+    {
+      "page": "security-test-batches",
+      "before_overflow_px": [
+        413
+      ],
+      "after_overflow_px": [
+        0
+      ]
+    },
+    {
+      "page": "security-test-requests",
+      "before_overflow_px": [
+        498
+      ],
+      "after_overflow_px": [
+        0
+      ]
+    },
+    {
+      "page": "security-work-orders",
+      "before_overflow_px": [
+        412
+      ],
+      "after_overflow_px": [
+        0
+      ]
+    },
+    {
+      "page": "assets",
+      "before_overflow_px": [
+        0
+      ],
+      "after_overflow_px": [
+        0
+      ]
+    },
+    {
+      "page": "systems",
+      "before_overflow_px": [
+        479
+      ],
+      "after_overflow_px": [
+        0
+      ]
+    },
+    {
+      "page": "inventory-tasks",
+      "before_overflow_px": [
+        43
+      ],
+      "after_overflow_px": [
+        0
+      ]
+    },
+    {
+      "page": "remediation",
+      "before_overflow_px": [
+        24
+      ],
+      "after_overflow_px": [
+        0
+      ]
+    },
+    {
+      "page": "remediation-people",
+      "before_overflow_px": [
+        0
+      ],
+      "after_overflow_px": [
+        0
+      ]
+    },
+    {
+      "page": "users",
+      "before_overflow_px": [
+        368
+      ],
+      "after_overflow_px": [
+        0
+      ]
+    },
+    {
+      "page": "organizations",
+      "before_overflow_px": [
+        179
+      ],
+      "after_overflow_px": [
+        0
+      ]
+    },
+    {
+      "page": "asset-candidates",
+      "before_overflow_px": [
+        123
+      ],
+      "after_overflow_px": [
+        0
+      ]
+    },
+    {
+      "page": "data-governance",
+      "before_overflow_px": [
+        0
+      ],
+      "after_overflow_px": [
+        0
+      ]
+    },
+    {
+      "page": "data-quality-issues",
+      "before_overflow_px": [
+        358
+      ],
+      "after_overflow_px": [
+        0
+      ]
+    },
+    {
+      "page": "data-quality-scan-history",
+      "before_overflow_px": [
+        100
+      ],
+      "after_overflow_px": [
+        0
+      ]
+    },
+    {
+      "page": "export-jobs",
+      "before_overflow_px": [
+        238
+      ],
+      "after_overflow_px": [
+        0
+      ]
+    },
+    {
+      "page": "audit-logs",
+      "before_overflow_px": [
+        253
+      ],
+      "after_overflow_px": [
+        0
+      ]
+    },
+    {
+      "page": "backups",
+      "before_overflow_px": [],
+      "after_overflow_px": []
+    },
+    {
+      "page": "recycle-bin",
+      "before_overflow_px": [
+        0
+      ],
+      "after_overflow_px": [
+        0
+      ]
+    }
+  ]
+}

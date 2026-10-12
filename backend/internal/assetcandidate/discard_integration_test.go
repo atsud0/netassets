@@ -77,12 +77,17 @@ func TestDiscardingCandidateWorkingVersionReleasesCandidateAndFindings(t *testin
 		t.Fatalf("assign role: %v", err)
 	}
 
-	principal := auth.Principal{UserID: userID, Username: "candidate_discard_operator", DisplayName: "候选废弃测试运营", Permissions: []string{"asset.manage"}}
+	// Candidate creation and confirmation are headquarters-owned actions, while
+	// discarding the resulting working version is an organization-side action.
+	// Both run as the same seeded user so the test stays self-contained.
+	principal := auth.Principal{UserID: userID, Username: "candidate_discard_operator", DisplayName: "候选废弃测试运营", Roles: []string{auth.RoleGroupAdmin}, Permissions: []string{"asset.manage"}}
+	groupPrincipal := principal
+	principal = auth.Principal{UserID: userID, Username: "candidate_discard_operator", DisplayName: "候选废弃测试运营", Roles: []string{"organization_admin"}, Permissions: []string{"asset.manage"}}
 
 	assetService := asset.NewService(pool)
 	service := NewService(pool, assetService)
 
-	created, err := service.Create(ctx, principal, CreateInput{
+	created, err := service.Create(ctx, groupPrincipal, CreateInput{
 		AssetType: "domain", AssetValue: "discard.example.com", Name: "待废弃资产",
 		OrganizationID: organizationID, Source: "finding_import",
 		SourceReference: "findings-20261010",
@@ -90,7 +95,7 @@ func TestDiscardingCandidateWorkingVersionReleasesCandidateAndFindings(t *testin
 	if err != nil {
 		t.Fatalf("create candidate: %v", err)
 	}
-	if _, err := service.Accept(ctx, principal, created.ID, AcceptInput{}, "req-discard", "127.0.0.1"); err != nil {
+	if _, err := service.Accept(ctx, groupPrincipal, created.ID, AcceptInput{}, "req-discard", "127.0.0.1"); err != nil {
 		t.Fatalf("accept candidate: %v", err)
 	}
 
@@ -116,7 +121,12 @@ func TestDiscardingCandidateWorkingVersionReleasesCandidateAndFindings(t *testin
 		t.Fatalf("insert finding: %v", err)
 	}
 
-	if err := assetService.Delete(ctx, principal, draftID, "req-discard", "127.0.0.1"); err != nil {
+	// The working version is locked: the discard must carry the version it read.
+	var draftVersion int
+	if err := pool.QueryRow(ctx, `SELECT version FROM inventory_asset_drafts WHERE id=$1::uuid`, draftID).Scan(&draftVersion); err != nil {
+		t.Fatalf("load working version lock: %v", err)
+	}
+	if err := assetService.Delete(ctx, principal, draftID, &draftVersion, "req-discard", "127.0.0.1"); err != nil {
 		t.Fatalf("discard working version: %v", err)
 	}
 
@@ -139,7 +149,7 @@ func TestDiscardingCandidateWorkingVersionReleasesCandidateAndFindings(t *testin
 	}
 
 	// The whole point of unwinding: the candidate must be confirmable again.
-	if _, err := service.Accept(ctx, principal, created.ID, AcceptInput{}, "req-discard-2", "127.0.0.1"); err != nil {
+	if _, err := service.Accept(ctx, groupPrincipal, created.ID, AcceptInput{}, "req-discard-2", "127.0.0.1"); err != nil {
 		t.Fatalf("re-accept candidate after discard: %v", err)
 	}
 	if err := pool.QueryRow(ctx, `SELECT COALESCE(working_version_draft_id::text,'') FROM asset_candidates WHERE id=$1::uuid`, created.ID).Scan(&draftID); err != nil {
