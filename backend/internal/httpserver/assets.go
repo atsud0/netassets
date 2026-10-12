@@ -155,6 +155,10 @@ func registerAssetRoutes(api *gin.RouterGroup, requireAuth gin.HandlerFunc, serv
 		result, err := service.UpdateBatch(c.Request.Context(), mustPrincipal(c), input, c.GetString("request_id"), c.ClientIP())
 		switch {
 		case errors.Is(err, asset.ErrInvalid):
+			if strings.TrimSpace(input.DirectChangeReason) == "" {
+				writeAPIError(c, http.StatusBadRequest, "invalid_direct_change_reason", "请填写集团直接批量变更资产的原因")
+				return
+			}
 			writeAPIError(c, http.StatusBadRequest, "invalid_batch", "单次请选择 1 至 200 个资产，并指定有效状态或网络区域")
 		case err != nil:
 			logger.Error("batch update assets", "error", err, "request_id", c.GetString("request_id"))
@@ -237,7 +241,7 @@ func registerAssetRoutes(api *gin.RouterGroup, requireAuth gin.HandlerFunc, serv
 		case errors.Is(err, asset.ErrForbidden):
 			writeAPIError(c, http.StatusForbidden, "forbidden", "当前账号无权在该组织新增资产")
 		case errors.Is(err, asset.ErrInvalid):
-			writeAPIError(c, http.StatusBadRequest, "invalid_asset", "请检查资产类型、资产值和归属信息")
+			writeAPIError(c, http.StatusBadRequest, "invalid_asset", "请检查资产类型、资产值和归属信息；集团管理员直接新增正式资产时必须填写变更原因")
 		case errors.Is(err, asset.ErrNotFound):
 			writeAPIError(c, http.StatusNotFound, "reference_not_found", "所属组织或业务系统不存在")
 		case errors.Is(err, asset.ErrConflict):
@@ -248,6 +252,49 @@ func registerAssetRoutes(api *gin.RouterGroup, requireAuth gin.HandlerFunc, serv
 		default:
 			c.JSON(http.StatusCreated, gin.H{"item": item})
 		}
+	})
+
+	// Recheck items raised when a group administrator writes the formal ledger
+	// directly. Headquarters sees the whole list; the owning organization sees
+	// the items it has to confirm and closes them itself.
+	group.GET("/direct-change-rechecks", func(c *gin.Context) {
+		page, err := parsePageQuery(c)
+		if err != nil {
+			writeAPIError(c, http.StatusBadRequest, "invalid_query", "分页参数不正确，page_size 最大为 100")
+			return
+		}
+		result, err := service.SearchDirectChangeRecheckTasks(c.Request.Context(), mustPrincipal(c), asset.DirectChangeRecheckFilter{
+			Status:         c.Query("status"),
+			OrganizationID: c.Query("organization_id"),
+			AssetID:        c.Query("asset_id"),
+			Page:           page,
+		})
+		if err != nil {
+			writeDirectChangeRecheckError(c, logger, "search direct change recheck tasks", err)
+			return
+		}
+		c.JSON(http.StatusOK, result)
+	})
+	group.GET("/direct-change-rechecks/:id", func(c *gin.Context) {
+		item, err := service.GetDirectChangeRecheckTask(c.Request.Context(), mustPrincipal(c), c.Param("id"))
+		if err != nil {
+			writeDirectChangeRecheckError(c, logger, "get direct change recheck task", err)
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"item": item})
+	})
+	group.POST("/direct-change-rechecks/:id/confirm", func(c *gin.Context) {
+		var input asset.DirectChangeConfirmationInput
+		if err := c.ShouldBindJSON(&input); err != nil {
+			writeAPIError(c, http.StatusBadRequest, "invalid_request", "请选择复核结论并填写说明")
+			return
+		}
+		item, err := service.ConfirmDirectChangeRecheckTask(c.Request.Context(), mustPrincipal(c), c.Param("id"), input, c.GetString("request_id"), c.ClientIP())
+		if err != nil {
+			writeDirectChangeRecheckError(c, logger, "confirm direct change recheck task", err)
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"item": item})
 	})
 
 	group.PATCH("/:id", func(c *gin.Context) {
@@ -263,7 +310,7 @@ func registerAssetRoutes(api *gin.RouterGroup, requireAuth gin.HandlerFunc, serv
 		case errors.Is(err, asset.ErrForbidden):
 			writeAPIError(c, http.StatusForbidden, "forbidden", "当前账号无权编辑该资产或变更其所属组织")
 		case errors.Is(err, asset.ErrInvalid):
-			writeAPIError(c, http.StatusBadRequest, "invalid_asset", "请检查资产类型、资产值、状态和归属信息")
+			writeAPIError(c, http.StatusBadRequest, "invalid_asset", "请检查资产类型、资产值、状态和归属信息；集团管理员直接修改正式资产时必须填写变更原因")
 		case errors.Is(err, asset.ErrNotFound):
 			writeAPIError(c, http.StatusNotFound, "reference_not_found", "网络资产、所属组织或业务系统不存在")
 		case errors.Is(err, asset.ErrEditConflict):
@@ -279,7 +326,8 @@ func registerAssetRoutes(api *gin.RouterGroup, requireAuth gin.HandlerFunc, serv
 	})
 
 	group.DELETE("/:id", func(c *gin.Context) {
-		err := service.Delete(c.Request.Context(), mustPrincipal(c), c.Param("id"), parseAssetExpectedVersion(c), c.GetString("request_id"), c.ClientIP())
+		err := service.Delete(c.Request.Context(), mustPrincipal(c), c.Param("id"), parseAssetExpectedVersion(c),
+			strings.TrimSpace(c.Query("direct_change_reason")), c.GetString("request_id"), c.ClientIP())
 		switch {
 		case errors.Is(err, asset.ErrVersionRequired):
 			writeAPIError(c, http.StatusBadRequest, "expected_version_required", "删除网络资产工作版本需要提供 expected_version")
@@ -290,7 +338,7 @@ func registerAssetRoutes(api *gin.RouterGroup, requireAuth gin.HandlerFunc, serv
 		case errors.Is(err, asset.ErrNotFound):
 			writeAPIError(c, http.StatusNotFound, "asset_not_found", "网络资产不存在")
 		case errors.Is(err, asset.ErrInvalid):
-			writeAPIError(c, http.StatusBadRequest, "invalid_asset_id", "资产编号不正确")
+			writeAPIError(c, http.StatusBadRequest, "invalid_asset_id", "资产编号不正确，或缺少集团直接变更原因（direct_change_reason）")
 		case err != nil:
 			logger.Error("delete asset", "error", err, "request_id", c.GetString("request_id"))
 			writeAPIError(c, http.StatusInternalServerError, "internal_error", "删除网络资产失败")
@@ -413,11 +461,16 @@ func registerAssetRoutes(api *gin.RouterGroup, requireAuth gin.HandlerFunc, serv
 		}
 		defer file.Close()
 
-		result, err := service.Import(c.Request.Context(), mustPrincipal(c), organizationID, fileHeader.Filename, file, importMode, c.GetString("request_id"), c.ClientIP(), asset.ColumnMapping(columnMapping))
+		directChangeReason := strings.TrimSpace(c.PostForm("direct_change_reason"))
+		result, err := service.Import(c.Request.Context(), mustPrincipal(c), organizationID, fileHeader.Filename, file, importMode, directChangeReason, c.GetString("request_id"), c.ClientIP(), asset.ColumnMapping(columnMapping))
 		switch {
 		case errors.Is(err, asset.ErrForbidden):
 			writeAPIError(c, http.StatusForbidden, "forbidden", "当前账号无权向该组织导入资产")
 		case errors.Is(err, asset.ErrInvalid):
+			if directChangeReason == "" {
+				writeAPIError(c, http.StatusBadRequest, "invalid_direct_change_reason", "请填写集团直接导入资产的原因")
+				return
+			}
 			writeAPIError(c, http.StatusBadRequest, "invalid_import", "文件格式、表头或数据行数不符合要求（最多 5000 行）")
 		case err != nil:
 			logger.Error("import assets", "error", err, "request_id", c.GetString("request_id"))
@@ -441,4 +494,20 @@ func parseAssetExpectedVersion(c *gin.Context) *int {
 		return nil
 	}
 	return &value
+}
+
+func writeDirectChangeRecheckError(c *gin.Context, logger *slog.Logger, action string, err error) {
+	switch {
+	case errors.Is(err, asset.ErrForbidden):
+		writeAPIError(c, http.StatusForbidden, "forbidden", "当前账号无权查看或复核集团直接变更记录")
+	case errors.Is(err, asset.ErrInvalid):
+		writeAPIError(c, http.StatusBadRequest, "invalid_recheck", "复核状态或说明不正确；状态只允许 confirmed（认可）或 disputed（有异议）")
+	case errors.Is(err, asset.ErrNotFound):
+		writeAPIError(c, http.StatusNotFound, "recheck_not_found", "复核记录不存在")
+	case errors.Is(err, asset.ErrConflict):
+		writeAPIError(c, http.StatusConflict, "recheck_already_closed", "该复核记录已被处理")
+	case err != nil:
+		logger.Error(action, "error", err, "request_id", c.GetString("request_id"))
+		writeAPIError(c, http.StatusInternalServerError, "internal_error", "处理集团直接变更复核记录失败")
+	}
 }

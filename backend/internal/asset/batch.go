@@ -15,6 +15,10 @@ type BatchUpdateInput struct {
 	IDs           []string `json:"ids"`
 	Status        *string  `json:"status"`
 	NetworkAreaID *string  `json:"network_area_id"`
+	// DirectChangeReason is mandatory for a group administrator writing the
+	// formal ledger directly. A batch write must not become the one path into the
+	// ledger that leaves no recheck item behind.
+	DirectChangeReason string `json:"direct_change_reason,omitempty"`
 }
 
 type BatchOperationItem struct {
@@ -56,6 +60,7 @@ func (s *Service) UpdateBatch(ctx context.Context, principal auth.Principal, inp
 		}
 		if itemErr == nil {
 			updateInput := createInputFromAsset(current)
+			updateInput.DirectChangeReason = input.DirectChangeReason
 			if status != nil {
 				updateInput.Status = *status
 			}

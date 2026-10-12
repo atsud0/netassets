@@ -126,7 +126,7 @@ func TestDiscardingCandidateWorkingVersionReleasesCandidateAndFindings(t *testin
 	if err := pool.QueryRow(ctx, `SELECT version FROM inventory_asset_drafts WHERE id=$1::uuid`, draftID).Scan(&draftVersion); err != nil {
 		t.Fatalf("load working version lock: %v", err)
 	}
-	if err := assetService.Delete(ctx, principal, draftID, &draftVersion, "req-discard", "127.0.0.1"); err != nil {
+	if err := assetService.Delete(ctx, principal, draftID, &draftVersion, "", "req-discard", "127.0.0.1"); err != nil {
 		t.Fatalf("discard working version: %v", err)
 	}
 

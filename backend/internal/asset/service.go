@@ -113,6 +113,10 @@ type CreateInput struct {
 	CustomValues      []customfield.Value `json:"custom_values,omitempty"`
 	ExpectedUpdatedAt *time.Time          `json:"expected_updated_at,omitempty"`
 	ExpectedVersion   *int                `json:"expected_version,omitempty"`
+	// DirectChangeReason is required when a group administrator writes the
+	// formal ledger outside the inventory task. It is stored on the recheck task
+	// that is raised for the owning organization.
+	DirectChangeReason string `json:"direct_change_reason,omitempty"`
 }
 
 type ImportError struct {
@@ -884,6 +888,9 @@ func (s *Service) create(ctx context.Context, principal auth.Principal, input Cr
 		return Asset{}, ErrForbidden
 	}
 	normalizeInput(&input)
+	if err := validateDirectChangeReason(input.DirectChangeReason); err != nil {
+		return Asset{}, err
+	}
 	normalizedValue, err := normalizeValue(input.Type, input.Value)
 	if err != nil || !validInput(input) {
 		return Asset{}, ErrInvalid
@@ -913,10 +920,14 @@ func (s *Service) create(ctx context.Context, principal auth.Principal, input Cr
 	if _, err := tx.Exec(ctx, `
 		INSERT INTO audit_logs (user_id, organization_id, action, resource_type, resource_id, summary, details, request_ip, request_id)
 		VALUES ($1::uuid, $2::uuid, 'asset.create', 'asset', $3, '新增网络资产',
-		        jsonb_build_object('type', $4::text, 'value', $5::text, 'source', $6::text),
-		        NULLIF($7, '')::inet, NULLIF($8, ''))
-	`, principal.UserID, input.OrganizationID, item.ID, item.Type, item.Value, source, ipAddress, requestID); err != nil {
+		        jsonb_build_object('type', $4::text, 'value', $5::text, 'source', $6::text, 'direct_change_reason', NULLIF($7, '')),
+		        NULLIF($8, '')::inet, NULLIF($9, ''))
+	`, principal.UserID, input.OrganizationID, item.ID, item.Type, item.Value, source, input.DirectChangeReason, ipAddress, requestID); err != nil {
 		return Asset{}, fmt.Errorf("write asset audit: %w", err)
+	}
+	if err := s.writeDirectChangeRecheck(ctx, tx, principal, DirectChangeCreate, item.ID, input.OrganizationID, input.DirectChangeReason,
+		map[string]any{"after": item}, nil, requestID, ipAddress); err != nil {
+		return Asset{}, err
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return Asset{}, fmt.Errorf("commit asset: %w", err)
@@ -1047,6 +1058,9 @@ func (s *Service) Update(ctx context.Context, principal auth.Principal, assetID 
 	if err != nil || !validInput(input) {
 		return Asset{}, ErrInvalid
 	}
+	if err := validateDirectChangeReason(input.DirectChangeReason); err != nil {
+		return Asset{}, err
+	}
 	if input.OrganizationID != current.OrganizationID && !principal.HasRole("group_admin") {
 		return Asset{}, ErrForbidden
 	}
@@ -1139,15 +1153,31 @@ func (s *Service) Update(ctx context.Context, principal auth.Principal, assetID 
 			return Asset{}, fmt.Errorf("update asset system: %w", err)
 		}
 	}
-	changesJSON, err := json.Marshal(assetFieldChanges(current, input, organizationName, systemName, networkAreaName, ownerUsername, ownerDisplayName))
+	changes := assetFieldChanges(current, input, organizationName, systemName, networkAreaName, ownerUsername, ownerDisplayName)
+	changesJSON, err := json.Marshal(changes)
 	if err != nil {
 		return Asset{}, fmt.Errorf("encode asset changes: %w", err)
+	}
+	// The before snapshot is the asset as this caller read it; recording it next
+	// to the field-level diff is what lets the owning organization judge the
+	// change without trusting the group administrator's own description.
+	beforeSnapshot := current
+	// Read the after-state through the transaction: a pool-level read would not
+	// see this transaction's own UPDATE and would record a snapshot equal to the
+	// before-state.
+	updated, err := queryAsset(ctx, tx, assetID)
+	if err != nil {
+		return Asset{}, err
+	}
+	if err := s.writeDirectChangeRecheck(ctx, tx, principal, DirectChangeUpdate, assetID, input.OrganizationID, input.DirectChangeReason,
+		map[string]any{"before": beforeSnapshot, "after": updated}, changes, requestID, ipAddress); err != nil {
+		return Asset{}, err
 	}
 	if _, err := tx.Exec(ctx, `
 		INSERT INTO audit_logs (user_id, organization_id, action, resource_type, resource_id, summary, details, request_ip, request_id)
 		VALUES ($1::uuid, $2::uuid, 'asset.update', 'asset', $3, '编辑网络资产',
-		        jsonb_build_object('changes', $4::jsonb), NULLIF($5, '')::inet, NULLIF($6, ''))
-	`, principal.UserID, input.OrganizationID, assetID, changesJSON, ipAddress, requestID); err != nil {
+		        jsonb_build_object('changes', $4::jsonb, 'direct_change_reason', NULLIF($5, '')), NULLIF($6, '')::inet, NULLIF($7, ''))
+	`, principal.UserID, input.OrganizationID, assetID, changesJSON, input.DirectChangeReason, ipAddress, requestID); err != nil {
 		return Asset{}, fmt.Errorf("write asset update audit: %w", err)
 	}
 	resourceLabel := strings.TrimSpace(input.Name)
@@ -1189,7 +1219,7 @@ func (s *Service) Update(ctx context.Context, principal auth.Principal, assetID 
 // organization users that means the working ledger (draft discard or an offline
 // request), which is why the call accepts the optimistic-lock value the client
 // last saw; group administrators still delete the published ledger directly.
-func (s *Service) Delete(ctx context.Context, principal auth.Principal, assetID string, expectedVersion *int, requestID, ipAddress string) error {
+func (s *Service) Delete(ctx context.Context, principal auth.Principal, assetID string, expectedVersion *int, directChangeReason, requestID, ipAddress string) error {
 	if usesWorkingInventory(principal) {
 		if _, err := s.getWorking(ctx, principal, assetID); err == nil {
 			return s.deleteWorking(ctx, principal, assetID, expectedVersion, requestID, ipAddress)
@@ -1204,6 +1234,9 @@ func (s *Service) Delete(ctx context.Context, principal auth.Principal, assetID 
 	}
 	if usesWorkingInventory(principal) {
 		return s.createWorkingDelete(ctx, principal, current, requestID, ipAddress)
+	}
+	if err := validateDirectChangeReason(directChangeReason); err != nil {
+		return err
 	}
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
@@ -1223,9 +1256,13 @@ func (s *Service) Delete(ctx context.Context, principal auth.Principal, assetID 
 	if _, err := tx.Exec(ctx, `
 		INSERT INTO audit_logs (user_id, organization_id, action, resource_type, resource_id, summary, details, request_ip, request_id)
 		VALUES ($1::uuid, $2::uuid, 'asset.delete', 'asset', $3, '删除网络资产',
-		        jsonb_build_object('type', $4::text, 'value', $5::text), NULLIF($6, '')::inet, NULLIF($7, ''))
-	`, principal.UserID, current.OrganizationID, assetID, current.Type, current.Value, ipAddress, requestID); err != nil {
+		        jsonb_build_object('type', $4::text, 'value', $5::text, 'direct_change_reason', NULLIF($6, '')), NULLIF($7, '')::inet, NULLIF($8, ''))
+	`, principal.UserID, current.OrganizationID, assetID, current.Type, current.Value, directChangeReason, ipAddress, requestID); err != nil {
 		return fmt.Errorf("write asset delete audit: %w", err)
+	}
+	if err := s.writeDirectChangeRecheck(ctx, tx, principal, DirectChangeDelete, assetID, current.OrganizationID, directChangeReason,
+		map[string]any{"before": current, "deleted": true}, nil, requestID, ipAddress); err != nil {
+		return err
 	}
 	resourceLabel := strings.TrimSpace(current.Name)
 	if resourceLabel == "" {
@@ -1657,6 +1694,10 @@ func (s *Service) PreviewImport(ctx context.Context, principal auth.Principal, o
 	if !allowed {
 		return ImportResult{}, ErrForbidden
 	}
+
+	if err != nil {
+		return ImportResult{}, err
+	}
 	mode, err := normalizeImportMode(principal, rawMode)
 	if err != nil {
 		return ImportResult{}, err
@@ -1797,7 +1838,10 @@ func (s *Service) PreviewImport(ctx context.Context, principal auth.Principal, o
 	return result, nil
 }
 
-func (s *Service) Import(ctx context.Context, principal auth.Principal, organizationID, fileName string, reader io.Reader, rawMode, requestID, ipAddress string, mapping ColumnMapping) (ImportResult, error) {
+// Import writes formal ledger rows in bulk. For a group administrator that is
+// still a direct write, so it takes the same mandatory reason as Create/Update
+// and raises the same recheck items instead of becoming an unaudited side door.
+func (s *Service) Import(ctx context.Context, principal auth.Principal, organizationID, fileName string, reader io.Reader, rawMode, directChangeReason, requestID, ipAddress string, mapping ColumnMapping) (ImportResult, error) {
 	if !principal.HasPermission("asset.manage") {
 		return ImportResult{}, ErrForbidden
 	}
@@ -1808,6 +1852,9 @@ func (s *Service) Import(ctx context.Context, principal auth.Principal, organiza
 	}
 	if !allowed {
 		return ImportResult{}, ErrForbidden
+	}
+	if err := validateDirectChangeReason(directChangeReason); err != nil {
+		return ImportResult{}, err
 	}
 	mode, err := normalizeImportMode(principal, rawMode)
 	if err != nil {
@@ -1913,15 +1960,18 @@ func (s *Service) Import(ctx context.Context, principal auth.Principal, organiza
 				continue
 			}
 			if target.ID != "" {
+				input.DirectChangeReason = directChangeReason
 				imported, err = s.Update(ctx, principal, target.ID, input, requestID, ipAddress)
 				operation = "update"
 			} else if duplicate {
 				err = ErrConflict
 			} else {
+				input.DirectChangeReason = directChangeReason
 				imported, err = s.createImported(ctx, principal, input, definitions, customValues, requestID, ipAddress)
 				operation = "create"
 			}
 		} else {
+			input.DirectChangeReason = directChangeReason
 			imported, err = s.createImported(ctx, principal, input, definitions, customValues, requestID, ipAddress)
 			operation = "create"
 		}

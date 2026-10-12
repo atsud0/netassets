@@ -111,11 +111,11 @@ func TestDirectWorkingAssetVersionUpdateAndDeleteRequireMatchingVersion(t *testi
 		t.Fatalf("stale update leaked through: stored name = %q", storedName)
 	}
 
-	if err := service.Delete(ctx, principal, created.ID, nil, "req-asset-cas-delete-no-version", "127.0.0.1"); !errors.Is(err, ErrVersionRequired) {
+	if err := service.Delete(ctx, principal, created.ID, nil, "", "req-asset-cas-delete-no-version", "127.0.0.1"); !errors.Is(err, ErrVersionRequired) {
 		t.Fatalf("delete without expected_version = %v, want ErrVersionRequired", err)
 	}
 	stale := created.Version
-	if err := service.Delete(ctx, principal, created.ID, &stale, "req-asset-cas-delete-stale", "127.0.0.1"); !errors.Is(err, ErrEditConflict) {
+	if err := service.Delete(ctx, principal, created.ID, &stale, "", "req-asset-cas-delete-stale", "127.0.0.1"); !errors.Is(err, ErrEditConflict) {
 		t.Fatalf("stale working delete = %v, want ErrEditConflict", err)
 	}
 	var stillEditing string
@@ -127,7 +127,7 @@ func TestDirectWorkingAssetVersionUpdateAndDeleteRequireMatchingVersion(t *testi
 	}
 
 	current := updated.Version
-	if err := service.Delete(ctx, principal, created.ID, &current, "req-asset-cas-delete", "127.0.0.1"); err != nil {
+	if err := service.Delete(ctx, principal, created.ID, &current, "", "req-asset-cas-delete", "127.0.0.1"); err != nil {
 		t.Fatalf("current working delete: %v", err)
 	}
 	var status string

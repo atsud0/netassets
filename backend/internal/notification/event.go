@@ -27,6 +27,7 @@ const (
 	EventAssetArchived           = "asset.archived"
 	EventAssetDeleted            = "asset.deleted"
 	EventAssetRestored           = "asset.restored"
+	EventAssetDirectChanged      = "asset.direct_changed"
 
 	EventBusinessSystemArchived = "business_system.archived"
 	EventBusinessSystemRestored = "business_system.restored"
