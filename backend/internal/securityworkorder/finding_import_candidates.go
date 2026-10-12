@@ -606,6 +606,15 @@ func (s *Service) ListFindingImportScopeOptions(ctx context.Context, principal a
 // is real the moment it arrives, so the finding is stored against the working
 // version instead of being held back as an untracked import row. Publishing the
 // working version fills in the formal asset id.
+func findingImportCandidateFindingStatus(candidate FindingImportCandidate) string {
+	if candidate.RawData != nil {
+		if status := normalizeFindingImportStatus(candidate.RawData["status"]); status != "" {
+			return status
+		}
+	}
+	return "pending"
+}
+
 func (s *Service) linkFindingToWorkingVersion(ctx context.Context, tx pgx.Tx, principal auth.Principal, id string, candidate FindingImportCandidate, input FindingImportCandidateLinkInput, requestID, ipAddress string) (FindingImportCandidate, error) {
 	var organizationID string
 	if err := tx.QueryRow(ctx, `
@@ -631,7 +640,7 @@ func (s *Service) linkFindingToWorkingVersion(ctx context.Context, tx pgx.Tx, pr
 	findingID := duplicateFindingID
 	if errors.Is(err, pgx.ErrNoRows) {
 		findingInput := FindingInput{
-			Title: candidate.Title, Severity: candidate.Severity, Status: "pending",
+			Title: candidate.Title, Severity: candidate.Severity, Status: findingImportCandidateFindingStatus(candidate),
 			AssigneeOrganizationID: organizationID, PendingAssetDraftID: input.PendingAssetDraftID,
 			VulnerabilityType: candidate.VulnerabilityType, Description: candidate.Description,
 			Evidence: candidate.Evidence, RemediationAdvice: candidate.RemediationAdvice,
@@ -797,7 +806,7 @@ func (s *Service) LinkFindingImportCandidate(ctx context.Context, principal auth
 	findingID := duplicateFindingID
 	if errors.Is(err, pgx.ErrNoRows) {
 		findingInput := FindingInput{
-			Title: candidate.Title, Severity: candidate.Severity, Status: "pending",
+			Title: candidate.Title, Severity: candidate.Severity, Status: findingImportCandidateFindingStatus(candidate),
 			AssigneeOrganizationID: scope.OrganizationID, AssetID: scope.AssetID,
 			BusinessSystemID: scope.BusinessSystemID, TestBatchID: candidate.TestBatchID,
 			VulnerabilityType: candidate.VulnerabilityType, Description: candidate.Description,

@@ -19,6 +19,7 @@ import (
 
 	"netassets/internal/asset"
 	"netassets/internal/auth"
+	"netassets/internal/findingstatus"
 	"netassets/internal/pagination"
 )
 
@@ -67,8 +68,8 @@ type findingImportScope struct {
 
 // FindingImportTemplate returns the standard security-finding import template.
 func FindingImportTemplate(format string) ([]byte, string, string, error) {
-	headers := []string{"资产类型", "资产值", "漏洞标题", "严重等级", "漏洞类型", "漏洞描述", "验证证据", "整改建议", "发现时间"}
-	example := []string{"url", "https://example.com/login", "登录接口未授权访问", "高危", "越权访问", "未登录情况下可以读取用户信息", "GET /api/user/1 返回完整用户信息", "增加服务端身份认证和资源权限校验", "2026-07-22 10:00:00"}
+	headers := []string{"资产类型", "资产值", "漏洞标题", "严重等级", "漏洞类型", "漏洞描述", "验证证据", "整改建议", "发现时间", "状态"}
+	example := []string{"url", "https://example.com/login", "登录接口未授权访问", "高危", "越权访问", "未登录情况下可以读取用户信息", "GET /api/user/1 返回完整用户信息", "增加服务端身份认证和资源权限校验", "2026-07-22 10:00:00", "pending"}
 	switch strings.ToLower(strings.TrimSpace(format)) {
 	case "csv":
 		var buffer bytes.Buffer
@@ -102,6 +103,7 @@ func FindingImportTemplate(format string) ([]byte, string, string, error) {
 		_ = file.SetColWidth(sheet, "D", "E", 14)
 		_ = file.SetColWidth(sheet, "F", "H", 34)
 		_ = file.SetColWidth(sheet, "I", "I", 22)
+		_ = file.SetColWidth(sheet, "J", "J", 14)
 		var buffer bytes.Buffer
 		if err := file.Write(&buffer); err != nil {
 			return nil, "", "", err
@@ -399,6 +401,7 @@ type findingJSONRecord struct {
 	Evidence          string             `json:"evidence"`
 	RemediationAdvice string             `json:"remediation_advice"`
 	Remediation       string             `json:"remediation"`
+	Status            string             `json:"status"`
 	DiscoveredAt      string             `json:"discovered_at"`
 	CreatedAt         string             `json:"created_at"`
 	Timestamp         string             `json:"ts"`
@@ -431,7 +434,7 @@ func readFindingImportJSON(data []byte) ([][]string, string, error) {
 		}
 		records = envelope.Findings
 	}
-	headers := []string{"资产类型", "资产值", "漏洞标题", "严重等级", "漏洞类型", "漏洞描述", "验证证据", "整改建议", "发现时间"}
+	headers := []string{"资产类型", "资产值", "漏洞标题", "严重等级", "漏洞类型", "漏洞描述", "验证证据", "整改建议", "发现时间", "状态"}
 	rows := make([][]string, 1, len(records)+1)
 	rows[0] = headers
 	for _, record := range records {
@@ -473,7 +476,7 @@ func readFindingImportJSON(data []byte) ([][]string, string, error) {
 		}
 		for _, item := range assets {
 			assetType, assetValue := normalizeFindingJSONAsset(item.Type, firstNonEmptyImportValue(item.Value, item.Label))
-			rows = append(rows, []string{assetType, assetValue, title, record.Severity, vulnerabilityType, description, evidence, advice, discoveredAt})
+			rows = append(rows, []string{assetType, assetValue, title, record.Severity, vulnerabilityType, description, evidence, advice, discoveredAt, strings.TrimSpace(record.Status)})
 		}
 	}
 	if len(rows) < 2 {
@@ -597,7 +600,7 @@ func nonEmptyImportRows(rows [][]string) [][]string {
 func mapFindingImportHeaders(row []string) map[string]int {
 	result := map[string]int{
 		"asset_type": -1, "asset_value": -1, "title": -1, "severity": -1, "vulnerability_type": -1,
-		"description": -1, "evidence": -1, "remediation_advice": -1, "discovered_at": -1,
+		"description": -1, "evidence": -1, "remediation_advice": -1, "discovered_at": -1, "status": -1,
 	}
 	aliases := map[string]string{
 		"资产类型": "asset_type", "assettype": "asset_type", "asset_type": "asset_type",
@@ -609,6 +612,7 @@ func mapFindingImportHeaders(row []string) map[string]int {
 		"验证证据": "evidence", "证据": "evidence", "evidence": "evidence",
 		"整改建议": "remediation_advice", "修复建议": "remediation_advice", "remediationadvice": "remediation_advice", "remediation_advice": "remediation_advice",
 		"发现时间": "discovered_at", "discoveredat": "discovered_at", "discovered_at": "discovered_at",
+		"状态": "status", "status": "status", "漏洞状态": "status",
 	}
 	for index, header := range row {
 		normalized := strings.ToLower(strings.ReplaceAll(strings.TrimSpace(strings.TrimPrefix(header, "\ufeff")), " ", ""))
@@ -639,12 +643,16 @@ func findingInputFromImportRow(row []string, headers map[string]int, batchID str
 	if severity == "" {
 		return FindingInput{}, "", "", &findingImportRowError{"invalid_severity", "严重等级仅支持严重、高危、中危、低危、提示，或 critical/high/medium/low/info"}
 	}
+	status := normalizeFindingImportStatus(value("status"))
+	if value("status") != "" && status == "" {
+		return FindingInput{}, "", "", &findingImportRowError{"invalid_status", "漏洞状态仅支持 pending、in_progress、confirmed、resolved、fixed、false_positive、ignored、duplicate、risk_accepted，或对应中文标签"}
+	}
 	discoveredAt, err := parseFindingImportTime(value("discovered_at"))
 	if err != nil {
 		return FindingInput{}, "", "", &findingImportRowError{"invalid_discovered_at", "发现时间格式不正确，建议使用 YYYY-MM-DD HH:mm:ss"}
 	}
 	input := FindingInput{
-		Title: value("title"), Severity: severity, Status: "pending", TestBatchID: batchID,
+		Title: value("title"), Severity: severity, Status: status, TestBatchID: batchID,
 		VulnerabilityType: value("vulnerability_type"), Description: value("description"), Evidence: value("evidence"),
 		RemediationAdvice: value("remediation_advice"), Source: "import", DiscoveredAt: discoveredAt,
 	}
@@ -667,6 +675,29 @@ func normalizeFindingAssetType(value string) string {
 		value = normalized
 	}
 	if value == "domain" || value == "ip" || value == "url" || value == "service" || value == "other" {
+		return value
+	}
+	return ""
+}
+
+// normalizeFindingImportStatus preserves the status semantics emitted by the
+// native JSON export. Empty is intentionally pending for old templates that do
+// not carry a status column; explicit values are validated against the single
+// backend vocabulary instead of being silently reset.
+func normalizeFindingImportStatus(value string) string {
+	value = strings.ToLower(strings.TrimSpace(value))
+	aliases := map[string]string{
+		"待处理": findingstatus.Pending, "处理中": findingstatus.InProgress, "已确认": findingstatus.Confirmed,
+		"已处理": findingstatus.Resolved, "已修复": findingstatus.Fixed, "误报": findingstatus.FalsePositive,
+		"忽略": findingstatus.Ignored, "重复": findingstatus.Duplicate, "风险接受": findingstatus.RiskAccepted,
+	}
+	if normalized, ok := aliases[value]; ok {
+		return normalized
+	}
+	if value == "" {
+		return findingstatus.Pending
+	}
+	if findingstatus.Valid(value) {
 		return value
 	}
 	return ""

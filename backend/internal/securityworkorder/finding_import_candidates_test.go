@@ -78,3 +78,20 @@ func TestSuggestFindingImportScopeDoesNotSelectTiedCIDRMatches(t *testing.T) {
 		t.Fatalf("suggestion=(%s,%s,%d), want no automatic suggestion with cidr metadata", suggestion.ScopeAssetID, method, confidence)
 	}
 }
+
+func TestFindingImportCandidateFindingStatusUsesExportVocabulary(t *testing.T) {
+	for _, tc := range []struct {
+		status string
+		want   string
+	}{
+		{status: "pending", want: "pending"},
+		{status: "in_progress", want: "in_progress"},
+		{status: "忽略", want: "ignored"},
+		{status: "", want: "pending"},
+	} {
+		candidate := FindingImportCandidate{RawData: map[string]string{"status": tc.status}}
+		if got := findingImportCandidateFindingStatus(candidate); got != tc.want {
+			t.Fatalf("status %q -> %q, want %q", tc.status, got, tc.want)
+		}
+	}
+}
