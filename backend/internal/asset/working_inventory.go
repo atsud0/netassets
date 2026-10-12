@@ -431,14 +431,7 @@ func (s *Service) deleteWorking(ctx context.Context, p auth.Principal, id, reque
 		return ErrForbidden
 	}
 	if cur.Operation == "create" {
-		r, e := s.pool.Exec(ctx, `UPDATE inventory_asset_drafts SET draft_status='discarded',updated_by=$2::uuid,updated_at=now() WHERE id::text=$1 AND task_id IS NULL AND operation='create' AND draft_status IN `+inventorydraft.EditableSQL+``, id, p.UserID)
-		if e != nil {
-			return e
-		}
-		if r.RowsAffected() == 0 {
-			return ErrNotFound
-		}
-		return nil
+		return s.discardWorkingCreate(ctx, p, id)
 	}
 	r, e := s.pool.Exec(ctx, `UPDATE inventory_asset_drafts SET operation='delete',draft_status='editing',updated_by=$2::uuid,updated_at=now() WHERE id::text=$1 AND task_id IS NULL AND source_asset_id IS NOT NULL AND draft_status IN `+inventorydraft.EditableSQL+``, id, p.UserID)
 	if e != nil {
@@ -446,6 +439,71 @@ func (s *Service) deleteWorking(ctx context.Context, p auth.Principal, id, reque
 	}
 	if r.RowsAffected() == 0 {
 		return ErrNotFound
+	}
+	return nil
+}
+
+// discardWorkingCreate drops an unpublished "create" working version.
+//
+// A working version confirmed from a finding-import asset candidate is not just
+// a draft: security_findings rows and asset_candidates rows already point at it.
+// Discarding it while leaving those pointers behind used to strand everything.
+// asset_candidates.Accept refuses to run again once working_version_draft_id is
+// set, so the candidate could never be re-confirmed, and the findings kept a
+// pending_asset_draft_id pointing at a row that can never be published, leaving
+// the "pending asset" dashboard count permanently inflated with no way out.
+//
+// Unwinding in one transaction keeps the three tables consistent: the candidate
+// returns to a confirmable state, the findings drop back to unlinked so the
+// "pending asset" queue shows them again, and the import rows return to the
+// candidate so they can be re-linked.
+func (s *Service) discardWorkingCreate(ctx context.Context, p auth.Principal, id string) error {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("begin discard working asset create: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	command, err := tx.Exec(ctx, `UPDATE inventory_asset_drafts SET draft_status='discarded',updated_by=$2::uuid,updated_at=now()
+		WHERE id::text=$1 AND task_id IS NULL AND operation='create' AND draft_status IN `+inventorydraft.EditableSQL+``, id, p.UserID)
+	if err != nil {
+		return fmt.Errorf("discard working asset create: %w", err)
+	}
+	if command.RowsAffected() == 0 {
+		return ErrNotFound
+	}
+	// Release the candidate and reopen all of its import rows in one statement.
+	// A candidate can be discarded after the operator has released its findings,
+	// so those rows may already be marked imported/duplicate. Keeping them in
+	// that state would make retry impossible even though the candidate is pending
+	// again. The CTE scopes the reset to this draft; it must not touch unrelated
+	// pending candidates.
+	if _, err := tx.Exec(ctx, `
+		WITH released AS (
+			UPDATE asset_candidates
+			SET working_version_draft_id=NULL, status='pending', reviewed_by=NULL, reviewed_at=NULL,
+			    review_note=NULL, updated_at=now()
+			WHERE working_version_draft_id=$1::uuid AND status='pending'
+			RETURNING id
+		)
+		UPDATE security_finding_import_candidates
+		SET status='pending', matched_asset_id=NULL, matched_scope_asset_id=NULL,
+		    imported_finding_id=NULL, reviewed_by=NULL, reviewed_at=NULL,
+		    review_note=NULL, updated_at=now()
+		WHERE asset_candidate_id IN (SELECT id FROM released)
+		  AND status IN ('pending','imported','duplicate')`, id); err != nil {
+		return fmt.Errorf("release asset candidate after discarding working version: %w", err)
+	}
+
+	// A finding parked on the discarded draft has no asset and no draft left, so
+	// it must become visible as unlinked again instead of waiting forever.
+	if _, err := tx.Exec(ctx, `
+		UPDATE security_findings
+		SET pending_asset_draft_id=NULL, updated_by=$2::uuid, updated_at=now()
+		WHERE pending_asset_draft_id=$1::uuid`, id, p.UserID); err != nil {
+		return fmt.Errorf("release findings from discarded working version: %w", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("commit discard working asset create: %w", err)
 	}
 	return nil
 }
