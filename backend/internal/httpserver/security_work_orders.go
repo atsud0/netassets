@@ -393,7 +393,10 @@ func writeFindingRiskResult(c *gin.Context, logger *slog.Logger, operation strin
 		writeAPIError(c, http.StatusBadRequest, "invalid_risk_acceptance", "请填写有效的风险接受原因、未来有效期或复核意见")
 	case errors.Is(err, securityworkorder.ErrNotFound):
 		writeAPIError(c, http.StatusNotFound, "finding_not_found", "安全发现不存在或当前账号不可见")
-	case errors.Is(err, securityworkorder.ErrState):
+	case errors.Is(err, securityworkorder.ErrState), errors.Is(err, securityworkorder.ErrConflict):
+		// ErrConflict also covers the 00052 guard: a finding already owned by an
+		// open remediation task cannot take a risk decision. That is a state
+		// conflict, not a server fault.
 		writeAPIError(c, http.StatusConflict, "invalid_finding_state", "安全发现当前状态不允许执行风险操作")
 	case err != nil:
 		logger.Error(operation, "error", err, "request_id", c.GetString("request_id"))
