@@ -660,7 +660,7 @@ func mapDraftDatabaseError(err error) error {
 func settleFindingImportCandidate(ctx context.Context, tx pgx.Tx, draftID, assetID, userID, requestID, ipAddress string) error {
 	if _, err := tx.Exec(ctx, `
 		UPDATE asset_candidates
-		SET status='accepted', matched_asset_id=$2::uuid, updated_by=$3::uuid, updated_at=now()
+		SET status='accepted', matched_asset_id=$2::uuid, reviewed_by=$3::uuid, reviewed_at=now(), updated_at=now()
 		WHERE working_version_draft_id=$1::uuid AND status='pending'`, draftID, assetID, userID); err != nil {
 		return fmt.Errorf("accept published finding import asset candidate: %w", err)
 	}
@@ -670,19 +670,38 @@ func settleFindingImportCandidate(ctx context.Context, tx pgx.Tx, draftID, asset
 		WHERE pending_asset_draft_id=$1::uuid`, draftID, assetID, userID); err != nil {
 		return fmt.Errorf("attach published asset to findings: %w", err)
 	}
+	// Publication is the end of the import queue for this discovery. Leaving the
+	// rows pending would keep them in "待关联漏洞" forever, pointing at a working
+	// version that no longer exists, so they are settled together with the asset.
 	if _, err := tx.Exec(ctx, `
 		UPDATE security_finding_import_candidates candidate
-		SET matched_asset_id=$2::uuid,
+		SET status='imported', matched_asset_id=$2::uuid,
 		    imported_finding_id=(
 		        SELECT f.id FROM security_findings f
-		        WHERE f.pending_asset_draft_id=$1::uuid AND f.asset_id=$2::uuid
+		        WHERE f.asset_id=$2::uuid
+		          AND f.pending_asset_draft_id IS NULL
+		          AND lower(btrim(f.title))=lower(btrim(candidate.title))
 		        ORDER BY f.created_at LIMIT 1
 		    ),
-		    updated_at=now()
+		    reviewed_by=$3::uuid, reviewed_at=now(), updated_at=now()
 		WHERE candidate.asset_candidate_id IN (
 		    SELECT id FROM asset_candidates WHERE working_version_draft_id=$1::uuid
-		) AND candidate.status='pending'`, draftID, assetID); err != nil {
-		return fmt.Errorf("attach published asset to finding import candidates: %w", err)
+		) AND candidate.status='pending'`, draftID, assetID, userID); err != nil {
+		return fmt.Errorf("settle published finding import candidates: %w", err)
+	}
+	if _, err := tx.Exec(ctx, `
+		UPDATE security_finding_imports i
+		SET pending_count=(
+		    SELECT count(*) FROM security_finding_import_candidates c
+		    WHERE c.finding_import_id=i.id AND c.status='pending'
+		)
+		WHERE i.id IN (
+		    SELECT finding_import_id FROM security_finding_import_candidates candidate
+		    WHERE candidate.asset_candidate_id IN (
+		        SELECT id FROM asset_candidates WHERE working_version_draft_id=$1::uuid
+		    )
+		)`, draftID); err != nil {
+		return fmt.Errorf("refresh settled finding import pending count: %w", err)
 	}
 	if _, err := tx.Exec(ctx, `
 		INSERT INTO audit_logs(user_id,organization_id,action,resource_type,resource_id,summary,details,request_ip,request_id)

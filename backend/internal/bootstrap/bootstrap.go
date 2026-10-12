@@ -34,6 +34,7 @@ var permissions = map[string]string{
 	"security_workorder.close":   "关闭安全工单",
 	"asset_candidate.view":       "查看资产候选",
 	"asset_candidate.follow_up":  "跟踪资产候选",
+	"asset_candidate.confirm":    "确认资产发现并建立工作版本",
 	"audit.read":                 "查看审计日志和变更记录",
 	"recycle_bin.manage":         "管理回收站",
 	"user.manage":                "管理用户、角色和任职",
@@ -119,7 +120,7 @@ func Ensure(ctx context.Context, pool *pgxpool.Pool, cfg config.Config, logger *
 		INSERT INTO role_permissions (role_id, permission_key)
 		SELECT $1::uuid, unnest($2::varchar[])
 		ON CONFLICT DO NOTHING
-	`, securityOperatorRoleID, []string{"security_test.manage", "security_finding.manage", "security_workorder.manage", "security_workorder.view", "security_workorder.execute", "security_workorder.assign", "security_workorder.review", "security_workorder.close", "asset_candidate.view", "asset_candidate.follow_up"}); err != nil {
+	`, securityOperatorRoleID, []string{"security_test.manage", "security_finding.manage", "security_workorder.manage", "security_workorder.view", "security_workorder.execute", "security_workorder.assign", "security_workorder.review", "security_workorder.close", "asset_candidate.view", "asset_candidate.follow_up", "asset_candidate.confirm"}); err != nil {
 		return fmt.Errorf("bootstrap security operator permissions: %w", err)
 	}
 

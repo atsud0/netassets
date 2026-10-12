@@ -54,6 +54,7 @@ type FindingImportCandidate struct {
 	RemediationAdvice         string            `json:"remediation_advice,omitempty"`
 	DiscoveredAt              time.Time         `json:"discovered_at"`
 	Status                    string            `json:"status"`
+	AssetCandidateID          string            `json:"asset_candidate_id,omitempty"`
 	SuggestedScopeAssetID     string            `json:"suggested_scope_asset_id,omitempty"`
 	SuggestedAssetID          string            `json:"suggested_asset_id,omitempty"`
 	SuggestedAssetValue       string            `json:"suggested_asset_value,omitempty"`
@@ -461,7 +462,7 @@ const findingImportCandidateSelect = `
 	       COALESCE(matched.organization_name_snapshot, matched_org.organization_name,''),
 	       COALESCE(c.match_method,''), COALESCE(c.match_confidence,0), COALESCE(c.review_note,''),
 	       COALESCE(reviewer.display_name,''), c.reviewed_at, COALESCE(c.imported_finding_id::text,''),
-	       COALESCE(f.finding_code,''), c.created_at, c.updated_at, count(*) OVER ()
+	       COALESCE(f.finding_code,''), COALESCE(c.asset_candidate_id::text,''), c.created_at, c.updated_at, count(*) OVER ()
 	FROM security_finding_import_candidates c
 	LEFT JOIN security_test_batches b ON b.id=c.test_batch_id
 	LEFT JOIN security_test_scope_assets suggested ON suggested.id=c.suggested_scope_asset_id
@@ -485,7 +486,7 @@ func scanFindingImportCandidate(row pgx.Row, withTotal bool) (FindingImportCandi
 		&item.SuggestedAssetValue, &item.SuggestedOrganizationName, &item.MatchedScopeAssetID, &item.MatchedAssetID,
 		&item.MatchedAssetValue, &item.MatchedOrganizationName, &item.MatchMethod, &item.MatchConfidence,
 		&item.ReviewNote, &item.ReviewedByName, &item.ReviewedAt, &item.ImportedFindingID,
-		&item.ImportedFindingCode, &item.CreatedAt, &item.UpdatedAt,
+		&item.ImportedFindingCode, &item.AssetCandidateID, &item.CreatedAt, &item.UpdatedAt,
 	}
 	if withTotal {
 		values = append(values, &total)
@@ -742,6 +743,12 @@ func (s *Service) LinkFindingImportCandidate(ctx context.Context, principal auth
 		selectedID = input.AssetID
 	}
 	var scope findingImportScope
+	if selectedID != "" && !validUUID(selectedID) {
+		// The id comes straight from the request body. A malformed value must be
+		// rejected as invalid input, not surfaced as a database cast error that
+		// the caller sees as a 500.
+		return FindingImportCandidate{}, ErrInvalid
+	}
 	if candidate.TestBatchID != "" {
 		err = tx.QueryRow(ctx, `
 			SELECT scope.id::text, scope.asset_id::text, scope.organization_id::text,

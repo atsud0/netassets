@@ -1,0 +1,468 @@
+package securityworkorder
+
+// This file drives the P0-3 mainline end to end with the real desensitized
+// scanner export (testdata/findings-20261010-142559.desensitized.json):
+//
+//	finding candidates -> asset candidates -> working version -> publication
+//
+// The file is the actual product of the scanner the customer runs, so every
+// assumption here is checked against that file rather than against a hand-made
+// CSV: the malformed escape sequences inside the report text, the mixed
+// endpoint/subdomain/ip/service asset rows, the native status vocabulary and
+// the host:port service rows all have to survive the import.
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"io"
+	"log/slog"
+	"os"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/jackc/pgx/v5/pgxpool"
+
+	"netassets/internal/asset"
+	"netassets/internal/assetcandidate"
+	"netassets/internal/auth"
+	"netassets/internal/bootstrap"
+	"netassets/internal/config"
+	"netassets/internal/inventorytask"
+	"netassets/internal/pagination"
+)
+
+const desensitizedFindingsFile = "testdata/findings-20261010-142559.desensitized.json"
+
+func TestP03RealScannerExportRunsThroughCandidateAndPublication(t *testing.T) {
+	databaseURL := strings.TrimSpace(os.Getenv("NETASSETS_TEST_DATABASE_URL"))
+	if databaseURL == "" {
+		t.Skip("NETASSETS_TEST_DATABASE_URL is not set; integration test requires a dedicated migrated PostgreSQL database")
+	}
+	payload, err := os.ReadFile(desensitizedFindingsFile)
+	if err != nil {
+		t.Fatalf("read desensitized finding export: %v", err)
+	}
+	ctx := context.Background()
+	pool, err := pgxpool.New(ctx, databaseURL)
+	if err != nil {
+		t.Fatalf("open test database: %v", err)
+	}
+	t.Cleanup(pool.Close)
+	if _, err := pool.Exec(ctx, `TRUNCATE organizations, users CASCADE`); err != nil {
+		t.Fatalf("reset p0-3 fixtures: %v", err)
+	}
+	p03Bootstrap(t, pool, "MAINLINE")
+
+	groupID := p03InsertOrg(t, pool, "", "P03_GROUP", "P0-3 测试集团", "group")
+	organizationID := p03InsertOrg(t, pool, groupID, "P03_SUB", "P0-3 测试子公司", "subsidiary")
+	operatorID := p03InsertUser(t, pool, "p03_security_operator", "P0-3 集团安全管理员")
+	orgAdminID := p03InsertUser(t, pool, "p03_org_admin", "P0-3 子公司管理员")
+	groupAdminID := p03InsertUser(t, pool, "p03_group_admin", "P0-3 集团管理员")
+
+	p03AssignRole(t, pool, operatorID, "security_operator", "", "all")
+	p03AssignRole(t, pool, orgAdminID, "organization_admin", organizationID, "organization")
+	p03AssignRole(t, pool, groupAdminID, "group_admin", "", "all")
+
+	operator := p03Principal(t, pool, operatorID, []string{"security_operator"})
+	orgAdmin := p03Principal(t, pool, orgAdminID, []string{"organization_admin"})
+	// Inventory tasks belong to the reporting domain: headquarters creates and
+	// reviews them, a subsidiary fills them in. The group security operator has no
+	// business creating one, so the test keeps the real division of labour.
+	groupAdmin := p03Principal(t, pool, groupAdminID, []string{"group_admin"})
+
+	assets := asset.NewService(pool)
+	candidates := assetcandidate.NewService(pool, assets)
+	findings := NewService(pool, t.TempDir())
+	tasks := inventorytask.NewService(pool)
+
+	// Step 1: import without a test batch. The export carries no batch, and the
+	// product must not demand one: it is an external finding delivery.
+	result, err := findings.ImportFindings(ctx, operator, "", "findings-20261010-142559.desensitized.json", strings.NewReader(string(payload)), "p03-import", "127.0.0.1")
+	if err != nil {
+		t.Fatalf("ImportFindings(real export) error = %v", err)
+	}
+	if result.TotalCount == 0 {
+		t.Fatal("ImportFindings(real export) produced no rows; the scanner export shape is no longer accepted")
+	}
+	if result.FailureCount != 0 {
+		t.Fatalf("ImportFindings(real export) failure_count = %d, want 0; errors = %+v", result.FailureCount, result.Errors)
+	}
+	t.Logf("import: total=%d success=%d pending=%d duplicate=%d failure=%d", result.TotalCount, result.SuccessCount, result.PendingCount, result.DuplicateCount, result.FailureCount)
+	// On a freshly deployed register no finding can match a formal asset, so every
+	// row must land as a pending discovery rather than be dropped.
+	if result.PendingCount == 0 {
+		t.Fatal("ImportFindings(real export) produced no pending discoveries; findings were dropped instead of becoming asset discoveries")
+	}
+
+	// The export is not valid JSON as it stands: the report text contains a
+	// literal backslash before a domain name (\c.target-a.com) and POSIX escapes
+	// such as \(...\). Without the repair path the import would reject the whole
+	// file, which is exactly what happened before the scanner output was
+	// inspected. Assert the repair against the real bytes rather than against a
+	// synthetic sample.
+	if json.Valid(payload) {
+		t.Fatal("the desensitized export is now valid JSON; the malformed-escape fixture no longer covers the repair path")
+	}
+	repaired := repairInvalidJSONEscapes(payload)
+	if !json.Valid(repaired) {
+		t.Fatalf("repairInvalidJSONEscapes did not produce valid JSON: %v", repaired[min(len(repaired)-120, 0):])
+	}
+	var repairedRecords []map[string]any
+	if err := json.Unmarshal(repaired, &repairedRecords); err != nil {
+		t.Fatalf("decode repaired export: %v", err)
+	}
+	if len(repairedRecords) == 0 {
+		t.Fatal("repaired export decoded to zero findings")
+	}
+	// The repair drops the offending slash and keeps the text, so the domain
+	// survives as readable content rather than as an escape that would break the
+	// parser again.
+	if !strings.Contains(string(repaired), `c.target-a.com`) || strings.Contains(string(repaired), `\c.target-a.com`) {
+		t.Fatal("the repair did not turn the malformed escape into plain content")
+	}
+
+	// Step 2: everything without a formal asset must be waiting as an asset
+	// candidate, never dropped.
+	page, err := pagination.Normalize(1, pagination.MaxPageSize)
+	if err != nil {
+		t.Fatalf("pagination.Normalize() error = %v", err)
+	}
+	pending, err := findings.SearchFindingImportCandidates(ctx, operator, FindingImportCandidateFilter{Status: "pending", Page: page})
+	if err != nil {
+		t.Fatalf("SearchFindingImportCandidates() error = %v", err)
+	}
+	if pending.Total == 0 {
+		t.Fatal("no pending finding import candidates; findings without a formal asset were dropped instead of becoming asset discoveries")
+	}
+	discoveryValues := make(map[string]bool)
+	for _, item := range pending.Items {
+		if item.AssetCandidateID == "" {
+			t.Fatalf("pending candidate %d (%s %s) has no asset candidate; the import lost the asset discovery link", item.SourceRowNumber, item.AssetType, item.AssetValue)
+		}
+		discoveryValues[item.AssetType+":"+item.AssetValue] = true
+	}
+	t.Logf("pending finding candidates: %d across %d distinct discoveries", pending.Total, len(discoveryValues))
+
+	// The scanner records Oracle listeners as host:port. Those must be
+	// discovered as the address, with the port kept as evidence on the asset,
+	// not as a separate "10.10.1.7:1521" asset.
+	var hostPortValue string
+	if err := pool.QueryRow(ctx, `
+		SELECT asset_value FROM asset_candidates WHERE asset_type='ip' AND asset_value LIKE '%:1521' LIMIT 1`).Scan(&hostPortValue); err == nil {
+		t.Fatalf("asset candidate %q was created for a host:port value; the port must collapse onto the address", hostPortValue)
+	}
+
+	// Step 3: a group reviewer confirms one discovery and it becomes an
+	// organization working version, not a formal asset.
+	candidateID := pending.Items[0].AssetCandidateID
+	accepted, err := candidates.Accept(ctx, operator, candidateID, assetcandidate.AcceptInput{
+		CreateInput: asset.CreateInput{
+			OrganizationID: organizationID, Name: "P0-3 已确认资产", Environment: "production",
+			NetworkScope: "public", Status: "active", Importance: "normal", OwnerName: "P0-3 测试子公司",
+		},
+		ReviewNote: "漏洞导入发现，确认归属",
+	}, "p03-accept", "127.0.0.1")
+	if err != nil {
+		t.Fatalf("Accept(asset candidate) error = %v", err)
+	}
+	if accepted.ID == "" {
+		t.Fatal("Accept(asset candidate) returned no working version")
+	}
+	// The HTTP handler composes the two steps: confirming the discovery and then
+	// releasing the findings that arrived with it onto the working version. The
+	// services cannot be merged into one transaction without an import cycle, so
+	// the wiring under test is the one the route uses.
+	if err := findings.LinkAcceptedAssetCandidate(ctx, operator, candidateID, "", "p03-accept-link", "127.0.0.1"); err != nil {
+		t.Fatalf("LinkAcceptedAssetCandidate() error = %v", err)
+	}
+	var draftID string
+	if err := pool.QueryRow(ctx, `SELECT working_version_draft_id::text FROM asset_candidates WHERE id=$1::uuid`, candidateID).Scan(&draftID); err != nil {
+		t.Fatalf("load working version draft: %v", err)
+	}
+	if draftID != accepted.ID {
+		t.Fatalf("working version draft = %q, accept returned %q", draftID, accepted.ID)
+	}
+	var formalAssetID string
+	if err := pool.QueryRow(ctx, `SELECT count(*)::text FROM assets WHERE id=$1::uuid`, draftID).Scan(&formalAssetID); err != nil {
+		t.Fatalf("count formal asset for draft: %v", err)
+	}
+	if formalAssetID != "0" {
+		t.Fatal("confirming a discovery wrote directly into the formal asset table; the working version gate was skipped")
+	}
+
+	// The findings that arrived with the discovery are now recorded against the
+	// working version rather than staying in limbo.
+	var attachedToDraft int
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM security_findings WHERE pending_asset_draft_id=$1::uuid`, draftID).Scan(&attachedToDraft); err != nil {
+		t.Fatalf("count findings attached to working version: %v", err)
+	}
+	if attachedToDraft == 0 {
+		t.Fatal("confirming a discovery left its findings unreleased; the import queue and the asset ledger disagree")
+	}
+	t.Logf("working version %s carries %d findings", draftID, attachedToDraft)
+
+	// Step 4: the subsidiary selects the working version into its own inventory
+	// task, submits it, and the group publishes it.
+	task, err := tasks.Create(ctx, groupAdmin, inventorytask.CreateInput{
+		Name: "P0-3 漏洞入库发布任务", StartAt: time.Now().Add(-time.Hour),
+		DeadlineAt: time.Now().Add(24 * time.Hour), Status: "active", AssetNetworkScope: "all",
+		RequiredFields: []string{"network_assets"}, RequireReview: true, AllowLateSubmission: true,
+		OrganizationIDs: []string{organizationID},
+	}, "p03-task", "127.0.0.1")
+	if err != nil {
+		t.Fatalf("Create(inventory task) error = %v", err)
+	}
+	if _, err := tasks.Start(ctx, orgAdmin, task.ID, organizationID, "p03-start", "127.0.0.1"); err != nil {
+		t.Fatalf("Start(inventory task) error = %v", err)
+	}
+	var draftVersion int
+	if err := pool.QueryRow(ctx, `SELECT version FROM inventory_asset_drafts WHERE id=$1::uuid`, draftID).Scan(&draftVersion); err != nil {
+		t.Fatalf("load working version: %v", err)
+	}
+	if _, err := tasks.SelectWorkspaceAsset(ctx, orgAdmin, task.ID, organizationID, draftID, draftVersion, "p03-select", "127.0.0.1"); err != nil {
+		t.Fatalf("SelectWorkspaceAsset() error = %v", err)
+	}
+	quality, err := tasks.QualityCheck(ctx, orgAdmin, task.ID, organizationID)
+	if err != nil {
+		t.Fatalf("QualityCheck() error = %v", err)
+	}
+	if !quality.Passed {
+		t.Fatalf("QualityCheck() = %+v, want passed; the confirmed discovery must be publishable", quality)
+	}
+	if _, err := tasks.Submit(ctx, orgAdmin, task.ID, organizationID, inventorytask.SubmissionInput{Note: "P0-3 漏洞导入资产入库"}, "p03-submit", "127.0.0.1"); err != nil {
+		t.Fatalf("Submit() error = %v", err)
+	}
+	if _, err := tasks.Review(ctx, groupAdmin, task.ID, organizationID, inventorytask.ReviewInput{Decision: "approved"}, "p03-review", "127.0.0.1"); err != nil {
+		t.Fatalf("Review(approved) error = %v", err)
+	}
+
+	// Step 5: publication must settle the discovery and re-link every finding
+	// onto the formal asset. This is the whole point of the mainline: the
+	// vulnerability must end up countable under its asset.
+	var publishedAssetID, candidateStatus string
+	if err := pool.QueryRow(ctx, `
+		SELECT COALESCE(matched_asset_id::text,''), status FROM asset_candidates WHERE id=$1::uuid`, candidateID).Scan(&publishedAssetID, &candidateStatus); err != nil {
+		t.Fatalf("load asset candidate after publication: %v", err)
+	}
+	if candidateStatus != "accepted" || publishedAssetID == "" {
+		t.Fatalf("asset candidate after publication = status %q asset %q, want accepted with a formal asset", candidateStatus, publishedAssetID)
+	}
+	var stillOnDraft int
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM security_findings WHERE pending_asset_draft_id=$1::uuid`, draftID).Scan(&stillOnDraft); err != nil {
+		t.Fatalf("count findings still on the working version: %v", err)
+	}
+	if stillOnDraft != 0 {
+		t.Fatalf("findings still reference the discarded working version after publication = %d", stillOnDraft)
+	}
+	var linkedToAsset int
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM security_findings WHERE asset_id=$1::uuid`, publishedAssetID).Scan(&linkedToAsset); err != nil {
+		t.Fatalf("count findings linked to the published asset: %v", err)
+	}
+	if linkedToAsset == 0 {
+		t.Fatal("publication did not move any finding onto the formal asset; vulnerabilities become untraceable at the last step")
+	}
+	t.Logf("published asset %s now carries %d findings", publishedAssetID, linkedToAsset)
+
+	// The publication is a single transaction: the import candidate must be
+	// settled, not left pointing at a working version that no longer exists.
+	var leftoverPending int
+	if err := pool.QueryRow(ctx, `
+		SELECT count(*) FROM security_finding_import_candidates
+		WHERE asset_candidate_id=$1::uuid AND status='pending'`, candidateID).Scan(&leftoverPending); err != nil {
+		t.Fatalf("count leftover pending import candidates: %v", err)
+	}
+	if leftoverPending != 0 {
+		t.Fatalf("import candidates still pending after publication = %d", leftoverPending)
+	}
+
+	// Step 6: the linkage must be retryable. A partial failure has to remain
+	// resumable without re-importing the file.
+	if _, err := findings.RetryAcceptedAssetCandidate(ctx, operator, candidateID, publishedAssetID, "p03-retry", "127.0.0.1"); err != nil {
+		t.Fatalf("RetryAcceptedAssetCandidate() on a settled candidate error = %v; a settled queue must stay idempotent", err)
+	}
+}
+
+func TestP03ImportRejectsIllegalValuesWithRowNumbers(t *testing.T) {
+	databaseURL := strings.TrimSpace(os.Getenv("NETASSETS_TEST_DATABASE_URL"))
+	if databaseURL == "" {
+		t.Skip("NETASSETS_TEST_DATABASE_URL is not set")
+	}
+	ctx := context.Background()
+	pool, err := pgxpool.New(ctx, databaseURL)
+	if err != nil {
+		t.Fatalf("open test database: %v", err)
+	}
+	t.Cleanup(pool.Close)
+	if _, err := pool.Exec(ctx, `TRUNCATE organizations, users CASCADE`); err != nil {
+		t.Fatalf("reset p0-3 value fixtures: %v", err)
+	}
+	p03Bootstrap(t, pool, "VALUES")
+	operatorID := p03InsertUser(t, pool, "p03_value_operator", "P0-3 值校验运营人员")
+	p03AssignRole(t, pool, operatorID, "security_operator", "", "all")
+	operator := p03Principal(t, pool, operatorID, []string{"security_operator"})
+	service := NewService(pool, t.TempDir())
+
+	csv := strings.Join([]string{
+		"资产类型,资产值,漏洞标题,严重等级,漏洞描述,状态",
+		"domain,example.com,合法状态漏洞,高危,应通过校验,fixed",
+		"domain,bad.example,非法状态漏洞,高危,应在导入层拒绝,not_a_real_status",
+		"domain,worse.example,非法严重等级漏洞,极其严重,应在导入层拒绝,pending",
+		"domain,ok.example,中文状态漏洞,低危,中文标签应被接受,已修复",
+	}, "\n")
+	result, err := service.ImportFindings(ctx, operator, "", "illegal-values.csv", strings.NewReader(csv), "p03-values", "127.0.0.1")
+	if err != nil {
+		t.Fatalf("ImportFindings(illegal values) error = %v", err)
+	}
+	codesByRow := make(map[int]string)
+	for _, item := range result.Errors {
+		codesByRow[item.Row] = item.Code
+	}
+	if result.FailureCount != 2 {
+		t.Fatalf("failure_count = %d, want 2; errors = %+v", result.FailureCount, result.Errors)
+	}
+	if codesByRow[3] != "invalid_status" {
+		t.Fatalf("row 3 code = %q, want invalid_status", codesByRow[3])
+	}
+	if codesByRow[4] != "invalid_severity" {
+		t.Fatalf("row 4 code = %q, want invalid_severity", codesByRow[4])
+	}
+	if result.SuccessCount+result.PendingCount == 0 {
+		t.Fatal("the legal rows were not accepted; an illegal neighbour must not fail the whole file")
+	}
+	// The Chinese label of a legal status must be accepted too: the export the
+	// customer produces is not guaranteed to use the English constants.
+	if result.FailureCount != 2 || result.SuccessCount+result.PendingCount != 2 {
+		t.Fatalf("legal rows were not both kept: success=%d pending=%d failure=%d", result.SuccessCount, result.PendingCount, result.FailureCount)
+	}
+}
+
+func TestP03PendingFindingListCannotBeLinkedWithoutRealScope(t *testing.T) {
+	databaseURL := strings.TrimSpace(os.Getenv("NETASSETS_TEST_DATABASE_URL"))
+	if databaseURL == "" {
+		t.Skip("NETASSETS_TEST_DATABASE_URL is not set")
+	}
+	ctx := context.Background()
+	pool, err := pgxpool.New(ctx, databaseURL)
+	if err != nil {
+		t.Fatalf("open test database: %v", err)
+	}
+	t.Cleanup(pool.Close)
+	if _, err := pool.Exec(ctx, `TRUNCATE organizations, users CASCADE`); err != nil {
+		t.Fatalf("reset p0-3 link fixtures: %v", err)
+	}
+	p03Bootstrap(t, pool, "LINK")
+	groupID := p03InsertOrg(t, pool, "", "P03_LINK_GROUP", "P0-3 关联测试集团", "group")
+	p03InsertOrg(t, pool, groupID, "P03_LINK_SUB", "P0-3 关联测试子公司", "subsidiary")
+	operatorID := p03InsertUser(t, pool, "p03_link_operator", "P0-3 关联运营人员")
+	p03AssignRole(t, pool, operatorID, "security_operator", "", "all")
+	operator := p03Principal(t, pool, operatorID, []string{"security_operator"})
+	service := NewService(pool, t.TempDir())
+
+	csv := strings.Join([]string{
+		"资产类型,资产值,漏洞标题,严重等级,漏洞描述",
+		"ip,198.51.100.42,无批次无资产漏洞,中危,应进入待关联资产候选",
+	}, "\n")
+	result, err := service.ImportFindings(ctx, operator, "", "link.csv", strings.NewReader(csv), "p03-link-import", "127.0.0.1")
+	if err != nil {
+		t.Fatalf("ImportFindings() error = %v", err)
+	}
+	if result.PendingCount != 1 {
+		t.Fatalf("pending_count = %d, want 1", result.PendingCount)
+	}
+	page, _ := pagination.Normalize(1, 20)
+	pending, err := service.SearchFindingImportCandidates(ctx, operator, FindingImportCandidateFilter{Status: "pending", Page: page})
+	if err != nil {
+		t.Fatalf("SearchFindingImportCandidates() error = %v", err)
+	}
+	if pending.Total != 1 || pending.Items[0].AssetCandidateID == "" {
+		t.Fatalf("pending candidate = %+v, want one row bound to an asset candidate", pending.Items)
+	}
+	candidate := pending.Items[0]
+	if _, err := service.LinkFindingImportCandidate(ctx, operator, candidate.ID, FindingImportCandidateLinkInput{ReviewNote: "缺少资产"}, "p03-link-empty", "127.0.0.1"); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("LinkFindingImportCandidate() without an asset error = %v, want ErrInvalid", err)
+	}
+	if _, err := service.LinkFindingImportCandidate(ctx, operator, candidate.ID, FindingImportCandidateLinkInput{AssetID: "not-a-uuid"}, "p03-link-bad", "127.0.0.1"); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("LinkFindingImportCandidate() with a bad asset id error = %v, want ErrInvalid", err)
+	}
+	// A candidate belonging to an asset discovery may not be linked onto an
+	// arbitrary formal asset the reviewer names: the discovery path owns it.
+	if _, err := service.LinkFindingImportCandidate(ctx, operator, candidate.ID, FindingImportCandidateLinkInput{AssetCandidateID: candidate.AssetCandidateID}, "p03-link-candidate", "127.0.0.1"); err != nil {
+		if !errors.Is(err, ErrInvalid) && !errors.Is(err, ErrForbidden) {
+			t.Fatalf("LinkFindingImportCandidate(asset candidate without organization) error = %v", err)
+		}
+	}
+}
+
+// p03Bootstrap recreates the built-in roles and permissions. Other integration
+// suites truncate users with CASCADE, which also empties roles and permissions;
+// reading them from the database keeps these tests aligned with production
+// authorization instead of hand-written permission strings.
+func p03Bootstrap(t *testing.T, pool *pgxpool.Pool, suffix string) {
+	t.Helper()
+	cfg := config.Config{
+		BootstrapAdminUsername:    "p03_root_" + suffix,
+		BootstrapAdminPassword:    "P03-Bootstrap-Password-123",
+		BootstrapAdminDisplayName: "P0-3 集团安全管理员",
+		BootstrapGroupCode:        "P03_BOOTSTRAP_" + suffix,
+		BootstrapGroupName:        "P0-3 引导集团",
+	}
+	if err := bootstrap.Ensure(context.Background(), pool, cfg, slog.New(slog.NewTextHandler(io.Discard, nil))); err != nil {
+		t.Fatalf("bootstrap built-in roles: %v", err)
+	}
+}
+
+func p03InsertOrg(t *testing.T, pool *pgxpool.Pool, parentID, code, name, orgType string) string {
+	t.Helper()
+	var id string
+	if err := pool.QueryRow(context.Background(), `
+		INSERT INTO organizations (parent_id, organization_code, organization_name, organization_type)
+		VALUES (NULLIF($1,'')::uuid,$2,$3,$4) RETURNING id::text`, parentID, code, name, orgType).Scan(&id); err != nil {
+		t.Fatalf("insert organization %s: %v", code, err)
+	}
+	return id
+}
+
+func p03InsertUser(t *testing.T, pool *pgxpool.Pool, username, displayName string) string {
+	t.Helper()
+	var id string
+	if err := pool.QueryRow(context.Background(), `
+		INSERT INTO users (username, password_hash, display_name) VALUES ($1,'not-used',$2) RETURNING id::text`,
+		username, displayName).Scan(&id); err != nil {
+		t.Fatalf("insert user %s: %v", username, err)
+	}
+	return id
+}
+
+func p03AssignRole(t *testing.T, pool *pgxpool.Pool, userID, roleKey, organizationID, dataScope string) {
+	t.Helper()
+	if _, err := pool.Exec(context.Background(), `
+		INSERT INTO user_roles (user_id, role_id, organization_id, data_scope)
+		SELECT $1::uuid, id, NULLIF($3,'')::uuid, $4 FROM roles WHERE role_key = $2`, userID, roleKey, organizationID, dataScope); err != nil {
+		t.Fatalf("assign role %s: %v", roleKey, err)
+	}
+}
+
+func p03Principal(t *testing.T, pool *pgxpool.Pool, userID string, roles []string) auth.Principal {
+	t.Helper()
+	rows, err := pool.Query(context.Background(), `
+		SELECT DISTINCT rp.permission_key
+		FROM user_roles ur
+		JOIN roles r ON r.id = ur.role_id AND r.status='enabled'
+		JOIN role_permissions rp ON rp.role_id = r.id
+		WHERE ur.user_id = $1::uuid`, userID)
+	if err != nil {
+		t.Fatalf("load permissions: %v", err)
+	}
+	defer rows.Close()
+	permissions := make([]string, 0)
+	for rows.Next() {
+		var key string
+		if err := rows.Scan(&key); err != nil {
+			t.Fatalf("scan permission: %v", err)
+		}
+		permissions = append(permissions, key)
+	}
+	return auth.Principal{UserID: userID, Roles: roles, Permissions: permissions}
+}

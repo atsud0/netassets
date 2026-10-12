@@ -193,6 +193,13 @@ func (s *Service) canConfirmCandidate(ctx context.Context, principal auth.Princi
 	if principal.HasRole("group_admin") {
 		return true, nil
 	}
+	// The group security operator imports findings and owns the resulting
+	// discoveries, but must not be able to edit the formal asset ledger. Ownership
+	// of a discovery is therefore a dedicated capability: without it the import
+	// queue dead-ends and only a group administrator could ever settle it.
+	if principal.HasPermission("asset_candidate.confirm") {
+		return true, nil
+	}
 	allowed, err := access.CanOperateOrganization(ctx, s.pool, principal, organizationID, "asset.manage")
 	if err != nil || !allowed {
 		return false, err

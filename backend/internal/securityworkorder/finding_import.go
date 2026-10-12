@@ -513,6 +513,13 @@ func normalizeFindingJSONAsset(assetType, value string) (string, string) {
 		}
 		return "other", value
 	case "service", "port":
+		// A scanner "service" row is not always host:port. When the label is a
+		// URL the useful identity is the URL itself, and forcing it into the
+		// service type made normalizeValue reject the row outright. URL-shaped
+		// service rows are therefore kept as url assets instead of being lost.
+		if strings.Contains(value, "://") {
+			return "url", value
+		}
 		return "service", value
 	default:
 		return "other", value
