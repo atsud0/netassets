@@ -11,6 +11,7 @@ import AssetExternalObservations from '../components/AssetExternalObservations.v
 import WorkingVersionDiffDrawer from '../components/WorkingVersionDiffDrawer.vue'
 import ResourceSubmissionHistoryDrawer from '../components/ResourceSubmissionHistoryDrawer.vue'
 import { assetDraftEndpoint, batchAssetUpdateSuccessMessage } from '../utils/inventory-drafts'
+import { assetDirectBatchEndpointQuery, needsDirectChangeReason } from '../utils/asset-direct-change'
 import { createSuggestedColumnMapping, getImportColumnMappingError, importColumnLabel, isImportColumnUsed, serializeImportColumnMapping, type ImportColumn, type ImportColumnMapping, type ImportField } from '../utils/import-column-mapping'
 
 interface Organization { id: string; code: string; name: string; type: string; status: string }
@@ -49,6 +50,17 @@ interface ChangeHistoryItem {
   created_at: string; details?: { changes?: FieldChange[] }
 }
 interface ListResponse<T> { items: T[]; total: number; page: number; page_size: number }
+interface DirectChangeRecheckItem {
+  id: string; asset_id: string; asset_type: string; asset_value: string; asset_name?: string
+  organization_id: string; organization_name: string
+  action: 'create' | 'update' | 'delete'; reason: string
+  snapshot?: { before?: Partial<Asset>; after?: Partial<Asset> }
+  changed_fields?: Array<{ field: string; before?: unknown; after?: unknown }>
+  status: 'open' | 'confirmed' | 'disputed'
+  created_by: string; created_by_name?: string; created_at: string
+  confirmed_by?: string; confirmed_by_name?: string; confirmed_at?: string; confirmation_note?: string
+  request_id?: string; request_ip?: string
+}
 interface BatchOperationItem { id: string; success: boolean; code?: string; message: string; item?: Asset; resource_name?: string }
 interface BatchOperationResult { total_count: number; success_count: number; failure_count: number; items: BatchOperationItem[] }
 interface DetailResponse { item: Asset }
@@ -139,7 +151,83 @@ const form = reactive({
   environment: 'production', network_scope: 'public', status: 'active', importance: 'normal', owner_user_id: '', owner_name: '', notes: '', expires_at: null as Date | null,
 })
 const networkAreaForm = reactive({ organization_id: '', name: '', code: '', status: 'enabled', sort_order: 0, notes: '' })
-const importForm = reactive<{ organization_id: string; import_mode: 'skip_duplicates' | 'update_working' }>({ organization_id: '', import_mode: 'skip_duplicates' })
+const importForm = reactive<{ organization_id: string; import_mode: 'skip_duplicates' | 'update_working'; direct_change_reason: string }>({ organization_id: '', import_mode: 'skip_duplicates', direct_change_reason: '' })
+
+// 集团管理员直写正式台账会绕过填报复核流程，后端强制要求变更原因。这里集中判定
+// 「本次操作是否直接写正式台账」，只有真正直写时才向用户索要原因，避免把填报
+// 路径也塞进不必要的输入框。
+const directLedgerWrite = computed(() => needsDirectChangeReason({ isGroupAdmin: auth.isGroupAdmin, inventoryMode: inventoryMode.value }))
+const directChangeReasonRequired = ref(false)
+const directChangeReason = ref('')
+function resetDirectChangeReason() {
+  directChangeReasonRequired.value = false
+  directChangeReason.value = ''
+}
+// 用户取消原因输入时不区分 cancel/close：返回空串表示「未提供原因」，调用方
+// 静默退出，避免把「取消」当成错误弹出来。
+async function requestDirectChangeReason(title: string, message: string): Promise<string> {
+  const { value } = await ElMessageBox.prompt(message, title, {
+    confirmButtonText: '确认提交', cancelButtonText: '取消',
+    inputType: 'textarea', inputPlaceholder: '例如：集团资产清查中确认的存量服务器',
+    inputValidator: (input) => Boolean(input?.trim()) || '请填写变更原因，该原因会同步给资产所属组织复核',
+  })
+  return value.trim()
+}
+
+const recheckVisible = ref(false)
+const recheckLoading = ref(false)
+const recheckItems = ref<DirectChangeRecheckItem[]>([])
+const recheckTotal = ref(0)
+const recheckPage = ref(1)
+const recheckPageSize = ref(20)
+const recheckStatusFilter = ref('')
+const recheckDetail = ref<DirectChangeRecheckItem>()
+const recheckDetailVisible = ref(false)
+const recheckSubmitting = ref(false)
+const recheckActionLabels: Record<string, string> = { create: '集团直接新增', update: '集团直接修改', delete: '集团直接删除' }
+const recheckStatusLabels: Record<string, string> = { open: '待复核', confirmed: '已认可', disputed: '有异议' }
+async function openRecheckDrawer() {
+  recheckVisible.value = true
+  recheckPage.value = 1
+  await loadRechecks()
+}
+async function loadRechecks() {
+  recheckLoading.value = true
+  try {
+    const { data } = await apiClient.get<ListResponse<DirectChangeRecheckItem>>('/assets/direct-change-rechecks', {
+      params: { page: recheckPage.value, page_size: recheckPageSize.value, status: recheckStatusFilter.value || undefined },
+    })
+    recheckItems.value = data.items
+    recheckTotal.value = data.total
+  } catch (error) {
+    ElMessage.error(getAPIErrorMessage(error, '读取集团直改复核列表失败'))
+  } finally {
+    recheckLoading.value = false
+  }
+}
+function openRecheckDetail(item: DirectChangeRecheckItem) {
+  recheckDetail.value = item
+  recheckDetailVisible.value = true
+}
+async function decideRecheck(item: DirectChangeRecheckItem, status: 'confirmed' | 'disputed') {
+  const prompt = status === 'confirmed' ? '认可后该变更视为归属确认无误，请填写确认说明' : '提出异议不会自动回滚已写入的资产，但会记录在台账审计中，请说明异议内容'
+  try {
+    const { value } = await ElMessageBox.prompt(prompt, status === 'confirmed' ? '认可集团直改' : '对直改提出异议', {
+      confirmButtonText: '确认', cancelButtonText: '取消',
+      inputValidator: (input) => Boolean(input?.trim()) || '请填写说明',
+    })
+    recheckSubmitting.value = true
+    await apiClient.post(`/assets/direct-change-rechecks/${item.id}/confirm`, { status, note: value.trim() })
+    ElMessage.success(status === 'confirmed' ? '已认可该变更' : '已提交异议')
+    recheckDetailVisible.value = false
+    await loadRechecks()
+  } catch (error) {
+    if (error === 'cancel' || error === 'close') return
+    ElMessage.error(getAPIErrorMessage(error, '提交复核结论失败'))
+  } finally {
+    recheckSubmitting.value = false
+  }
+}
 const rules: FormRules = {
   type: [{ required: true, message: '请选择资产类型', trigger: 'change' }],
   value: [{ required: true, message: '请输入资产值', trigger: 'blur' }],
@@ -372,6 +460,7 @@ function openCreateDialog() {
   editingDraftTaskID.value = ''
   editingDraftOrganizationID.value = ''
   resetForm()
+  resetDirectChangeReason()
   editDialogVisible.value = true
   void loadOwnerOptions()
 }
@@ -450,6 +539,8 @@ function assetPayload(item: Asset, overrides: Partial<typeof form> = {}) {
     business_system_id: item.business_system_id ?? '', network_area_id: item.network_area_id ?? '', environment: item.environment, network_scope: item.network_scope,
     status: item.status, importance: item.importance, owner_user_id: item.owner_user_id ?? '', owner_name: item.owner_name ?? '', notes: item.notes ?? '', expires_at: item.expires_at ?? null,
     custom_values: item.custom_values ?? [], ...overrides,
+    // 集团管理员归档/启用同样是直改正式台账，必须带上变更原因。
+    ...(directLedgerWrite.value && directChangeReasonRequired.value ? { direct_change_reason: directChangeReason.value } : {}),
   }
 }
 async function submit() {
@@ -459,6 +550,12 @@ async function submit() {
     const missing = customFields.value.find((field) => field.is_required && isEmptyCustomValue(customValues[field.field_key]))
     if (missing) { ElMessage.warning(`请填写自定义字段：${missing.field_name}`); return }
     const customPayload = customFields.value.map((field) => ({ field_key: field.field_key, value: customValues[field.field_key] }))
+    if (directLedgerWrite.value && !directChangeReasonRequired.value) {
+      // 台账直写必须说明原因，后端会拒绝没有原因的提交；在请求之前先要一次，
+      // 免得用户填完一整张表单才被 400 打回。
+      directChangeReason.value = await requestDirectChangeReason('集团直接变更正式台账', `确认以集团名义直接${editingAssetID.value ? '修改' : '新增'}正式台账资产，请填写变更原因：所属组织会收到一条待复核记录，且集团不能自行确认该变更。`)
+      directChangeReasonRequired.value = true
+    }
     // Draft saves use the same optimistic-lock contract as the backend. A
     // newly created draft has no version yet; existing drafts must echo the
     // version returned by the last read/save.
@@ -469,6 +566,7 @@ async function submit() {
       custom_values: customPayload,
       // Working versions (task-bound or not) are version-locked; only rows in
       // the published ledger still use the timestamp comparison.
+      ...(directLedgerWrite.value && directChangeReasonRequired.value ? { direct_change_reason: directChangeReason.value } : {}),
       ...(editingAssetID.value && editingExpectedVersion.value > 0 ? { expected_version: editingExpectedVersion.value } : {}),
       ...(editingAssetID.value && !editingExpectedVersion.value && !editingIsDraft.value && editingExpectedUpdatedAt.value ? { expected_updated_at: editingExpectedUpdatedAt.value } : {}),
     }
@@ -491,8 +589,10 @@ async function submit() {
     if (!inventoryMode.value && customFields.value.length && !response.data.item.is_working_copy) await apiClient.put(`/assets/${id}/custom-fields`, { values: customFields.value.map((field) => ({ field_key: field.field_key, value: customValues[field.field_key] })) })
     ElMessage.success(inventoryMode.value ? (editingIsDraft.value ? '本次上报内容已更新' : (editingAssetID.value ? '资产变更已保存，请选择后纳入本次上报' : '资产已保存为未上报状态，请选择后纳入本次上报')) : (response.data.item.is_working_copy ? (editingAssetID.value ? '网络资产已更新，当前仍为未上报状态' : '网络资产已新增，默认未上报') : (editingAssetID.value ? '网络资产已更新' : '网络资产已新增')))
     editDialogVisible.value = false
+    resetDirectChangeReason()
     await refreshAfterMutation()
   } catch (error) {
+    if (error === 'cancel' || error === 'close') { editDialogVisible.value = false; return }
     ElMessage.error(getAPIErrorMessage(error, inventoryMode.value ? '保存待上报网络资产失败' : (editingAssetID.value ? '编辑网络资产失败' : '新增网络资产失败')))
   } finally {
     submitting.value = false
@@ -575,10 +675,16 @@ async function runBatchUpdate(payload: { status?: string; network_area_id?: stri
     await ElMessageBox.confirm(`确认对选中的 ${selectedAssets.value.length} 个网络资产执行“${action}”吗？系统会逐项校验组织权限并返回处理结果。`, `批量${action}确认`, {
       type: 'warning', confirmButtonText: '确认执行', cancelButtonText: '取消',
     })
+    const directBatch = directLedgerWrite.value && selectedAssets.value.every((item) => !item.is_working_copy && !item.task_id)
+    let directReason = ''
+    if (directBatch) directReason = await requestDirectChangeReason('集团批量变更正式台账', `确认对 ${selectedAssets.value.length} 个正式台账资产执行“${action}”，请填写变更原因：每个资产都会在所属组织生成待复核记录。`)
     batchLoading.value = true
     const targets = [...selectedAssets.value]
     const response = await apiClient.patch<{ result: BatchOperationResult }>('/assets/batch', {
-      items: targets.map((item) => ({ id: item.id, expected_version: item.version })), ...payload,
+      // 后端批量更新按资产 ID 列表处理（ids），不是按带版本号的条目；版本由
+      // 服务端在事务里读取，条目形式会被当成空选择直接 400。
+      ids: targets.map((item) => item.id), ...payload,
+      ...assetDirectBatchEndpointQuery({ isGroupAdmin: auth.isGroupAdmin, inventoryMode: inventoryMode.value }, directReason),
     })
     const names = new Map(targets.map((item) => [item.id, item.name || item.value]))
     batchResult.value = {
@@ -618,8 +724,13 @@ async function toggleArchive(item: Asset) {
     await ElMessageBox.confirm(`确定${action}资产“${item.name || item.value}”吗？`, `${action}网络资产`, {
       confirmButtonText: action, cancelButtonText: '取消', type: archived ? 'info' : 'warning',
     })
+    if (directLedgerWrite.value) {
+      directChangeReason.value = await requestDirectChangeReason(`${action}正式台账资产`, `确认${action}正式台账资产“${item.name || item.value}”，请填写变更原因：所属组织会收到一条待复核记录。`)
+      directChangeReasonRequired.value = true
+    }
     await apiClient.patch(`/assets/${item.id}`, assetPayload(item, { status: archived ? 'active' : 'archived' }))
     ElMessage.success(`网络资产已${action}`)
+    resetDirectChangeReason()
     await refreshAfterMutation()
   } catch (error) {
     if (error === 'cancel' || error === 'close') return
@@ -631,13 +742,22 @@ async function removeAsset(item: Asset) {
     await ElMessageBox.confirm(`删除后资产将不再出现在列表中，确定删除“${item.name || item.value}”吗？`, '删除网络资产', {
       confirmButtonText: '删除', cancelButtonText: '取消', type: 'error',
     })
+    const formalDelete = !item.is_working_copy && !item.task_id
+    if (directLedgerWrite.value && formalDelete) {
+      directChangeReason.value = await requestDirectChangeReason('删除正式台账资产', `确认以集团名义删除正式台账资产“${item.name || item.value}”，请填写变更原因：所属组织会收到一条待复核记录。`)
+      directChangeReasonRequired.value = true
+    }
     if (item.is_working_copy && item.task_id) {
       if (!item.version || item.version <= 0) throw new Error('草稿版本信息缺失，请刷新后重试')
       await apiClient.delete(assetDraftEndpoint(item.task_id, item.organization_id, item.id), { params: { expected_version: item.version } })
     } else {
-      await apiClient.delete(`/assets/${item.id}`, { params: item.version && item.version > 0 ? { expected_version: item.version } : {} })
+      await apiClient.delete(`/assets/${item.id}`, { params: {
+        ...(item.version && item.version > 0 ? { expected_version: item.version } : {}),
+        ...(formalDelete && directChangeReasonRequired.value ? { direct_change_reason: directChangeReason.value } : {}),
+      } })
     }
     ElMessage.success('网络资产已删除')
+    resetDirectChangeReason()
     await refreshAfterMutation()
   } catch (error) {
     if (error === 'cancel' || error === 'close') return
@@ -679,6 +799,7 @@ async function analyzeImportColumns() {
 function openImportDialog() {
   importForm.organization_id = defaultOrganizationID()
   importForm.import_mode = 'skip_duplicates'
+  importForm.direct_change_reason = ''
   importFile.value = undefined
   clearImportColumnMapping()
   resetImportPreview()
@@ -705,6 +826,7 @@ async function runImport(preview = false) {
   if (!importFile.value) return ElMessage.warning('请选择 CSV 或 XLSX 文件')
   if (!importFields.value.length && !await analyzeImportColumns()) return
   if (importMappingError.value) return ElMessage.warning(importMappingError.value)
+  if (!preview && auth.isGroupAdmin && !importForm.direct_change_reason.trim()) return ElMessage.warning('导入正式台账属于集团直接变更，请填写变更原因')
   if (!preview && (importResultMode.value !== 'preview' || !importResult.value?.success_count)) {
     return ElMessage.warning('请先完成预检，并确认至少有一行可以导入')
   }
@@ -713,6 +835,7 @@ async function runImport(preview = false) {
     const data = new FormData()
     data.append('organization_id', importForm.organization_id)
     data.append('import_mode', importForm.import_mode)
+    if (auth.isGroupAdmin) data.append('direct_change_reason', importForm.direct_change_reason)
     data.append('column_mapping', serializeImportColumnMapping(importFields.value, importColumnMapping))
     data.append('file', importFile.value)
     const endpoint = preview ? '/assets/import/preview' : '/assets/import'
@@ -965,6 +1088,8 @@ watch(() => route.query.organization_id, (value) => {
 onMounted(() => {
   if (inventoryMode.value) organizationFilter.value = inventoryOrganizationID.value
   void load(!inventoryMode.value)
+  // 通知里的“集团直改复核”深链直接打开复核抽屉，省去用户自己在更多操作里找。
+  if (!inventoryMode.value && route.query.recheck === '1') void openRecheckDrawer()
 })
 </script>
 
@@ -990,7 +1115,7 @@ onMounted(() => {
           <el-button :loading="exporting">导出台账</el-button>
           <template #dropdown><el-dropdown-menu><el-dropdown-item @click="exportLedger('xlsx')">导出 XLSX</el-dropdown-item><el-dropdown-item @click="exportLedger('csv')">导出 CSV</el-dropdown-item><el-dropdown-item divided @click="queueXLSXExport">后台生成 XLSX</el-dropdown-item></el-dropdown-menu></template>
         </el-dropdown>
-        <el-dropdown v-if="!inventoryMode" trigger="click"><el-button>更多操作</el-button><template #dropdown><el-dropdown-menu><el-dropdown-item @click="openImportDialog">批量导入</el-dropdown-item><el-dropdown-item @click="openImportHistory">导入记录</el-dropdown-item><el-dropdown-item v-if="auth.isGroupAdmin" divided @click="openAreaManagement">网络区域配置</el-dropdown-item></el-dropdown-menu></template></el-dropdown>
+        <el-dropdown v-if="!inventoryMode" trigger="click"><el-button>更多操作</el-button><template #dropdown><el-dropdown-menu><el-dropdown-item @click="openImportDialog">批量导入</el-dropdown-item><el-dropdown-item @click="openImportHistory">导入记录</el-dropdown-item><el-dropdown-item v-if="auth.hasPermission('asset.manage')" divided @click="openRecheckDrawer">直改复核</el-dropdown-item><el-dropdown-item v-if="auth.isGroupAdmin" divided @click="openAreaManagement">网络区域配置</el-dropdown-item></el-dropdown-menu></template></el-dropdown>
         <el-button type="primary" @click="openCreateDialog">新增资产</el-button>
       </div>
     </div>
@@ -1181,6 +1306,10 @@ onMounted(() => {
             <p class="muted-text">覆盖模式不会直接修改集团正式台账：已上报资产会生成更新工作版本，已有可编辑工作版本会被文件内容更新；已纳入任务、已提交或待下线版本不可覆盖，导入后仍需通过填报任务提交上报。</p>
           </div>
         </el-form-item>
+        <el-form-item v-if="auth.isGroupAdmin" label="直改原因" required>
+          <el-input v-model="importForm.direct_change_reason" type="textarea" :rows="2" maxlength="1000" show-word-limit placeholder="例如：集团资产清查中确认的存量服务器" @input="resetImportPreview" />
+          <p class="muted-text">导入成功项直接进入集团正式台账，会在每个资产所属组织生成一条待复核记录；集团管理员不能自行确认该变更。</p>
+        </el-form-item>
         <el-form-item label="CSV / XLSX 文件" required><el-upload drag :auto-upload="false" :limit="1" accept=".csv,.xlsx" :on-change="handleFileChange" :on-remove="handleFileRemove"><div class="el-upload__text">拖入文件，或<em>点击选择</em></div><template #tip><div class="el-upload__tip">文件不超过 10 MB；业务系统使用同组织内的系统编码匹配；责任人账号按所属组织内的启用用户名匹配；有效期格式错误会在预检中逐行提示。</div></template></el-upload></el-form-item>
         <el-form-item v-if="importFile" label="文件列映射" required>
           <div v-loading="importColumnsLoading" class="import-mapping-panel">
@@ -1250,9 +1379,69 @@ onMounted(() => {
         </div>
       </div>
     </el-drawer>
+
+    <el-drawer v-model="recheckVisible" title="集团直改复核" size="880px">
+      <el-alert title="集团管理员绕过填报复核流程直接写入正式台账的资产会列在这里，由资产所属组织认可或提出异议。集团管理员不能确认自己写的变更。" type="info" :closable="false" show-icon />
+      <div class="recheck-toolbar">
+        <el-select v-model="recheckStatusFilter" clearable placeholder="全部状态" style="width: 150px" @change="recheckPage = 1; loadRechecks()">
+          <el-option v-for="(label, value) in recheckStatusLabels" :key="value" :label="label" :value="value" />
+        </el-select>
+        <span class="asset-filter-count">共 {{ recheckTotal }} 条</span>
+      </div>
+      <el-table :data="recheckItems" v-loading="recheckLoading" max-height="520">
+        <el-table-column label="资产" min-width="200"><template #default="scope"><div class="organization-name-cell"><strong>{{ scope.row.asset_name || scope.row.asset_value }}</strong><span>{{ scope.row.asset_type }} · {{ scope.row.asset_value }}</span></div></template></el-table-column>
+        <el-table-column label="所属组织" min-width="140" prop="organization_name" />
+        <el-table-column label="变更" width="120"><template #default="scope">{{ recheckActionLabels[scope.row.action] || scope.row.action }}</template></el-table-column>
+        <el-table-column label="变更原因" min-width="200"><template #default="scope">{{ scope.row.reason }}</template></el-table-column>
+        <el-table-column label="操作人 / 时间" width="160"><template #default="scope"><div class="organization-name-cell"><strong>{{ scope.row.created_by_name || '-' }}</strong><span>{{ formatDate(scope.row.created_at) }}</span></div></template></el-table-column>
+        <el-table-column label="状态" width="96"><template #default="scope"><el-tag :type="scope.row.status === 'confirmed' ? 'success' : scope.row.status === 'disputed' ? 'danger' : 'warning'" effect="plain">{{ recheckStatusLabels[scope.row.status] || scope.row.status }}</el-tag></template></el-table-column>
+        <el-table-column label="操作" width="140" fixed="right"><template #default="scope"><el-button link type="primary" @click="openRecheckDetail(scope.row)">查看</el-button><template v-if="scope.row.status === 'open' && !auth.isGroupAdmin"><el-button link type="primary" @click="decideRecheck(scope.row, 'confirmed')">认可</el-button><el-button link type="danger" @click="decideRecheck(scope.row, 'disputed')">有异议</el-button></template></template></el-table-column>
+      </el-table>
+      <el-pagination
+        v-model:current-page="recheckPage"
+        v-model:page-size="recheckPageSize"
+        layout="total, sizes, prev, pager, next"
+        :total="recheckTotal"
+        :page-sizes="[20, 50, 100]"
+        @current-change="loadRechecks"
+        @size-change="recheckPage = 1; loadRechecks()"
+      />
+    </el-drawer>
+
+    <el-dialog v-model="recheckDetailVisible" title="直改复核详情" width="760px">
+      <template v-if="recheckDetail">
+        <el-descriptions :column="2" border>
+          <el-descriptions-item label="资产">{{ recheckDetail.asset_name || recheckDetail.asset_value }}</el-descriptions-item>
+          <el-descriptions-item label="所属组织">{{ recheckDetail.organization_name }}</el-descriptions-item>
+          <el-descriptions-item label="变更类型">{{ recheckActionLabels[recheckDetail.action] || recheckDetail.action }}</el-descriptions-item>
+          <el-descriptions-item label="状态">{{ recheckStatusLabels[recheckDetail.status] || recheckDetail.status }}</el-descriptions-item>
+          <el-descriptions-item label="变更原因" :span="2">{{ recheckDetail.reason }}</el-descriptions-item>
+          <el-descriptions-item label="操作人">{{ recheckDetail.created_by_name || '-' }}</el-descriptions-item>
+          <el-descriptions-item label="操作时间">{{ formatDate(recheckDetail.created_at) }}</el-descriptions-item>
+          <el-descriptions-item label="来源 IP">{{ recheckDetail.request_ip || '-' }}</el-descriptions-item>
+          <el-descriptions-item label="请求 ID">{{ recheckDetail.request_id || '-' }}</el-descriptions-item>
+          <el-descriptions-item v-if="recheckDetail.status !== 'open'" label="复核人">{{ recheckDetail.confirmed_by_name || '-' }}</el-descriptions-item>
+          <el-descriptions-item v-if="recheckDetail.status !== 'open'" label="复核说明">{{ recheckDetail.confirmation_note || '-' }}</el-descriptions-item>
+        </el-descriptions>
+        <h4 class="recheck-section-title">字段变更</h4>
+        <el-table :data="recheckDetail.changed_fields || []" max-height="240">
+          <el-table-column prop="field" label="字段" min-width="160" />
+          <el-table-column label="变更前" min-width="180"><template #default="scope">{{ scope.row.before ?? '-' }}</template></el-table-column>
+          <el-table-column label="变更后" min-width="180"><template #default="scope">{{ scope.row.after ?? '-' }}</template></el-table-column>
+        </el-table>
+        <el-alert v-if="!auth.isGroupAdmin && recheckDetail.status === 'open'" title="请确认该变更与本组织资产事实一致；提出异议不会自动回滚资产，但会记录在台账审计中。" type="warning" :closable="false" show-icon />
+      </template>
+      <template #footer>
+        <el-button @click="recheckDetailVisible = false">关闭</el-button>
+        <template v-if="recheckDetail && recheckDetail.status === 'open' && !auth.isGroupAdmin">
+          <el-button type="primary" :loading="recheckSubmitting" @click="decideRecheck(recheckDetail, 'confirmed')">认可</el-button>
+          <el-button type="danger" :loading="recheckSubmitting" @click="decideRecheck(recheckDetail, 'disputed')">有异议</el-button>
+        </template>
+      </template>
+    </el-dialog>
   </section>
 </template>
 
 <style scoped>
-.network-asset-filter-controls,.network-asset-filter-controls.with-organization-filter { display:flex;flex-wrap:wrap;gap:10px; }.network-asset-filter-controls>.el-input { flex:1;min-width:220px; }.network-asset-filter-controls>.el-select { width:140px; }.network-asset-filter-controls>.el-select:last-of-type { width:170px; }.network-asset-filter-controls .el-button { margin-left:0; }.mono-text { overflow-wrap:anywhere; }@media(max-width:760px) { .network-asset-filter-controls>.el-input { flex-basis:100%; }.asset-page-actions { flex-wrap:wrap; }.batch-toolbar { align-items:flex-start; } }
+.network-asset-filter-controls,.network-asset-filter-controls.with-organization-filter { display:flex;flex-wrap:wrap;gap:10px; }.network-asset-filter-controls>.el-input { flex:1;min-width:220px; }.network-asset-filter-controls>.el-select { width:140px; }.network-asset-filter-controls>.el-select:last-of-type { width:170px; }.network-asset-filter-controls .el-button { margin-left:0; }.mono-text { overflow-wrap:anywhere; }.recheck-toolbar { display:flex;align-items:center;gap:12px;margin:12px 0; }.recheck-section-title { margin:16px 0 8px; }@media(max-width:760px) { .network-asset-filter-controls>.el-input { flex-basis:100%; }.asset-page-actions { flex-wrap:wrap; }.batch-toolbar { align-items:flex-start; } }
 </style>

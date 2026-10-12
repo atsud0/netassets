@@ -166,6 +166,7 @@ WHERE child.status='enabled' AND child.deleted_at IS NULL
 			WHEN 'asset.archived' THEN CASE WHEN ne.item_count>1 THEN '网络资产已批量归档' ELSE '网络资产已归档' END
 			WHEN 'asset.deleted' THEN CASE WHEN ne.item_count>1 THEN '网络资产已批量删除' ELSE '网络资产已删除' END
 			WHEN 'asset.restored' THEN CASE WHEN ne.item_count>1 THEN '网络资产已批量恢复' ELSE '网络资产已恢复' END
+			WHEN 'asset.direct_changed' THEN '集团直接变更正式台账资产，待本组织复核'
 			WHEN 'business_system.archived' THEN CASE WHEN ne.item_count>1 THEN '业务系统已批量归档' ELSE '业务系统已归档' END
 			WHEN 'business_system.restored' THEN CASE WHEN ne.item_count>1 THEN '业务系统已批量恢复' ELSE '业务系统已恢复' END
 			WHEN 'business_system.deleted' THEN CASE WHEN ne.item_count>1 THEN '业务系统已批量删除' ELSE '业务系统已删除' END
@@ -203,6 +204,11 @@ WHERE child.status='enabled' AND child.deleted_at IS NULL
 			WHEN 'asset.restored' THEN CASE WHEN ne.item_count>1
 				THEN format('%s 已从回收站批量恢复本组织 %s 项网络资产。', COALESCE(NULLIF(actor.display_name,''),actor.username,'管理员'),ne.item_count)
 				ELSE format('%s 已从回收站恢复网络资产“%s”。', COALESCE(NULLIF(actor.display_name,''),actor.username,'管理员'),ne.resource_label) END
+			WHEN 'asset.direct_changed' THEN format(
+				'%s 绕过填报复核流程直接变更了正式台账资产（%s），原因：%s。请核实归属并给出认可或异议结论。',
+				COALESCE(NULLIF(actor.display_name,''),actor.username,'集团管理员'),
+				COALESCE(NULLIF(ne.details->>'action_label',''),'直接变更'),
+				COALESCE(NULLIF(ne.details->>'reason',''),'未填写'))
 			WHEN 'business_system.archived' THEN CASE WHEN ne.item_count>1
 				THEN format('%s 已批量归档本组织 %s 个业务系统。', COALESCE(NULLIF(actor.display_name,''),actor.username,'管理员'),ne.item_count)
 				ELSE format('%s 已归档业务系统“%s”。', COALESCE(NULLIF(actor.display_name,''),actor.username,'管理员'),ne.resource_label) END
@@ -243,6 +249,7 @@ WHERE child.status='enabled' AND child.deleted_at IS NULL
 		COALESCE(ne.resource_id,'')::text AS resource_id,
 		CASE
 			WHEN ne.event_type='asset.deleted' THEN '/recycle-bin?resource_type=asset&organization_id=' || ne.target_organization_id::text
+			WHEN ne.event_type='asset.direct_changed' THEN '/assets?organization_id=' || ne.target_organization_id::text || '&recheck=1'
 			WHEN ne.event_type LIKE 'asset.%' THEN '/assets?organization_id=' || ne.target_organization_id::text || CASE WHEN ne.resource_id IS NOT NULL THEN '&asset_id=' || ne.resource_id ELSE '' END
 			WHEN ne.event_type='business_system.deleted' THEN '/recycle-bin?resource_type=business_system&organization_id=' || ne.target_organization_id::text
 			WHEN ne.event_type LIKE 'business_system.%' THEN '/business-systems?organization_id=' || ne.target_organization_id::text || CASE WHEN ne.resource_id IS NOT NULL THEN '&system_id=' || ne.resource_id ELSE '' END

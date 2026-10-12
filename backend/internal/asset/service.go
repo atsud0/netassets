@@ -1853,8 +1853,10 @@ func (s *Service) Import(ctx context.Context, principal auth.Principal, organiza
 	if !allowed {
 		return ImportResult{}, ErrForbidden
 	}
-	if err := validateDirectChangeReason(directChangeReason); err != nil {
-		return ImportResult{}, err
+	if !usesWorkingInventory(principal) {
+		if err := validateDirectChangeReason(directChangeReason); err != nil {
+			return ImportResult{}, err
+		}
 	}
 	mode, err := normalizeImportMode(principal, rawMode)
 	if err != nil {
