@@ -293,3 +293,57 @@ func TestNotificationScopeOrgEditorHasNoRemediationAccess(t *testing.T) {
 		}
 	}
 }
+
+// Retirement is the one remediation event that happens without the assignee
+// doing anything, so it is the one event most likely to be missing from the
+// notification chain: the reviewer needs to know the work stopped, and the
+// assignee needs to know it can continue again.
+func TestNotificationChainIncludesRetirementAndRestorationEvents(t *testing.T) {
+	f := setupNotificationScope(t)
+	ctx := f.ctx
+	for action := range map[string]string{
+		"asset_retired":   "关联资产已删除，任务暂停",
+		"system_retired":  "关联业务系统已删除，任务暂停",
+		"asset_restored":  "关联资产已恢复，任务可继续",
+		"system_restored": "业务系统已恢复，任务待确认",
+	} {
+		if _, err := f.pool.Exec(ctx, `
+			INSERT INTO remediation_task_events (task_id, actor_id, action, visibility, details)
+			VALUES ($1::uuid,$2::uuid,$3,'participants','{}'::jsonb)`, f.taskA, f.securityAdmin.UserID, action); err != nil {
+			t.Fatalf("insert %s event: %v", action, err)
+		}
+	}
+	// The notification query labels each event with the task's current material.
+	// The raw-SQL fixture has none, so the join would drop every event silently.
+	var revisions int
+	if err := f.pool.QueryRow(ctx, `SELECT count(*) FROM remediation_material_versions WHERE task_id=$1::uuid`, f.taskA).Scan(&revisions); err != nil {
+		t.Fatalf("count material versions: %v", err)
+	}
+	if revisions == 0 {
+		if _, err := f.pool.Exec(ctx, `
+			INSERT INTO remediation_material_versions (task_id, revision, title, severity, description, requirement, approved_by)
+			VALUES ($1::uuid,1,'通知范围材料','high','用于验证通知范围','完成整改',$2::uuid)`, f.taskA, f.securityAdmin.UserID); err != nil {
+			t.Fatalf("insert material version: %v", err)
+		}
+	}
+	result, _, err := f.notes.Search(ctx, f.orgAdminA, notification.SearchInput{Page: notificationPage()})
+	if err != nil {
+		t.Fatalf("Search error = %v", err)
+	}
+	seen := map[string]bool{}
+	for _, item := range result.Items {
+		if item.ResourceType == "remediation_task" && item.ResourceID == f.taskA {
+			seen[item.Title] = true
+		}
+	}
+	for _, want := range []string{
+		"关联资产已删除，任务暂停",
+		"关联业务系统已删除，任务暂停",
+		"关联资产已恢复，任务可继续",
+		"业务系统已恢复，任务待确认",
+	} {
+		if !seen[want] {
+			t.Fatalf("notification list is missing %q; got %v", want, seen)
+		}
+	}
+}

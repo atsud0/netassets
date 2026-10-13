@@ -658,25 +658,31 @@ WHERE child.status='enabled' AND child.deleted_at IS NULL
 	WHERE ej.requested_by=$1::uuid AND ej.status IN ('completed','failed')
  UNION ALL
  SELECT 'repair_event:'||e.id::text,'remediation',
- CASE e.action WHEN 'assign' THEN '收到修复任务' WHEN 'reassign' THEN '修复任务已改派' WHEN 'submit' THEN '修复结果待组织确认' WHEN 'organization-review' THEN '组织确认已有结果' WHEN 'security-review' THEN '集团复测已有结果' WHEN 'request.create' THEN '收到修复协作申请' WHEN 'request.decide' THEN '修复申请已有结果' ELSE '修复任务已更新' END,
- t.task_no||'：'||m.title,'info','remediation_task',t.id::text,
+ CASE e.action WHEN 'assign' THEN '收到修复任务' WHEN 'reassign' THEN '修复任务已改派' WHEN 'submit' THEN '修复结果待组织确认' WHEN 'organization-review' THEN '组织确认已有结果' WHEN 'security-review' THEN '集团复测已有结果' WHEN 'request.create' THEN '收到修复协作申请' WHEN 'request.decide' THEN '修复申请已有结果'
+   WHEN 'asset_retired' THEN '关联资产已删除，任务暂停' WHEN 'system_retired' THEN '关联业务系统已删除，任务暂停'
+   WHEN 'asset_restored' THEN '关联资产已恢复，任务可继续' WHEN 'system_restored' THEN '业务系统已恢复，任务待确认' ELSE '修复任务已更新' END,
+ t.task_no||'：'||m.title,
+ CASE WHEN e.action IN ('asset_retired','system_retired','asset_restored','system_restored') THEN 'warning' ELSE 'info' END,
+ 'remediation_task',t.id::text,
  CASE WHEN t.assignee_user_id=$1::uuid THEN '/repair/tasks?task_id=' ELSE '/remediation?task_id=' END||t.id::text,e.created_at,t.due_at
  FROM remediation_task_events e JOIN remediation_tasks t ON t.id=e.task_id
  JOIN remediation_material_versions m ON m.task_id=t.id AND m.revision=t.material_revision
- WHERE e.visibility='participants' AND e.actor_id<>$1::uuid AND e.action IN ('assign','reassign','submit','organization-review','security-review','request.create','request.decide','materials','cancel')
+ WHERE e.visibility='participants' AND e.actor_id<>$1::uuid AND e.action IN ('assign','reassign','submit','organization-review','security-review','request.create','request.decide','materials','cancel','asset_retired','system_retired','asset_restored','system_restored')
  AND remediation_can_read($1::uuid,t.id)
  UNION ALL
  SELECT 'repair_due:'||t.id::text||':'||extract(epoch FROM t.due_at)::bigint::text||':soon','remediation',
  '修复任务即将到期',t.task_no||'：'||m.title,'warning','remediation_task',t.id::text,
  CASE WHEN t.assignee_user_id=$1::uuid THEN '/repair/tasks?task_id=' ELSE '/remediation?task_id=' END||t.id::text,t.due_at,t.due_at
  FROM remediation_tasks t JOIN remediation_material_versions m ON m.task_id=t.id AND m.revision=t.material_revision
- WHERE t.status NOT IN ('completed','cancelled') AND t.due_at>=now() AND t.due_at<now()+interval '3 days' AND remediation_can_read($1::uuid,t.id)
+ WHERE t.status NOT IN ('completed','cancelled') AND t.asset_retired_at IS NULL AND t.system_retired_at IS NULL
+   AND t.due_at>=now() AND t.due_at<now()+interval '3 days' AND remediation_can_read($1::uuid,t.id)
  UNION ALL
  SELECT 'repair_overdue_summary:'||$1::uuid::text||':'||(t.assignee_user_id=$1::uuid)::text||':'||floor(extract(epoch FROM now())/(86400*(SELECT overdue_reminder_days FROM remediation_settings WHERE singleton)))::text,
  'remediation','修复任务逾期汇总','当前可见范围内有 '||count(*)::text||' 项未完成任务已逾期，请及时处理。','warning','remediation_summary',$1::uuid::text,
  CASE WHEN t.assignee_user_id=$1::uuid THEN '/repair/tasks?overdue=true' ELSE '/remediation?overdue=true' END,
  to_timestamp(floor(extract(epoch FROM now())/(86400*(SELECT overdue_reminder_days FROM remediation_settings WHERE singleton)))*(86400*(SELECT overdue_reminder_days FROM remediation_settings WHERE singleton))),min(t.due_at)
- FROM remediation_tasks t WHERE t.status NOT IN ('completed','cancelled') AND t.due_at<now() AND remediation_can_read($1::uuid,t.id)
+ FROM remediation_tasks t WHERE t.status NOT IN ('completed','cancelled') AND t.asset_retired_at IS NULL AND t.system_retired_at IS NULL
+   AND t.due_at<now() AND remediation_can_read($1::uuid,t.id)
  GROUP BY (t.assignee_user_id=$1::uuid) UNION ALL
  SELECT 'repair_reassigned:'||e.id::text,'remediation','修复任务分派已变更','一项任务已转交其他人员，你不再拥有该任务访问权限。','info','remediation_change',e.id::text,'/repair/tasks',e.created_at,NULL::timestamptz
  FROM remediation_task_events e WHERE e.action='reassign' AND e.details->>'from_user_id'=$1::uuid::text AND e.details->>'to_user_id'<>$1::uuid::text

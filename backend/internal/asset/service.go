@@ -29,6 +29,7 @@ import (
 	"netassets/internal/inventorydraft"
 	"netassets/internal/notification"
 	"netassets/internal/pagination"
+	"netassets/internal/remediationretire"
 )
 
 var (
@@ -1264,38 +1265,11 @@ func (s *Service) Delete(ctx context.Context, principal auth.Principal, assetID 
 	// it. The delivery history has to survive an audit, but the assignee must not
 	// keep working a task whose target no longer exists, and the reviewer must be
 	// able to see why the task stopped being current.
-	retiredRows, err := tx.Query(ctx, `
-		UPDATE remediation_tasks t SET asset_retired_at = now(), version = version + 1, updated_at = now()
-		FROM security_findings f
-		WHERE t.finding_id = f.id AND f.asset_id = $1::uuid
-		  AND t.status NOT IN ('completed', 'cancelled') AND t.asset_retired_at IS NULL
-		RETURNING t.id::text`, assetID)
+	retiredTaskIDs, err := remediationretire.Retire(ctx, tx, principal.UserID, remediationretire.AssetColumn,
+		"finding_id IN (SELECT id FROM security_findings WHERE asset_id = $1::uuid)", assetID,
+		"asset_retired", map[string]any{"asset_id": assetID, "reason": "关联资产已删除，整改任务待改派"})
 	if err != nil {
-		return fmt.Errorf("retire remediation tasks on asset delete: %w", err)
-	}
-	retiredTaskIDs := make([]string, 0, 4)
-	for retiredRows.Next() {
-		var taskID string
-		if err := retiredRows.Scan(&taskID); err != nil {
-			retiredRows.Close()
-			return fmt.Errorf("scan retired remediation task: %w", err)
-		}
-		retiredTaskIDs = append(retiredTaskIDs, taskID)
-	}
-	retiredRows.Close()
-	if err := retiredRows.Err(); err != nil {
-		return fmt.Errorf("iterate retired remediation tasks: %w", err)
-	}
-	// Record the retirement on the task timeline so the group can explain, in one
-	// place, why an open task suddenly stopped being current work.
-	for _, taskID := range retiredTaskIDs {
-		if _, err := tx.Exec(ctx, `
-			INSERT INTO remediation_task_events(task_id, actor_id, action, visibility, details)
-			VALUES($1::uuid, $2::uuid, 'asset_retired', 'participants',
-			       jsonb_build_object('asset_id', $3::text, 'reason', '关联资产已删除，整改任务待改派'))
-		`, taskID, principal.UserID, assetID); err != nil {
-			return fmt.Errorf("record remediation task retirement event: %w", err)
-		}
+		return err
 	}
 	if len(retiredTaskIDs) > 0 {
 		if _, err := tx.Exec(ctx, `

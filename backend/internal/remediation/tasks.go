@@ -142,8 +142,9 @@ const taskSelect = `SELECT t.id,t.task_no,t.work_order_id,w.work_order_no,w.stat
  (t.completion_reason='risk_accepted' AND f.status='risk_accepted' AND f.risk_accepted_until>now()) risk_acceptance_current,
  m.title,m.severity,m.affected_location,m.description,m.evidence,m.remediation_advice,m.requirement,
  (t.status NOT IN ('completed','cancelled') AND t.due_at<now()) overdue,
- (NOT remediation_grant_valid(t.grant_id,t.assignee_user_id,t.organization_id,t.business_system_id) OR NOT remediation_task_current(t.id)) needs_reassignment,
- (t.asset_retired_at IS NOT NULL) asset_retired,t.asset_retired_at
+ remediation_task_needs_reassignment(t.id) needs_reassignment,
+ (t.asset_retired_at IS NOT NULL) asset_retired,t.asset_retired_at,
+ (t.system_retired_at IS NOT NULL) system_retired,t.system_retired_at
  FROM remediation_tasks t JOIN security_findings f ON f.id=t.finding_id JOIN security_work_orders w ON w.id=t.work_order_id JOIN organizations o ON o.id=t.organization_id
  JOIN business_systems b ON b.id=t.business_system_id JOIN users u ON u.id=t.assignee_user_id
  JOIN remediation_grants g ON g.id=t.grant_id LEFT JOIN vendors v ON v.id=g.vendor_id
@@ -177,7 +178,7 @@ func taskQuery(p auth.Principal, in Filter) (string, []any, error) {
  AND ($7='' OR t.business_system_id=NULLIF($7,'')::uuid) AND ($8='' OR m.severity=$8)
  AND (NOT $9 OR (t.due_at>=now() AND t.due_at<now()+interval '3 days' AND t.status NOT IN ('completed','cancelled')))
  AND (NOT $10 OR (t.return_reason<>'' AND t.status NOT IN ('completed','cancelled')))
- AND (NOT $11 OR NOT remediation_grant_valid(t.grant_id,t.assignee_user_id,t.organization_id,t.business_system_id) OR NOT remediation_task_current(t.id) OR t.asset_retired_at IS NOT NULL)
+ AND (NOT $11 OR remediation_task_needs_reassignment(t.id))
  AND (NOT $12 OR t.blocked_reason<>'')
  AND (NOT $13 OR EXISTS(SELECT 1 FROM remediation_requests r WHERE r.task_id=t.id AND r.status='pending'))
  AND (NOT $14 OR (t.status='pending_org_review' AND remediation_can_manage($1::uuid,t.organization_id,'remediation.review')) OR (t.status='pending_security_review' AND remediation_is_security($1::uuid)))
@@ -210,7 +211,18 @@ func (s *Service) Detail(ctx context.Context, p auth.Principal, id string, execu
 	out["can_assign"] = !executor && allowed(ctx, s.pool, p, t.OrganizationID, "remediation.assign") == nil
 	out["can_review"] = !executor && allowed(ctx, s.pool, p, t.OrganizationID, "remediation.review") == nil
 	out["can_verify"] = !executor && security(ctx, s.pool, p)
-	out["can_execute"] = t.AssetRetiredAt == nil && authorizeTask(ctx, s.pool, p, t, true) == nil
+	// can_execute and its reason come from one SQL function so the panel, the
+	// list column and the action guard can never tell the assignee different
+	// stories about the same task.
+	var canExecute bool
+	var reason *string
+	if err = s.pool.QueryRow(ctx, `SELECT can_execute, reason FROM remediation_task_execution_state($1::uuid,$2::uuid)`, p.UserID, id).Scan(&canExecute, &reason); err != nil {
+		return nil, err
+	}
+	out["can_execute"] = canExecute
+	if reason != nil {
+		out["execution_blocked_reason"] = *reason
+	}
 	if !executor && internal(ctx, s.pool, p, t) {
 		source, e := readObject(ctx, s.pool, `SELECT title,severity,description,COALESCE(evidence,'') evidence,COALESCE(remediation_advice,'') remediation_advice FROM security_findings WHERE id=$1::uuid`, t.FindingID)
 		if e != nil {
@@ -272,7 +284,11 @@ func (s *Service) AssignableFindings(ctx context.Context, p auth.Principal, orde
  COALESCE(f.business_system_id,(SELECT sa.business_system_id FROM system_assets sa WHERE sa.asset_id=f.asset_id AND sa.is_primary ORDER BY sa.business_system_id LIMIT 1)) business_system_id,COALESCE(a.asset_value,'') affected_location,w.remediation_requirement requirement,w.due_at,
  EXISTS(SELECT 1 FROM remediation_tasks t WHERE t.work_order_id=w.id AND t.finding_id=f.id AND t.status<>'cancelled') assigned
  FROM security_work_order_findings l JOIN security_findings f ON f.id=l.finding_id JOIN security_work_orders w ON w.id=l.work_order_id LEFT JOIN assets a ON a.id=f.asset_id
- WHERE w.id=$1::uuid AND remediation_can_manage($2::uuid,w.assignee_organization_id,'remediation.assign') ORDER BY f.finding_code`, page, orderID, p.UserID)
+ WHERE w.id=$1::uuid AND remediation_can_manage($2::uuid,w.assignee_organization_id,'remediation.assign')
+   -- Assign refuses a finding whose asset is soft deleted, so offering it here
+   -- would show an assignable row that fails the moment it is picked.
+   AND (f.asset_id IS NULL OR a.deleted_at IS NULL)
+ ORDER BY f.finding_code`, page, orderID, p.UserID)
 }
 
 type ActionInput struct {
@@ -336,18 +352,27 @@ func (s *Service) Act(ctx context.Context, p auth.Principal, id, action, key str
 	if t.MaterialNeedsReview && contains([]string{"submit", "organization-review", "security-review"}, action) {
 		return nil, ErrConflict
 	}
-	// A task whose asset was retired must not be progressed by the assignee. The
-	// security-side paths (source-update, reviews, cancellation) stay available so
-	// the group can still correct the record and settle the work; what is forbidden
-	// is producing new delivery against a target that no longer exists.
-	if t.AssetRetiredAt != nil && contains([]string{"accept", "progress", "submit", "withdraw"}, action) {
-		return nil, ErrConflict
+	// An assignee must not produce new delivery against a task that can no longer
+	// be executed: a retired asset or system, a reassigned finding, an expired
+	// authorization. The security-side paths (source-update, reviews, cancellation)
+	// stay available so the group can still correct the record and settle the work.
+	// request.create is included because asking for a delay on a deleted target is
+	// not a meaningful collaboration.
+	next := t.Status
+	details := Object{"reason": in.Reason}
+	if contains([]string{"accept", "progress", "submit", "withdraw", "request.create"}, action) {
+		// One predicate decides executability for the guard, the list column and
+		// the detail panel. The retired-task rule above is now a special case of
+		// it, so it is stated once, in SQL, with an explanation attached.
+		if reason, blocked := executionBlock(ctx, tx, p, t); blocked {
+			details["execution_blocked_reason"] = reason
+			details["execution_action"] = action
+			return nil, ErrConflict
+		}
 	}
 	if t.Version != in.ExpectedVersion {
 		return nil, ErrConflict
 	}
-	next := t.Status
-	details := Object{"reason": in.Reason}
 	visibility := "participants"
 	requireExecutor := func() error { return authorizeTask(ctx, tx, p, t, true) }
 	requireManager := func(permission string) error {

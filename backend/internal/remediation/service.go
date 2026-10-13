@@ -236,22 +236,43 @@ type Task struct {
 	// AssetRetiredAt records that the task's target asset was soft deleted while
 	// the task was still open. The task keeps its delivery history but stops being
 	// current work for the assignee until the asset is restored or the task is
-	// reassigned.
-	AssetRetiredAt *time.Time `json:"asset_retired_at,omitempty"`
+	// reassigned. SystemRetiredAt is the same contract on the business system
+	// dimension; both are explicit because remediation_task_current() silently
+	// reports false for either, which is not an explanation anyone can act on.
+	AssetRetiredAt  *time.Time `json:"asset_retired_at,omitempty"`
+	SystemRetiredAt *time.Time `json:"system_retired_at,omitempty"`
 }
 
 func loadTask(ctx context.Context, q queryer, id string) (Task, error) {
 	var t Task
 	err := q.QueryRow(ctx, `SELECT id::text,work_order_id::text,finding_id::text,organization_id::text,business_system_id::text,
- assignee_user_id::text,grant_id::text,status,version,material_revision,COALESCE(current_submission_id::text,''),due_at,target_environment,deployment_required,expected_completion_at,blocked_dependency,blocked_until,material_needs_review,source_revision,assignee_snapshot,asset_retired_at
- FROM remediation_tasks WHERE id=$1::uuid`, id).Scan(&t.ID, &t.WorkOrderID, &t.FindingID, &t.OrganizationID, &t.SystemID, &t.AssigneeID, &t.GrantID, &t.Status, &t.Version, &t.MaterialRevision, &t.SubmissionID, &t.DueAt, &t.TargetEnvironment, &t.DeploymentRequired, &t.ExpectedCompletion, &t.BlockedDependency, &t.BlockedUntil, &t.MaterialNeedsReview, &t.SourceRevision, &t.AssigneeSnapshot, &t.AssetRetiredAt)
+ assignee_user_id::text,grant_id::text,status,version,material_revision,COALESCE(current_submission_id::text,''),due_at,target_environment,deployment_required,expected_completion_at,blocked_dependency,blocked_until,material_needs_review,source_revision,assignee_snapshot,asset_retired_at,system_retired_at
+ FROM remediation_tasks WHERE id=$1::uuid`, id).Scan(&t.ID, &t.WorkOrderID, &t.FindingID, &t.OrganizationID, &t.SystemID, &t.AssigneeID, &t.GrantID, &t.Status, &t.Version, &t.MaterialRevision, &t.SubmissionID, &t.DueAt, &t.TargetEnvironment, &t.DeploymentRequired, &t.ExpectedCompletion, &t.BlockedDependency, &t.BlockedUntil, &t.MaterialNeedsReview, &t.SourceRevision, &t.AssigneeSnapshot, &t.AssetRetiredAt, &t.SystemRetiredAt)
 	return t, dbError(err)
 }
+// executionBlock asks the single executability predicate why an assignee action
+// cannot proceed. It returns the machine reason (asset_retired,
+// authorization_expired, ...) so the audit trail explains the refusal instead of
+// leaving a bare conflict. A closed task is not blocked here: the state machine
+// reports that with a more precise error.
+func executionBlock(ctx context.Context, q queryer, p auth.Principal, t Task) (string, bool) {
+	var canExecute bool
+	var reason *string
+	if err := q.QueryRow(ctx, `SELECT can_execute, reason FROM remediation_task_execution_state($1::uuid,$2::uuid)`, p.UserID, t.ID).Scan(&canExecute, &reason); err != nil || canExecute || reason == nil {
+		return "", false
+	}
+	return *reason, true
+}
+
 func authorizeTask(ctx context.Context, q queryer, p auth.Principal, t Task, executor bool) error {
 	var ok bool
 	sql := `SELECT remediation_can_read($1::uuid,$2::uuid)`
 	if executor {
-		sql = `SELECT assignee_user_id=$1::uuid AND ((remediation_grant_valid(grant_id,$1::uuid,organization_id,business_system_id) AND remediation_task_current(id)) OR asset_retired_at IS NOT NULL) FROM remediation_tasks WHERE id=$2::uuid`
+		// Executor authorization is a read gate, not an executability gate: a
+		// retired task's assignee must still open its history. Whether the task
+		// can actually be progressed is decided by one place,
+		// remediation_task_execution_state, via requireExecutable below.
+		sql = `SELECT assignee_user_id=$1::uuid AND ((remediation_grant_valid(grant_id,$1::uuid,organization_id,business_system_id) AND remediation_task_current(id)) OR asset_retired_at IS NOT NULL OR system_retired_at IS NOT NULL) FROM remediation_tasks WHERE id=$2::uuid`
 	}
 	if err := q.QueryRow(ctx, sql, p.UserID, t.ID).Scan(&ok); err != nil {
 		return dbError(err)

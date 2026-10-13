@@ -493,3 +493,120 @@ func p03Principal(t *testing.T, pool *pgxpool.Pool, userID string, roles []strin
 	}
 	return auth.Principal{UserID: userID, Roles: roles, Permissions: permissions}
 }
+
+// Two security operators editing the same finding is a normal event, so every
+// read-modify-write path must prove it is writing on top of the data it read.
+// This covers the generic PATCH and the dedicated status actions, because they
+// used to have very different rules.
+func TestP03FindingEditAndStatusActionsRequireCurrentVersion(t *testing.T) {
+	databaseURL := strings.TrimSpace(os.Getenv("NETASSETS_TEST_DATABASE_URL"))
+	if databaseURL == "" {
+		t.Skip("NETASSETS_TEST_DATABASE_URL is not set; integration test requires a dedicated migrated PostgreSQL database")
+	}
+	ctx := context.Background()
+	pool, err := pgxpool.New(ctx, databaseURL)
+	if err != nil {
+		t.Fatalf("open test database: %v", err)
+	}
+	t.Cleanup(pool.Close)
+	p03Bootstrap(t, pool, "LOCK")
+	groupID := p03InsertOrg(t, pool, "", "P03_LOCK_GROUP", "P0-3 并发测试集团", "group")
+	subID := p03InsertOrg(t, pool, groupID, "P03_LOCK_SUB", "P0-3 并发测试子公司", "subsidiary")
+	var systemID string
+	if err := pool.QueryRow(ctx, `
+		INSERT INTO business_systems (system_code, system_name, owner_organization_id, system_status)
+		VALUES ($1,$2,$3::uuid,'running') RETURNING id::text`, "P03_LOCK_SYS", "并发测试系统", subID).Scan(&systemID); err != nil {
+		t.Fatalf("insert business system: %v", err)
+	}
+	operatorID := p03InsertUser(t, pool, "p03_lock_operator", "P0-3 并发运营人员")
+	p03AssignRole(t, pool, operatorID, "security_operator", "", "all")
+	operator := p03Principal(t, pool, operatorID, []string{"security_operator"})
+	service := NewService(pool, t.TempDir())
+
+	created, err := service.CreateFinding(ctx, operator, FindingInput{
+		Title: "并发编辑漏洞", Severity: "high", Status: "pending", AssigneeOrganizationID: subID,
+		BusinessSystemID: systemID, Description: "初始描述", Source: "manual", DiscoveredAt: time.Now(),
+	}, "p03-lock-create", "127.0.0.1")
+	if err != nil {
+		t.Fatalf("CreateFinding() error = %v", err)
+	}
+	base := func() FindingInput {
+		return FindingInput{
+			Title: "并发编辑漏洞", Severity: "high", Status: "pending", AssigneeOrganizationID: subID,
+			BusinessSystemID: systemID, Description: "更新描述", Source: "manual", DiscoveredAt: time.Now(),
+		}
+	}
+	// A PATCH without the lock token is a client bug, not a convenience.
+	if _, err = service.UpdateFinding(ctx, operator, created.ID, base(), "p03-lock-missing", "127.0.0.1"); !errors.Is(err, ErrVersionRequired) {
+		t.Fatalf("UpdateFinding() without expected_updated_at error = %v, want ErrVersionRequired", err)
+	}
+	first, err := service.GetFinding(ctx, operator, created.ID)
+	if err != nil {
+		t.Fatalf("GetFinding() error = %v", err)
+	}
+	stale := first.UpdatedAt
+	updated := base()
+	updated.ExpectedUpdatedAt = &stale
+	// The race: another operator commits between the read and the write.
+	concurrent := base()
+	fresh := time.Now().Add(time.Millisecond)
+	concurrent.ExpectedUpdatedAt = &fresh
+	if _, err = service.UpdateFinding(ctx, operator, created.ID, concurrent, "p03-lock-concurrent", "127.0.0.1"); !errors.Is(err, ErrEditConflict) {
+		t.Fatalf("UpdateFinding() with a stale token error = %v, want ErrEditConflict", err)
+	}
+	if _, err = service.UpdateFinding(ctx, operator, created.ID, updated, "p03-lock-ok", "127.0.0.1"); err != nil {
+		t.Fatalf("UpdateFinding() with the current token error = %v", err)
+	}
+
+	current, err := service.GetFinding(ctx, operator, created.ID)
+	if err != nil {
+		t.Fatalf("GetFinding() after edit error = %v", err)
+	}
+	if _, err = service.AcceptRisk(ctx, operator, created.ID, RiskAcceptanceInput{
+		Reason: "接受风险", AcceptedUntil: time.Now().Add(24 * time.Hour),
+	}, "p03-lock-risk-missing", "127.0.0.1"); !errors.Is(err, ErrVersionRequired) {
+		t.Fatalf("AcceptRisk() without expected_updated_at error = %v, want ErrVersionRequired", err)
+	}
+	if _, err = service.AcceptRisk(ctx, operator, created.ID, RiskAcceptanceInput{
+		Reason: "接受风险", AcceptedUntil: time.Now().Add(24 * time.Hour), ExpectedUpdatedAt: &stale,
+	}, "p03-lock-risk-stale", "127.0.0.1"); !errors.Is(err, ErrEditConflict) {
+		t.Fatalf("AcceptRisk() with a stale token error = %v, want ErrEditConflict", err)
+	}
+	if _, err = service.RevokeRisk(ctx, operator, created.ID, RiskRevokeInput{}, "p03-lock-revoke-missing", "127.0.0.1"); !errors.Is(err, ErrVersionRequired) {
+		t.Fatalf("RevokeRisk() without expected_updated_at error = %v, want ErrVersionRequired", err)
+	}
+	accepted, err := service.AcceptRisk(ctx, operator, created.ID, RiskAcceptanceInput{
+		Reason: "接受风险", AcceptedUntil: time.Now().Add(24 * time.Hour), ExpectedUpdatedAt: &current.UpdatedAt,
+	}, "p03-lock-risk-ok", "127.0.0.1")
+	if err != nil {
+		t.Fatalf("AcceptRisk() with the current token error = %v", err)
+	}
+	if _, err = service.RevokeRisk(ctx, operator, created.ID, RiskRevokeInput{ExpectedUpdatedAt: &current.UpdatedAt}, "p03-lock-revoke-stale", "127.0.0.1"); !errors.Is(err, ErrEditConflict) {
+		t.Fatalf("RevokeRisk() with a stale token error = %v, want ErrEditConflict", err)
+	}
+	if _, err = service.RevokeRisk(ctx, operator, created.ID, RiskRevokeInput{ExpectedUpdatedAt: &accepted.UpdatedAt}, "p03-lock-revoke-ok", "127.0.0.1"); err != nil {
+		t.Fatalf("RevokeRisk() with the current token error = %v", err)
+	}
+
+	after, err := service.GetFinding(ctx, operator, created.ID)
+	if err != nil {
+		t.Fatalf("GetFinding() after revoke error = %v", err)
+	}
+	acceptedAgain, err := service.AcceptRisk(ctx, operator, created.ID, RiskAcceptanceInput{
+		Reason: "再次接受", AcceptedUntil: time.Now().Add(48 * time.Hour), ExpectedUpdatedAt: &after.UpdatedAt,
+	}, "p03-lock-risk-again", "127.0.0.1")
+	if err != nil {
+		t.Fatalf("AcceptRisk() for the review error = %v", err)
+	}
+	if _, err = service.ReviewRisk(ctx, operator, created.ID, RiskReviewInput{Comment: "复核"}, "p03-lock-review-missing", "127.0.0.1"); !errors.Is(err, ErrVersionRequired) {
+		t.Fatalf("ReviewRisk() without expected_updated_at error = %v, want ErrVersionRequired", err)
+	}
+	if _, err = service.ReviewRisk(ctx, operator, created.ID, RiskReviewInput{Comment: "复核", ExpectedUpdatedAt: &acceptedAgain.UpdatedAt}, "p03-lock-review-ok", "127.0.0.1"); err != nil {
+		t.Fatalf("ReviewRisk() with the current token error = %v", err)
+	}
+	revived, err := service.RevokeRisk(ctx, operator, created.ID, RiskRevokeInput{ExpectedUpdatedAt: nil}, "p03-lock-revoke-no", "127.0.0.1")
+	if err != nil && !errors.Is(err, ErrVersionRequired) {
+		t.Fatalf("RevokeRisk() with a nil token error = %v, want ErrVersionRequired", err)
+	}
+	_ = revived
+}

@@ -160,7 +160,15 @@ func registerSecurityWorkOrderRoutes(api *gin.RouterGroup, requireAuth gin.Handl
 		writeFindingRiskResult(c, logger, "accept security finding risk", item, err)
 	})
 	findings.POST("/:id/revoke-risk", func(c *gin.Context) {
-		item, err := service.RevokeRisk(c.Request.Context(), mustPrincipal(c), c.Param("id"), c.GetString("request_id"), c.ClientIP())
+		var input securityworkorder.RiskRevokeInput
+		// Revoking takes no decision fields, but an empty body used to be valid.
+		// Reject a malformed one so a client cannot smuggle a wrong-shaped token
+		// in and be told the record merely was not risk-accepted.
+		if err := c.ShouldBindJSON(&input); err != nil {
+			writeAPIError(c, http.StatusBadRequest, "invalid_request", "撤销风险接受请求格式不正确")
+			return
+		}
+		item, err := service.RevokeRisk(c.Request.Context(), mustPrincipal(c), c.Param("id"), input, c.GetString("request_id"), c.ClientIP())
 		writeFindingRiskResult(c, logger, "revoke security finding risk", item, err)
 	})
 	findings.POST("/:id/review-risk", func(c *gin.Context) {
@@ -385,8 +393,13 @@ func writeFindingResult(c *gin.Context, logger *slog.Logger, operation string, s
 		writeAPIError(c, http.StatusBadRequest, "invalid_finding", "请检查责任组织、关联资产、严重等级和漏洞信息")
 	case errors.Is(err, securityworkorder.ErrNotFound):
 		writeAPIError(c, http.StatusNotFound, "reference_not_found", "安全发现、责任组织、关联资产或业务系统不存在或不匹配")
+	case errors.Is(err, securityworkorder.ErrVersionRequired):
+		writeAPIError(c, http.StatusBadRequest, "finding_version_required", "编辑安全发现必须携带 expected_updated_at")
 	case errors.Is(err, securityworkorder.ErrEditConflict):
-		writeAPIError(c, http.StatusConflict, "finding_edit_conflict", "安全发现已被其他人修改，请刷新后重试")
+		// Deliberately neutral: the row can also have moved because a background
+		// process (asset deletion, risk expiry) rewrote it, so do not claim a
+		// specific person changed it.
+		writeAPIError(c, http.StatusConflict, "finding_edit_conflict", "安全发现数据已发生变化，请刷新后重新确认再提交")
 	case errors.Is(err, securityworkorder.ErrConflict):
 		writeAPIError(c, http.StatusConflict, "finding_conflict", "安全发现当前不能执行该操作")
 	case err != nil:
@@ -405,6 +418,10 @@ func writeFindingDuplicateResult(c *gin.Context, logger *slog.Logger, operation 
 		writeAPIError(c, http.StatusBadRequest, "invalid_duplicate", "请填写有效的主漏洞编号和重复原因")
 	case errors.Is(err, securityworkorder.ErrNotFound):
 		writeAPIError(c, http.StatusNotFound, "finding_not_found", "安全发现不存在或主漏洞不存在")
+	case errors.Is(err, securityworkorder.ErrVersionRequired):
+		writeAPIError(c, http.StatusBadRequest, "finding_version_required", "重复关联必须携带 expected_updated_at")
+	case errors.Is(err, securityworkorder.ErrEditConflict):
+		writeAPIError(c, http.StatusConflict, "finding_edit_conflict", "安全发现数据已发生变化，请刷新后重新确认再提交")
 	case errors.Is(err, securityworkorder.ErrState), errors.Is(err, securityworkorder.ErrConflict):
 		writeAPIError(c, http.StatusConflict, "invalid_finding_state", "安全发现当前状态不允许建立重复关联")
 	case err != nil:
@@ -423,6 +440,10 @@ func writeFindingRiskResult(c *gin.Context, logger *slog.Logger, operation strin
 		writeAPIError(c, http.StatusBadRequest, "invalid_risk_acceptance", "请填写有效的风险接受原因、未来有效期或复核意见")
 	case errors.Is(err, securityworkorder.ErrNotFound):
 		writeAPIError(c, http.StatusNotFound, "finding_not_found", "安全发现不存在或当前账号不可见")
+	case errors.Is(err, securityworkorder.ErrVersionRequired):
+		writeAPIError(c, http.StatusBadRequest, "finding_version_required", "风险状态操作必须携带 expected_updated_at")
+	case errors.Is(err, securityworkorder.ErrEditConflict):
+		writeAPIError(c, http.StatusConflict, "finding_edit_conflict", "安全发现数据已发生变化，请刷新后重新确认再提交")
 	case errors.Is(err, securityworkorder.ErrState), errors.Is(err, securityworkorder.ErrConflict):
 		// ErrConflict also covers the 00052 guard: a finding already owned by an
 		// open remediation task cannot take a risk decision. That is a state

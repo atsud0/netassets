@@ -514,10 +514,13 @@ func TestRoleMatrixFindingAndAttachmentBoundaries(t *testing.T) {
 	// Group security roles manage findings and risk decisions.
 	if _, err := f.orders.AcceptRisk(f.ctx, f.securityAdmin, f.riskFindingID, securityworkorder.RiskAcceptanceInput{
 		Reason: "业务接受风险", AcceptedUntil: time.Now().Add(30 * 24 * time.Hour),
+		ExpectedUpdatedAt: findingVersion(t, f.ctx, f.pool, f.riskFindingID),
 	}, "", ""); err != nil {
 		t.Fatalf("security admin AcceptRisk error = %v", err)
 	}
-	if _, err := f.orders.RevokeRisk(f.ctx, f.securityAdmin, f.riskFindingID, "", ""); err != nil {
+	if _, err := f.orders.RevokeRisk(f.ctx, f.securityAdmin, f.riskFindingID, securityworkorder.RiskRevokeInput{
+		ExpectedUpdatedAt: findingVersion(t, f.ctx, f.pool, f.riskFindingID),
+	}, "", ""); err != nil {
 		t.Fatalf("security admin RevokeRisk error = %v", err)
 	}
 	// Organization roles never decide risk acceptance.

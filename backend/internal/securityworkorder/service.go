@@ -32,6 +32,11 @@ var (
 	// read it. It is a distinct error so the API can answer 409 with a retry hint
 	// instead of lumping it together with workflow conflicts.
 	ErrEditConflict = errors.New("security finding has been updated by another user")
+	// ErrVersionRequired reports a read-modify-write caller that forgot to send
+	// the row version it read. Rejecting it is stricter than silently
+	// overwriting: an unconditional UPDATE is exactly how two operators lose
+	// each other's status decisions.
+	ErrVersionRequired = errors.New("expected_updated_at is required")
 	uuidPattern     = regexp.MustCompile(`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$`)
 )
 
@@ -122,9 +127,9 @@ type FindingInput struct {
 	// ExpectedUpdatedAt is the optimistic-lock token of a generic finding edit.
 	// Two security operators editing the same finding is a normal event, not an
 	// edge case, so the caller must send back the row version it read instead of
-	// letting a stale form overwrite a newer status transition. Empty means the
-	// caller is not doing a read-modify-write (imports and workflow actions keep
-	// their own guards) and is only honoured on create-style callers.
+	// letting a stale form overwrite a newer status transition. Create does not
+	// need it; every PATCH and every status action must send it, so a caller
+	// cannot bypass the lock by omitting the field.
 	ExpectedUpdatedAt *time.Time `json:"expected_updated_at,omitempty"`
 }
 
@@ -280,11 +285,23 @@ type CommentInput struct {
 type RiskAcceptanceInput struct {
 	Reason        string    `json:"reason"`
 	AcceptedUntil time.Time `json:"accepted_until"`
+	// ExpectedUpdatedAt carries the row version the operator saw. A status
+	// transition is a read-modify-write just like a field edit, so it takes the
+	// same optimistic lock; otherwise an accept could silently revert a
+	// duplicate link or a description fix made a minute earlier.
+	ExpectedUpdatedAt *time.Time `json:"expected_updated_at,omitempty"`
 }
 
 type RiskReviewInput struct {
-	Comment       string     `json:"comment"`
-	AcceptedUntil *time.Time `json:"accepted_until"`
+	Comment          string     `json:"comment"`
+	AcceptedUntil    *time.Time `json:"accepted_until"`
+	ExpectedUpdatedAt *time.Time `json:"expected_updated_at,omitempty"`
+}
+
+// RiskRevokeInput only carries the optimistic-lock token; revoking restores the
+// previous status, so there is nothing else for the caller to decide.
+type RiskRevokeInput struct {
+	ExpectedUpdatedAt *time.Time `json:"expected_updated_at,omitempty"`
 }
 
 // DuplicateFindingInput is deliberately separate from FindingInput. A
@@ -293,6 +310,9 @@ type RiskReviewInput struct {
 type DuplicateFindingInput struct {
 	MasterFindingID string `json:"master_finding_id"`
 	Reason          string `json:"reason"`
+	// ExpectedUpdatedAt protects the duplicate relationship from being written
+	// on top of a status or asset change the caller never saw.
+	ExpectedUpdatedAt *time.Time `json:"expected_updated_at,omitempty"`
 }
 
 type Service struct {
@@ -608,6 +628,11 @@ func (s *Service) UpdateFinding(ctx context.Context, principal auth.Principal, i
 	if !validUUID(id) {
 		return Finding{}, ErrInvalid
 	}
+	// UpdateFinding is the only read-modify-write entry for a finding row, so a
+	// missing optimistic-lock token is a client bug, not a convenience.
+	if input.ExpectedUpdatedAt == nil {
+		return Finding{}, ErrVersionRequired
+	}
 	normalizeFindingInput(&input)
 	if !validFindingInput(input) {
 		return Finding{}, ErrInvalid
@@ -677,7 +702,7 @@ func (s *Service) UpdateFinding(ctx context.Context, principal auth.Principal, i
 		       description = $10, evidence = NULLIF($11, ''), remediation_advice = NULLIF($12, ''),
 		       source = $13, discovered_at = $14, updated_by = $15::uuid, updated_at = now()
 		WHERE id::text = $1
-		  AND ($16::timestamptz IS NULL OR updated_at = $16::timestamptz)`, id, input.Title, input.Severity, input.Status, input.AssigneeOrganizationID,
+		  AND updated_at = $16::timestamptz`, id, input.Title, input.Severity, input.Status, input.AssigneeOrganizationID,
 		input.AssetID, input.BusinessSystemID, input.TestBatchID, input.VulnerabilityType, input.Description, input.Evidence,
 		input.RemediationAdvice, input.Source, input.DiscoveredAt, principal.UserID, input.ExpectedUpdatedAt)
 	if err != nil {
@@ -687,14 +712,12 @@ func (s *Service) UpdateFinding(ctx context.Context, principal auth.Principal, i
 		// Distinguish "row vanished" from "row moved on". A stale lock value is a
 		// recoverable conflict the caller retries with a fresh read; a missing row
 		// is not something a retry can fix.
-		if input.ExpectedUpdatedAt != nil {
-			var exists bool
-			if err := tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM security_findings WHERE id::text = $1)`, id).Scan(&exists); err != nil {
-				return Finding{}, fmt.Errorf("check finding existence after stale edit: %w", err)
-			}
-			if exists {
-				return Finding{}, ErrEditConflict
-			}
+		var exists bool
+		if err := tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM security_findings WHERE id::text = $1)`, id).Scan(&exists); err != nil {
+			return Finding{}, fmt.Errorf("check finding existence after stale edit: %w", err)
+		}
+		if exists {
+			return Finding{}, ErrEditConflict
 		}
 		return Finding{}, ErrNotFound
 	}
@@ -785,13 +808,17 @@ func (s *Service) LinkDuplicateFinding(ctx context.Context, principal auth.Princ
 	}
 
 	var sourceOrganization, sourceStatus, existingMaster string
+	var currentVersion time.Time
 	if err := tx.QueryRow(ctx, `
-		SELECT assignee_organization_id::text, status, COALESCE(duplicate_of_finding_id::text, '')
+		SELECT assignee_organization_id::text, status, COALESCE(duplicate_of_finding_id::text, ''), updated_at
 		FROM security_findings WHERE id=$1::uuid FOR UPDATE`, id).
-		Scan(&sourceOrganization, &sourceStatus, &existingMaster); errors.Is(err, pgx.ErrNoRows) {
+		Scan(&sourceOrganization, &sourceStatus, &existingMaster, &currentVersion); errors.Is(err, pgx.ErrNoRows) {
 		return Finding{}, ErrNotFound
 	} else if err != nil {
 		return Finding{}, fmt.Errorf("load duplicate finding: %w", err)
+	}
+	if err := checkFindingVersion(id, input.ExpectedUpdatedAt, currentVersion); err != nil {
+		return Finding{}, err
 	}
 	if existingMaster != "" || !canLinkDuplicateFromStatus(sourceStatus) {
 		return Finding{}, ErrState
@@ -871,17 +898,22 @@ func (s *Service) AcceptRisk(ctx context.Context, principal auth.Principal, id s
 
 	var organizationID, previousStatus, previousFromStatus string
 	var activelyLinked bool
+	var currentVersion time.Time
 	if err := tx.QueryRow(ctx, `
 		SELECT f.assignee_organization_id::text, f.status, COALESCE(f.risk_accepted_from_status, ''),
 		       EXISTS (
 			SELECT 1 FROM security_work_order_findings link
 			JOIN security_work_orders wo ON wo.id = link.work_order_id
 			WHERE link.finding_id = f.id AND wo.status NOT IN ('closed', 'cancelled')
-		       )
-		FROM security_findings f WHERE f.id::text = $1 FOR UPDATE`, id).Scan(&organizationID, &previousStatus, &previousFromStatus, &activelyLinked); errors.Is(err, pgx.ErrNoRows) {
+		       ),
+		       f.updated_at
+		FROM security_findings f WHERE f.id::text = $1 FOR UPDATE`, id).Scan(&organizationID, &previousStatus, &previousFromStatus, &activelyLinked, &currentVersion); errors.Is(err, pgx.ErrNoRows) {
 		return Finding{}, ErrNotFound
 	} else if err != nil {
 		return Finding{}, fmt.Errorf("load finding risk acceptance: %w", err)
+	}
+	if err := checkFindingVersion(id, input.ExpectedUpdatedAt, currentVersion); err != nil {
+		return Finding{}, err
 	}
 	if previousStatus != "pending" && previousStatus != "in_progress" && previousStatus != "confirmed" && previousStatus != "resolved" && previousStatus != "fixed" && previousStatus != "risk_accepted" {
 		return Finding{}, ErrState
@@ -915,7 +947,7 @@ func (s *Service) AcceptRisk(ctx context.Context, principal auth.Principal, id s
 	return s.getFinding(ctx, id)
 }
 
-func (s *Service) RevokeRisk(ctx context.Context, principal auth.Principal, id, requestID, ipAddress string) (Finding, error) {
+func (s *Service) RevokeRisk(ctx context.Context, principal auth.Principal, id string, input RiskRevokeInput, requestID, ipAddress string) (Finding, error) {
 	if err := s.guardPersonalFinding(ctx, id); err != nil {
 		return Finding{}, err
 	}
@@ -943,12 +975,16 @@ func (s *Service) RevokeRisk(ctx context.Context, principal auth.Principal, id, 
 
 	var organizationID, previousStatus, fromStatus string
 	var acceptedUntil *time.Time
+	var currentVersion time.Time
 	if err := tx.QueryRow(ctx, `
-		SELECT assignee_organization_id::text, status, COALESCE(risk_accepted_from_status, ''), risk_accepted_until
-		FROM security_findings WHERE id::text = $1 FOR UPDATE`, id).Scan(&organizationID, &previousStatus, &fromStatus, &acceptedUntil); errors.Is(err, pgx.ErrNoRows) {
+		SELECT assignee_organization_id::text, status, COALESCE(risk_accepted_from_status, ''), risk_accepted_until, updated_at
+		FROM security_findings WHERE id::text = $1 FOR UPDATE`, id).Scan(&organizationID, &previousStatus, &fromStatus, &acceptedUntil, &currentVersion); errors.Is(err, pgx.ErrNoRows) {
 		return Finding{}, ErrNotFound
 	} else if err != nil {
 		return Finding{}, fmt.Errorf("load finding risk revocation: %w", err)
+	}
+	if err := checkFindingVersion(id, input.ExpectedUpdatedAt, currentVersion); err != nil {
+		return Finding{}, err
 	}
 	if previousStatus != "risk_accepted" {
 		return Finding{}, ErrState
@@ -1002,12 +1038,16 @@ func (s *Service) ReviewRisk(ctx context.Context, principal auth.Principal, id s
 
 	var organizationID, previousStatus string
 	var currentUntil *time.Time
+	var currentVersion time.Time
 	if err := tx.QueryRow(ctx, `
-		SELECT assignee_organization_id::text, status, risk_accepted_until
-		FROM security_findings WHERE id::text = $1 FOR UPDATE`, id).Scan(&organizationID, &previousStatus, &currentUntil); errors.Is(err, pgx.ErrNoRows) {
+		SELECT assignee_organization_id::text, status, risk_accepted_until, updated_at
+		FROM security_findings WHERE id::text = $1 FOR UPDATE`, id).Scan(&organizationID, &previousStatus, &currentUntil, &currentVersion); errors.Is(err, pgx.ErrNoRows) {
 		return Finding{}, ErrNotFound
 	} else if err != nil {
 		return Finding{}, fmt.Errorf("load finding risk review: %w", err)
+	}
+	if err := checkFindingVersion(id, input.ExpectedUpdatedAt, currentVersion); err != nil {
+		return Finding{}, err
 	}
 	if previousStatus != "risk_accepted" {
 		return Finding{}, ErrState
@@ -1972,6 +2012,22 @@ func restoredRiskAcceptanceStatus(status string) string {
 	default:
 		return findingstatus.Confirmed
 	}
+}
+
+// checkFindingVersion enforces the optimistic lock on a status action once the
+// row is already held with FOR UPDATE. Every state transition outside the import
+// pipeline decides from data an operator read on screen, so it must prove that
+// data is still current before it writes. A missing token is a client bug; a
+// stale token is a conflict the caller resolves by refreshing and confirming
+// again. The lock must be read as timestamptz so the comparison is exact.
+func checkFindingVersion(id string, expected *time.Time, current time.Time) error {
+	if expected == nil {
+		return ErrVersionRequired
+	}
+	if !current.Equal(*expected) {
+		return ErrEditConflict
+	}
+	return nil
 }
 
 func validRiskAcceptanceInput(input RiskAcceptanceInput) bool {

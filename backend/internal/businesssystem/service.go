@@ -26,6 +26,7 @@ import (
 	"netassets/internal/importmapping"
 	"netassets/internal/notification"
 	"netassets/internal/pagination"
+	"netassets/internal/remediationretire"
 )
 
 var (
@@ -1022,12 +1023,35 @@ func (s *Service) Delete(ctx context.Context, principal auth.Principal, systemID
 		return fmt.Errorf("begin business system delete: %w", err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
+	// Same reasoning as asset retirement: the shared lock keeps this delete from
+	// interleaving with remediation assignment, so a task cannot be created after
+	// the retirement UPDATE has already taken its snapshot.
+	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtext('netassets-remediation'))`); err != nil {
+		return fmt.Errorf("lock remediation work during business system delete: %w", err)
+	}
 	command, err := tx.Exec(ctx, `UPDATE business_systems SET deleted_at=now(), system_status='archived', updated_by=$1::uuid, updated_at=now() WHERE id=$2::uuid AND deleted_at IS NULL`, principal.UserID, systemID)
 	if err != nil {
 		return fmt.Errorf("delete business system: %w", err)
 	}
 	if command.RowsAffected() == 0 {
 		return ErrNotFound
+	}
+	// The system disappearing invalidates its open remediation work. Record it as
+	// a retirement (same contract as asset retirement) rather than leaving the
+	// tasks to fail remediation_task_current() with no recorded reason.
+	retiredTaskIDs, err := remediationretire.Retire(ctx, tx, principal.UserID, remediationretire.SystemColumn, "business_system_id = $1::uuid", systemID,
+		"system_retired", map[string]any{"business_system_id": systemID, "reason": "关联业务系统已删除，整改任务待改派"})
+	if err != nil {
+		return err
+	}
+	if len(retiredTaskIDs) > 0 {
+		if _, err := tx.Exec(ctx, `
+			INSERT INTO audit_logs (user_id, organization_id, action, resource_type, resource_id, summary, details, request_ip, request_id)
+			VALUES ($1::uuid, $2::uuid, 'business_system.delete', 'business_system', $3, '删除业务系统导致整改任务待改派',
+			        jsonb_build_object('retired_remediation_tasks', $4::int), NULLIF($5, '')::inet, NULLIF($6, ''))
+		`, principal.UserID, current.OrganizationID, systemID, len(retiredTaskIDs), ipAddress, requestID); err != nil {
+			return fmt.Errorf("write business system delete remediation audit: %w", err)
+		}
 	}
 	if _, err := tx.Exec(ctx, `
 		INSERT INTO audit_logs (user_id, organization_id, action, resource_type, resource_id, summary, details, request_ip, request_id)

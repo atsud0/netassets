@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"os"
@@ -16,6 +17,7 @@ import (
 	"netassets/internal/asset"
 	"netassets/internal/auth"
 	"netassets/internal/bootstrap"
+	"netassets/internal/businesssystem"
 	"netassets/internal/config"
 	"netassets/internal/notification"
 	"netassets/internal/pagination"
@@ -88,6 +90,18 @@ func setup(t *testing.T) *fixture {
 	must(t, err)
 	return f
 }
+// findingVersion returns the current optimistic-lock token of a finding. Tests
+// that drive a status action have to send it, because the service now refuses
+// to write a finding whose row moved after the caller read it.
+func findingVersion(t *testing.T, ctx context.Context, pool *pgxpool.Pool, id string) *time.Time {
+	t.Helper()
+	var version time.Time
+	if err := pool.QueryRow(ctx, `SELECT updated_at FROM security_findings WHERE id::text = $1`, id).Scan(&version); err != nil {
+		t.Fatalf("load finding version: %v", err)
+	}
+	return &version
+}
+
 func must(t *testing.T, err error) {
 	t.Helper()
 	if err != nil {
@@ -503,4 +517,202 @@ func TestAssetRetirementRetiresThenRestoresRemediationTask(t *testing.T) {
 	// Delivery can resume after restoration.
 	now := time.Now()
 	f.action(t, f.worker, id, "submit", remediation.ActionInput{Summary: "恢复后提交", DeploymentStatus: "target", ChangeReference: "release-y", DeployedAt: &now, SelfTestResult: "自测通过"}, true)
+}
+
+// A business system soft delete must retire its open remediation work exactly
+// like an asset soft delete does, and restoring it must bring the work back
+// without resurrecting anything that was already cancelled.
+func TestBusinessSystemRetirementRetiresAndRestoresTasks(t *testing.T) {
+	f := setup(t)
+	systems := businesssystem.NewService(f.pool)
+	// Give the fixture's first finding a real asset so the system retirement test
+	// covers the same shape production has: a task targeting a published system
+	// whose assets are already being taken out of service.
+	var assetID string
+	// queryBusinessSystem inner-joins the data-security profile, so a system built
+	// by raw SQL needs its row or the delete path reports "not found".
+	_, err := f.pool.Exec(f.ctx, `INSERT INTO business_system_data_security_profiles(business_system_id) VALUES($1::uuid) ON CONFLICT DO NOTHING`, f.system)
+	must(t, err)
+	must(t, f.pool.QueryRow(f.ctx, `INSERT INTO assets(asset_type,asset_value,normalized_value,status,created_by)
+		VALUES('ip',$1,$1,'active',$2::uuid) RETURNING id::text`, fmt.Sprintf("10.20.%d.%d", os.Getpid()%250, time.Now().UnixNano()%250), f.group.UserID).Scan(&assetID))
+	_, err = f.pool.Exec(f.ctx, `INSERT INTO asset_organizations(asset_id,organization_id,relationship_type,is_primary) VALUES($1::uuid,$2::uuid,'owner',true)`, assetID, f.org)
+	must(t, err)
+	_, err = f.pool.Exec(f.ctx, `INSERT INTO system_assets(asset_id,business_system_id,is_primary) VALUES($1::uuid,$2::uuid,true)`, assetID, f.system)
+	must(t, err)
+	// The throwaway asset belongs to the system only so the delete has a retired
+	// member; the task under test stays asset-less, so its only retirement reason
+	// can be the system one.
+	id := f.assign(t, 0, "system-retire-key", f.grant)
+	f.action(t, f.worker, id, "accept", remediation.ActionInput{}, true)
+	cancelled := f.assign(t, 1, "system-retire-cancelled", f.otherGrant)
+	f.action(t, f.manager, cancelled, "cancel", remediation.ActionInput{Reason: "重复立项"}, false)
+
+	// The bootstrap admin is the only principal that deletes a published system
+	// outright; organization roles go through the working inventory instead.
+	admin := f.group
+	admin.Roles = []string{auth.RoleGroupAdmin}
+	admin.Permissions = append(admin.Permissions, "system.manage")
+	if err := systems.Delete(f.ctx, admin, f.system, nil, "system-retire-delete", "127.0.0.1"); !errors.Is(err, businesssystem.ErrInUse) {
+		t.Fatalf("system delete with a live linked asset = %v, want ErrInUse; a system with work in flight must be deleted from a system whose assets are already retired", err)
+	}
+	// Retire the linked asset first: the fixture's finding belongs to it, so the
+	// asset goes through the same soft delete production would use.
+	assets := asset.NewService(f.pool)
+	err = assets.Delete(f.ctx, f.group, assetID, nil, "系统下线前先退役资产", "system-retire-asset", "127.0.0.1")
+	must(t, err)
+	if err := systems.Delete(f.ctx, admin, f.system, nil, "system-retire-delete", "127.0.0.1"); err != nil {
+		t.Fatal(err)
+	}
+
+	var retirement any
+	var taskStatus string
+	must(t, f.pool.QueryRow(f.ctx, `SELECT status, system_retired_at FROM remediation_tasks WHERE id=$1::uuid`, id).Scan(&taskStatus, &retirement))
+	if taskStatus != "in_progress" || retirement == nil {
+		t.Fatalf("open task after system delete = status %q retired %v; history must survive and be marked retired", taskStatus, retirement)
+	}
+	var retiredEvents int
+	must(t, f.pool.QueryRow(f.ctx, `SELECT count(*) FROM remediation_task_events WHERE task_id=$1::uuid AND action='system_retired'`, id).Scan(&retiredEvents))
+	if retiredEvents != 1 {
+		t.Fatalf("system_retired events = %d, want 1", retiredEvents)
+	}
+	managed, err := f.s.Detail(f.ctx, f.manager, id, false)
+	must(t, err)
+	if managed["needs_reassignment"] != true {
+		t.Fatal("reviewer was not warned the task needs reassignment after its system was deleted")
+	}
+	if managed["can_execute"] != false || managed["execution_blocked_reason"] != "system_retired" {
+		t.Fatalf("can_execute=%v reason=%v, want false/system_retired", managed["can_execute"], managed["execution_blocked_reason"])
+	}
+	page, _ := pagination.Normalize(1, 50)
+	queue, err := f.s.List(f.ctx, f.manager, remediation.Filter{NeedsReassignment: true, Page: page})
+	must(t, err)
+	found := false
+	for _, row := range queue.Items {
+		if row["id"] == id {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("the system-retired task is missing from the needs-reassignment queue")
+	}
+
+	// Every delivery action must be refused with a reason, not just the one the
+	// asset-retirement test happens to cover.
+	detail, err := f.s.Detail(f.ctx, f.manager, id, false)
+	must(t, err)
+	version := int(detail["version"].(float64))
+	target := time.Now().Add(time.Hour)
+	for _, tc := range []struct {
+		action string
+		in     remediation.ActionInput
+	}{
+		{"accept", remediation.ActionInput{ExpectedVersion: version, ExpectedCompletion: &target}},
+		{"progress", remediation.ActionInput{ExpectedVersion: version, ExpectedCompletion: &target}},
+		{"submit", remediation.ActionInput{ExpectedVersion: version, Summary: "继续修复", DeploymentStatus: "target", ChangeReference: "release-z", DeployedAt: &target, SelfTestResult: "自测通过"}},
+		{"request.create", remediation.ActionInput{ExpectedVersion: version, Reason: "申请延期", BlockedDependency: "等待窗口", BlockedUntil: &target}},
+	} {
+		if _, err = f.s.Act(f.ctx, f.worker, id, tc.action, "system-retire-"+tc.action, tc.in, true); !errors.Is(err, remediation.ErrConflict) {
+			t.Fatalf("%s on a system-retired task = %v, want ErrConflict", tc.action, err)
+		}
+	}
+
+	must(t, recyclebin.NewService(f.pool).RestoreBusinessSystem(f.ctx, f.group, f.system, "system-retire-restore", "127.0.0.1"))
+	var restoredEvents int
+	must(t, f.pool.QueryRow(f.ctx, `SELECT count(*) FROM remediation_task_events WHERE task_id=$1::uuid AND action='system_restored'`, id).Scan(&restoredEvents))
+	if restoredEvents != 1 {
+		t.Fatalf("system_restored events = %d, want 1", restoredEvents)
+	}
+	var stillRetired any
+	must(t, f.pool.QueryRow(f.ctx, `SELECT system_retired_at FROM remediation_tasks WHERE id=$1::uuid`, id).Scan(&stillRetired))
+	if stillRetired != nil {
+		t.Fatal("restoring the system did not clear the retirement mark")
+	}
+	// A restored system comes back archived, so the task stays unexecutable until
+	// the group reactivates it. Retiring is not the same as resuming.
+	restored, err := f.s.Detail(f.ctx, f.manager, id, false)
+	must(t, err)
+	if restored["can_execute"] != false || restored["execution_blocked_reason"] != "system_unavailable" {
+		t.Fatalf("archived system leaves can_execute=%v reason=%v, want false/system_unavailable", restored["can_execute"], restored["execution_blocked_reason"])
+	}
+	_, err = f.pool.Exec(f.ctx, `UPDATE business_systems SET system_status='running' WHERE id=$1::uuid`, f.system)
+	must(t, err)
+	live, err := f.s.Detail(f.ctx, f.manager, id, false)
+	must(t, err)
+	if live["can_execute"] != true {
+		t.Fatalf("reactivated system leaves can_execute=%v (reason %v), want true", live["can_execute"], live["execution_blocked_reason"])
+	}
+	now := time.Now()
+	f.action(t, f.worker, id, "submit", remediation.ActionInput{Summary: "恢复后提交", DeploymentStatus: "target", ChangeReference: "release-a", DeployedAt: &now, SelfTestResult: "自测通过"}, true)
+
+	// A cancelled task is history, not interrupted work: restoring the system
+	// must never bring it back into the active queue.
+	var cancelledStatus string
+	var cancelledRetired any
+	must(t, f.pool.QueryRow(f.ctx, `SELECT status, system_retired_at FROM remediation_tasks WHERE id=$1::uuid`, cancelled).Scan(&cancelledStatus, &cancelledRetired))
+	if cancelledStatus != "cancelled" || cancelledRetired != nil {
+		t.Fatalf("cancelled task after system restore = status %q retired %v; it must stay cancelled", cancelledStatus, cancelledRetired)
+	}
+}
+
+// An assignable list must only offer findings the assign action will accept.
+// Assign refuses a finding whose asset is soft deleted, so a row that lingers in
+// the picker is a guaranteed failure at the moment of selection.
+func TestAssignableFindingsHideSoftDeletedAssets(t *testing.T) {
+	f := setup(t)
+	page, _ := pagination.Normalize(1, 50)
+	var assetID string
+	must(t, f.pool.QueryRow(f.ctx, `
+		INSERT INTO assets(asset_type,asset_value,normalized_value,status,created_by)
+		VALUES('ip',$1,$1,'active',$2::uuid) RETURNING id::text`,
+		fmt.Sprintf("10.30.%d.%d", os.Getpid()%250, time.Now().UnixNano()%250), f.group.UserID).Scan(&assetID))
+	_, err := f.pool.Exec(f.ctx, `
+		INSERT INTO asset_organizations(asset_id,organization_id,relationship_type,is_primary)
+		VALUES($1::uuid,$2::uuid,'owner',true)`, assetID, f.org)
+	must(t, err)
+	_, err = f.pool.Exec(f.ctx, `UPDATE security_findings SET asset_id=$2::uuid WHERE id=$1::uuid`, f.findings[1], assetID)
+	must(t, err)
+
+	before, err := f.s.AssignableFindings(f.ctx, f.manager, f.order, page)
+	must(t, err)
+	if !assignableHas(before.Items, f.findings[1]) {
+		t.Fatal("a live asset's finding is missing from the assignable list")
+	}
+	must(t, asset.NewService(f.pool).Delete(f.ctx, f.group, assetID, nil, "资产下线", "assignable-hide", "127.0.0.1"))
+	after, err := f.s.AssignableFindings(f.ctx, f.manager, f.order, page)
+	must(t, err)
+	if assignableHas(after.Items, f.findings[1]) {
+		t.Fatal("the assignable list still offers a finding whose asset is deleted")
+	}
+}
+
+func assignableHas(items []remediation.Object, id string) bool {
+	for _, item := range items {
+		if item["id"] == id {
+			return true
+		}
+	}
+	return false
+}
+
+// Migration 00075 replaced a mis-specified index: the retired-task lookup was
+// created on asset_id while every query filters on finding_id, so it was never
+// used and the intended lookup stayed a sequential scan.
+func TestRetiredTaskLookupIndexIsKeyedByFinding(t *testing.T) {
+	f := setup(t)
+	var columns string
+	must(t, f.pool.QueryRow(f.ctx, `
+		SELECT string_agg(a.attname, ',' ORDER BY a.attname)
+		FROM pg_class idx
+		JOIN pg_index i ON i.indexrelid = idx.oid
+		JOIN pg_class tbl ON tbl.oid = i.indrelid
+		JOIN pg_attribute a ON a.attrelid = tbl.oid AND a.attnum = ANY(i.indkey)
+		WHERE idx.relname = 'remediation_tasks_finding_retired_idx'`).Scan(&columns))
+	if columns != "finding_id" {
+		t.Fatalf("remediation_tasks_finding_retired_idx covers %q, want finding_id", columns)
+	}
+	var stale int
+	must(t, f.pool.QueryRow(f.ctx, `SELECT count(*) FROM pg_class WHERE relname = 'remediation_tasks_asset_retired_idx'`).Scan(&stale))
+	if stale != 0 {
+		t.Fatal("the mis-specified remediation_tasks_asset_retired_idx is still present")
+	}
 }

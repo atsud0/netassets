@@ -382,7 +382,9 @@ func TestClosedRiskExpiryAndNewRemediationRound(t *testing.T) {
 	if stats["risk_accepted"] != float64(0) || stats["risk_expired"] != float64(1) {
 		t.Fatalf("expired risk still valid: %v", stats)
 	}
-	_, err = f.orders.RevokeRisk(f.ctx, f.group, f.findings[0], "", "")
+	_, err = f.orders.RevokeRisk(f.ctx, f.group, f.findings[0], securityworkorder.RiskRevokeInput{
+		ExpectedUpdatedAt: findingVersion(t, f.ctx, f.pool, f.findings[0]),
+	}, "", "")
 	must(t, err)
 	next, err := f.orders.CreateWorkOrder(f.ctx, f.group, securityworkorder.WorkOrderInput{ExecutionMode: "individual", Title: "风险到期再次整改", RemediationRequirement: "重新修复并部署", AssigneeOrganizationID: f.org, DueAt: f.due, FindingIDs: []string{f.findings[0]}}, "", "")
 	must(t, err)

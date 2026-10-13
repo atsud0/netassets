@@ -593,9 +593,11 @@ async function submitRiskAction() {
   riskSubmitting.value = true
   try {
     const endpoint = riskMode.value === 'accept' ? 'accept-risk' : 'review-risk'
+    // Carry the row version the dialog was opened from so a concurrent edit is
+    // reported instead of silently overwritten.
     const payload = riskMode.value === 'accept'
-      ? { reason: riskForm.reason, accepted_until: acceptedUntil.toISOString() }
-      : { comment: riskForm.comment, accepted_until: acceptedUntil.toISOString() }
+      ? { reason: riskForm.reason, accepted_until: acceptedUntil.toISOString(), expected_updated_at: item.updated_at }
+      : { comment: riskForm.comment, accepted_until: acceptedUntil.toISOString(), expected_updated_at: item.updated_at }
     const response = await apiClient.post<ItemResponse<Finding>>(`/security-findings/${item.id}/${endpoint}`, payload)
     selectedFinding.value = response.data.item
     riskDialogVisible.value = false
@@ -611,7 +613,7 @@ async function submitRiskAction() {
 async function revokeFindingRisk(item: Finding) {
   try {
     await ElMessageBox.confirm(`确定撤销“${item.code}”的风险接受吗？撤销后将恢复为待处理状态。`, '撤销风险接受', { type: 'warning', confirmButtonText: '撤销', cancelButtonText: '取消' })
-    const response = await apiClient.post<ItemResponse<Finding>>(`/security-findings/${item.id}/revoke-risk`)
+    const response = await apiClient.post<ItemResponse<Finding>>(`/security-findings/${item.id}/revoke-risk`, { expected_updated_at: item.updated_at })
     selectedFinding.value = response.data.item
     ElMessage.success('风险接受已撤销')
     await refreshAfterMutation()
