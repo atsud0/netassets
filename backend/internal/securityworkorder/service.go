@@ -28,7 +28,11 @@ var (
 	ErrIndividualWorkOrderAction = errors.New("individual work order requires remediation task")
 	ErrInvalid                   = errors.New("invalid input")
 	ErrState                     = errors.New("invalid state")
-	uuidPattern                  = regexp.MustCompile(`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$`)
+	// ErrEditConflict reports that another user changed the row after this caller
+	// read it. It is a distinct error so the API can answer 409 with a retry hint
+	// instead of lumping it together with workflow conflicts.
+	ErrEditConflict = errors.New("security finding has been updated by another user")
+	uuidPattern     = regexp.MustCompile(`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$`)
 )
 
 type Finding struct {
@@ -115,6 +119,13 @@ type FindingInput struct {
 	ImportStatusNormalized    string `json:"-"`
 	ImportStatusMappingReason string `json:"-"`
 	DuplicateOfFindingID      string `json:"-"`
+	// ExpectedUpdatedAt is the optimistic-lock token of a generic finding edit.
+	// Two security operators editing the same finding is a normal event, not an
+	// edge case, so the caller must send back the row version it read instead of
+	// letting a stale form overwrite a newer status transition. Empty means the
+	// caller is not doing a read-modify-write (imports and workflow actions keep
+	// their own guards) and is only honoured on create-style callers.
+	ExpectedUpdatedAt *time.Time `json:"expected_updated_at,omitempty"`
 }
 
 // validFindingAssetLinkState keeps the API filter vocabulary identical to the
@@ -665,13 +676,26 @@ func (s *Service) UpdateFinding(ctx context.Context, principal auth.Principal, i
 		       business_system_id = NULLIF($7, '')::uuid, test_batch_id = NULLIF($8, '')::uuid, vulnerability_type = NULLIF($9, ''),
 		       description = $10, evidence = NULLIF($11, ''), remediation_advice = NULLIF($12, ''),
 		       source = $13, discovered_at = $14, updated_by = $15::uuid, updated_at = now()
-		WHERE id::text = $1`, id, input.Title, input.Severity, input.Status, input.AssigneeOrganizationID,
+		WHERE id::text = $1
+		  AND ($16::timestamptz IS NULL OR updated_at = $16::timestamptz)`, id, input.Title, input.Severity, input.Status, input.AssigneeOrganizationID,
 		input.AssetID, input.BusinessSystemID, input.TestBatchID, input.VulnerabilityType, input.Description, input.Evidence,
-		input.RemediationAdvice, input.Source, input.DiscoveredAt, principal.UserID)
+		input.RemediationAdvice, input.Source, input.DiscoveredAt, principal.UserID, input.ExpectedUpdatedAt)
 	if err != nil {
 		return Finding{}, fmt.Errorf("update security finding: %w", err)
 	}
 	if command.RowsAffected() == 0 {
+		// Distinguish "row vanished" from "row moved on". A stale lock value is a
+		// recoverable conflict the caller retries with a fresh read; a missing row
+		// is not something a retry can fix.
+		if input.ExpectedUpdatedAt != nil {
+			var exists bool
+			if err := tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM security_findings WHERE id::text = $1)`, id).Scan(&exists); err != nil {
+				return Finding{}, fmt.Errorf("check finding existence after stale edit: %w", err)
+			}
+			if exists {
+				return Finding{}, ErrEditConflict
+			}
+		}
 		return Finding{}, ErrNotFound
 	}
 	if err := writeAudit(ctx, tx, principal, input.AssigneeOrganizationID, "security_finding.update", "security_finding", id,

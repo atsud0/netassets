@@ -109,6 +109,9 @@ const savedFilterViews = ref<InstanceType<typeof SavedFilterViews>>()
 const findingDialogVisible = ref(false)
 const findingFormRef = ref<FormInstance>()
 const editingFindingID = ref('')
+// The row version this form was opened with. Sending it back lets the API reject
+// a save that would overwrite a newer edit by another security operator.
+const editingFindingUpdatedAt = ref('')
 const findingForm = reactive({
   title: '', severity: 'high', status: FINDING_STATUS_PENDING, assignee_organization_id: '', asset_id: '', business_system_id: '', test_batch_id: '',
   vulnerability_type: '', description: '', evidence: '', remediation_advice: '', source: 'manual', discovered_at: new Date() as Date | string,
@@ -451,6 +454,7 @@ function defaultRiskUntil() {
 }
 
 function resetFindingForm() {
+  editingFindingUpdatedAt.value = ''
   Object.assign(findingForm, {
     title: '', severity: 'high', status: FINDING_STATUS_PENDING, assignee_organization_id: defaultOrganizationID(), asset_id: '', business_system_id: '', test_batch_id: '',
     vulnerability_type: '', description: '', evidence: '', remediation_advice: '', source: 'manual', discovered_at: new Date(),
@@ -465,6 +469,7 @@ function openCreateFinding() {
 
 function openEditFinding(item: Finding) {
   editingFindingID.value = item.id
+  editingFindingUpdatedAt.value = item.updated_at
   Object.assign(findingForm, {
     title: item.title, severity: item.severity, status: item.status, assignee_organization_id: item.assignee_organization_id,
     asset_id: item.asset_id ?? '', business_system_id: item.business_system_id ?? '', test_batch_id: item.test_batch_id ?? '', vulnerability_type: item.vulnerability_type ?? '',
@@ -482,8 +487,11 @@ async function saveFinding() {
   }
   submitting.value = true
   try {
-    const payload = { ...findingForm, discovered_at: new Date(findingForm.discovered_at).toISOString() }
-    if (editingFindingID.value) await apiClient.patch(`/security-findings/${editingFindingID.value}`, payload)
+    const payload: Record<string, unknown> = { ...findingForm, discovered_at: new Date(findingForm.discovered_at).toISOString() }
+    if (editingFindingID.value) {
+      payload.expected_updated_at = editingFindingUpdatedAt.value
+      await apiClient.patch(`/security-findings/${editingFindingID.value}`, payload)
+    }
     else await apiClient.post('/security-findings', payload)
     ElMessage.success(editingFindingID.value ? '安全发现已更新' : '安全发现已登记')
     findingDialogVisible.value = false

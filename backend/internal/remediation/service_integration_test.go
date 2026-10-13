@@ -13,11 +13,13 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
+	"netassets/internal/asset"
 	"netassets/internal/auth"
 	"netassets/internal/bootstrap"
 	"netassets/internal/config"
 	"netassets/internal/notification"
 	"netassets/internal/pagination"
+	"netassets/internal/recyclebin"
 	"netassets/internal/remediation"
 	"netassets/internal/securityworkorder"
 )
@@ -399,4 +401,106 @@ func TestScopeChangesAndLegacyFindingWriteGuard(t *testing.T) {
 	if detail["needs_reassignment"] != true {
 		t.Fatal("administrator not warned of scope change")
 	}
+}
+
+// An asset soft delete must not silently kill open remediation work, and must not
+// leave the assignee working a target that no longer exists either. The task is
+// retired (kept for audit, blocked for the executor, surfaced to the reviewer),
+// and a restore brings it back without resurrecting work that was settled while
+// the asset was gone.
+func TestAssetRetirementRetiresThenRestoresRemediationTask(t *testing.T) {
+	f := setup(t)
+
+	// Give the finding a formal asset before assigning remediation. This keeps
+	// the normal finding/task integrity trigger happy and makes the test exercise
+	// the real asset delete path rather than a fixture-only UPDATE.
+	var assetID string
+	must(t, f.pool.QueryRow(f.ctx, `
+		INSERT INTO assets(asset_type,asset_value,normalized_value,status,created_by)
+		VALUES('ip', $1, $1, 'active', $2::uuid) RETURNING id::text`, "10.20.30.40", f.group.UserID).Scan(&assetID))
+	_, err := f.pool.Exec(f.ctx, `
+		INSERT INTO asset_organizations(asset_id,organization_id,relationship_type,is_primary)
+		VALUES($1::uuid,$2::uuid,'owner',true)`, assetID, f.org)
+	must(t, err)
+	_, err = f.pool.Exec(f.ctx, `
+		UPDATE security_findings SET asset_id=$2::uuid WHERE id=$1::uuid`, f.findings[0], assetID)
+	must(t, err)
+
+	id := f.assign(t, 0, "asset-retire-key", f.grant)
+	f.action(t, f.worker, id, "accept", remediation.ActionInput{}, true)
+	before, err := f.s.Detail(f.ctx, f.worker, id, true)
+	must(t, err)
+	if before["asset_retired_at"] != nil {
+		t.Fatal("a live asset produced a retirement mark")
+	}
+
+	// Soft delete through the real asset service so the retirement runs inside
+	// the same transaction as the ledger delete.
+	assets := asset.NewService(f.pool)
+	must(t, assets.Delete(f.ctx, f.group, assetID, nil, "资产下线，核查关联漏洞", "asset-retire-delete", "127.0.0.1"))
+
+	var deletedAt any
+	must(t, f.pool.QueryRow(f.ctx, `SELECT deleted_at FROM assets WHERE id=$1::uuid`, assetID).Scan(&deletedAt))
+	if deletedAt == nil {
+		t.Fatal("asset was not soft deleted")
+	}
+	var taskStatus string
+	var retirement any
+	must(t, f.pool.QueryRow(f.ctx, `SELECT status, asset_retired_at FROM remediation_tasks WHERE id=$1::uuid`, id).Scan(&taskStatus, &retirement))
+	if taskStatus != "in_progress" {
+		t.Fatalf("task status after asset delete = %q; the delivery history must survive, not be cancelled", taskStatus)
+	}
+	if retirement == nil {
+		t.Fatal("open task was not marked as retired after its asset was deleted")
+	}
+	var retirementEvents int
+	must(t, f.pool.QueryRow(f.ctx, `SELECT count(*) FROM remediation_task_events WHERE task_id=$1::uuid AND action='asset_retired'`, id).Scan(&retirementEvents))
+	if retirementEvents != 1 {
+		t.Fatalf("asset_retired events = %d, want 1", retirementEvents)
+	}
+	managed, err := f.s.Detail(f.ctx, f.manager, id, false)
+	must(t, err)
+	if managed["needs_reassignment"] != true {
+		t.Fatal("reviewer was not told the task needs reassignment after the asset was retired")
+	}
+	page, _ := pagination.Normalize(1, 50)
+	pendingList, err := f.s.List(f.ctx, f.manager, remediation.Filter{NeedsReassignment: true, Page: page})
+	must(t, err)
+	found := false
+	for _, row := range pendingList.Items {
+		if row["id"] == id {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("the retired task is missing from the needs-reassignment queue")
+	}
+
+	// The assignee must not be able to keep delivering against a deleted asset.
+	detail, err := f.s.Detail(f.ctx, f.manager, id, false)
+	must(t, err)
+	target := time.Now().Add(time.Hour)
+	_, err = f.s.Act(f.ctx, f.worker, id, "submit", "retired-submit-key", remediation.ActionInput{
+		ExpectedVersion: int(detail["version"].(float64)), Summary: "继续修复", DeploymentStatus: "target",
+		ChangeReference: "release-x", DeployedAt: &target, SelfTestResult: "自测通过",
+	}, true)
+	if !errors.Is(err, remediation.ErrConflict) {
+		t.Fatalf("executor submit on a retired task = %v, want ErrConflict", err)
+	}
+
+	// Restoring the asset brings the task back without rewriting its history.
+	must(t, recyclebin.NewService(f.pool).RestoreAsset(f.ctx, f.group, assetID, "asset-retire-restore", "127.0.0.1"))
+	var revived any
+	must(t, f.pool.QueryRow(f.ctx, `SELECT asset_retired_at FROM remediation_tasks WHERE id=$1::uuid`, id).Scan(&revived))
+	if revived != nil {
+		t.Fatal("restoring the asset did not clear the retirement mark")
+	}
+	restored, err := f.s.Detail(f.ctx, f.manager, id, false)
+	must(t, err)
+	if restored["asset_retired_at"] != nil {
+		t.Fatal("restored task still reports a retirement")
+	}
+	// Delivery can resume after restoration.
+	now := time.Now()
+	f.action(t, f.worker, id, "submit", remediation.ActionInput{Summary: "恢复后提交", DeploymentStatus: "target", ChangeReference: "release-y", DeployedAt: &now, SelfTestResult: "自测通过"}, true)
 }

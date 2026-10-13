@@ -385,6 +385,8 @@ func writeFindingResult(c *gin.Context, logger *slog.Logger, operation string, s
 		writeAPIError(c, http.StatusBadRequest, "invalid_finding", "请检查责任组织、关联资产、严重等级和漏洞信息")
 	case errors.Is(err, securityworkorder.ErrNotFound):
 		writeAPIError(c, http.StatusNotFound, "reference_not_found", "安全发现、责任组织、关联资产或业务系统不存在或不匹配")
+	case errors.Is(err, securityworkorder.ErrEditConflict):
+		writeAPIError(c, http.StatusConflict, "finding_edit_conflict", "安全发现已被其他人修改，请刷新后重试")
 	case errors.Is(err, securityworkorder.ErrConflict):
 		writeAPIError(c, http.StatusConflict, "finding_conflict", "安全发现当前不能执行该操作")
 	case err != nil:

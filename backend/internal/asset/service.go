@@ -1243,6 +1243,13 @@ func (s *Service) Delete(ctx context.Context, principal auth.Principal, assetID 
 		return fmt.Errorf("begin asset delete: %w", err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
+	// Serialize asset retirement with remediation assignment and review writes.
+	// Without the shared lock, an assignment that starts while this delete is in
+	// flight could create a task after the retirement UPDATE has already taken its
+	// snapshot, leaving a live task on a deleted target.
+	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtext('netassets-remediation'))`); err != nil {
+		return fmt.Errorf("lock remediation work during asset delete: %w", err)
+	}
 	command, err := tx.Exec(ctx, `
 		UPDATE assets SET deleted_at = now(), updated_at = now(), updated_by = $2::uuid
 		WHERE id::text = $1 AND deleted_at IS NULL
@@ -1252,6 +1259,52 @@ func (s *Service) Delete(ctx context.Context, principal auth.Principal, assetID 
 	}
 	if command.RowsAffected() == 0 {
 		return ErrNotFound
+	}
+	// Retire the remediation work that hangs on this asset instead of cancelling
+	// it. The delivery history has to survive an audit, but the assignee must not
+	// keep working a task whose target no longer exists, and the reviewer must be
+	// able to see why the task stopped being current.
+	retiredRows, err := tx.Query(ctx, `
+		UPDATE remediation_tasks t SET asset_retired_at = now(), version = version + 1, updated_at = now()
+		FROM security_findings f
+		WHERE t.finding_id = f.id AND f.asset_id = $1::uuid
+		  AND t.status NOT IN ('completed', 'cancelled') AND t.asset_retired_at IS NULL
+		RETURNING t.id::text`, assetID)
+	if err != nil {
+		return fmt.Errorf("retire remediation tasks on asset delete: %w", err)
+	}
+	retiredTaskIDs := make([]string, 0, 4)
+	for retiredRows.Next() {
+		var taskID string
+		if err := retiredRows.Scan(&taskID); err != nil {
+			retiredRows.Close()
+			return fmt.Errorf("scan retired remediation task: %w", err)
+		}
+		retiredTaskIDs = append(retiredTaskIDs, taskID)
+	}
+	retiredRows.Close()
+	if err := retiredRows.Err(); err != nil {
+		return fmt.Errorf("iterate retired remediation tasks: %w", err)
+	}
+	// Record the retirement on the task timeline so the group can explain, in one
+	// place, why an open task suddenly stopped being current work.
+	for _, taskID := range retiredTaskIDs {
+		if _, err := tx.Exec(ctx, `
+			INSERT INTO remediation_task_events(task_id, actor_id, action, visibility, details)
+			VALUES($1::uuid, $2::uuid, 'asset_retired', 'participants',
+			       jsonb_build_object('asset_id', $3::text, 'reason', '关联资产已删除，整改任务待改派'))
+		`, taskID, principal.UserID, assetID); err != nil {
+			return fmt.Errorf("record remediation task retirement event: %w", err)
+		}
+	}
+	if len(retiredTaskIDs) > 0 {
+		if _, err := tx.Exec(ctx, `
+			INSERT INTO audit_logs (user_id, organization_id, action, resource_type, resource_id, summary, details, request_ip, request_id)
+			VALUES ($1::uuid, $2::uuid, 'asset.delete', 'asset', $3, '删除网络资产导致整改任务待改派',
+			        jsonb_build_object('retired_remediation_tasks', $4::int), NULLIF($5, '')::inet, NULLIF($6, ''))
+		`, principal.UserID, current.OrganizationID, assetID, len(retiredTaskIDs), ipAddress, requestID); err != nil {
+			return fmt.Errorf("write asset delete remediation audit: %w", err)
+		}
 	}
 	if _, err := tx.Exec(ctx, `
 		INSERT INTO audit_logs (user_id, organization_id, action, resource_type, resource_id, summary, details, request_ip, request_id)

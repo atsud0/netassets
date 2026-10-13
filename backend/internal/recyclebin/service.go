@@ -139,6 +139,11 @@ func (s *Service) RestoreAsset(ctx context.Context, principal auth.Principal, as
 		return fmt.Errorf("begin asset restore: %w", err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
+	// Match remediation.begin() and asset deletion so restore cannot race an
+	// assignment or review transition while it revives retired work.
+	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtext('netassets-remediation'))`); err != nil {
+		return fmt.Errorf("lock remediation work during asset restore: %w", err)
+	}
 
 	var organizationID, assetType, normalizedValue, value, ownerUserID string
 	err = tx.QueryRow(ctx, `
@@ -218,11 +223,46 @@ func (s *Service) RestoreAsset(ctx context.Context, principal auth.Principal, as
 	if command.RowsAffected() == 0 {
 		return ErrNotFound
 	}
+	// Clear the retirement mark on the tasks this asset retired, but only for the
+	// ones that were not cancelled while the asset was gone. A cancelled task stays
+	// cancelled: restoring an asset must not silently reopen settled work. Capture
+	// each revived task so its timeline explains why it became current again.
+	revivedRows, err := tx.Query(ctx, `
+		UPDATE remediation_tasks t SET asset_retired_at = NULL, version = version + 1, updated_at = now()
+		FROM security_findings f
+		WHERE t.finding_id = f.id AND f.asset_id = $1::uuid AND t.asset_retired_at IS NOT NULL
+		  AND t.status <> 'cancelled'
+		RETURNING t.id::text`, assetID)
+	if err != nil {
+		return fmt.Errorf("revive remediation tasks on asset restore: %w", err)
+	}
+	revivedTaskIDs := make([]string, 0, 4)
+	for revivedRows.Next() {
+		var taskID string
+		if err := revivedRows.Scan(&taskID); err != nil {
+			revivedRows.Close()
+			return fmt.Errorf("scan revived remediation task: %w", err)
+		}
+		revivedTaskIDs = append(revivedTaskIDs, taskID)
+	}
+	revivedRows.Close()
+	if err := revivedRows.Err(); err != nil {
+		return fmt.Errorf("iterate revived remediation tasks: %w", err)
+	}
+	for _, taskID := range revivedTaskIDs {
+		if _, err := tx.Exec(ctx, `
+			INSERT INTO remediation_task_events(task_id, actor_id, action, visibility, details)
+			VALUES($1::uuid, $2::uuid, 'asset_restored', 'participants',
+			       jsonb_build_object('asset_id', $3::text, 'reason', '关联资产已恢复，整改任务恢复当前性'))
+		`, taskID, principal.UserID, assetID); err != nil {
+			return fmt.Errorf("record remediation task restoration event: %w", err)
+		}
+	}
 	if _, err := tx.Exec(ctx, `
 		INSERT INTO audit_logs (user_id, organization_id, action, resource_type, resource_id, summary, details, request_ip, request_id)
 		VALUES ($1::uuid, $2::uuid, 'asset.restore', 'asset', $3, '恢复网络资产',
-		        jsonb_build_object('type', $4::text, 'value', $5::text), NULLIF($6, '')::inet, NULLIF($7, ''))
-	`, principal.UserID, organizationID, assetID, assetType, value, ipAddress, requestID); err != nil {
+		        jsonb_build_object('type', $4::text, 'value', $5::text, 'revived_remediation_tasks', $8::int), NULLIF($6, '')::inet, NULLIF($7, ''))
+	`, principal.UserID, organizationID, assetID, assetType, value, ipAddress, requestID, len(revivedTaskIDs)); err != nil {
 		return fmt.Errorf("write asset restore audit: %w", err)
 	}
 	if err := notification.WriteEvent(ctx, tx, notification.EventInput{

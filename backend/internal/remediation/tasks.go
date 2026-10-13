@@ -99,7 +99,8 @@ func (s *Service) Assign(ctx context.Context, p auth.Principal, orderID, key str
 	var system, severity string
 	err = tx.QueryRow(ctx, `SELECT COALESCE(COALESCE(f.business_system_id,(SELECT sa.business_system_id FROM system_assets sa WHERE sa.asset_id=f.asset_id AND sa.is_primary ORDER BY sa.business_system_id LIMIT 1))::text,''),f.severity FROM security_work_order_findings l
  JOIN security_findings f ON f.id=l.finding_id LEFT JOIN assets a ON a.id=f.asset_id
- WHERE l.work_order_id=$1::uuid AND f.id=$2::uuid AND f.assignee_organization_id=$3::uuid AND f.status IN ('pending','in_progress') FOR UPDATE OF f`, orderID, in.FindingID, org).Scan(&system, &severity)
+ WHERE l.work_order_id=$1::uuid AND f.id=$2::uuid AND f.assignee_organization_id=$3::uuid AND f.status IN ('pending','in_progress')
+   AND (f.asset_id IS NULL OR a.deleted_at IS NULL) FOR UPDATE OF f`, orderID, in.FindingID, org).Scan(&system, &severity)
 	if err != nil {
 		return nil, dbError(err)
 	}
@@ -141,7 +142,8 @@ const taskSelect = `SELECT t.id,t.task_no,t.work_order_id,w.work_order_no,w.stat
  (t.completion_reason='risk_accepted' AND f.status='risk_accepted' AND f.risk_accepted_until>now()) risk_acceptance_current,
  m.title,m.severity,m.affected_location,m.description,m.evidence,m.remediation_advice,m.requirement,
  (t.status NOT IN ('completed','cancelled') AND t.due_at<now()) overdue,
- (NOT remediation_grant_valid(t.grant_id,t.assignee_user_id,t.organization_id,t.business_system_id) OR NOT remediation_task_current(t.id)) needs_reassignment
+ (NOT remediation_grant_valid(t.grant_id,t.assignee_user_id,t.organization_id,t.business_system_id) OR NOT remediation_task_current(t.id)) needs_reassignment,
+ (t.asset_retired_at IS NOT NULL) asset_retired,t.asset_retired_at
  FROM remediation_tasks t JOIN security_findings f ON f.id=t.finding_id JOIN security_work_orders w ON w.id=t.work_order_id JOIN organizations o ON o.id=t.organization_id
  JOIN business_systems b ON b.id=t.business_system_id JOIN users u ON u.id=t.assignee_user_id
  JOIN remediation_grants g ON g.id=t.grant_id LEFT JOIN vendors v ON v.id=g.vendor_id
@@ -175,7 +177,7 @@ func taskQuery(p auth.Principal, in Filter) (string, []any, error) {
  AND ($7='' OR t.business_system_id=NULLIF($7,'')::uuid) AND ($8='' OR m.severity=$8)
  AND (NOT $9 OR (t.due_at>=now() AND t.due_at<now()+interval '3 days' AND t.status NOT IN ('completed','cancelled')))
  AND (NOT $10 OR (t.return_reason<>'' AND t.status NOT IN ('completed','cancelled')))
- AND (NOT $11 OR NOT remediation_grant_valid(t.grant_id,t.assignee_user_id,t.organization_id,t.business_system_id) OR NOT remediation_task_current(t.id))
+ AND (NOT $11 OR NOT remediation_grant_valid(t.grant_id,t.assignee_user_id,t.organization_id,t.business_system_id) OR NOT remediation_task_current(t.id) OR t.asset_retired_at IS NOT NULL)
  AND (NOT $12 OR t.blocked_reason<>'')
  AND (NOT $13 OR EXISTS(SELECT 1 FROM remediation_requests r WHERE r.task_id=t.id AND r.status='pending'))
  AND (NOT $14 OR (t.status='pending_org_review' AND remediation_can_manage($1::uuid,t.organization_id,'remediation.review')) OR (t.status='pending_security_review' AND remediation_is_security($1::uuid)))
@@ -208,7 +210,7 @@ func (s *Service) Detail(ctx context.Context, p auth.Principal, id string, execu
 	out["can_assign"] = !executor && allowed(ctx, s.pool, p, t.OrganizationID, "remediation.assign") == nil
 	out["can_review"] = !executor && allowed(ctx, s.pool, p, t.OrganizationID, "remediation.review") == nil
 	out["can_verify"] = !executor && security(ctx, s.pool, p)
-	out["can_execute"] = authorizeTask(ctx, s.pool, p, t, true) == nil
+	out["can_execute"] = t.AssetRetiredAt == nil && authorizeTask(ctx, s.pool, p, t, true) == nil
 	if !executor && internal(ctx, s.pool, p, t) {
 		source, e := readObject(ctx, s.pool, `SELECT title,severity,description,COALESCE(evidence,'') evidence,COALESCE(remediation_advice,'') remediation_advice FROM security_findings WHERE id=$1::uuid`, t.FindingID)
 		if e != nil {
@@ -332,6 +334,13 @@ func (s *Service) Act(ctx context.Context, p auth.Principal, id, action, key str
 		}
 	}
 	if t.MaterialNeedsReview && contains([]string{"submit", "organization-review", "security-review"}, action) {
+		return nil, ErrConflict
+	}
+	// A task whose asset was retired must not be progressed by the assignee. The
+	// security-side paths (source-update, reviews, cancellation) stay available so
+	// the group can still correct the record and settle the work; what is forbidden
+	// is producing new delivery against a target that no longer exists.
+	if t.AssetRetiredAt != nil && contains([]string{"accept", "progress", "submit", "withdraw"}, action) {
 		return nil, ErrConflict
 	}
 	if t.Version != in.ExpectedVersion {
