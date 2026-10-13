@@ -1,6 +1,9 @@
 package securityworkorder
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestReadFindingImportJSONRepairsInvalidReportEscapes(t *testing.T) {
 	data := []byte(`[{"name":"test finding","severity":"low","summary":"report mentions \c.target","assets":[{"type":"domain","label":"example.com"}]}]`)
@@ -72,5 +75,50 @@ func TestReadFindingImportJSONRejectsInvalidExportStatus(t *testing.T) {
 	_, _, _, rowErr := findingInputFromImportRow(rows[1], headers, "")
 	if rowErr == nil || rowErr.code != "invalid_status" {
 		t.Fatalf("row error = %#v, want invalid_status", rowErr)
+	}
+}
+
+func TestNormalizeFindingImportStatusEvidence(t *testing.T) {
+	tests := []struct {
+		name       string
+		raw        string
+		normalized string
+		wantRaw    string
+		wantReason string
+	}{
+		{name: "empty defaults pending", raw: "", normalized: "pending", wantReason: "未提供外部状态"},
+		{name: "english is retained", raw: "confirmed", normalized: "confirmed", wantRaw: "confirmed", wantReason: "本地标准状态"},
+		{name: "chinese maps", raw: "已修复", normalized: "fixed", wantRaw: "已修复", wantReason: "中文状态标签"},
+		{name: "risk acceptance is conservative", raw: "risk_accepted", normalized: "confirmed", wantRaw: "risk_accepted", wantReason: "缺少本地风险接受"},
+		{name: "duplicate is conservative", raw: "重复", normalized: "pending", wantRaw: "重复", wantReason: "缺少本地主漏洞"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := normalizeFindingImportStatusEvidence(tc.raw)
+			if err != nil {
+				t.Fatalf("normalizeFindingImportStatusEvidence() error = %v", err)
+			}
+			if got.Raw != tc.wantRaw || got.Normalized != tc.normalized || !strings.Contains(got.Reason, tc.wantReason) {
+				t.Fatalf("evidence = %#v, want raw=%q normalized=%q reason containing %q", got, tc.wantRaw, tc.normalized, tc.wantReason)
+			}
+		})
+	}
+	if _, err := normalizeFindingImportStatusEvidence("closed"); err == nil {
+		t.Fatal("invalid external status should be rejected")
+	}
+}
+
+func TestFindingInputFromImportRowPersistsStatusEvidence(t *testing.T) {
+	headers := mapFindingImportHeaders([]string{"资产类型", "资产值", "漏洞标题", "严重等级", "漏洞描述", "状态"})
+	row := []string{"ip", "192.0.2.10", "外部风险接受", "高危", "需要本地复核", "风险接受"}
+	input, _, _, rowErr := findingInputFromImportRow(row, headers, "")
+	if rowErr != nil {
+		t.Fatalf("findingInputFromImportRow() error = %#v", rowErr)
+	}
+	if input.Status != "confirmed" || input.ImportStatusRaw != "风险接受" || input.ImportStatusNormalized != "confirmed" {
+		t.Fatalf("input status evidence = %#v", input)
+	}
+	if input.ImportStatusMappingReason == "" {
+		t.Fatal("status mapping reason should be retained")
 	}
 }

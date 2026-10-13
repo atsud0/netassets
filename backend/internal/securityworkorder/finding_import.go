@@ -650,8 +650,8 @@ func findingInputFromImportRow(row []string, headers map[string]int, batchID str
 	if severity == "" {
 		return FindingInput{}, "", "", &findingImportRowError{"invalid_severity", "严重等级仅支持严重、高危、中危、低危、提示，或 critical/high/medium/low/info"}
 	}
-	status := normalizeFindingImportStatus(value("status"))
-	if value("status") != "" && status == "" {
+	statusEvidence, statusErr := normalizeFindingImportStatusEvidence(value("status"))
+	if statusErr != nil {
 		return FindingInput{}, "", "", &findingImportRowError{"invalid_status", "漏洞状态仅支持 pending、in_progress、confirmed、resolved、fixed、false_positive、ignored、duplicate、risk_accepted，或对应中文标签"}
 	}
 	discoveredAt, err := parseFindingImportTime(value("discovered_at"))
@@ -659,9 +659,11 @@ func findingInputFromImportRow(row []string, headers map[string]int, batchID str
 		return FindingInput{}, "", "", &findingImportRowError{"invalid_discovered_at", "发现时间格式不正确，建议使用 YYYY-MM-DD HH:mm:ss"}
 	}
 	input := FindingInput{
-		Title: value("title"), Severity: severity, Status: status, TestBatchID: batchID,
+		Title: value("title"), Severity: severity, Status: statusEvidence.Normalized, TestBatchID: batchID,
 		VulnerabilityType: value("vulnerability_type"), Description: value("description"), Evidence: value("evidence"),
 		RemediationAdvice: value("remediation_advice"), Source: "import", DiscoveredAt: discoveredAt,
+		ImportStatusRaw: statusEvidence.Raw, ImportStatusNormalized: statusEvidence.Normalized,
+		ImportStatusMappingReason: statusEvidence.Reason,
 	}
 	if input.Title == "" {
 		return FindingInput{}, "", "", &findingImportRowError{"title_required", "漏洞标题不能为空"}
@@ -687,10 +689,16 @@ func normalizeFindingAssetType(value string) string {
 	return ""
 }
 
-// normalizeFindingImportStatus preserves the status semantics emitted by the
-// native JSON export. Empty is intentionally pending for old templates that do
-// not carry a status column; explicit values are validated against the single
-// backend vocabulary instead of being silently reset.
+type findingImportStatusEvidence struct {
+	Raw        string
+	Normalized string
+	Reason     string
+}
+
+// normalizeFindingImportStatus preserves the status vocabulary for callers
+// that only need validation. Import persistence uses
+// normalizeFindingImportStatusEvidence below so conservative conversions keep
+// their explanation next to the original value.
 func normalizeFindingImportStatus(value string) string {
 	value = strings.ToLower(strings.TrimSpace(value))
 	aliases := map[string]string{
@@ -708,6 +716,39 @@ func normalizeFindingImportStatus(value string) string {
 		return value
 	}
 	return ""
+}
+
+// normalizeFindingImportStatusEvidence maps an external status to the one
+// local finding state vocabulary while retaining enough evidence to explain
+// the mapping. External exports do not carry this system's risk-acceptance
+// approval or duplicate-master relationship, so those two values are never
+// promoted without local evidence.
+func normalizeFindingImportStatusEvidence(value string) (findingImportStatusEvidence, error) {
+	raw := strings.TrimSpace(value)
+	normalized := normalizeFindingImportStatus(raw)
+	if raw != "" && normalized == "" {
+		return findingImportStatusEvidence{}, ErrInvalid
+	}
+	if raw == "" {
+		return findingImportStatusEvidence{Normalized: findingstatus.Pending, Reason: "未提供外部状态，按兼容规则默认为待处理"}, nil
+	}
+	if normalized == findingstatus.RiskAccepted {
+		return findingImportStatusEvidence{
+			Raw: raw, Normalized: findingstatus.Confirmed,
+			Reason: "外部状态缺少本地风险接受理由和到期时间，保守映射为已确认；需通过本地风险接受流程重新审批",
+		}, nil
+	}
+	if normalized == findingstatus.Duplicate {
+		return findingImportStatusEvidence{
+			Raw: raw, Normalized: findingstatus.Pending,
+			Reason: "外部状态缺少本地主漏洞 ID，保守映射为待处理；需通过本地重复漏洞关联流程确认",
+		}, nil
+	}
+	reason := "外部状态已是本地标准状态值"
+	if raw != normalized {
+		reason = "中文状态标签已映射为本地标准状态值"
+	}
+	return findingImportStatusEvidence{Raw: raw, Normalized: normalized, Reason: reason}, nil
 }
 
 func normalizeFindingSeverity(value string) string {

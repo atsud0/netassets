@@ -19,6 +19,55 @@ const (
 	RiskAccepted  = "risk_accepted"
 )
 
+// Asset-link and remediation values are deliberately kept separate from the
+// vulnerability status above.  A finding can be confirmed while it is still
+// waiting for an asset to be identified, and it can be fixed while the asset
+// itself is retired; collapsing either dimension back into status makes those
+// cases impossible to explain.
+const (
+	AssetUnlinked = "unlinked"
+	AssetPending  = "pending"
+	AssetLive     = "live"
+	AssetRetired  = "retired"
+
+	RemediationNotStarted            = "not_started"
+	RemediationPendingAcceptance     = "pending_acceptance"
+	RemediationInProgress            = "in_progress"
+	RemediationPendingOrgReview      = "pending_org_review"
+	RemediationPendingSecurityReview = "pending_security_review"
+	RemediationCompleted             = "completed"
+)
+
+var transitionTable = map[string]map[string]struct{}{
+	Pending: {
+		InProgress: {}, Confirmed: {}, FalsePositive: {}, Ignored: {}, Duplicate: {},
+	},
+	InProgress: {
+		Pending: {}, Confirmed: {}, Resolved: {},
+	},
+	Confirmed: {
+		InProgress: {}, Resolved: {}, FalsePositive: {}, Ignored: {}, Duplicate: {},
+	},
+	Resolved: {
+		InProgress: {}, Confirmed: {}, Fixed: {},
+	},
+	Fixed: {
+		Confirmed: {}, InProgress: {},
+	},
+	FalsePositive: {
+		Pending: {}, Confirmed: {},
+	},
+	Ignored: {
+		Pending: {}, Confirmed: {},
+	},
+	Duplicate: {
+		Pending: {}, Confirmed: {},
+	},
+	// Risk acceptance is entered and left by the dedicated risk workflow.  It
+	// intentionally has no direct generic transition.
+	RiskAccepted: {},
+}
+
 // Definition carries the persisted value together with its display label and
 // the order used by status breakdowns.
 type Definition struct {
@@ -60,6 +109,29 @@ func Valid(value string) bool {
 		}
 	}
 	return false
+}
+
+// CanTransition reports whether a generic finding edit may move a finding
+// between two vulnerability states.  Dedicated actions (risk acceptance,
+// risk revocation/expiry and duplicate linking) must still perform their own
+// evidence and permission checks; this function is not a substitute for
+// those checks.
+func CanTransition(from, to string) bool {
+	if !Valid(from) || !Valid(to) {
+		return false
+	}
+	if from == to {
+		return true
+	}
+	_, ok := transitionTable[from][to]
+	return ok
+}
+
+// CanSetDirectly reports whether a generic create/import operation may start
+// with a status.  The two evidence-bearing states must be entered through a
+// dedicated workflow or an explicit import mapping.
+func CanSetDirectly(value string) bool {
+	return Valid(value) && value != RiskAccepted && value != Duplicate
 }
 
 // Label returns the Chinese label for a status, falling back to the raw value

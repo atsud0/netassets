@@ -74,3 +74,34 @@ func contains(haystack, needle string) bool {
 	}
 	return false
 }
+
+func TestCanTransition(t *testing.T) {
+	allowed := [][2]string{
+		{Pending, Confirmed},
+		{Confirmed, InProgress},
+		{InProgress, Resolved},
+		{Resolved, Fixed},
+		{FalsePositive, Confirmed},
+		{Duplicate, Pending},
+	}
+	for _, pair := range allowed {
+		if !CanTransition(pair[0], pair[1]) {
+			t.Errorf("CanTransition(%q, %q) = false, want true", pair[0], pair[1])
+		}
+	}
+	blocked := [][2]string{
+		{Pending, Fixed},
+		{Fixed, RiskAccepted},
+		{Confirmed, RiskAccepted},
+		{RiskAccepted, Confirmed},
+		{"unknown", Pending},
+	}
+	for _, pair := range blocked {
+		if CanTransition(pair[0], pair[1]) {
+			t.Errorf("CanTransition(%q, %q) = true, want false", pair[0], pair[1])
+		}
+	}
+	if !CanSetDirectly(Confirmed) || CanSetDirectly(RiskAccepted) || CanSetDirectly(Duplicate) {
+		t.Fatal("direct status policy does not protect evidence-bearing states")
+	}
+}

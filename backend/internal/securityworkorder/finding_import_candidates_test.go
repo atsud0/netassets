@@ -95,3 +95,20 @@ func TestFindingImportCandidateFindingStatusUsesExportVocabulary(t *testing.T) {
 		}
 	}
 }
+
+func TestFindingImportCandidateStatusUsesPersistedEvidence(t *testing.T) {
+	candidate := FindingImportCandidate{
+		RawData:                   map[string]string{"status": "risk_accepted"},
+		ImportStatusRaw:           "risk_accepted",
+		ImportStatusNormalized:    "confirmed",
+		ImportStatusMappingReason: "保守映射",
+	}
+	if got := findingImportCandidateFindingStatus(candidate); got != "confirmed" {
+		t.Fatalf("persisted normalized status = %q, want confirmed", got)
+	}
+
+	candidate = FindingImportCandidate{RawData: map[string]string{"status": "重复"}}
+	if got := findingImportCandidateFindingStatus(candidate); got != "pending" {
+		t.Fatalf("legacy duplicate candidate status = %q, want pending", got)
+	}
+}

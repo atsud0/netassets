@@ -38,38 +38,42 @@ type Finding struct {
 	Severity string `json:"severity"`
 	Status   string `json:"status"`
 	// Status is the vulnerability/risk state. These fields are independent dimensions.
-	AssetAssociationStatus   string     `json:"asset_association_status"`
-	RemediationStatus        string     `json:"remediation_status"`
-	AssigneeOrganizationID   string     `json:"assignee_organization_id"`
-	AssigneeOrganizationCode string     `json:"assignee_organization_code"`
-	AssigneeOrganizationName string     `json:"assignee_organization_name"`
-	AssetID                  string     `json:"asset_id,omitempty"`
-	AssetValue               string     `json:"asset_value,omitempty"`
-	AssetName                string     `json:"asset_name,omitempty"`
-	BusinessSystemID         string     `json:"business_system_id,omitempty"`
-	BusinessSystemCode       string     `json:"business_system_code,omitempty"`
-	BusinessSystemName       string     `json:"business_system_name,omitempty"`
-	TestBatchID              string     `json:"test_batch_id,omitempty"`
-	TestBatchCode            string     `json:"test_batch_code,omitempty"`
-	TestBatchName            string     `json:"test_batch_name,omitempty"`
-	VulnerabilityType        string     `json:"vulnerability_type,omitempty"`
-	Description              string     `json:"description"`
-	Evidence                 string     `json:"evidence,omitempty"`
-	RemediationAdvice        string     `json:"remediation_advice,omitempty"`
-	Source                   string     `json:"source"`
-	DiscoveredAt             time.Time  `json:"discovered_at"`
-	CreatedByName            string     `json:"created_by_name,omitempty"`
-	CreatedAt                time.Time  `json:"created_at"`
-	UpdatedAt                time.Time  `json:"updated_at"`
-	RiskAcceptedAt           *time.Time `json:"risk_accepted_at,omitempty"`
-	RiskAcceptedUntil        *time.Time `json:"risk_accepted_until,omitempty"`
-	RiskAcceptanceReason     string     `json:"risk_acceptance_reason,omitempty"`
-	RiskAcceptedByName       string     `json:"risk_accepted_by_name,omitempty"`
-	RiskAcceptedFromStatus   string     `json:"risk_accepted_from_status,omitempty"`
-	RiskReviewedAt           *time.Time `json:"risk_reviewed_at,omitempty"`
-	RiskReviewedByName       string     `json:"risk_reviewed_by_name,omitempty"`
-	RiskReviewComment        string     `json:"risk_review_comment,omitempty"`
-	RiskAcceptanceExpired    bool       `json:"risk_acceptance_expired"`
+	AssetAssociationStatus    string     `json:"asset_association_status"`
+	RemediationStatus         string     `json:"remediation_status"`
+	AssigneeOrganizationID    string     `json:"assignee_organization_id"`
+	AssigneeOrganizationCode  string     `json:"assignee_organization_code"`
+	AssigneeOrganizationName  string     `json:"assignee_organization_name"`
+	AssetID                   string     `json:"asset_id,omitempty"`
+	AssetValue                string     `json:"asset_value,omitempty"`
+	AssetName                 string     `json:"asset_name,omitempty"`
+	BusinessSystemID          string     `json:"business_system_id,omitempty"`
+	BusinessSystemCode        string     `json:"business_system_code,omitempty"`
+	BusinessSystemName        string     `json:"business_system_name,omitempty"`
+	TestBatchID               string     `json:"test_batch_id,omitempty"`
+	TestBatchCode             string     `json:"test_batch_code,omitempty"`
+	TestBatchName             string     `json:"test_batch_name,omitempty"`
+	VulnerabilityType         string     `json:"vulnerability_type,omitempty"`
+	Description               string     `json:"description"`
+	Evidence                  string     `json:"evidence,omitempty"`
+	RemediationAdvice         string     `json:"remediation_advice,omitempty"`
+	Source                    string     `json:"source"`
+	DiscoveredAt              time.Time  `json:"discovered_at"`
+	CreatedByName             string     `json:"created_by_name,omitempty"`
+	CreatedAt                 time.Time  `json:"created_at"`
+	UpdatedAt                 time.Time  `json:"updated_at"`
+	RiskAcceptedAt            *time.Time `json:"risk_accepted_at,omitempty"`
+	RiskAcceptedUntil         *time.Time `json:"risk_accepted_until,omitempty"`
+	RiskAcceptanceReason      string     `json:"risk_acceptance_reason,omitempty"`
+	RiskAcceptedByName        string     `json:"risk_accepted_by_name,omitempty"`
+	RiskAcceptedFromStatus    string     `json:"risk_accepted_from_status,omitempty"`
+	RiskReviewedAt            *time.Time `json:"risk_reviewed_at,omitempty"`
+	RiskReviewedByName        string     `json:"risk_reviewed_by_name,omitempty"`
+	RiskReviewComment         string     `json:"risk_review_comment,omitempty"`
+	RiskAcceptanceExpired     bool       `json:"risk_acceptance_expired"`
+	ImportStatusRaw           string     `json:"import_status_raw,omitempty"`
+	ImportStatusNormalized    string     `json:"import_status_normalized,omitempty"`
+	ImportStatusMappingReason string     `json:"import_status_mapping_reason,omitempty"`
+	DuplicateOfFindingID      string     `json:"duplicate_of_finding_id,omitempty"`
 	// PendingAssetDraftID is the unpublished working version this finding waits
 	// on. It is echoed back to the UI so a pending row can say which draft will
 	// resolve it once published.
@@ -105,6 +109,12 @@ type FindingInput struct {
 	// so it is recorded and counted even when the asset register has not caught
 	// up yet; publishing the draft fills in AssetID.
 	PendingAssetDraftID string `json:"pending_asset_draft_id,omitempty"`
+	// Import status evidence is accepted only from the import pipeline. Generic
+	// API callers cannot use these fields to bypass the status workflow.
+	ImportStatusRaw           string `json:"-"`
+	ImportStatusNormalized    string `json:"-"`
+	ImportStatusMappingReason string `json:"-"`
+	DuplicateOfFindingID      string `json:"-"`
 }
 
 // validFindingAssetLinkState keeps the API filter vocabulary identical to the
@@ -372,7 +382,8 @@ func (s *Service) SearchFindings(ctx context.Context, principal auth.Principal, 
 		       COALESCE(risk_acceptor.display_name, ''), COALESCE(f.risk_accepted_from_status, ''),
 		       f.risk_reviewed_at, COALESCE(risk_reviewer.display_name, ''), COALESCE(f.risk_review_comment, ''),
 		       (f.status = 'risk_accepted' AND f.risk_accepted_until IS NOT NULL AND f.risk_accepted_until < now()),
-		       count(*) OVER ()
+		       COALESCE(f.import_status_raw,''), COALESCE(f.import_status_normalized,''), COALESCE(f.import_status_mapping_reason,''),
+		       COALESCE(f.duplicate_of_finding_id::text,''), count(*) OVER ()
 		FROM security_findings f
 		JOIN organizations o ON o.id = f.assignee_organization_id
 		LEFT JOIN assets a ON a.id = f.asset_id
@@ -470,7 +481,17 @@ func (s *Service) CreateFinding(ctx context.Context, principal auth.Principal, i
 	if !validFindingInput(input) {
 		return Finding{}, ErrInvalid
 	}
-	if input.Status == "risk_accepted" {
+	if input.Source != "import" && (input.ImportStatusRaw != "" || input.ImportStatusNormalized != "" || input.ImportStatusMappingReason != "") {
+		return Finding{}, ErrInvalid
+	}
+	if input.Source == "import" {
+		if !findingstatus.Valid(input.ImportStatusNormalized) || input.Status != input.ImportStatusNormalized || input.ImportStatusMappingReason == "" {
+			return Finding{}, ErrInvalid
+		}
+	} else if input.Status == findingstatus.RiskAccepted {
+		return Finding{}, ErrConflict
+	}
+	if input.Status == findingstatus.Duplicate || input.DuplicateOfFindingID != "" {
 		return Finding{}, ErrConflict
 	}
 	if err := s.validateReferences(ctx, input.AssigneeOrganizationID, input.AssetID, input.BusinessSystemID); err != nil {
@@ -505,16 +526,20 @@ func (s *Service) createFindingInTx(ctx context.Context, tx pgx.Tx, principal au
 	if err := tx.QueryRow(ctx, `
 		INSERT INTO security_findings (
 			finding_code, title, severity, status, assignee_organization_id, asset_id, pending_asset_draft_id, business_system_id, test_batch_id,
-			vulnerability_type, description, evidence, remediation_advice, source, discovered_at, created_by, updated_by
+			vulnerability_type, description, evidence, remediation_advice, source, discovered_at, created_by, updated_by,
+			import_status_raw, import_status_normalized, import_status_mapping_reason, duplicate_of_finding_id
 		) VALUES ($1, $2, $3, $4, $5::uuid, NULLIF($6, '')::uuid, NULLIF($16, '')::uuid, NULLIF($7, '')::uuid, NULLIF($8, '')::uuid,
-		          NULLIF($9, ''), $10, NULLIF($11, ''), NULLIF($12, ''), $13, $14, $15::uuid, $15::uuid)
+		          NULLIF($9, ''), $10, NULLIF($11, ''), NULLIF($12, ''), $13, $14, $15::uuid, $15::uuid,
+		          NULLIF($17, ''), NULLIF($18, ''), NULLIF($19, ''), NULLIF($20, '')::uuid)
 		RETURNING id::text`, code, input.Title, input.Severity, input.Status, input.AssigneeOrganizationID,
 		input.AssetID, input.BusinessSystemID, input.TestBatchID, input.VulnerabilityType, input.Description, input.Evidence,
-		input.RemediationAdvice, input.Source, input.DiscoveredAt, principal.UserID, input.PendingAssetDraftID).Scan(&id); err != nil {
+		input.RemediationAdvice, input.Source, input.DiscoveredAt, principal.UserID, input.PendingAssetDraftID,
+		input.ImportStatusRaw, input.ImportStatusNormalized, input.ImportStatusMappingReason, input.DuplicateOfFindingID).Scan(&id); err != nil {
 		return "", "", fmt.Errorf("insert security finding: %w", err)
 	}
 	if err := writeAudit(ctx, tx, principal, input.AssigneeOrganizationID, "security_finding.create", "security_finding", id,
-		"登记安全发现 "+code, map[string]any{"severity": input.Severity, "asset_id": input.AssetID, "business_system_id": input.BusinessSystemID, "test_batch_id": input.TestBatchID}, requestID, ipAddress); err != nil {
+		"登记安全发现 "+code, map[string]any{"severity": input.Severity, "asset_id": input.AssetID, "business_system_id": input.BusinessSystemID, "test_batch_id": input.TestBatchID,
+			"import_status_raw": input.ImportStatusRaw, "import_status_normalized": input.ImportStatusNormalized, "import_status_mapping_reason": input.ImportStatusMappingReason}, requestID, ipAddress); err != nil {
 		return "", "", err
 	}
 	eventType := notification.EventFindingCreatedOnSystem
@@ -588,6 +613,12 @@ func (s *Service) UpdateFinding(ctx context.Context, principal auth.Principal, i
 	// remains the current status.
 	if (currentStatus == "risk_accepted" && input.Status != "risk_accepted") ||
 		(currentStatus != "risk_accepted" && input.Status == "risk_accepted") {
+		return Finding{}, ErrConflict
+	}
+	if input.Status != currentStatus && !findingstatus.CanTransition(currentStatus, input.Status) {
+		return Finding{}, ErrState
+	}
+	if input.Status == findingstatus.Duplicate || input.DuplicateOfFindingID != "" {
 		return Finding{}, ErrConflict
 	}
 	if err := s.validateReferences(ctx, input.AssigneeOrganizationID, input.AssetID, input.BusinessSystemID); err != nil {
@@ -1384,7 +1415,9 @@ func (s *Service) getFinding(ctx context.Context, id string) (Finding, error) {
 		       f.risk_accepted_at, f.risk_accepted_until, COALESCE(f.risk_acceptance_reason, ''),
 		       COALESCE(risk_acceptor.display_name, ''), COALESCE(f.risk_accepted_from_status, ''),
 		       f.risk_reviewed_at, COALESCE(risk_reviewer.display_name, ''), COALESCE(f.risk_review_comment, ''),
-		       (f.status = 'risk_accepted' AND f.risk_accepted_until IS NOT NULL AND f.risk_accepted_until < now())
+		       (f.status = 'risk_accepted' AND f.risk_accepted_until IS NOT NULL AND f.risk_accepted_until < now()),
+		       COALESCE(f.import_status_raw,''), COALESCE(f.import_status_normalized,''), COALESCE(f.import_status_mapping_reason,''),
+		       COALESCE(f.duplicate_of_finding_id::text,'')
 		FROM security_findings f
 		JOIN organizations o ON o.id = f.assignee_organization_id
 		LEFT JOIN assets a ON a.id = f.asset_id
@@ -1606,7 +1639,8 @@ func scanFindingWithTotal(row rowScanner, item *Finding, total *int) error {
 		&item.BusinessSystemName, &item.TestBatchID, &item.TestBatchCode, &item.TestBatchName, &item.VulnerabilityType, &item.Description, &item.Evidence,
 		&item.RemediationAdvice, &item.Source, &item.DiscoveredAt, &item.CreatedByName, &item.CreatedAt, &item.UpdatedAt,
 		&item.RiskAcceptedAt, &item.RiskAcceptedUntil, &item.RiskAcceptanceReason, &item.RiskAcceptedByName,
-		&item.RiskAcceptedFromStatus, &item.RiskReviewedAt, &item.RiskReviewedByName, &item.RiskReviewComment, &item.RiskAcceptanceExpired, total); err != nil {
+		&item.RiskAcceptedFromStatus, &item.RiskReviewedAt, &item.RiskReviewedByName, &item.RiskReviewComment, &item.RiskAcceptanceExpired,
+		&item.ImportStatusRaw, &item.ImportStatusNormalized, &item.ImportStatusMappingReason, &item.DuplicateOfFindingID, total); err != nil {
 		return err
 	}
 	// Derive the single word the UI branches on so every listing and detail view
@@ -1635,7 +1669,8 @@ func scanFinding(row rowScanner, item *Finding) error {
 		&item.BusinessSystemName, &item.TestBatchID, &item.TestBatchCode, &item.TestBatchName, &item.VulnerabilityType, &item.Description, &item.Evidence,
 		&item.RemediationAdvice, &item.Source, &item.DiscoveredAt, &item.CreatedByName, &item.CreatedAt, &item.UpdatedAt,
 		&item.RiskAcceptedAt, &item.RiskAcceptedUntil, &item.RiskAcceptanceReason, &item.RiskAcceptedByName,
-		&item.RiskAcceptedFromStatus, &item.RiskReviewedAt, &item.RiskReviewedByName, &item.RiskReviewComment, &item.RiskAcceptanceExpired)
+		&item.RiskAcceptedFromStatus, &item.RiskReviewedAt, &item.RiskReviewedByName, &item.RiskReviewComment, &item.RiskAcceptanceExpired,
+		&item.ImportStatusRaw, &item.ImportStatusNormalized, &item.ImportStatusMappingReason, &item.DuplicateOfFindingID)
 	if err != nil {
 		return err
 	}

@@ -19,6 +19,7 @@ import (
 	"netassets/internal/access"
 	"netassets/internal/asset"
 	"netassets/internal/auth"
+	"netassets/internal/findingstatus"
 	"netassets/internal/pagination"
 )
 
@@ -54,6 +55,9 @@ type FindingImportCandidate struct {
 	RemediationAdvice         string            `json:"remediation_advice,omitempty"`
 	DiscoveredAt              time.Time         `json:"discovered_at"`
 	Status                    string            `json:"status"`
+	ImportStatusRaw           string            `json:"import_status_raw,omitempty"`
+	ImportStatusNormalized    string            `json:"import_status_normalized,omitempty"`
+	ImportStatusMappingReason string            `json:"import_status_mapping_reason,omitempty"`
 	AssetCandidateID          string            `json:"asset_candidate_id,omitempty"`
 	SuggestedScopeAssetID     string            `json:"suggested_scope_asset_id,omitempty"`
 	SuggestedAssetID          string            `json:"suggested_asset_id,omitempty"`
@@ -377,14 +381,16 @@ func insertFindingImportCandidates(ctx context.Context, tx pgx.Tx, importID, bat
 			INSERT INTO security_finding_import_candidates (
 				finding_import_id, test_batch_id, source_row_number, raw_data, asset_type, asset_value,
 				normalized_value, title, severity, vulnerability_type, description, evidence,
-				remediation_advice, discovered_at, status, suggested_scope_asset_id, suggested_asset_id,
-				asset_candidate_id, match_method, match_confidence
+				remediation_advice, discovered_at, status, import_status_raw, import_status_normalized,
+				import_status_mapping_reason, suggested_scope_asset_id, suggested_asset_id, asset_candidate_id,
+				match_method, match_confidence
 			) VALUES ($1::uuid,NULLIF($2,'')::uuid,$3,$4::jsonb,$5,$6,NULLIF($7,''),$8,$9,NULLIF($10,''),$11,
-			          NULLIF($12,''),NULLIF($13,''),$14,'pending',NULLIF($15,'')::uuid,NULLIF($16,'')::uuid,
-			          NULLIF($17,'')::uuid,NULLIF($18,''),NULLIF($19,0))`,
+			          NULLIF($12,''),NULLIF($13,''),$14,'pending',NULLIF($15,''),NULLIF($16,''),NULLIF($17,''),
+		          NULLIF($18,'')::uuid,NULLIF($19,'')::uuid,NULLIF($20,'')::uuid,NULLIF($21,''),NULLIF($22,0))`,
 			importID, batchID, candidate.SourceRowNumber, string(rawData), candidate.AssetType, candidate.AssetValue,
 			candidate.NormalizedValue, candidate.Input.Title, candidate.Input.Severity, candidate.Input.VulnerabilityType,
 			candidate.Input.Description, candidate.Input.Evidence, candidate.Input.RemediationAdvice, candidate.Input.DiscoveredAt,
+			candidate.Input.ImportStatusRaw, candidate.Input.ImportStatusNormalized, candidate.Input.ImportStatusMappingReason,
 			candidate.SuggestedScopeAssetID, candidate.SuggestedAssetID, assetCandidateID, candidate.MatchMethod, candidate.MatchConfidence); err != nil {
 			return fmt.Errorf("insert finding import candidate: %w", err)
 		}
@@ -454,6 +460,7 @@ const findingImportCandidateSelect = `
 	       c.source_row_number, c.raw_data::text, c.asset_type, c.asset_value, COALESCE(c.normalized_value,''),
 	       c.title, c.severity, COALESCE(c.vulnerability_type,''), c.description, COALESCE(c.evidence,''),
 	       COALESCE(c.remediation_advice,''), c.discovered_at, c.status,
+	       COALESCE(c.import_status_raw,''), COALESCE(c.import_status_normalized,''), COALESCE(c.import_status_mapping_reason,''),
 	       COALESCE(c.suggested_scope_asset_id::text,''), COALESCE(c.suggested_asset_id::text,''),
 	       COALESCE(suggested.asset_value_snapshot, suggested_asset.asset_value,''),
 	       COALESCE(suggested.organization_name_snapshot, suggested_org.organization_name,''),
@@ -482,7 +489,8 @@ func scanFindingImportCandidate(row pgx.Row, withTotal bool) (FindingImportCandi
 		&item.ID, &item.FindingImportID, &item.TestBatchID, &item.TestBatchCode, &item.TestBatchName,
 		&item.SourceRowNumber, &rawDataText, &item.AssetType, &item.AssetValue, &item.NormalizedValue,
 		&item.Title, &item.Severity, &item.VulnerabilityType, &item.Description, &item.Evidence,
-		&item.RemediationAdvice, &item.DiscoveredAt, &item.Status, &item.SuggestedScopeAssetID, &item.SuggestedAssetID,
+		&item.RemediationAdvice, &item.DiscoveredAt, &item.Status, &item.ImportStatusRaw, &item.ImportStatusNormalized,
+		&item.ImportStatusMappingReason, &item.SuggestedScopeAssetID, &item.SuggestedAssetID,
 		&item.SuggestedAssetValue, &item.SuggestedOrganizationName, &item.MatchedScopeAssetID, &item.MatchedAssetID,
 		&item.MatchedAssetValue, &item.MatchedOrganizationName, &item.MatchMethod, &item.MatchConfidence,
 		&item.ReviewNote, &item.ReviewedByName, &item.ReviewedAt, &item.ImportedFindingID,
@@ -607,13 +615,26 @@ func (s *Service) ListFindingImportScopeOptions(ctx context.Context, principal a
 // is real the moment it arrives, so the finding is stored against the working
 // version instead of being held back as an untracked import row. Publishing the
 // working version fills in the formal asset id.
-func findingImportCandidateFindingStatus(candidate FindingImportCandidate) string {
-	if candidate.RawData != nil {
-		if status := normalizeFindingImportStatus(candidate.RawData["status"]); status != "" {
-			return status
+func findingImportCandidateStatusEvidence(candidate FindingImportCandidate) findingImportStatusEvidence {
+	// The persisted normalized value is authoritative. Re-deriving from raw
+	// JSON would resurrect risk_accepted/duplicate without their local evidence
+	// and could change the meaning of an already reviewed candidate.
+	if findingstatus.Valid(candidate.ImportStatusNormalized) {
+		return findingImportStatusEvidence{
+			Raw: candidate.ImportStatusRaw, Normalized: candidate.ImportStatusNormalized,
+			Reason: candidate.ImportStatusMappingReason,
 		}
 	}
-	return "pending"
+	if candidate.RawData != nil {
+		if evidence, err := normalizeFindingImportStatusEvidence(candidate.RawData["status"]); err == nil {
+			return evidence
+		}
+	}
+	return findingImportStatusEvidence{Normalized: findingstatus.Pending, Reason: "历史候选缺少状态证据，按兼容规则默认为待处理"}
+}
+
+func findingImportCandidateFindingStatus(candidate FindingImportCandidate) string {
+	return findingImportCandidateStatusEvidence(candidate).Normalized
 }
 
 func (s *Service) linkFindingToWorkingVersion(ctx context.Context, tx pgx.Tx, principal auth.Principal, id string, candidate FindingImportCandidate, input FindingImportCandidateLinkInput, requestID, ipAddress string) (FindingImportCandidate, error) {
@@ -639,13 +660,16 @@ func (s *Service) linkFindingToWorkingVersion(ctx context.Context, tx pgx.Tx, pr
 	}
 	status := "imported"
 	findingID := duplicateFindingID
+	statusEvidence := findingImportCandidateStatusEvidence(candidate)
 	if errors.Is(err, pgx.ErrNoRows) {
 		findingInput := FindingInput{
-			Title: candidate.Title, Severity: candidate.Severity, Status: findingImportCandidateFindingStatus(candidate),
+			Title: candidate.Title, Severity: candidate.Severity, Status: statusEvidence.Normalized,
 			AssigneeOrganizationID: organizationID, PendingAssetDraftID: input.PendingAssetDraftID,
 			VulnerabilityType: candidate.VulnerabilityType, Description: candidate.Description,
 			Evidence: candidate.Evidence, RemediationAdvice: candidate.RemediationAdvice,
 			Source: "import", DiscoveredAt: candidate.DiscoveredAt,
+			ImportStatusRaw: statusEvidence.Raw, ImportStatusNormalized: statusEvidence.Normalized,
+			ImportStatusMappingReason: statusEvidence.Reason,
 		}
 		findingID, _, err = s.createFindingInTx(ctx, tx, principal, findingInput, requestID, ipAddress)
 		if err != nil {
@@ -811,14 +835,17 @@ func (s *Service) LinkFindingImportCandidate(ctx context.Context, principal auth
 	}
 	status := "imported"
 	findingID := duplicateFindingID
+	statusEvidence := findingImportCandidateStatusEvidence(candidate)
 	if errors.Is(err, pgx.ErrNoRows) {
 		findingInput := FindingInput{
-			Title: candidate.Title, Severity: candidate.Severity, Status: findingImportCandidateFindingStatus(candidate),
+			Title: candidate.Title, Severity: candidate.Severity, Status: statusEvidence.Normalized,
 			AssigneeOrganizationID: scope.OrganizationID, AssetID: scope.AssetID,
 			BusinessSystemID: scope.BusinessSystemID, TestBatchID: candidate.TestBatchID,
 			VulnerabilityType: candidate.VulnerabilityType, Description: candidate.Description,
 			Evidence: candidate.Evidence, RemediationAdvice: candidate.RemediationAdvice,
 			Source: "import", DiscoveredAt: candidate.DiscoveredAt,
+			ImportStatusRaw: statusEvidence.Raw, ImportStatusNormalized: statusEvidence.Normalized,
+			ImportStatusMappingReason: statusEvidence.Reason,
 		}
 		findingID, _, err = s.createFindingInTx(ctx, tx, principal, findingInput, requestID, ipAddress)
 		if err != nil {
