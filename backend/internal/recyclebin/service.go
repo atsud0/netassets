@@ -162,7 +162,14 @@ func (s *Service) RestoreAsset(ctx context.Context, principal auth.Principal, as
 	if !validReference {
 		return ErrInvalid
 	}
-	if err := tx.QueryRow(ctx, `SELECT NOT EXISTS (SELECT 1 FROM assets a JOIN asset_network_areas area ON area.id=a.network_area_id WHERE a.id=$1::uuid AND (area.status <> 'enabled' OR area.organization_id <> $2::uuid))`, assetID, organizationID).Scan(&validReference); err != nil {
+	if err := tx.QueryRow(ctx, `SELECT NOT EXISTS (
+		SELECT 1
+		FROM assets a
+		LEFT JOIN asset_network_areas area ON area.id = a.network_area_id
+		WHERE a.id = $1::uuid
+		  AND a.network_area_id IS NOT NULL
+		  AND (area.id IS NULL OR area.status <> 'enabled' OR area.organization_id <> $2::uuid)
+	)`, assetID, organizationID).Scan(&validReference); err != nil {
 		return fmt.Errorf("validate asset network area on restore: %w", err)
 	}
 	if !validReference {

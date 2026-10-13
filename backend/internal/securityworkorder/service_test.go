@@ -244,3 +244,29 @@ func TestFindingAssetLinkStateFilterCoversEveryState(t *testing.T) {
 		t.Fatalf("filter fragment missing the no-op empty value branch:\n%s", fragment)
 	}
 }
+
+func TestDuplicateFindingSourceStatusBoundary(t *testing.T) {
+	for _, status := range []string{"pending", "in_progress", "confirmed"} {
+		if !canLinkDuplicateFromStatus(status) {
+			t.Fatalf("status %q should allow an explicit duplicate link", status)
+		}
+	}
+	for _, status := range []string{"resolved", "fixed", "false_positive", "ignored", "duplicate", "risk_accepted", ""} {
+		if canLinkDuplicateFromStatus(status) {
+			t.Fatalf("status %q should not allow an explicit duplicate link", status)
+		}
+	}
+}
+
+func TestRestoredRiskAcceptanceStatusIsConservative(t *testing.T) {
+	for _, status := range []string{"pending", "in_progress", "confirmed", "resolved", "fixed"} {
+		if got := restoredRiskAcceptanceStatus(status); got != status {
+			t.Fatalf("restoredRiskAcceptanceStatus(%q) = %q, want %q", status, got, status)
+		}
+	}
+	for _, status := range []string{"", "duplicate", "false_positive", "ignored", "risk_accepted", "unexpected"} {
+		if got := restoredRiskAcceptanceStatus(status); got != "confirmed" {
+			t.Fatalf("restoredRiskAcceptanceStatus(%q) = %q, want confirmed", status, got)
+		}
+	}
+}

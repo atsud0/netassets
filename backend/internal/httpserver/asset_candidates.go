@@ -1,13 +1,16 @@
 package httpserver
 
 import (
+	"context"
 	"errors"
 	"log/slog"
 	"net/http"
 	"strings"
 
 	"github.com/gin-gonic/gin"
+	"github.com/jackc/pgx/v5"
 
+	"netassets/internal/asset"
 	"netassets/internal/assetcandidate"
 	"netassets/internal/securityworkorder"
 )
@@ -107,22 +110,22 @@ func registerAssetCandidateRoutes(api *gin.RouterGroup, requireAuth gin.HandlerF
 			writeAPIError(c, http.StatusBadRequest, "invalid_request", "请补充正式资产的入库信息")
 			return
 		}
-		item, err := service.Accept(c.Request.Context(), mustPrincipal(c), c.Param("id"), input, c.GetString("request_id"), c.ClientIP())
+		var afterCreate assetcandidate.AcceptAfterCreate
+		if findingService != nil {
+			// Keep the working-version insert, candidate settlement and imported
+			// finding release in one transaction. A callback is used instead of a
+			// package dependency so assetcandidate remains independent from the
+			// securityworkorder domain.
+			afterCreate = func(ctx context.Context, tx pgx.Tx, created asset.Asset) error {
+				return findingService.LinkAcceptedAssetCandidateInTx(ctx, tx, mustPrincipal(c), c.Param("id"), created.ID, c.GetString("request_id"), c.ClientIP())
+			}
+		}
+		item, err := service.AcceptWithAfterCreate(c.Request.Context(), mustPrincipal(c), c.Param("id"), input, c.GetString("request_id"), c.ClientIP(), afterCreate)
 		if err != nil {
 			writeAssetCandidateError(c, logger, "accept asset candidate", err)
 			return
 		}
-		response := gin.H{"item": item}
-		if findingService != nil {
-			// item.ID is the organization working version, not a formal asset. The
-			// link service re-reads the candidate to pick up the draft id, so pass
-			// an empty asset id instead of pretending the draft is an asset.
-			if linkErr := findingService.LinkAcceptedAssetCandidate(c.Request.Context(), mustPrincipal(c), c.Param("id"), "", c.GetString("request_id"), c.ClientIP()); linkErr != nil {
-				logger.Error("link imported findings after asset candidate acceptance", "error", linkErr, "asset_candidate_id", c.Param("id"), "working_version_id", item.ID, "request_id", c.GetString("request_id"))
-				response["warning"] = "资产已入库，但关联漏洞暂未全部生成安全发现，请刷新后重试"
-			}
-		}
-		c.JSON(http.StatusOK, response)
+		c.JSON(http.StatusOK, gin.H{"item": item})
 	})
 	group.POST("/:id/retry-findings", func(c *gin.Context) {
 		if findingService == nil {

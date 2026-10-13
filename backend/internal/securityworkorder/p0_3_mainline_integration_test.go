@@ -22,6 +22,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"netassets/internal/asset"
@@ -31,6 +32,7 @@ import (
 	"netassets/internal/config"
 	"netassets/internal/inventorytask"
 	"netassets/internal/pagination"
+	"netassets/internal/recyclebin"
 )
 
 const desensitizedFindingsFile = "testdata/findings-20261010-142559.desensitized.json"
@@ -157,26 +159,24 @@ func TestP03RealScannerExportRunsThroughCandidateAndPublication(t *testing.T) {
 	// Step 3: a group reviewer confirms one discovery and it becomes an
 	// organization working version, not a formal asset.
 	candidateID := pending.Items[0].AssetCandidateID
-	accepted, err := candidates.Accept(ctx, operator, candidateID, assetcandidate.AcceptInput{
+	accepted, err := candidates.AcceptWithAfterCreate(ctx, groupAdmin, candidateID, assetcandidate.AcceptInput{
 		CreateInput: asset.CreateInput{
 			OrganizationID: organizationID, Name: "P0-3 已确认资产", Environment: "production",
 			NetworkScope: "public", Status: "active", Importance: "normal", OwnerName: "P0-3 测试子公司",
 		},
 		ReviewNote: "漏洞导入发现，确认归属",
-	}, "p03-accept", "127.0.0.1")
+	}, "p03-accept", "127.0.0.1", func(callbackCtx context.Context, tx pgx.Tx, created asset.Asset) error {
+		return findings.LinkAcceptedAssetCandidateInTx(callbackCtx, tx, groupAdmin, candidateID, created.ID, "p03-accept", "127.0.0.1")
+	})
 	if err != nil {
 		t.Fatalf("Accept(asset candidate) error = %v", err)
 	}
 	if accepted.ID == "" {
 		t.Fatal("Accept(asset candidate) returned no working version")
 	}
-	// The HTTP handler composes the two steps: confirming the discovery and then
-	// releasing the findings that arrived with it onto the working version. The
-	// services cannot be merged into one transaction without an import cycle, so
-	// the wiring under test is the one the route uses.
-	if err := findings.LinkAcceptedAssetCandidate(ctx, operator, candidateID, "", "p03-accept-link", "127.0.0.1"); err != nil {
-		t.Fatalf("LinkAcceptedAssetCandidate() error = %v", err)
-	}
+	// The same transaction that creates the working version released the
+	// findings. A failure in that callback would roll the candidate and draft
+	// back together instead of leaving a split-brain queue.
 	var draftID string
 	if err := pool.QueryRow(ctx, `SELECT working_version_draft_id::text FROM asset_candidates WHERE id=$1::uuid`, candidateID).Scan(&draftID); err != nil {
 		t.Fatalf("load working version draft: %v", err)
@@ -264,6 +264,33 @@ func TestP03RealScannerExportRunsThroughCandidateAndPublication(t *testing.T) {
 		t.Fatal("publication did not move any finding onto the formal asset; vulnerabilities become untraceable at the last step")
 	}
 	t.Logf("published asset %s now carries %d findings", publishedAssetID, linkedToAsset)
+
+	// Retirement never deletes the vulnerability history. Restoring the asset
+	// makes the association live again but must not rewrite the finding's own
+	// status or create a second asset identity.
+	if _, err := pool.Exec(ctx, `UPDATE assets SET deleted_at=now() WHERE id=$1::uuid`, publishedAssetID); err != nil {
+		t.Fatalf("soft delete published asset: %v", err)
+	}
+	var retiredCount int
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM security_findings WHERE asset_id=$1::uuid AND asset_link_status='retired'`, publishedAssetID).Scan(&retiredCount); err != nil {
+		t.Fatalf("count retired findings: %v", err)
+	}
+	if retiredCount != linkedToAsset {
+		t.Fatalf("retired findings = %d, want all %d findings to remain linked and visible", retiredCount, linkedToAsset)
+	}
+	if err := recyclebin.NewService(pool).RestoreAsset(ctx, groupAdmin, publishedAssetID, "p03-restore", "127.0.0.1"); err != nil {
+		t.Fatalf("restore published asset with historical findings: %v", err)
+	}
+	var liveCount, statusChangeCount int
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM security_findings WHERE asset_id=$1::uuid AND asset_link_status='live'`, publishedAssetID).Scan(&liveCount); err != nil {
+		t.Fatalf("count restored live findings: %v", err)
+	}
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM security_findings WHERE asset_id=$1::uuid AND status NOT IN ('pending','in_progress','confirmed','resolved','fixed','false_positive','ignored','duplicate','risk_accepted')`, publishedAssetID).Scan(&statusChangeCount); err != nil {
+		t.Fatalf("check restored finding statuses: %v", err)
+	}
+	if liveCount != linkedToAsset || statusChangeCount != 0 {
+		t.Fatalf("restored findings = live %d/%d, invalid_status %d; restore must preserve historical findings and their vulnerability state", liveCount, linkedToAsset, statusChangeCount)
+	}
 
 	// The publication is a single transaction: the import candidate must be
 	// settled, not left pointing at a working version that no longer exists.

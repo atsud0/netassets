@@ -173,6 +173,16 @@ func registerSecurityWorkOrderRoutes(api *gin.RouterGroup, requireAuth gin.Handl
 		writeFindingRiskResult(c, logger, "review security finding risk", item, err)
 	})
 
+	findings.POST("/:id/link-duplicate", func(c *gin.Context) {
+		var input securityworkorder.DuplicateFindingInput
+		if err := c.ShouldBindJSON(&input); err != nil {
+			writeAPIError(c, http.StatusBadRequest, "invalid_request", "重复漏洞关联信息格式不正确")
+			return
+		}
+		item, err := service.LinkDuplicateFinding(c.Request.Context(), mustPrincipal(c), c.Param("id"), input, c.GetString("request_id"), c.ClientIP())
+		writeFindingDuplicateResult(c, logger, "link duplicate security finding", item, err)
+	})
+
 	findings.POST("", func(c *gin.Context) {
 		var input securityworkorder.FindingInput
 		if err := c.ShouldBindJSON(&input); err != nil {
@@ -382,6 +392,24 @@ func writeFindingResult(c *gin.Context, logger *slog.Logger, operation string, s
 		writeAPIError(c, http.StatusInternalServerError, "internal_error", "保存安全发现失败")
 	default:
 		c.JSON(status, gin.H{"item": item})
+	}
+}
+
+func writeFindingDuplicateResult(c *gin.Context, logger *slog.Logger, operation string, item securityworkorder.Finding, err error) {
+	switch {
+	case errors.Is(err, securityworkorder.ErrForbidden):
+		writeAPIError(c, http.StatusForbidden, "forbidden", "当前账号无安全发现重复关联权限")
+	case errors.Is(err, securityworkorder.ErrInvalid):
+		writeAPIError(c, http.StatusBadRequest, "invalid_duplicate", "请填写有效的主漏洞编号和重复原因")
+	case errors.Is(err, securityworkorder.ErrNotFound):
+		writeAPIError(c, http.StatusNotFound, "finding_not_found", "安全发现不存在或主漏洞不存在")
+	case errors.Is(err, securityworkorder.ErrState), errors.Is(err, securityworkorder.ErrConflict):
+		writeAPIError(c, http.StatusConflict, "invalid_finding_state", "安全发现当前状态不允许建立重复关联")
+	case err != nil:
+		logger.Error(operation, "error", err, "request_id", c.GetString("request_id"))
+		writeAPIError(c, http.StatusInternalServerError, "internal_error", "处理重复漏洞关联失败")
+	default:
+		c.JSON(http.StatusOK, gin.H{"item": item})
 	}
 }
 

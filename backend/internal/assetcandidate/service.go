@@ -336,7 +336,17 @@ func (s *Service) Create(ctx context.Context, principal auth.Principal, in Creat
 // The candidate stays pending and carries the draft id until the working version
 // is published, at which point inventorytask settles it and releases the
 // findings that were waiting on the asset.
+// AcceptAfterCreate runs inside the same database transaction that creates the
+// working version and settles the candidate. Callers use it to persist related
+// facts (for example imported findings) without leaving a half-successful
+// candidate confirmation behind.
+type AcceptAfterCreate func(context.Context, pgx.Tx, asset.Asset) error
+
 func (s *Service) Accept(ctx context.Context, principal auth.Principal, id string, in AcceptInput, requestID, ip string) (asset.Asset, error) {
+	return s.AcceptWithAfterCreate(ctx, principal, id, in, requestID, ip, nil)
+}
+
+func (s *Service) AcceptWithAfterCreate(ctx context.Context, principal auth.Principal, id string, in AcceptInput, requestID, ip string, afterCreate AcceptAfterCreate) (asset.Asset, error) {
 	candidate, err := s.confirmCandidate(ctx, principal, id)
 	if err != nil {
 		return asset.Asset{}, err
@@ -407,6 +417,22 @@ func (s *Service) Accept(ctx context.Context, principal auth.Principal, id strin
 			SET matched_asset_id=NULL, updated_at=now()
 			WHERE asset_candidate_id=$1::uuid AND status='pending'`, id); err != nil {
 			return fmt.Errorf("detach pending findings from asset candidate: %w", err)
+		}
+		if afterCreate != nil {
+			if err := afterCreate(ctx, ctxTx, created); err != nil {
+				return err
+			}
+		} else {
+			// Legacy service callers may still confirm discoveries without wiring
+			// the security-workorder package. Never let that compatibility path
+			// strand imported vulnerabilities after the draft is created.
+			var pendingFindings int
+			if err := ctxTx.QueryRow(ctx, `SELECT count(*) FROM security_finding_import_candidates WHERE asset_candidate_id=$1::uuid AND status='pending'`, id).Scan(&pendingFindings); err != nil {
+				return fmt.Errorf("check pending findings before accepting asset candidate: %w", err)
+			}
+			if pendingFindings > 0 {
+				return ErrConflict
+			}
 		}
 		return s.audit(ctx, ctxTx, principal, resolvedOrganizationID, "asset_candidate.accept", id, "确认待确认资产归属并生成未上报工作版本", map[string]any{"working_version_draft_id": created.ID, "review_note": strings.TrimSpace(in.ReviewNote)}, requestID, ip)
 	})

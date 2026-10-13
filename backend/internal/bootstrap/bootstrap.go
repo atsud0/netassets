@@ -120,7 +120,7 @@ func Ensure(ctx context.Context, pool *pgxpool.Pool, cfg config.Config, logger *
 		INSERT INTO role_permissions (role_id, permission_key)
 		SELECT $1::uuid, unnest($2::varchar[])
 		ON CONFLICT DO NOTHING
-	`, securityOperatorRoleID, []string{"security_test.manage", "security_finding.manage", "security_workorder.manage", "security_workorder.view", "security_workorder.execute", "security_workorder.assign", "security_workorder.review", "security_workorder.close", "asset_candidate.view", "asset_candidate.follow_up", "asset_candidate.confirm"}); err != nil {
+	`, securityOperatorRoleID, []string{"security_test.manage", "security_finding.manage", "security_workorder.manage", "security_workorder.view", "security_workorder.execute", "security_workorder.assign", "security_workorder.review", "security_workorder.close", "asset_candidate.view", "asset_candidate.follow_up"}); err != nil {
 		return fmt.Errorf("bootstrap security operator permissions: %w", err)
 	}
 

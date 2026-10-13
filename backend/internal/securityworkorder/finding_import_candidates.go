@@ -698,10 +698,7 @@ func (s *Service) linkFindingToWorkingVersion(ctx context.Context, tx pgx.Tx, pr
 		summary, map[string]any{"pending_asset_draft_id": input.PendingAssetDraftID, "finding_id": findingID, "review_note": input.ReviewNote}, requestID, ipAddress); err != nil {
 		return FindingImportCandidate{}, err
 	}
-	if err := tx.Commit(ctx); err != nil {
-		return FindingImportCandidate{}, fmt.Errorf("commit link finding import candidate: %w", err)
-	}
-	return s.GetFindingImportCandidate(ctx, principal, id)
+	return candidate, nil
 }
 
 func (s *Service) LinkFindingImportCandidate(ctx context.Context, principal auth.Principal, id string, input FindingImportCandidateLinkInput, requestID, ipAddress string) (FindingImportCandidate, error) {
@@ -738,11 +735,13 @@ func (s *Service) LinkFindingImportCandidate(ctx context.Context, principal auth
 	var candidate FindingImportCandidate
 	if err := tx.QueryRow(ctx, `
 		SELECT finding_import_id::text, COALESCE(test_batch_id::text,''), title, severity, COALESCE(vulnerability_type,''),
-		       description, COALESCE(evidence,''), COALESCE(remediation_advice,''), discovered_at, status
+		       description, COALESCE(evidence,''), COALESCE(remediation_advice,''), discovered_at, status,
+		       COALESCE(import_status_raw,''), COALESCE(import_status_normalized,''), COALESCE(import_status_mapping_reason,'')
 		FROM security_finding_import_candidates WHERE id=$1::uuid FOR UPDATE`, id).Scan(
 		&candidate.FindingImportID, &candidate.TestBatchID, &candidate.Title, &candidate.Severity,
 		&candidate.VulnerabilityType, &candidate.Description, &candidate.Evidence, &candidate.RemediationAdvice,
-		&candidate.DiscoveredAt, &candidate.Status); errors.Is(err, pgx.ErrNoRows) {
+		&candidate.DiscoveredAt, &candidate.Status, &candidate.ImportStatusRaw, &candidate.ImportStatusNormalized,
+		&candidate.ImportStatusMappingReason); errors.Is(err, pgx.ErrNoRows) {
 		return FindingImportCandidate{}, ErrNotFound
 	} else if err != nil {
 		return FindingImportCandidate{}, fmt.Errorf("lock finding import candidate: %w", err)
@@ -756,7 +755,14 @@ func (s *Service) LinkFindingImportCandidate(ctx context.Context, principal auth
 		// published yet. The finding is recorded against the working version so it
 		// is counted and assignable now, and picks up the formal asset id when the
 		// organization publishes.
-		return s.linkFindingToWorkingVersion(ctx, tx, principal, id, candidate, input, requestID, ipAddress)
+		_, linkErr := s.linkFindingToWorkingVersion(ctx, tx, principal, id, candidate, input, requestID, ipAddress)
+		if linkErr != nil {
+			return FindingImportCandidate{}, linkErr
+		}
+		if err := tx.Commit(ctx); err != nil {
+			return FindingImportCandidate{}, fmt.Errorf("commit link finding import candidate: %w", err)
+		}
+		return s.GetFindingImportCandidate(ctx, principal, id)
 	}
 
 	selectedID := input.ScopeAssetID
@@ -899,6 +905,73 @@ func (s *Service) LinkFindingImportCandidate(ctx context.Context, principal auth
 		return FindingImportCandidate{}, fmt.Errorf("commit link finding import candidate: %w", err)
 	}
 	return s.GetFindingImportCandidate(ctx, principal, id)
+}
+
+// LinkAcceptedAssetCandidateInTx releases all pending import rows behind an
+// accepted candidate inside the caller's transaction. It is used by the asset
+// candidate confirmation route so draft creation, candidate settlement and
+// finding creation either all commit or all roll back.
+func (s *Service) LinkAcceptedAssetCandidateInTx(ctx context.Context, tx pgx.Tx, principal auth.Principal, assetCandidateID, pendingAssetDraftID, requestID, ipAddress string) error {
+	if !principal.CanManageSecurityFindings() && !principal.HasRole(auth.RoleGroupAdmin) && !principal.HasPermission("asset.manage") {
+		return ErrForbidden
+	}
+	assetCandidateID = strings.TrimSpace(assetCandidateID)
+	pendingAssetDraftID = strings.TrimSpace(pendingAssetDraftID)
+	if !validUUID(assetCandidateID) || !validUUID(pendingAssetDraftID) {
+		return ErrInvalid
+	}
+	var organizationID, draftID string
+	if err := tx.QueryRow(ctx, `
+		SELECT COALESCE(organization_id::text,''), COALESCE(working_version_draft_id::text,'')
+		FROM asset_candidates WHERE id=$1::uuid FOR UPDATE`, assetCandidateID).Scan(&organizationID, &draftID); errors.Is(err, pgx.ErrNoRows) {
+		return ErrNotFound
+	} else if err != nil {
+		return fmt.Errorf("lock accepted asset candidate for finding link: %w", err)
+	}
+	if draftID != pendingAssetDraftID {
+		return ErrConflict
+	}
+	rows, err := tx.Query(ctx, `SELECT id::text FROM security_finding_import_candidates WHERE asset_candidate_id=$1::uuid AND status='pending' ORDER BY source_row_number,created_at FOR UPDATE`, assetCandidateID)
+	if err != nil {
+		return fmt.Errorf("list pending findings for accepted asset candidate: %w", err)
+	}
+	ids := make([]string, 0)
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			rows.Close()
+			return err
+		}
+		ids = append(ids, id)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return fmt.Errorf("iterate pending findings for accepted asset candidate: %w", err)
+	}
+	rows.Close()
+	for _, id := range ids {
+		var candidate FindingImportCandidate
+		if err := tx.QueryRow(ctx, `
+			SELECT finding_import_id::text, COALESCE(test_batch_id::text,''), title, severity, COALESCE(vulnerability_type,''),
+			       description, COALESCE(evidence,''), COALESCE(remediation_advice,''), discovered_at, status,
+			       COALESCE(import_status_raw,''), COALESCE(import_status_normalized,''), COALESCE(import_status_mapping_reason,'')
+			FROM security_finding_import_candidates WHERE id=$1::uuid FOR UPDATE`, id).Scan(
+			&candidate.FindingImportID, &candidate.TestBatchID, &candidate.Title, &candidate.Severity,
+			&candidate.VulnerabilityType, &candidate.Description, &candidate.Evidence, &candidate.RemediationAdvice,
+			&candidate.DiscoveredAt, &candidate.Status, &candidate.ImportStatusRaw, &candidate.ImportStatusNormalized,
+			&candidate.ImportStatusMappingReason); errors.Is(err, pgx.ErrNoRows) {
+			return ErrNotFound
+		} else if err != nil {
+			return fmt.Errorf("lock pending finding import candidate: %w", err)
+		}
+		if candidate.Status != "pending" {
+			continue
+		}
+		if _, err := s.linkFindingToWorkingVersion(ctx, tx, principal, id, candidate, FindingImportCandidateLinkInput{AssetCandidateID: assetCandidateID, PendingAssetDraftID: pendingAssetDraftID}, requestID, ipAddress); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (s *Service) IgnoreFindingImportCandidate(ctx context.Context, principal auth.Principal, id string, input FindingImportCandidateReviewInput, requestID, ipAddress string) (FindingImportCandidate, error) {

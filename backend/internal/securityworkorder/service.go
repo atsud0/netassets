@@ -276,6 +276,14 @@ type RiskReviewInput struct {
 	AcceptedUntil *time.Time `json:"accepted_until"`
 }
 
+// DuplicateFindingInput is deliberately separate from FindingInput. A
+// duplicate relationship is evidence-bearing and must never be created by a
+// generic PATCH or import row without an explicit master finding.
+type DuplicateFindingInput struct {
+	MasterFindingID string `json:"master_finding_id"`
+	Reason          string `json:"reason"`
+}
+
 type Service struct {
 	pool       *pgxpool.Pool
 	storageDir string
@@ -291,6 +299,9 @@ func NewService(pool *pgxpool.Pool, storageDirs ...string) *Service {
 
 // SummarizeFindings returns counts using the same visibility rules as the findings list.
 func (s *Service) SummarizeFindings(ctx context.Context, principal auth.Principal, organizationID string) (FindingSummaryStats, error) {
+	if err := s.expireDueRiskAcceptances(ctx); err != nil {
+		return FindingSummaryStats{}, err
+	}
 	organizationID = strings.TrimSpace(organizationID)
 	if organizationID != "" {
 		if !validUUID(organizationID) {
@@ -347,6 +358,9 @@ func (s *Service) ListFindings(ctx context.Context, principal auth.Principal, or
 
 // SearchFindings applies database pagination before findings are hydrated and serialized.
 func (s *Service) SearchFindings(ctx context.Context, principal auth.Principal, organizationID, status, assetLinkState string, page pagination.Query) (pagination.Result[Finding], error) {
+	if err := s.expireDueRiskAcceptances(ctx); err != nil {
+		return pagination.Result[Finding]{}, err
+	}
 	organizationID = strings.TrimSpace(organizationID)
 	status = strings.TrimSpace(status)
 	assetLinkState = strings.TrimSpace(assetLinkState)
@@ -678,6 +692,9 @@ func (s *Service) GetFinding(ctx context.Context, principal auth.Principal, id s
 	if !validUUID(id) {
 		return Finding{}, ErrInvalid
 	}
+	if err := s.expireDueRiskAcceptances(ctx); err != nil {
+		return Finding{}, err
+	}
 	item, err := s.getFinding(ctx, id)
 	if err != nil {
 		return Finding{}, err
@@ -716,6 +733,89 @@ func (s *Service) GetFinding(ctx context.Context, principal auth.Principal, id s
 		return Finding{}, ErrNotFound
 	}
 	return item, nil
+}
+
+// LinkDuplicateFinding marks id as a duplicate of an existing master finding.
+// It is a dedicated action because a duplicate needs an explicit, auditable
+// relationship; generic finding edits and external imports cannot invent one.
+func (s *Service) LinkDuplicateFinding(ctx context.Context, principal auth.Principal, id string, input DuplicateFindingInput, requestID, ipAddress string) (Finding, error) {
+	if !principal.CanManageSecurityFindings() {
+		return Finding{}, ErrForbidden
+	}
+	input.MasterFindingID = strings.TrimSpace(input.MasterFindingID)
+	input.Reason = strings.TrimSpace(input.Reason)
+	if !validUUID(id) || !validUUID(input.MasterFindingID) || id == input.MasterFindingID || input.Reason == "" || len(input.Reason) > 5000 {
+		return Finding{}, ErrInvalid
+	}
+	if err := s.guardPersonalFinding(ctx, id); err != nil {
+		return Finding{}, err
+	}
+
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return Finding{}, fmt.Errorf("begin link duplicate finding: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtext('netassets-remediation'))`); err != nil {
+		return Finding{}, err
+	}
+
+	var sourceOrganization, sourceStatus, existingMaster string
+	if err := tx.QueryRow(ctx, `
+		SELECT assignee_organization_id::text, status, COALESCE(duplicate_of_finding_id::text, '')
+		FROM security_findings WHERE id=$1::uuid FOR UPDATE`, id).
+		Scan(&sourceOrganization, &sourceStatus, &existingMaster); errors.Is(err, pgx.ErrNoRows) {
+		return Finding{}, ErrNotFound
+	} else if err != nil {
+		return Finding{}, fmt.Errorf("load duplicate finding: %w", err)
+	}
+	if existingMaster != "" || !canLinkDuplicateFromStatus(sourceStatus) {
+		return Finding{}, ErrState
+	}
+	var masterStatus, masterDuplicate string
+	if err := tx.QueryRow(ctx, `
+		SELECT status, COALESCE(duplicate_of_finding_id::text, '')
+		FROM security_findings WHERE id=$1::uuid FOR UPDATE`, input.MasterFindingID).
+		Scan(&masterStatus, &masterDuplicate); errors.Is(err, pgx.ErrNoRows) {
+		return Finding{}, ErrNotFound
+	} else if err != nil {
+		return Finding{}, fmt.Errorf("load duplicate master finding: %w", err)
+	}
+	// Do not create chains. A master must itself remain the canonical finding.
+	if masterDuplicate != "" || masterStatus == findingstatus.Duplicate || masterStatus == findingstatus.FalsePositive || masterStatus == findingstatus.Ignored {
+		return Finding{}, ErrState
+	}
+	var activeTask bool
+	if err := tx.QueryRow(ctx, `
+		SELECT EXISTS(
+			SELECT 1 FROM remediation_tasks t
+			JOIN security_work_orders w ON w.id=t.work_order_id
+			WHERE t.finding_id=$1::uuid AND t.status<>'cancelled' AND w.status NOT IN ('closed','cancelled')
+		)`, id).Scan(&activeTask); err != nil {
+		return Finding{}, fmt.Errorf("check duplicate finding tasks: %w", err)
+	}
+	if activeTask {
+		return Finding{}, ErrConflict
+	}
+	if _, err := tx.Exec(ctx, `
+		UPDATE security_findings
+		SET status='duplicate', duplicate_of_finding_id=$2::uuid, updated_at=now(), updated_by=$3::uuid
+		WHERE id=$1::uuid`, id, input.MasterFindingID, principal.UserID); err != nil {
+		return Finding{}, fmt.Errorf("link duplicate finding: %w", err)
+	}
+	if err := writeAudit(ctx, tx, principal, sourceOrganization, "security_finding.link_duplicate", "security_finding", id,
+		"将安全发现标记为重复", map[string]any{
+			"master_finding_id": input.MasterFindingID,
+			"previous_status":   sourceStatus,
+			"new_status":        findingstatus.Duplicate,
+			"reason":            input.Reason,
+		}, requestID, ipAddress); err != nil {
+		return Finding{}, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return Finding{}, fmt.Errorf("commit link duplicate finding: %w", err)
+	}
+	return s.getFinding(ctx, id)
 }
 
 func (s *Service) AcceptRisk(ctx context.Context, principal auth.Principal, id string, input RiskAcceptanceInput, requestID, ipAddress string) (Finding, error) {
@@ -772,7 +872,7 @@ func (s *Service) AcceptRisk(ctx context.Context, principal auth.Principal, id s
 	if _, err := tx.Exec(ctx, `
 		UPDATE security_findings
 		SET status = 'risk_accepted', risk_accepted_at = now(), risk_accepted_until = $2,
-		    risk_acceptance_reason = $3, risk_accepted_by = $4::uuid, risk_accepted_from_status = $5,
+		    risk_acceptance_expired_at = NULL, risk_acceptance_reason = $3, risk_accepted_by = $4::uuid, risk_accepted_from_status = $5,
 		    risk_reviewed_at = NULL, risk_reviewed_by = NULL, risk_review_comment = NULL,
 		    updated_by = $4::uuid, updated_at = now()
 		WHERE id::text = $1`, id, input.AcceptedUntil, input.Reason, principal.UserID, fromStatus); err != nil {
@@ -1731,6 +1831,83 @@ func writeAudit(ctx context.Context, tx pgx.Tx, principal auth.Principal, organi
 	return nil
 }
 
+// expireDueRiskAcceptances materializes expiry as a state transition instead
+// of leaving the database row in risk_accepted forever. It is invoked lazily by
+// finding reads and summaries because this service has no scheduler. The
+// operation is idempotent and writes a system audit record for every finding.
+func (s *Service) expireDueRiskAcceptances(ctx context.Context) error {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("begin expire risk acceptances: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	type expiredRiskAcceptance struct {
+		id             string
+		organizationID string
+		previousStatus string
+		newStatus      string
+		acceptedUntil  *time.Time
+		expiredAt      time.Time
+	}
+	rows, err := tx.Query(ctx, `
+		UPDATE security_findings
+		SET status = CASE
+				WHEN risk_accepted_from_status IN ('pending','in_progress','confirmed','resolved','fixed') THEN risk_accepted_from_status
+				ELSE 'confirmed'
+			END,
+			risk_acceptance_expired_at = COALESCE(risk_acceptance_expired_at, now()),
+			updated_at = now()
+		WHERE status='risk_accepted'
+		  AND risk_accepted_until IS NOT NULL
+		  AND risk_accepted_until <= now()
+		  AND risk_acceptance_expired_at IS NULL
+		RETURNING id::text, assignee_organization_id::text, COALESCE(risk_accepted_from_status, ''),
+		          risk_accepted_until, status, risk_acceptance_expired_at`)
+	if err != nil {
+		return fmt.Errorf("expire risk acceptances: %w", err)
+	}
+	expired := make([]expiredRiskAcceptance, 0)
+	for rows.Next() {
+		var item expiredRiskAcceptance
+		if err := rows.Scan(&item.id, &item.organizationID, &item.previousStatus, &item.acceptedUntil, &item.newStatus, &item.expiredAt); err != nil {
+			rows.Close()
+			return fmt.Errorf("scan expired risk acceptance: %w", err)
+		}
+		expired = append(expired, item)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return fmt.Errorf("iterate expired risk acceptances: %w", err)
+	}
+	// pgx keeps the connection busy while RETURNING rows are open. Read all
+	// affected rows and close the result before using the same transaction for
+	// audit inserts; otherwise expiry can fail intermittently under load.
+	rows.Close()
+	for _, item := range expired {
+		payload, err := json.Marshal(map[string]any{
+			"previous_status":            findingstatus.RiskAccepted,
+			"restored_from_status":       restoredRiskAcceptanceStatus(item.previousStatus),
+			"new_status":                 item.newStatus,
+			"risk_accepted_from_status":  item.previousStatus,
+			"risk_accepted_until":        item.acceptedUntil,
+			"risk_acceptance_expired_at": item.expiredAt,
+		})
+		if err != nil {
+			return fmt.Errorf("encode expired risk audit: %w", err)
+		}
+		if _, err := tx.Exec(ctx, `
+			INSERT INTO audit_logs (organization_id, action, resource_type, resource_id, summary, details)
+			VALUES (NULLIF($1,'')::uuid, 'security_finding.risk_acceptance_expired', 'security_finding', $2,
+			        '风险接受已到期，恢复重新评估', $3::jsonb)`, item.organizationID, item.id, string(payload)); err != nil {
+			return fmt.Errorf("write expired risk audit: %w", err)
+		}
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("commit expired risk acceptances: %w", err)
+	}
+	return nil
+}
+
 func normalizeFindingInput(input *FindingInput) {
 	input.Title = strings.TrimSpace(input.Title)
 	input.Severity = strings.TrimSpace(input.Severity)
@@ -1752,6 +1929,24 @@ func normalizeFindingInput(input *FindingInput) {
 	}
 	if input.DiscoveredAt.IsZero() {
 		input.DiscoveredAt = time.Now()
+	}
+}
+
+func canLinkDuplicateFromStatus(status string) bool {
+	switch status {
+	case findingstatus.Pending, findingstatus.InProgress, findingstatus.Confirmed:
+		return true
+	default:
+		return false
+	}
+}
+
+func restoredRiskAcceptanceStatus(status string) string {
+	switch status {
+	case findingstatus.Pending, findingstatus.InProgress, findingstatus.Confirmed, findingstatus.Resolved, findingstatus.Fixed:
+		return status
+	default:
+		return findingstatus.Confirmed
 	}
 }
 
