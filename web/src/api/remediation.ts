@@ -16,6 +16,10 @@ export interface RepairTask extends Material {
  // execution_blocked_reason is the machine reason from remediation_task_execution_state.
  // Without it the UI can only say "action refused", which is not something the operator can act on.
  execution_blocked_reason?: string; asset_retired_at?: string; system_retired_at?: string
+ // revived=true means the asset or system came back and nobody has confirmed the
+ // follow-up yet. revived_ack_at records that decision; conflating the two leaves
+ // the group with a queue nobody can clear.
+ revived?: boolean; revived_at?: string; revived_ack_at?: string; revived_ack_by?: string
 }
 export interface Grant {
   id: string; user_id: string; username: string; display_name: string; organization_id: string; organization_name: string

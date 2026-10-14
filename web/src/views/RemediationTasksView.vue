@@ -46,7 +46,37 @@ function saveView() {
 function applyView() {
  try { const v = JSON.parse(localStorage.getItem(viewKey.value) || '{}'); status.value=typeof v.status==='string'?v.status:'all';systemID.value=v.systemID||'';severity.value=v.severity||'';special.value=v.special||'';keyword.value=v.keyword||'';overdue.value=Boolean(v.overdue);orderID.value=executor.value?'':v.orderID||'';advanced.value=true;page.value=1;void load() } catch { ElMessage.warning('保存的视图无法读取，请重新保存') }
 }
-function resetFilters() { revivedOnly.value = false; blockReason.value = ''; status.value=executor.value?'active':'all';systemID.value='';severity.value='';special.value='';keyword.value='';overdue.value=false;page.value=1;void load() }
+const revivedSelection = ref<RepairTask[]>([])
+const acknowledging = ref(false)
+const reviveAckReason = ref('')
+function revivedSelectable(row: RepairTask) {
+  return Boolean(row.revived && !row.revived_ack_at && row.can_assign)
+}
+function onSelectionChange(rows: RepairTask[]) {
+  selectedTasks.value = rows
+  revivedSelection.value = rows.filter(revivedSelectable)
+}
+function showRevivedOnly() { status.value = 'all'; special.value = ''; blockReason.value = ''; revivedOnly.value = true; page.value = 1; void load() }
+async function acknowledgeSelected() {
+  const ids = revivedSelection.value.map(r => r.id)
+  if (!ids.length) return
+  try {
+    const reason = reviveAckReason.value.trim() || '已知悉资产/系统恢复，重新纳入当前工作'
+    const key = `revive-ack-${new Date().toISOString().slice(0,19).replace(/[T:]/g,'')}-${ids.length}`
+    const { data } = await apiClient.post<{ items: { id?: string; error?: string }[] }>('/remediation-tasks/acknowledge-revived', { task_ids: ids, reason }, { headers: { 'Idempotency-Key': key } })
+    const failed = (data.items ?? []).filter(i => i.error)
+    if (failed.length) {
+      ElMessage.warning(`已确认 ${ids.length - failed.length} 项；${failed.length} 项未成功（${failed.map(f => f.error).join('、')}），列表已刷新`)
+    } else {
+      ElMessage.success(`已确认 ${ids.length} 项恢复跟进`)
+    }
+    revivedSelection.value = []
+    await load()
+  } catch (e: unknown) {
+    ElMessage.error(e instanceof Error ? e.message : '批量确认失败')
+  }
+}
+function resetFilters() { revivedOnly.value = false; revivedSelection.value = []; reviveAckReason.value = ''; blockReason.value = ''; status.value=executor.value?'active':'all';systemID.value='';severity.value='';special.value='';keyword.value='';overdue.value=false;page.value=1;void load() }
 const quickViews = computed(() => [
  {key:'all',label:'全部任务'}, ...(!executor.value ? [{key:'review_mine',label:'待我审核'}] : []),
  {key:'overdue',label:'已逾期'}, {key:'returned',label:'被退回'}, {key:'active',label:'未完成'}, {key:'completed',label:'已完成'},
@@ -201,17 +231,18 @@ onMounted(async () => {
         <div class="reassign-heading"><strong>待改派队列</strong><span class="muted">按不可执行原因分组；先恢复资产或系统，再决定改派或取消</span></div>
         <div class="reassign-grid"><button v-for="item in blockBreakdown" :key="item.reason" type="button" class="reassign-card" :aria-pressed="blockReason === item.reason" @click="filterByBlockReason(item.reason)"><span class="reassign-count">{{ item.count }}</span><span class="reassign-text">{{ item.text }}</span><span class="muted">{{ item.action }}</span></button></div>
         <el-alert v-if="blockReason" type="info" :closable="false" class="reassign-filtered">已按“{{ executionBlockReasons[blockReason]?.text || blockReason }}”筛选 <el-button link type="primary" @click="blockReason = ''; page = 1; load()">查看全部原因</el-button></el-alert>
-        <div v-if="stats?.revived" class="reassign-revived"><el-button text type="warning" @click="status='all'; special=''; blockReason=''; revivedOnly=true; page=1; load()">{{ stats.revived }} 项任务因资产/系统恢复而重新回到当前工作，请确认是否继续</el-button></div>
+        <div v-if="stats?.revived" class="reassign-revived"><el-button text type="warning" @click="showRevivedOnly()">{{ stats.revived }} 项任务因资产/系统恢复而重新回到当前工作，请确认是否继续</el-button></div>
       </section>
-      <el-table v-else v-loading="loading" :data="rows" :class="{ 'compact-table':compact }" @selection-change="selectedTasks=$event">
+      <div v-if="revivedSelection.length && !executor" class="selection-bar"><span>已选择 {{ revivedSelection.length }} 项恢复待确认任务</span><el-button type="primary" :loading="acknowledging" @click="acknowledgeSelected">批量确认恢复跟进</el-button><small>确认表示已知悉这些任务重新回到当前工作；确认后可逐项改派、取消或继续执行</small><el-input v-model="reviveAckReason" placeholder="确认说明（可选，将记入任务时间线）" maxlength="200" style="width:280px" /></div>
+      <el-table v-loading="loading" :data="rows" :class="{ 'compact-table':compact }" @selection-change="onSelectionChange">
         <template #empty><el-empty description="当前筛选下没有修复任务" :image-size="64"><el-button @click="resetFilters">清除筛选</el-button><el-button v-if="auth.hasPermission('remediation.assign')" type="primary" @click="advanced=true">选择工单安排修复</el-button></el-empty></template>
-        <el-table-column type="selection" width="42" :selectable="(row:RepairTask)=>(row.status==='pending_org_review'&&auth.hasPermission('remediation.review'))||(row.status==='pending_security_review'&&auth.canManageSecurityWorkOrders)" />
+        <el-table-column type="selection" width="42" :selectable="(row:RepairTask)=>revivedSelectable(row)||(row.status==='pending_org_review'&&auth.hasPermission('remediation.review'))||(row.status==='pending_security_review'&&auth.canManageSecurityWorkOrders)" />
         <el-table-column label="任务 / 漏洞" min-width="210"><template #default="{row}"><el-button link type="primary" @click="open(row.id)">{{ row.title }}</el-button><div class="muted">{{ row.task_no }} <el-tag v-if="row.return_reason" type="warning" size="small">退回修复</el-tag></div></template></el-table-column>
         <el-table-column label="业务归属" min-width="145"><template #default="{row}">{{ row.system_name }}<div class="muted">{{ row.organization_name }}</div></template></el-table-column>
         <el-table-column label="不可执行原因 / 处理建议" min-width="190"><template #default="{row}"><template v-if="row.execution_blocked_reason"><span>{{ blockText(row.execution_blocked_reason) }}</span><div class="muted">{{ blockAction(row.execution_blocked_reason) }}</div></template><span v-else class="muted">—</span></template></el-table-column>
         <el-table-column label="负责人" min-width="115"><template #default="{row}">{{ row.assignee_name }}<div class="muted" :title="row.vendor_name">{{ row.vendor_name || '内部人员' }}</div></template></el-table-column>
         <el-table-column label="等级" width="75"><template #default="{row}"><el-tag :type="severityType(row.severity)" size="small">{{ severityLabels[row.severity] }}</el-tag></template></el-table-column>
-        <el-table-column label="当前状态" min-width="135"><template #default="{row}"><el-tag size="small">{{ row.completion_reason==='risk_accepted'&&!row.risk_acceptance_current?'风险接受已失效':outcomes[row.completion_reason]||taskStatuses[row.status] }}</el-tag><div><el-tag v-if="row.material_needs_review" type="warning" size="small">材料待复核</el-tag><el-tag v-if="row.blocked_reason" type="warning" size="small">有阻塞</el-tag><el-tag v-if="row.execution_blocked_reason" :type="row.execution_blocked_reason==='system_unavailable'?'warning':'danger'" size="small">{{ executionBlockReasons[row.execution_blocked_reason]?.text || row.execution_blocked_reason }}</el-tag></div></template></el-table-column>
+        <el-table-column label="当前状态" min-width="135"><template #default="{row}"><el-tag size="small">{{ row.completion_reason==='risk_accepted'&&!row.risk_acceptance_current?'风险接受已失效':outcomes[row.completion_reason]||taskStatuses[row.status] }}</el-tag><div><el-tag v-if="row.material_needs_review" type="warning" size="small">材料待复核</el-tag><el-tag v-if="row.blocked_reason" type="warning" size="small">有阻塞</el-tag><el-tag v-if="row.execution_blocked_reason" :type="row.execution_blocked_reason==='system_unavailable'?'warning':'danger'" size="small">{{ executionBlockReasons[row.execution_blocked_reason]?.text || row.execution_blocked_reason }}</el-tag><el-tag v-if="row.revived && !row.revived_ack_at" type="warning" size="small">恢复待确认</el-tag></div></template></el-table-column>
         <el-table-column label="截止 / 优先级" min-width="135"><template #default="{row}"><span :class="{'overdue-text':row.overdue}">{{ dateText(row.due_at) }}</span><div v-if="row.overdue" class="overdue-text">已逾期</div></template></el-table-column>
         <el-table-column label="下一步" width="100" fixed="right"><template #default="{row}"><el-button link type="primary" @click="open(row.id)">{{ taskAction(row) }}</el-button></template></el-table-column>
       </el-table>

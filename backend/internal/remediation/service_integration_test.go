@@ -675,16 +675,47 @@ func TestBusinessSystemRetirementRetiresAndRestoresTasks(t *testing.T) {
 	now := time.Now()
 	f.action(t, f.worker, id, "submit", remediation.ActionInput{Summary: "恢复后提交", DeploymentStatus: "target", ChangeReference: "release-a", DeployedAt: &now, SelfTestResult: "自测通过"}, true)
 
-	// Once the revived task is actually worked on, it must leave the follow-up
-	// queue: the "came back" question has been answered by the submit.
+	// Working on the task is NOT the decision the queue is asking for. Under the
+	// old event-derived rule any progress event silently emptied the queue; the
+	// explicit acknowledgement is what empties it, and only a manager can give it.
 	_, err = f.pool.Exec(f.ctx, `UPDATE remediation_tasks SET updated_at=now() WHERE id=$1::uuid`, id)
 	must(t, err)
-	leftQueue, err := f.s.List(f.ctx, f.manager, remediation.Filter{Revived: true, Page: page})
+	stillQueued, err := f.s.List(f.ctx, f.manager, remediation.Filter{Revived: true, Page: page})
 	must(t, err)
-	for _, row := range leftQueue.Items {
-		if row["id"] == id {
-			t.Fatal("a task that was progressed after its restore is still listed as revived")
-		}
+	if !queueHas(stillQueued.Items, id) {
+		t.Fatal("progressing a task silently removed it from the revived queue; the decision must be explicit")
+	}
+	// The assignee cannot make that decision.
+	if _, err = f.s.Act(f.ctx, f.worker, id, "revive-ack", "", remediation.ActionInput{Reason: "自行确认", ExpectedVersion: currentVersion(t, f, id)}, true); !errors.Is(err, remediation.ErrForbidden) {
+		t.Fatalf("assignee revive-ack = %v, want ErrForbidden", err)
+	}
+	beforeAck, err := f.s.Detail(f.ctx, f.manager, id, false)
+	must(t, err)
+	acked, err := f.s.Act(f.ctx, f.manager, id, "revive-ack", "", remediation.ActionInput{Reason: "系统已归档，任务暂缓至重新启用", ExpectedVersion: currentVersion(t, f, id)}, false)
+	must(t, err)
+	if acked["status"] != beforeAck["status"] {
+		t.Fatalf("revive-ack moved the task from %v to %v; acknowledging must not touch the workflow", beforeAck["status"], acked["status"])
+	}
+	afterAck, err := f.s.Detail(f.ctx, f.manager, id, false)
+	must(t, err)
+	if afterAck["revived"] != true || afterAck["revived_ack_at"] == nil || afterAck["revived_ack_by"] != f.manager.UserID {
+		t.Fatalf("detail after ack = revived %v ack_at %v ack_by %v, want true with the acknowledging manager", afterAck["revived"], afterAck["revived_ack_at"], afterAck["revived_ack_by"])
+	}
+	drained, err := f.s.List(f.ctx, f.manager, remediation.Filter{Revived: true, Page: page})
+	must(t, err)
+	if queueHas(drained.Items, id) {
+		t.Fatal("an acknowledged task is still listed as revived")
+	}
+	// Acknowledging twice must not overwrite the first decision.
+	if _, err = f.s.Act(f.ctx, f.manager, id, "revive-ack", "", remediation.ActionInput{Reason: "再确认一次", ExpectedVersion: currentVersion(t, f, id)}, false); !errors.Is(err, remediation.ErrConflict) {
+		t.Fatalf("second revive-ack = %v, want ErrConflict", err)
+	}
+	var ackBy string
+	var ackAt any
+	must(t, f.pool.QueryRow(f.ctx, `SELECT COALESCE(revived_ack_by::text,'') FROM remediation_tasks WHERE id=$1::uuid`, id).Scan(&ackBy))
+	must(t, f.pool.QueryRow(f.ctx, `SELECT revived_ack_at FROM remediation_tasks WHERE id=$1::uuid`, id).Scan(&ackAt))
+	if ackBy != f.manager.UserID || ackAt == nil {
+		t.Fatalf("revived_ack_by=%q revived_ack_at=%v, want the acknowledging manager and a timestamp", ackBy, ackAt)
 	}
 
 	// A cancelled task is history, not interrupted work: restoring the system
@@ -757,5 +788,98 @@ func TestRetiredTaskLookupIndexIsKeyedByFinding(t *testing.T) {
 	must(t, f.pool.QueryRow(f.ctx, `SELECT count(*) FROM pg_class WHERE relname = 'remediation_tasks_asset_retired_idx'`).Scan(&stale))
 	if stale != 0 {
 		t.Fatal("the mis-specified remediation_tasks_asset_retired_idx is still present")
+	}
+}
+
+func queueHas(items []remediation.Object, id string) bool {
+	for _, item := range items {
+		if item["id"] == id {
+			return true
+		}
+	}
+	return false
+}
+
+func currentVersion(t *testing.T, f *fixture, id string) int {
+	t.Helper()
+	var version int
+	must(t, f.pool.QueryRow(f.ctx, `SELECT version FROM remediation_tasks WHERE id=$1::uuid`, id).Scan(&version))
+	return version
+}
+
+// The revived queue is a group-level obligation, so it has to be clearable in
+// one decision. Per-task results matter as much as the bulk call: one already
+// settled task, one unauthorized task and one bad ID must not hide the tasks
+// that actually needed a decision.
+func TestAcknowledgeRevivedBatchSettlesEachTaskIndependently(t *testing.T) {
+	f := setup(t)
+	systems := businesssystem.NewService(f.pool)
+	_, err := f.pool.Exec(f.ctx, `INSERT INTO business_system_data_security_profiles(business_system_id) VALUES($1::uuid) ON CONFLICT DO NOTHING`, f.system)
+	must(t, err)
+	first := f.assign(t, 0, "revive-batch-first", f.grant)
+	second := f.assign(t, 1, "revive-batch-second", f.otherGrant)
+	f.action(t, f.worker, first, "accept", remediation.ActionInput{}, true)
+	admin := f.group
+	admin.Roles = []string{auth.RoleGroupAdmin}
+	admin.Permissions = append(admin.Permissions, "system.manage")
+	if err := systems.Delete(f.ctx, admin, f.system, nil, "整批恢复测试", "127.0.0.1"); err != nil {
+		t.Fatal(err)
+	}
+	// Retirement is not revival: nothing enters the follow-up queue until the
+	// system actually comes back from the recycle bin.
+	page, _ := pagination.Normalize(1, 50)
+	retiredOnly, err := f.s.List(f.ctx, f.manager, remediation.Filter{Revived: true, Page: page})
+	must(t, err)
+	if queueHas(retiredOnly.Items, first) || queueHas(retiredOnly.Items, second) {
+		t.Fatal("a task that was only retired, not restored, is already listed as revived")
+	}
+	must(t, recyclebin.NewService(f.pool).RestoreBusinessSystem(f.ctx, f.group, f.system, "revive-batch-restore", "127.0.0.1"))
+	// One task gets settled before the batch runs, so the batch must report it as
+	// a conflict instead of silently succeeding twice.
+	if _, err = f.s.Act(f.ctx, f.manager, first, "revive-ack", "", remediation.ActionInput{Reason: "先行确认", ExpectedVersion: currentVersion(t, f, first)}, false); err != nil {
+		t.Fatal(err)
+	}
+	queue, err := f.s.List(f.ctx, f.manager, remediation.Filter{Revived: true, Page: page})
+	must(t, err)
+	if !queueHas(queue.Items, second) {
+		t.Fatal("the restored task is missing from the revived queue before the batch")
+	}
+
+	results, err := f.s.AcknowledgeRevived(f.ctx, f.manager, []string{first, second, "not-a-uuid", "00000000-0000-0000-0000-000000000000"}, "系统恢复后统一复检", "revive-batch-key")
+	must(t, err)
+	if len(results) != 4 {
+		t.Fatalf("batch results = %d, want one per requested task", len(results))
+	}
+	if results[0]["error"] != "state_conflict" {
+		t.Fatalf("already acknowledged task = %v, want state_conflict", results[0])
+	}
+	if results[1]["error"] != nil {
+		t.Fatalf("pending revived task = %v, want success", results[1])
+	}
+	for _, index := range []int{2, 3} {
+		if results[index]["error"] == nil {
+			t.Fatalf("unusable id %d = %v, want an error code", index, results[index])
+		}
+	}
+	drained, err := f.s.List(f.ctx, f.manager, remediation.Filter{Revived: true, Page: page})
+	must(t, err)
+	if queueHas(drained.Items, second) {
+		t.Fatal("a task acknowledged by the batch is still listed as revived")
+	}
+	// Replaying the same batch must be safe: the settled tasks report conflict
+	// rather than overwriting the first acknowledgement.
+	replay, err := f.s.AcknowledgeRevived(f.ctx, f.manager, []string{first, second}, "系统恢复后统一复检", "revive-batch-key")
+	must(t, err)
+	for _, row := range replay {
+		if row["error"] != "state_conflict" {
+			t.Fatalf("replayed batch row = %v, want state_conflict", row)
+		}
+	}
+	// The batch reports per-task outcomes, so a caller without the assign
+	// permission must see every row refused rather than a silent success.
+	denied, err := f.s.AcknowledgeRevived(f.ctx, f.worker, []string{second}, "自行清队列", "revive-batch-worker")
+	must(t, err)
+	if len(denied) != 1 || denied[0]["error"] != "forbidden" {
+		t.Fatalf("assignee batch = %v, want a forbidden result", denied)
 	}
 }

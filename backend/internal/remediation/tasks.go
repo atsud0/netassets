@@ -145,7 +145,8 @@ const taskSelect = `SELECT t.id,t.task_no,t.work_order_id,w.work_order_no,w.stat
  remediation_task_needs_reassignment(t.id) needs_reassignment,
  (SELECT reason FROM remediation_task_execution_state(t.id)) execution_blocked_reason,
  (t.asset_retired_at IS NOT NULL) asset_retired,t.asset_retired_at,
- (t.system_retired_at IS NOT NULL) system_retired,t.system_retired_at
+ (t.system_retired_at IS NOT NULL) system_retired,t.system_retired_at,
+ (t.revived_at IS NOT NULL) revived,t.revived_at,t.revived_ack_at,t.revived_ack_by
  FROM remediation_tasks t JOIN security_findings f ON f.id=t.finding_id JOIN security_work_orders w ON w.id=t.work_order_id JOIN organizations o ON o.id=t.organization_id
  JOIN business_systems b ON b.id=t.business_system_id JOIN users u ON u.id=t.assignee_user_id
  JOIN remediation_grants g ON g.id=t.grant_id LEFT JOIN vendors v ON v.id=g.vendor_id
@@ -574,6 +575,35 @@ func (s *Service) Act(ctx context.Context, p auth.Principal, id, action, key str
 			}
 			_, err = tx.Exec(ctx, `UPDATE remediation_tasks SET completion_reason='verified_fixed',completed_at=now(),return_reason='' WHERE id=$1::uuid`, id)
 		}
+	case "revive-ack":
+		// Acknowledging a revival is a management decision, not delivery: it says
+		// "we know this task came back, and this is what we decided". It stays
+		// available while the task is unexecutable (an archived system still
+		// blocks execution), and it is refused once acknowledged so a double click
+		// cannot overwrite who made the call.
+		if err = requireManager("remediation.assign"); err != nil {
+			return nil, err
+		}
+		if !textOK(in.Reason, 2000, true) {
+			return nil, ErrInvalid
+		}
+		var revivedAt, ackedAt *time.Time
+		if err = tx.QueryRow(ctx, `SELECT revived_at,revived_ack_at FROM remediation_tasks WHERE id=$1::uuid`, id).Scan(&revivedAt, &ackedAt); err != nil {
+			return nil, err
+		}
+		if revivedAt == nil || ackedAt != nil {
+			return nil, ErrConflict
+		}
+		command, err := tx.Exec(ctx, `UPDATE remediation_tasks SET revived_ack_at=now(),revived_ack_by=$2::uuid WHERE id=$1::uuid AND revived_at IS NOT NULL AND revived_ack_at IS NULL`, id, p.UserID)
+		if err != nil {
+			return nil, err
+		}
+		if command.RowsAffected() == 0 {
+			// Another reviewer acknowledged between the read and the write.
+			return nil, ErrConflict
+		}
+		details["revived_at"] = revivedAt.Format(time.RFC3339)
+		next = t.Status
 	case "reassign":
 		if err = requireManager("remediation.assign"); err != nil {
 			return nil, err

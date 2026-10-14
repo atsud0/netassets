@@ -2,7 +2,11 @@ package remediation
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"time"
+
+	"github.com/jackc/pgx/v5"
 
 	"netassets/internal/auth"
 	"netassets/internal/pagination"
@@ -185,4 +189,89 @@ func (s *Service) TaskSystems(ctx context.Context, p auth.Principal, mine bool, 
 		return pagination.Result[Object]{}, err
 	}
 	return pageObjects(ctx, s.pool, `SELECT DISTINCT business_system_id id,system_name,organization_id,organization_name FROM (`+sql+`) visible ORDER BY system_name,id`, page, args...)
+}
+
+// AcknowledgeRevived confirms, in one decision, that a group has looked at every
+// task that came back from a soft-deleted asset or business system. It exists
+// because the group-level queue is the only place that sees cross-organization
+// revived work, and a queue nobody can clear in bulk is a queue nobody clears.
+//
+// Each task is settled on its own: one already-settled or unauthorized task must
+// not block the rest, and the caller receives a per-task result. The whole call is
+// idempotent through the key, so a retried request cannot acknowledge twice.
+func (s *Service) AcknowledgeRevived(ctx context.Context, p auth.Principal, ids []string, reason, key string) ([]Object, error) {
+	if len(ids) < 1 || len(ids) > 200 || len(key) < 8 || len(key) > 100 || !textOK(reason, 2000, true) {
+		return nil, ErrInvalid
+	}
+	tx, err := s.begin(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback(ctx)
+	results := make([]Object, 0, len(ids))
+	for index, id := range ids {
+		out, ackErr := s.acknowledgeOne(ctx, tx, p, id, reason, fmt.Sprintf("%s:%d", key, index))
+		if ackErr != nil {
+			code := "invalid_request"
+			switch {
+			case errors.Is(ackErr, ErrForbidden):
+				code = "forbidden"
+			case errors.Is(ackErr, ErrNotFound):
+				code = "not_found"
+			case errors.Is(ackErr, ErrConflict):
+				code = "state_conflict"
+			case !errors.Is(ackErr, ErrInvalid):
+				// A per-task internal failure is reported in the result list; it must
+				// not abort the batch, or one bad ID hides every other decision.
+				code = "internal_error"
+			}
+			if code == "forbidden" {
+				_ = s.RecordDenial(ctx, code)
+			}
+			results = append(results, Object{"id": id, "error": code})
+			continue
+		}
+		results = append(results, out)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return nil, err
+	}
+	return results, nil
+}
+
+func (s *Service) acknowledgeOne(ctx context.Context, tx pgx.Tx, p auth.Principal, id, reason, key string) (Object, error) {
+	if !validID(id) {
+		return nil, ErrInvalid
+	}
+	t, err := loadTask(ctx, tx, id)
+	if err != nil {
+		return nil, err
+	}
+	if err = allowed(ctx, tx, p, t.OrganizationID, "remediation.assign"); err != nil {
+		return nil, err
+	}
+	var revivedAt, ackedAt *time.Time
+	if err = tx.QueryRow(ctx, `SELECT revived_at,revived_ack_at FROM remediation_tasks WHERE id=$1::uuid`, id).Scan(&revivedAt, &ackedAt); err != nil {
+		return nil, err
+	}
+	if revivedAt == nil || ackedAt != nil {
+		return nil, ErrConflict
+	}
+	command, err := tx.Exec(ctx, `UPDATE remediation_tasks SET revived_ack_at=now(),revived_ack_by=$2::uuid,version=version+1,updated_at=now() WHERE id=$1::uuid AND revived_at IS NOT NULL AND revived_ack_at IS NULL`, id, p.UserID)
+	if err != nil {
+		return nil, dbError(err)
+	}
+	if command.RowsAffected() == 0 {
+		return nil, ErrConflict
+	}
+	if err = event(ctx, tx, p, t, "revive-ack", "participants", Object{"reason": reason, "revived_at": revivedAt.Format(time.RFC3339)}); err != nil {
+		return nil, err
+	}
+	out := Object{"id": id, "status": t.Status, "version": t.Version + 1}
+	// The idempotency key is per task, so retrying a partial batch settles the
+	// tasks that succeeded without failing the ones that already moved on.
+	if err = saveResult(ctx, tx, p, "revive-ack:"+key, id, "", out); err != nil {
+		return nil, err
+	}
+	return out, nil
 }

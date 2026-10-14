@@ -61,9 +61,13 @@ func Retire(ctx context.Context, tx pgx.Tx, actorID, retiredColumn, predicate st
 // Revive clears the retirement marker on the tasks selected by predicate and
 // returns the affected task IDs. A cancelled task is never revived: restoring
 // an asset or system must not silently reopen work that was already settled.
+//
+// Reviving also stamps revived_at. That column, not the event stream, is what
+// puts the task into the follow-up queue, so the queue survives any unrelated
+// activity on the task and needs an explicit manager acknowledgement to leave.
 func Revive(ctx context.Context, tx pgx.Tx, retiredColumn, predicate string, value any) ([]string, error) {
 	rows, err := tx.Query(ctx, fmt.Sprintf(`
-		UPDATE remediation_tasks SET %s = NULL, version = version + 1, updated_at = now()
+		UPDATE remediation_tasks SET %s = NULL, revived_at = now(), revived_ack_at = NULL, revived_ack_by = NULL, version = version + 1, updated_at = now()
 		WHERE %s AND %s IS NOT NULL AND status <> 'cancelled'
 		RETURNING id::text`, retiredColumn, predicate, retiredColumn), value)
 	if err != nil {
