@@ -13,6 +13,9 @@ export interface RepairTask extends Material {
   version: number; material_revision: number; current_submission_id?: string; due_at: string; original_due_at: string
   target_environment: string; deployment_required: boolean; progress: string; blocked_reason: string; return_reason: string
   overdue: boolean; needs_reassignment: boolean; can_assign?: boolean; can_review?: boolean; can_verify?: boolean; can_execute?: boolean
+ // execution_blocked_reason is the machine reason from remediation_task_execution_state.
+ // Without it the UI can only say "action refused", which is not something the operator can act on.
+ execution_blocked_reason?: string; asset_retired_at?: string; system_retired_at?: string
 }
 export interface Grant {
   id: string; user_id: string; username: string; display_name: string; organization_id: string; organization_name: string
@@ -41,6 +44,23 @@ export const eventLabels: Record<string, string> = {
   'source-update': '原始材料更新', 'reopen-risk': '撤销风险接受', assign: '派发任务', accept: '接收任务', progress: '更新进展', submit: '提交修复', withdraw: '撤回提交',
   'organization-review': '组织确认', 'security-review': '集团复测', reassign: '改派任务', cancel: '取消任务',
   materials: '更新共享材料', comment: '追加沟通', 'attachment.upload': '上传附件', 'request.create': '提出申请', 'request.decide': '处理申请',
+  asset_retired: '关联资产已删除，任务暂停', system_retired: '关联业务系统已删除，任务暂停',
+  asset_restored: '关联资产已恢复，任务可继续', system_restored: '业务系统已恢复，任务待确认',
+}
+// executionBlockReasons maps remediation_task_execution_state() to what the person
+// reading the screen has to do about it. A reason without an action is a dead end.
+export const executionBlockReasons: Record<string, { text: string; action: string }> = {
+  asset_retired: { text: '关联资产已删除，任务暂停', action: '请联系资产管理员恢复资产，或由集团安全管理员改派任务、取消任务。' },
+  system_retired: { text: '关联业务系统已删除，任务暂停', action: '请联系系统管理员恢复业务系统，或由集团安全管理员改派任务、取消任务。' },
+  organization_mismatch: { text: '漏洞责任组织已变更，任务归属失效', action: '请联系集团安全管理员改派任务。' },
+  system_mismatch: { text: '漏洞所属业务系统已变更，任务归属失效', action: '请联系集团安全管理员改派任务。' },
+  asset_unavailable: { text: '漏洞关联的资产已删除、已归档或归属变更', action: '请联系集团安全管理员重新关联资产或改派任务。' },
+  system_unavailable: { text: '业务系统已归档或已删除，任务暂不可执行', action: '业务系统重新启用后任务自动恢复；如需继续整改请联系集团安全管理员改派。' },
+  authorization_expired: { text: '当前人员授权已过期、被停用或超出有效期', action: '请联系集团安全管理员恢复授权，或安排改派。' },
+  not_assignee: { text: '当前账号不是该任务的执行人', action: '如需接手，请联系集团安全管理员改派任务。' },
+  not_authorized: { text: '当前账号无该任务的执行权限', action: '请联系集团安全管理员确认授权范围。' },
+  finding_missing: { text: '关联漏洞已不存在', action: '请联系集团安全管理员处理该工单。' },
+  task_closed: { text: '任务已结束，无需继续交付', action: '如有新问题请在主工单中跟进。' },
 }
 export function dateText(value?: string) { return value ? new Date(value).toLocaleString('zh-CN') : '—' }
 export function newKey() {

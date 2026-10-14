@@ -143,6 +143,7 @@ const taskSelect = `SELECT t.id,t.task_no,t.work_order_id,w.work_order_no,w.stat
  m.title,m.severity,m.affected_location,m.description,m.evidence,m.remediation_advice,m.requirement,
  (t.status NOT IN ('completed','cancelled') AND t.due_at<now()) overdue,
  remediation_task_needs_reassignment(t.id) needs_reassignment,
+ (SELECT reason FROM remediation_task_execution_state(t.id)) execution_blocked_reason,
  (t.asset_retired_at IS NOT NULL) asset_retired,t.asset_retired_at,
  (t.system_retired_at IS NOT NULL) system_retired,t.system_retired_at
  FROM remediation_tasks t JOIN security_findings f ON f.id=t.finding_id JOIN security_work_orders w ON w.id=t.work_order_id JOIN organizations o ON o.id=t.organization_id
@@ -220,8 +221,13 @@ func (s *Service) Detail(ctx context.Context, p auth.Principal, id string, execu
 		return nil, err
 	}
 	out["can_execute"] = canExecute
+	// Always overwrite the task-level column: the detail view is actor-scoped, so
+	// a manager opening someone else's task must see "not_assignee" rather than the
+	// task's own retirement reason.
 	if reason != nil {
 		out["execution_blocked_reason"] = *reason
+	} else {
+		delete(out, "execution_blocked_reason")
 	}
 	if !executor && internal(ctx, s.pool, p, t) {
 		source, e := readObject(ctx, s.pool, `SELECT title,severity,description,COALESCE(evidence,'') evidence,COALESCE(remediation_advice,'') remediation_advice FROM security_findings WHERE id=$1::uuid`, t.FindingID)

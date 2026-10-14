@@ -16,6 +16,7 @@ import (
 	"netassets/internal/customfield"
 	"netassets/internal/notification"
 	"netassets/internal/pagination"
+	"netassets/internal/remediationretire"
 )
 
 type BusinessSystemDraftInput struct {
@@ -510,6 +511,13 @@ func publishBusinessSystemDrafts(ctx context.Context, tx pgx.Tx, principal auth.
 	if err != nil {
 		return fmt.Errorf("load publication custom fields: %w", err)
 	}
+	// The working-version delete path archives the same business_systems row as the
+	// direct group-admin delete, so it must retire open remediation work with the
+	// identical semantics. Otherwise a task published through the reporting flow
+	// would keep running against a system that no longer exists.
+	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtext('netassets-remediation'))`); err != nil {
+		return fmt.Errorf("lock remediation work during business system draft publication: %w", err)
+	}
 	for _, item := range items {
 		resourceID := item.ID
 		action, summary := "business_system.create", "审核发布填报业务系统"
@@ -552,6 +560,20 @@ func publishBusinessSystemDrafts(ctx context.Context, tx pgx.Tx, principal auth.
 			}
 			if result.RowsAffected() == 0 {
 				return ErrNotFound
+			}
+			retiredTaskIDs, err := remediationretire.Retire(ctx, tx, principal.UserID, remediationretire.SystemColumn, "business_system_id = $1::uuid", resourceID,
+				"system_retired", map[string]any{"business_system_id": resourceID, "source": "inventory_task", "reason": "关联业务系统已删除，整改任务待改派"})
+			if err != nil {
+				return err
+			}
+			if len(retiredTaskIDs) > 0 {
+				if _, err := tx.Exec(ctx, `
+					INSERT INTO audit_logs(user_id,organization_id,action,resource_type,resource_id,summary,details,request_ip,request_id)
+					VALUES($1::uuid,$2::uuid,'business_system.delete','business_system',$3,'审核发布业务系统删除导致整改任务待改派',
+					        jsonb_build_object('retired_remediation_tasks',$4::int,'source','inventory_task'),NULLIF($5,'')::inet,NULLIF($6,''))
+				`, principal.UserID, organizationID, resourceID, len(retiredTaskIDs), ipAddress, requestID); err != nil {
+					return fmt.Errorf("write published business system retirement audit: %w", err)
+				}
 			}
 		default:
 			return ErrInvalid

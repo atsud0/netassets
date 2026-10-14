@@ -2,7 +2,7 @@
 import { computed, reactive, ref, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { apiClient, getAPIErrorMessage, getDownloadAPIErrorMessage } from '../api/client'
-import { dateText, eventLabels, loadOptions, newKey, outcomes, requestLabels, severityLabels, taskStatuses } from '../api/remediation'
+import { dateText, eventLabels, executionBlockReasons, loadOptions, newKey, outcomes, requestLabels, severityLabels, taskStatuses } from '../api/remediation'
 import type { Attachment, Comment, Grant, Material, MaterialVersion, Page, RepairRequest, RepairTask, Submission, TaskEvent } from '../api/remediation'
 
 const props = defineProps<{ id: string; executor: boolean }>()
@@ -34,6 +34,13 @@ const childTotal = ref(0)
 const path = computed(() => `${props.executor ? '/repair/tasks' : '/remediation-tasks'}/${props.id}`)
 const writable = computed(() => task.value && ['pending_acceptance', 'in_progress'].includes(task.value.status))
 const editable = computed(() => task.value?.can_execute && task.value.status === 'in_progress')
+// The backend answers "can you act" and "why not" with one predicate. Rendering the
+// reason is what turns a refusal into something the operator can act on.
+const executionBlock = computed<{ text: string; action: string } | undefined>(() => {
+  const reason = task.value?.execution_blocked_reason
+  if (!reason) return undefined
+  return executionBlockReasons[reason] ?? { text: `任务当前不可执行（${reason}）`, action: '请联系集团安全管理员确认任务状态。' }
+})
 const form = reactive({ remediation_summary: '', deployment_status: 'target', change_reference: '', deployed_at: '', self_test_result: '', no_deployment_reason: '', attachment_ids: [] as string[] })
 const progress = ref('')
 const blocked = ref('')
@@ -197,7 +204,12 @@ async function decideRequest() {
       <p v-else class="muted">{{ task.status==='cancelled'?'执行任务已取消，请在主工单中跟进后续安排。':'已按批准的处置结果结束执行，具体依据见申请和操作记录。' }}</p>
       <el-alert v-if="task.material_needs_review" title="共享材料待管理员复核，暂不能提交或通过审核。原有材料保留供查阅。" type="warning" :closable="false" />
       <el-alert v-if="task.return_reason" :title="`退回原因：${task.return_reason}`" type="warning" :closable="false" />
-      <el-alert v-if="task.needs_reassignment" title="当前人员授权已失效，请恢复有效授权或安排改派。" type="warning" :closable="false" />
+      <el-alert v-if="executionBlock" type="warning" :closable="false" class="execution-blocked-alert">
+        <template #title>{{ executionBlock?.text }}</template>
+        <p class="blocked-action">{{ executionBlock?.action }}</p>
+        <p v-if="task.asset_retired_at" class="muted">资产于 {{ dateText(task.asset_retired_at) }} 删除；恢复资产后任务自动回到可执行状态。</p>
+        <p v-if="task.system_retired_at" class="muted">业务系统于 {{ dateText(task.system_retired_at) }} 删除；恢复业务系统后需重新启用才能继续整改。</p>
+      </el-alert>
       <div class="repair-workspace"><section class="repair-evidence">
       <el-tabs v-model="tab">
         <el-tab-pane label="漏洞与验收要求" name="materials">
@@ -290,7 +302,7 @@ async function decideRequest() {
 </template>
 
 <style scoped>
-.repair-detail { min-height: 240px; }.detail-heading,.actions { display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin:16px 0; }.detail-heading { justify-content:space-between; }.detail-heading h2 { margin:8px 0; }.pre { white-space:pre-wrap;overflow-wrap:anywhere;line-height:1.7; }.muted,small { color:var(--el-text-color-secondary); }.record { padding:16px 0;border-bottom:1px solid var(--el-border-color-lighter); }.review-record { padding:12px;background:var(--el-fill-color-light);margin-top:12px; }.el-alert { margin-top:12px; }.el-pagination { margin-top:16px; }.el-select { min-width:180px; }
+.repair-detail { min-height: 240px; }.detail-heading,.actions { display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin:16px 0; }.detail-heading { justify-content:space-between; }.detail-heading h2 { margin:8px 0; }.pre { white-space:pre-wrap;overflow-wrap:anywhere;line-height:1.7; }.muted,small { color:var(--el-text-color-secondary); }.record { padding:16px 0;border-bottom:1px solid var(--el-border-color-lighter); }.review-record { padding:12px;background:var(--el-fill-color-light);margin-top:12px; }.el-alert { margin-top:12px; }.execution-blocked-alert :deep(.el-alert__content) { line-height:1.7; }.blocked-action { margin:4px 0 0;font-size:13px; }.execution-blocked-alert .muted { margin:4px 0 0;font-size:12px; }.el-pagination { margin-top:16px; }.el-select { min-width:180px; }
 </style>
 
 <style scoped>
