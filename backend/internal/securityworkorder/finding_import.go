@@ -290,7 +290,7 @@ func (s *Service) SearchFindingImports(ctx context.Context, principal auth.Princ
 		return pagination.Result[FindingImportHistory]{}, ErrForbidden
 	}
 	rows, err := s.pool.Query(ctx, `
-		SELECT i.id::text, i.test_batch_id::text, b.batch_code, b.batch_name, i.file_name, i.file_type, i.status,
+		SELECT i.id::text, COALESCE(i.test_batch_id::text,''), COALESCE(b.batch_code,''), COALESCE(b.batch_name,''), i.file_name, i.file_type, i.status,
 		       i.total_count, i.success_count, i.failure_count, i.duplicate_count, i.pending_count, i.errors::text,
 		       COALESCE(u.display_name,''), i.created_at, count(*) OVER ()
 		FROM security_finding_imports i
