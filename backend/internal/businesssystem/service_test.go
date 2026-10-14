@@ -313,13 +313,13 @@ func TestPrepareCreateInputNormalizesAndDerivesDataVolume(t *testing.T) {
 	input := validBusinessSystemInput()
 	input.Code = "  CRM_100  "
 	input.Name = "  客户服务系统  "
-	input.OwnerContact = "  owner@example.com  "
+	input.OwnerContact = " 138-0000-0000 "
 	input.PersonalInformationRecordCount = &count
 
 	if err := PrepareCreateInput(&input); err != nil {
 		t.Fatalf("PrepareCreateInput() error = %v", err)
 	}
-	if input.Code != "CRM_100" || input.Name != "客户服务系统" || input.OwnerContact != "owner@example.com" {
+	if input.Code != "CRM_100" || input.Name != "客户服务系统" || input.OwnerContact != "13800000000" {
 		t.Fatalf("normalized input = %#v", input)
 	}
 	if input.DataVolumeOver100K != "yes" {
@@ -488,5 +488,39 @@ func TestBusinessSystemAnalyzeIgnoresTemplateSampleRow(t *testing.T) {
 	}
 	if !found {
 		t.Fatal("analysis no longer shows the real user row")
+	}
+}
+
+// TestOwnerContactIsValidated is the guard for "新增/编辑业务系统，手机号码没有做
+// 校验": any text used to be accepted as the owner contact, so the ledger filled
+// with values that can never reach the owner, and the form offered no hint.
+func TestOwnerContactIsValidated(t *testing.T) {
+	input := validBusinessSystemInput()
+	for _, value := range []string{"abc", "张三", "1380000000", "转接行政"} {
+		input.OwnerContact = value
+		err := PrepareCreateInput(&input)
+		if !errors.Is(err, ErrInvalidOwnerContact) {
+			t.Fatalf("PrepareCreateInput with owner_contact=%q returned %v, want ErrInvalidOwnerContact", value, err)
+		}
+		if message := businessSystemRowErrorMessage(err); message == "业务系统字段格式不正确" {
+			t.Fatalf("owner contact failure must not be reported as a generic field error, got %q", message)
+		}
+	}
+}
+
+func TestOwnerContactIsNormalizedAndAccepted(t *testing.T) {
+	input := validBusinessSystemInput()
+	input.OwnerContact = " 138-0000-0000 "
+	if err := PrepareCreateInput(&input); err != nil {
+		t.Fatalf("PrepareCreateInput with a valid owner contact returned %v", err)
+	}
+	if input.OwnerContact != "13800000000" {
+		t.Fatalf("owner contact = %q, want the normalized %q", input.OwnerContact, "13800000000")
+	}
+	for _, value := range []string{"", "021-88886666-8001", "400-820-8820", "6688"} {
+		input.OwnerContact = value
+		if err := PrepareCreateInput(&input); err != nil {
+			t.Fatalf("owner_contact=%q must be accepted, got %v", value, err)
+		}
 	}
 }

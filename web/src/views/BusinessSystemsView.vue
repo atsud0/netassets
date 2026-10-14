@@ -11,6 +11,7 @@ import WorkingVersionDiffDrawer from '../components/WorkingVersionDiffDrawer.vue
 import ResourceSubmissionHistoryDrawer from '../components/ResourceSubmissionHistoryDrawer.vue'
 import { draftLastEditedHint, draftTakeoverSummary } from '../utils/inventory-drafts'
 import { reportEditConflict } from '../utils/edit-conflict'
+import { contactPhoneRule, normalizeContactPhone } from '../utils/contact-phone'
 import { createSuggestedColumnMapping, getImportColumnMappingError, importColumnLabel, isImportColumnUsed, serializeImportColumnMapping, type ImportColumn, type ImportColumnMapping, type ImportField } from '../utils/import-column-mapping'
 
 interface Organization { id: string; code: string; name: string; type: string; status: string }
@@ -140,6 +141,9 @@ const rules: FormRules = {
   code: [{ required: true, message: '请输入系统编码', trigger: 'blur' }, { pattern: /^[A-Za-z0-9][A-Za-z0-9_-]{1,63}$/, message: '使用 2-64 位字母、数字、下划线或横线', trigger: 'blur' }],
   name: [{ required: true, message: '请输入系统名称', trigger: 'blur' }],
   organization_id: [{ required: true, message: '请选择所属组织', trigger: 'change' }],
+  // The owner contact is the only channel a group security manager has to reach
+  // the system owner, so it is validated here instead of failing on submit.
+  owner_contact: [{ validator: contactPhoneRule.validator, trigger: 'blur' }],
 }
 const yesNoLabels: Record<string, string> = { yes: '是', no: '否', unknown: '待确认', pending: '待认定' }
 const statusLabels: Record<string, string> = { planning: '规划中', running: '运行中', suspended: '暂停', offline: '已下线', archived: '已归档' }
@@ -302,6 +306,9 @@ async function openEditDialog(row: BusinessSystem) {
 }
 
 async function submit() {
+  // Store the same normalized form the validator checked, so "138-0000-0000"
+  // does not survive as a differently searchable value in the ledger.
+  form.owner_contact = normalizeContactPhone(form.owner_contact)
   if (!formRef.value || !(await formRef.value.validate())) return
   const missing = customFields.value.find((field) => field.is_required && isEmptyCustomValue(customValues[field.field_key]))
   if (missing) { ElMessage.warning(`请填写自定义字段：${missing.field_name}`); return }
@@ -918,7 +925,7 @@ onMounted(load)
           <el-form-item label="运行状态"><el-select v-model="form.status" style="width:100%"><el-option label="运行中" value="running" /><el-option label="规划中" value="planning" /><el-option label="暂停" value="suspended" /><el-option label="已下线" value="offline" /><el-option v-if="editingID" label="已归档" value="archived" /></el-select></el-form-item>
           <el-form-item label="系统等级"><el-select v-model="form.level" style="width:100%"><el-option label="一般" value="normal" /><el-option label="重要" value="important" /><el-option label="核心" value="core" /></el-select></el-form-item>
           <el-form-item label="负责人"><el-input v-model="form.owner_name" maxlength="128" /></el-form-item>
-          <el-form-item label="联系方式"><el-input v-model="form.owner_contact" maxlength="255" /></el-form-item>
+          <el-form-item label="联系方式" prop="owner_contact"><el-input v-model="form.owner_contact" maxlength="64" placeholder="手机号码、座机或分机号" /></el-form-item>
           <el-form-item label="互联网暴露情况"><el-select v-model="form.internet_exposure" style="width:100%"><el-option label="是" value="yes" /><el-option label="否" value="no" /><el-option label="部分" value="partial" /><el-option label="待确认" value="unknown" /></el-select></el-form-item>
           <el-form-item label="部署方式"><el-input v-model="form.deployment_type" placeholder="如：集团私有云" /></el-form-item>
           <el-form-item label="系统说明" class="full-span"><el-input v-model="form.description" type="textarea" :rows="2" /></el-form-item>

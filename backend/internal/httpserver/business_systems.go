@@ -358,6 +358,8 @@ func registerBusinessSystemRoutes(api *gin.RouterGroup, requireAuth gin.HandlerF
 		switch {
 		case errors.Is(err, businesssystem.ErrForbidden):
 			writeAPIError(c, http.StatusForbidden, "forbidden", "当前账号无权在该组织新增业务系统")
+		case errors.Is(err, businesssystem.ErrInvalidOwnerContact):
+			writeAPIError(c, http.StatusBadRequest, "invalid_owner_contact", "联系方式格式不正确，请填写手机号码、座机或分机号")
 		case errors.Is(err, businesssystem.ErrInvalid):
 			writeAPIError(c, http.StatusBadRequest, "invalid_business_system", "请检查系统信息和数据安全属性")
 		case errors.Is(err, businesssystem.ErrNotFound):
@@ -386,6 +388,8 @@ func registerBusinessSystemRoutes(api *gin.RouterGroup, requireAuth gin.HandlerF
 			writeAPIError(c, http.StatusConflict, "working_version_conflict", "该业务系统工作版本已被其他人更新，请刷新后重试")
 		case errors.Is(err, businesssystem.ErrForbidden):
 			writeAPIError(c, http.StatusForbidden, "forbidden", "当前账号无权编辑该业务系统或变更其所属组织")
+		case errors.Is(err, businesssystem.ErrInvalidOwnerContact):
+			writeAPIError(c, http.StatusBadRequest, "invalid_owner_contact", "联系方式格式不正确，请填写手机号码、座机或分机号")
 		case errors.Is(err, businesssystem.ErrInvalid):
 			writeAPIError(c, http.StatusBadRequest, "invalid_business_system", "请检查系统信息和数据安全属性")
 		case errors.Is(err, businesssystem.ErrNotFound):

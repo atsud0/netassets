@@ -21,6 +21,7 @@ import (
 
 	"netassets/internal/access"
 	"netassets/internal/auth"
+	"netassets/internal/contactphone"
 	"netassets/internal/customfield"
 	"netassets/internal/exportfile"
 	"netassets/internal/importmapping"
@@ -30,13 +31,17 @@ import (
 )
 
 var (
-	ErrForbidden              = errors.New("forbidden")
-	ErrNotFound               = errors.New("not found")
-	ErrConflict               = errors.New("conflict")
-	ErrInUse                  = errors.New("in use")
-	ErrInvalid                = errors.New("invalid input")
-	ErrEditConflict           = errors.New("working version has been updated by another user")
-	ErrVersionRequired        = errors.New("expected_version is required")
+	ErrForbidden       = errors.New("forbidden")
+	ErrNotFound        = errors.New("not found")
+	ErrConflict        = errors.New("conflict")
+	ErrInUse           = errors.New("in use")
+	ErrInvalid         = errors.New("invalid input")
+	ErrEditConflict    = errors.New("working version has been updated by another user")
+	ErrVersionRequired = errors.New("expected_version is required")
+	// ErrInvalidOwnerContact wraps ErrInvalid so existing callers that only
+	// check for a generic invalid input keep working, while the HTTP layer can
+	// still point at the offending field.
+	ErrInvalidOwnerContact    = fmt.Errorf("%w: owner contact is not a valid phone number", ErrInvalid)
 	ErrExportTooLarge         = errors.New("synchronous xlsx export too large")
 	codePattern               = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_-]{1,63}$`)
 	businessSystemUUIDPattern = regexp.MustCompile(`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$`)
@@ -811,7 +816,7 @@ func (s *Service) Update(ctx context.Context, principal auth.Principal, systemID
 	}
 	normalize(&input)
 	if !validInput(input) {
-		return BusinessSystem{}, ErrInvalid
+		return BusinessSystem{}, ownerContactError(input)
 	}
 	if input.PersonalInformationRecordCount != nil {
 		if *input.PersonalInformationRecordCount >= 100000 {
@@ -1589,7 +1594,7 @@ func (s *Service) Import(ctx context.Context, principal auth.Principal, organiza
 		input.CustomValues = customValues
 		if err := PrepareCreateInput(&input); err != nil {
 			result.FailureCount++
-			result.Errors = append(result.Errors, ImportError{Row: rowNumber, Code: "invalid", Message: "业务系统字段格式不正确"})
+			result.Errors = append(result.Errors, ImportError{Row: rowNumber, Code: businessSystemRowErrorCode(err), Message: businessSystemRowErrorMessage(err)})
 			continue
 		}
 		if _, exists := seen[input.Code]; exists {
@@ -1640,7 +1645,7 @@ func (s *Service) Import(ctx context.Context, principal auth.Principal, organiza
 			result.Errors = append(result.Errors, ImportError{Row: rowNumber, Code: "organization_not_found", Message: "所属组织不存在或已停用"})
 		case errors.Is(err, ErrInvalid):
 			result.FailureCount++
-			result.Errors = append(result.Errors, ImportError{Row: rowNumber, Code: "invalid", Message: "业务系统字段格式不正确"})
+			result.Errors = append(result.Errors, ImportError{Row: rowNumber, Code: businessSystemRowErrorCode(err), Message: businessSystemRowErrorMessage(err)})
 		default:
 			return ImportResult{}, err
 		}
@@ -1931,7 +1936,7 @@ func PrepareCreateInput(input *CreateInput) error {
 		}
 	}
 	if !validInput(*input) {
-		return ErrInvalid
+		return ownerContactError(*input)
 	}
 	return nil
 }
@@ -1942,7 +1947,7 @@ func normalize(input *CreateInput) {
 	input.ShortName = strings.TrimSpace(input.ShortName)
 	input.OrganizationID = strings.TrimSpace(input.OrganizationID)
 	input.OwnerName = strings.TrimSpace(input.OwnerName)
-	input.OwnerContact = strings.TrimSpace(input.OwnerContact)
+	input.OwnerContact = contactphone.Normalize(input.OwnerContact)
 	input.Status = strings.TrimSpace(input.Status)
 	input.Level = strings.TrimSpace(input.Level)
 	input.DeploymentType = strings.TrimSpace(input.DeploymentType)
@@ -1958,6 +1963,9 @@ func normalize(input *CreateInput) {
 }
 func validInput(input CreateInput) bool {
 	if !codePattern.MatchString(input.Code) || input.Name == "" || len(input.Name) > 255 || input.OrganizationID == "" {
+		return false
+	}
+	if !validOwnerContact(input.OwnerContact) {
 		return false
 	}
 	if !oneOf(input.Status, "planning", "running", "suspended", "offline", "archived") || !oneOf(input.Level, "normal", "important", "core") {
@@ -2065,4 +2073,44 @@ func dropBusinessSystemTemplateExampleRows(rows [][]string, definitions []custom
 		kept = append(kept, row)
 	}
 	return kept
+}
+
+// ownerContactError reports the specific reason a create or update failed so
+// that the form can point at the offending field instead of the generic
+// "请检查系统信息和数据安全属性" message.
+func ownerContactError(input CreateInput) error {
+	if !validOwnerContact(input.OwnerContact) {
+		return ErrInvalidOwnerContact
+	}
+	return ErrInvalid
+}
+
+// validOwnerContact keeps obviously unusable contact numbers out of the ledger.
+// The owner contact is the only way a group security manager can reach the
+// system owner, so free text such as "abc" or a five digit fragment was accepted
+// before and silently wasted that channel. Separators are tolerated because real
+// ledgers carry them; the value is normalized before this check runs.
+func validOwnerContact(value string) bool {
+	if len(value) > contactphone.MaxLength {
+		return false
+	}
+	return contactphone.IsValid(value)
+}
+
+// businessSystemRowErrorCode and Message make a rejected import row name the
+// offending field. A row rejected only because of the owner contact used to be
+// reported as a generic "业务系统字段格式不正确", which sent users hunting
+// through columns that were perfectly fine.
+func businessSystemRowErrorCode(err error) string {
+	if errors.Is(err, ErrInvalidOwnerContact) {
+		return "invalid_owner_contact"
+	}
+	return "invalid"
+}
+
+func businessSystemRowErrorMessage(err error) string {
+	if errors.Is(err, ErrInvalidOwnerContact) {
+		return "联系方式格式不正确，请填写手机号码、座机或分机号"
+	}
+	return "业务系统字段格式不正确"
 }
