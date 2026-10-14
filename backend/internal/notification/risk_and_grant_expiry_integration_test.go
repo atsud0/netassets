@@ -1,6 +1,7 @@
 package notification_test
 
 import (
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -54,13 +55,13 @@ func TestRiskAcceptanceNotificationsAreKeyedAndNotRepeated(t *testing.T) {
 		t.Fatalf("first Search error = %v", err)
 	}
 	expiredKey := "finding:risk_expired:" + findingID + ":"
-	foundExpired := false
+	firstExpiredKey := ""
 	for _, item := range first.Items {
 		if strings.HasPrefix(item.Key, expiredKey) {
-			foundExpired = true
+			firstExpiredKey = item.Key
 		}
 	}
-	if !foundExpired {
+	if firstExpiredKey == "" {
 		t.Fatalf("expired risk acceptance produced no notification; keys=%+v", keysOf(first.Items))
 	}
 	second, _, err := f.notes.Search(f.ctx, f.securityAdmin, notification.SearchInput{Page: notificationPage()})
@@ -78,17 +79,43 @@ func TestRiskAcceptanceNotificationsAreKeyedAndNotRepeated(t *testing.T) {
 		t.Fatalf("MarkAllRead error = %v", err)
 	}
 	before := countRiskReads(expiredKey)
-	for range 2 {
+	if before == 0 {
+		t.Fatal("no read row was recorded for the expired risk acceptance; the mark-read path is not exercised")
+	}
+	// The scans are spread over seconds on purpose. A key that mixes the current
+	// time into itself looks stable inside a single fast loop, because every round
+	// lands in the same clock second; only a scan in a later second can tell a key
+	// that is derived from the acceptance deadline from one that is derived from
+	// "now". Sleeping makes the difference observable.
+	for round := 1; round <= 2; round++ {
+		time.Sleep(1100 * time.Millisecond)
 		if _, _, err := f.notes.Search(f.ctx, f.securityAdmin, notification.SearchInput{Page: notificationPage()}); err != nil {
 			t.Fatalf("repeat Search error = %v", err)
 		}
 		if err := f.notes.MarkAllRead(f.ctx, f.securityAdmin); err != nil {
 			t.Fatalf("repeat MarkAllRead error = %v", err)
 		}
+		if after := countRiskReads(expiredKey); after != before {
+			t.Fatalf("round %d: risk notification read rows changed from %d to %d across a later scan; the key must be derived from the acceptance deadline, not from the scan time", round, before, after)
+		}
 	}
-	if after := countRiskReads(expiredKey); after != before {
-		t.Fatalf("risk notification read rows changed from %d to %d across scans; keys must be stable", before, after)
+	// The key must also be exactly the deadline, so a second acceptance period on the
+	// same finding is a new item rather than a silent overwrite of the old one.
+	if want := expiredKey + strconv.FormatInt(findingDeadlineEpoch(t, f, findingID), 10); firstExpiredKey != want {
+		t.Fatalf("risk notification key = %q, want %q; the key must identify the acceptance period, not the scan", firstExpiredKey, want)
 	}
+}
+
+// findingDeadlineEpoch reads the acceptance deadline back from the row, so the
+// key is pinned against stored data instead of against the value just inserted.
+func findingDeadlineEpoch(t *testing.T, f *notificationScopeFixture, findingID string) int64 {
+	t.Helper()
+	var epoch int64
+	if err := f.pool.QueryRow(f.ctx, `
+		SELECT extract(epoch FROM risk_accepted_until)::bigint FROM security_findings WHERE id=$1::uuid`, findingID).Scan(&epoch); err != nil {
+		t.Fatalf("read acceptance deadline: %v", err)
+	}
+	return epoch
 }
 
 func keysOf(items []notification.Item) []string {
