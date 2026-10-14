@@ -10,6 +10,7 @@ import { useAuthStore } from '../stores/auth'
 import WorkingVersionDiffDrawer from '../components/WorkingVersionDiffDrawer.vue'
 import ResourceSubmissionHistoryDrawer from '../components/ResourceSubmissionHistoryDrawer.vue'
 import { draftLastEditedHint, draftTakeoverSummary } from '../utils/inventory-drafts'
+import { reportEditConflict } from '../utils/edit-conflict'
 import { createSuggestedColumnMapping, getImportColumnMappingError, importColumnLabel, isImportColumnUsed, serializeImportColumnMapping, type ImportColumn, type ImportColumnMapping, type ImportField } from '../utils/import-column-mapping'
 
 interface Organization { id: string; code: string; name: string; type: string; status: string }
@@ -327,7 +328,11 @@ async function submit() {
     dialogVisible.value = false
     await refreshAfterMutation()
     if (detailVisible.value && detail.value?.id === id) await openDetail(detail.value as BusinessSystem)
-  } catch (error) { ElMessage.error(getAPIErrorMessage(error, editingID.value ? '编辑业务系统失败' : '新增业务系统失败')) }
+  } catch (error) {
+    if (error === 'cancel' || error === 'close') return
+    if (await reportEditConflict(error, '业务系统已被其他人更新', load)) return
+    ElMessage.error(getAPIErrorMessage(error, editingID.value ? '编辑业务系统失败' : '新增业务系统失败'))
+  }
   finally { submitting.value = false }
 }
 
@@ -385,7 +390,11 @@ async function removeDraft(row: BusinessSystem) {
     await apiClient.delete(`/inventory-tasks/${inventoryTaskID.value}/organizations/${inventoryOrganizationID.value}/business-system-drafts/${row.id}`, { params: { expected_version: row.version } })
     ElMessage.success('任务变更已取消')
     await loadDraftSystems()
-  } catch (error) { if (error !== 'cancel' && error !== 'close') ElMessage.error(getAPIErrorMessage(error, '删除业务系统草稿失败')) }
+  } catch (error) {
+    if (error === 'cancel' || error === 'close') return
+    if (await reportEditConflict(error, '草稿已被其他人更新', loadDraftSystems)) return
+    ElMessage.error(getAPIErrorMessage(error, '删除业务系统草稿失败'))
+  }
 }
 
 function draftOwnerLabel(row: BusinessSystem) {
@@ -411,7 +420,10 @@ async function takeoverDraft(row: BusinessSystem) {
     await apiClient.post(`/inventory-tasks/${inventoryTaskID.value}/organizations/${inventoryOrganizationID.value}/business-system-drafts/${row.id}/takeover`, { expected_version: row.version, reason })
     ElMessage.success('已接管该草稿，接管原因已记入审计日志')
     await loadDraftSystems()
-  } catch (error) { ElMessage.error(getAPIErrorMessage(error, '接管业务系统草稿失败')) }
+  } catch (error) {
+    if (await reportEditConflict(error, '草稿已被其他人更新', loadDraftSystems)) return
+    ElMessage.error(getAPIErrorMessage(error, '接管业务系统草稿失败'))
+  }
 }
 
 async function requestSystemDeletion(row: BusinessSystem) {

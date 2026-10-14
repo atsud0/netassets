@@ -52,3 +52,15 @@ function readBlobWithFileReader(blob: Blob) {
     reader.readAsText(blob)
   })
 }
+
+// Optimistic concurrency (expected_version / expected_updated_at) failures come
+// back as HTTP 409. They must never be presented as a generic failure: the write
+// was rejected because the server copy moved on, so the UI has to offer a reload
+// instead of implying the user's input was wrong.
+export function isEditConflictError(error: unknown) {
+  return axios.isAxiosError<APIErrorPayload>(error) && error.response?.status === 409
+}
+
+export function describeEditConflict(fallback = '数据已被其他人更新') {
+  return `${fallback}，本次修改未覆盖服务器上的最新内容。请先刷新查看最新数据，再重新提交。`
+}

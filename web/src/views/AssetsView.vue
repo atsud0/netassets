@@ -10,7 +10,8 @@ import SavedFilterViews from '../components/SavedFilterViews.vue'
 import AssetExternalObservations from '../components/AssetExternalObservations.vue'
 import WorkingVersionDiffDrawer from '../components/WorkingVersionDiffDrawer.vue'
 import ResourceSubmissionHistoryDrawer from '../components/ResourceSubmissionHistoryDrawer.vue'
-import { assetDraftEndpoint, batchAssetUpdateSuccessMessage, draftLastEditedHint, draftTakeoverSummary, normalizeDraftTakeoverReason } from '../utils/inventory-drafts'
+import { assetDraftEndpoint, batchAssetUpdateSuccessMessage, draftLastEditedHint, draftTakeoverSummary } from '../utils/inventory-drafts'
+import { reportEditConflict } from '../utils/edit-conflict'
 import { assetDirectBatchEndpointQuery, needsDirectChangeReason } from '../utils/asset-direct-change'
 import { createSuggestedColumnMapping, getImportColumnMappingError, importColumnLabel, isImportColumnUsed, serializeImportColumnMapping, type ImportColumn, type ImportColumnMapping, type ImportField } from '../utils/import-column-mapping'
 
@@ -595,6 +596,7 @@ async function submit() {
     await refreshAfterMutation()
   } catch (error) {
     if (error === 'cancel' || error === 'close') { editDialogVisible.value = false; return }
+    if (await reportEditConflict(error, '网络资产已被其他人更新', refreshAfterMutation)) return
     ElMessage.error(getAPIErrorMessage(error, inventoryMode.value ? '保存待上报网络资产失败' : (editingAssetID.value ? '编辑网络资产失败' : '新增网络资产失败')))
   } finally {
     submitting.value = false
@@ -671,6 +673,7 @@ async function takeoverDraft(item: Asset) {
     ElMessage.success('已接管该草稿，接管原因已记入审计日志')
     await refreshAfterMutation()
   } catch (error) {
+    if (await reportEditConflict(error, '草稿已被其他人更新', loadAssetDrafts)) return
     ElMessage.error(getAPIErrorMessage(error, '接管填报资产草稿失败'))
   }
 }
@@ -684,6 +687,7 @@ async function removeDraft(item: Asset) {
     await loadAssetDrafts()
   } catch (error) {
     if (error === 'cancel' || error === 'close') return
+    if (await reportEditConflict(error, '草稿已被其他人更新', loadAssetDrafts)) return
     ElMessage.error(getAPIErrorMessage(error, '删除填报资产草稿失败'))
   }
 }
