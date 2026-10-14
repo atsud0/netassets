@@ -627,6 +627,37 @@ func TestBusinessSystemRetirementRetiresAndRestoresTasks(t *testing.T) {
 	if stillRetired != nil {
 		t.Fatal("restoring the system did not clear the retirement mark")
 	}
+	// Restoring is not only a data fix: the group has to see the task came back,
+	// otherwise the work silently disappears from every working queue.
+	page, _ = pagination.Normalize(1, 50)
+	revived, err := f.s.List(f.ctx, f.manager, remediation.Filter{Revived: true, Page: page})
+	must(t, err)
+	revivedFound := false
+	for _, row := range revived.Items {
+		if row["id"] == id {
+			revivedFound = true
+		}
+	}
+	if !revivedFound {
+		t.Fatal("the restored task is missing from the revived follow-up queue")
+	}
+	revivedStats, err := f.s.Statistics(f.ctx, f.manager, remediation.Filter{Revived: true, Page: page})
+	must(t, err)
+	if revivedStats["revived"] == nil || revivedStats["revived"].(float64) < 1 {
+		t.Fatalf("statistics revived = %v, want at least 1", revivedStats["revived"])
+	}
+	revivedBlocks, err := f.s.List(f.ctx, f.manager, remediation.Filter{ExecutionBlockedReason: "system_unavailable", Page: page})
+	must(t, err)
+	blockedFound := false
+	for _, row := range revivedBlocks.Items {
+		if row["id"] == id {
+			blockedFound = true
+		}
+	}
+	if !blockedFound {
+		t.Fatal("filtering the queue by execution_blocked_reason did not return the archived-system task")
+	}
+
 	// A restored system comes back archived, so the task stays unexecutable until
 	// the group reactivates it. Retiring is not the same as resuming.
 	restored, err := f.s.Detail(f.ctx, f.manager, id, false)
@@ -643,6 +674,18 @@ func TestBusinessSystemRetirementRetiresAndRestoresTasks(t *testing.T) {
 	}
 	now := time.Now()
 	f.action(t, f.worker, id, "submit", remediation.ActionInput{Summary: "恢复后提交", DeploymentStatus: "target", ChangeReference: "release-a", DeployedAt: &now, SelfTestResult: "自测通过"}, true)
+
+	// Once the revived task is actually worked on, it must leave the follow-up
+	// queue: the "came back" question has been answered by the submit.
+	_, err = f.pool.Exec(f.ctx, `UPDATE remediation_tasks SET updated_at=now() WHERE id=$1::uuid`, id)
+	must(t, err)
+	leftQueue, err := f.s.List(f.ctx, f.manager, remediation.Filter{Revived: true, Page: page})
+	must(t, err)
+	for _, row := range leftQueue.Items {
+		if row["id"] == id {
+			t.Fatal("a task that was progressed after its restore is still listed as revived")
+		}
+	}
 
 	// A cancelled task is history, not interrupted work: restoring the system
 	// must never bring it back into the active queue.

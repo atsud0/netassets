@@ -105,3 +105,47 @@ func TestCanTransition(t *testing.T) {
 		t.Fatal("direct status policy does not protect evidence-bearing states")
 	}
 }
+
+// The external scanner export the customer produces carries this vocabulary, and
+// `notify`-style labels shown to reviewers are derived from it. A silent change
+// to either a value or its Chinese label would corrupt both the import mapping
+// and every status breakdown, so the contract is pinned literally rather than
+// derived from the implementation.
+//
+// Note the deliberate distinction: resolved = 已处理 (the remediation work was
+// carried out) and fixed = 已修复 (the vulnerability no longer reproduces).
+// They are separate states and must never be collapsed into one another.
+func TestStatusVocabularyMatchesExternalExportContract(t *testing.T) {
+	want := []struct {
+		value string
+		label string
+	}{
+		{Pending, "待处理"},
+		{InProgress, "处理中"},
+		{Confirmed, "已确认"},
+		{Resolved, "已处理"},
+		{Fixed, "已修复"},
+		{FalsePositive, "误报"},
+		{Ignored, "忽略"},
+		{Duplicate, "重复"},
+		{RiskAccepted, "风险接受"},
+	}
+	definitions := Definitions()
+	if len(definitions) != len(want) {
+		t.Fatalf("status count = %d, want %d", len(definitions), len(want))
+	}
+	for i, expected := range want {
+		if definitions[i].Value != expected.value || definitions[i].Label != expected.label {
+			t.Fatalf("status %d = (%q, %q), want (%q, %q)", i, definitions[i].Value, definitions[i].Label, expected.value, expected.label)
+		}
+	}
+	if Label(Resolved) == Label(Fixed) {
+		t.Fatal("resolved and fixed share one label; the two states are no longer distinguishable to a reviewer")
+	}
+	// The two states must also stay distinguishable in the flow direction: a
+	// handled finding becomes fixed only through an explicit transition, never
+	// by being relabelled.
+	if CanTransition(Resolved, Fixed) != true || CanTransition(Fixed, Resolved) {
+		t.Fatal("resolved/fixed transition direction changed; handled findings must be able to become fixed without rewriting history")
+	}
+}

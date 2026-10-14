@@ -152,9 +152,23 @@ const taskSelect = `SELECT t.id,t.task_no,t.work_order_id,w.work_order_no,w.stat
  JOIN remediation_material_versions m ON m.task_id=t.id AND m.revision=t.material_revision `
 
 type Filter struct {
-	OrderID, Status, Keyword, SystemID, Severity                                                                  string
+	OrderID, Status, Keyword, SystemID, Severity, ExecutionBlockedReason                                        string
 	Mine, Overdue, DueSoon, Returned, NeedsReassignment, Blocked, PendingRequest, ReviewMine, MaterialNeedsReview bool
+	// Revived selects tasks whose asset or system was restored. Restoration clears
+	// the retirement marker and puts the task back into current work, but nobody
+	// owns the follow-up, so the group needs one list of "came back, nobody is
+	// looking at it yet".
+	Revived bool
 	Page                                                                                                          pagination.Query
+}
+
+// blockedReasons lists every reason remediation_task_execution_state() can
+// return. It is duplicated here only to validate a filter value before it reaches
+// the query; the authoritative definition stays in SQL.
+func blockedReasons() []string {
+	return []string{"task_not_found", "task_closed", "asset_retired", "system_retired", "finding_missing",
+		"organization_mismatch", "system_mismatch", "asset_unavailable", "system_unavailable",
+		"authorization_expired", "not_assignee", "not_authorized"}
 }
 
 func taskQuery(p auth.Principal, in Filter) (string, []any, error) {
@@ -165,6 +179,11 @@ func taskQuery(p auth.Principal, in Filter) (string, []any, error) {
 		return "", nil, ErrInvalid
 	}
 	if in.Severity != "" && !contains([]string{"critical", "high", "medium", "low", "info"}, in.Severity) {
+		return "", nil, ErrInvalid
+	}
+	// The reason vocabulary is the database function's, not the caller's, so an
+	// unknown value is rejected instead of silently returning an empty queue.
+	if in.ExecutionBlockedReason != "" && !contains(blockedReasons(), in.ExecutionBlockedReason) {
 		return "", nil, ErrInvalid
 	}
 	if in.Mine && in.Status == "" {
@@ -183,8 +202,10 @@ func taskQuery(p auth.Principal, in Filter) (string, []any, error) {
  AND (NOT $12 OR t.blocked_reason<>'')
  AND (NOT $13 OR EXISTS(SELECT 1 FROM remediation_requests r WHERE r.task_id=t.id AND r.status='pending'))
  AND (NOT $14 OR (t.status='pending_org_review' AND remediation_can_manage($1::uuid,t.organization_id,'remediation.review')) OR (t.status='pending_security_review' AND remediation_is_security($1::uuid)))
- AND (NOT $15 OR t.material_needs_review)`
-	return sql, []any{p.UserID, in.Mine, in.OrderID, in.Status, in.Keyword, in.Overdue, in.SystemID, in.Severity, in.DueSoon, in.Returned, in.NeedsReassignment, in.Blocked, in.PendingRequest, in.ReviewMine, in.MaterialNeedsReview}, nil
+ AND (NOT $15 OR t.material_needs_review)
+ AND ($16='' OR (SELECT reason FROM remediation_task_execution_state(t.id))=$16)
+ AND (NOT $17 OR remediation_task_recently_revived(t.id))`
+	return sql, []any{p.UserID, in.Mine, in.OrderID, in.Status, in.Keyword, in.Overdue, in.SystemID, in.Severity, in.DueSoon, in.Returned, in.NeedsReassignment, in.Blocked, in.PendingRequest, in.ReviewMine, in.MaterialNeedsReview, in.ExecutionBlockedReason, in.Revived}, nil
 }
 func (s *Service) List(ctx context.Context, p auth.Principal, in Filter) (pagination.Result[Object], error) {
 	sql, args, err := taskQuery(p, in)

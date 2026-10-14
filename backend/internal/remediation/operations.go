@@ -58,8 +58,10 @@ func (s *Service) Statistics(ctx context.Context, p auth.Principal, in Filter) (
  SELECT count(*) total,count(*) FILTER(WHERE v.completion_reason='verified_fixed') verified_fixed,
  count(*) FILTER(WHERE v.completion_reason='risk_accepted' AND v.risk_acceptance_current) risk_accepted,count(*) FILTER(WHERE v.completion_reason='risk_accepted' AND NOT v.risk_acceptance_current) risk_expired,count(*) FILTER(WHERE v.completion_reason='false_positive') false_positive,
  count(*) FILTER(WHERE v.overdue) overdue,count(*) FILTER(WHERE v.due_at<>v.original_due_at) extended,
+ count(*) FILTER(WHERE remediation_task_recently_revived(v.id)) revived,
  COALESCE(avg(d.execution_seconds),0) execution_seconds,COALESCE(avg(d.organization_seconds),0) organization_seconds,COALESCE(avg(d.security_seconds),0) security_seconds,
  COALESCE((SELECT jsonb_object_agg(status,n) FROM(SELECT status,count(*) n FROM visible GROUP BY status) x),'{}'::jsonb) counts,
+ COALESCE((SELECT jsonb_object_agg(reason,n) FROM(SELECT execution_blocked_reason reason,count(*) n FROM visible WHERE execution_blocked_reason IS NOT NULL GROUP BY execution_blocked_reason) x),'{}'::jsonb) block_reasons,
  COALESCE((SELECT jsonb_agg(x) FROM(SELECT organization_name,assignee_name,vendor_name,count(*) total,count(*) FILTER(WHERE status NOT IN ('completed','cancelled')) active FROM visible GROUP BY organization_name,assignee_name,vendor_name ORDER BY active DESC,assignee_name) x),'[]'::jsonb) workload
  FROM visible v LEFT JOIN durations d ON d.task_id=v.id`, args...)
 }

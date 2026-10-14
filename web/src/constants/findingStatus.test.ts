@@ -32,3 +32,29 @@ describe('findingStatus', () => {
     expect(isFindingStatusOpen('unknown')).toBe(false)
   })
 })
+
+// The labels below are the vocabulary the external scanner export uses and that
+// reviewers read. They are asserted literally so a refactor cannot quietly
+// rename a state; resolved (已处理) and fixed (已修复) in particular are two
+// different facts about the same vulnerability.
+describe('finding status label contract', () => {
+  it('maps every value to its external label', () => {
+    expect(FINDING_STATUSES.map(s => [s.value, s.label])).toEqual([
+      ['pending', '待处理'],
+      ['in_progress', '处理中'],
+      ['confirmed', '已确认'],
+      ['resolved', '已处理'],
+      ['fixed', '已修复'],
+      ['false_positive', '误报'],
+      ['ignored', '忽略'],
+      ['duplicate', '重复'],
+      ['risk_accepted', '风险接受'],
+    ])
+  })
+
+  it('keeps resolved and fixed distinguishable', () => {
+    expect(findingStatusLabels.resolved).not.toBe(findingStatusLabels.fixed)
+    expect(findingStatusLabels.resolved).toBe('已处理')
+    expect(findingStatusLabels.fixed).toBe('已修复')
+  })
+})

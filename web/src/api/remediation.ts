@@ -79,5 +79,5 @@ export async function loadOptions<T>(path: string, params: Record<string, string
   }
 }
 
-export interface RepairStatistics { total: number; verified_fixed: number; risk_accepted: number; risk_expired: number; false_positive: number; overdue: number; extended: number; execution_seconds: number; organization_seconds: number; security_seconds: number; counts: Record<string, number>; workload: { organization_name: string; assignee_name: string; vendor_name: string; total: number; active: number }[] }
+export interface RepairStatistics { total: number; verified_fixed: number; risk_accepted: number; risk_expired: number; false_positive: number; overdue: number; extended: number; revived: number; execution_seconds: number; organization_seconds: number; security_seconds: number; counts: Record<string, number>; block_reasons: Record<string, number>; workload: { organization_name: string; assignee_name: string; vendor_name: string; total: number; active: number }[] }
 export interface MaterialVersion extends Material { revision: number; source_revision: number; target_environment: string; deployment_required: boolean; attachments: Attachment[]; created_at: string }

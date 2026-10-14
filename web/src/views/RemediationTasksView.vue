@@ -22,6 +22,8 @@ const status = ref(typeof route.query.status === 'string' ? route.query.status :
 const systemID = ref('')
 const severity = ref('')
 const special = ref(typeof route.query.view === 'string' ? route.query.view : '')
+const blockReason = ref('')
+const revivedOnly = ref(false)
 const systems = ref<SystemOption[]>([])
 const stats = ref<RepairStatistics>()
 const selectedTasks = ref<RepairTask[]>([])
@@ -44,7 +46,7 @@ function saveView() {
 function applyView() {
  try { const v = JSON.parse(localStorage.getItem(viewKey.value) || '{}'); status.value=typeof v.status==='string'?v.status:'all';systemID.value=v.systemID||'';severity.value=v.severity||'';special.value=v.special||'';keyword.value=v.keyword||'';overdue.value=Boolean(v.overdue);orderID.value=executor.value?'':v.orderID||'';advanced.value=true;page.value=1;void load() } catch { ElMessage.warning('保存的视图无法读取，请重新保存') }
 }
-function resetFilters() { status.value=executor.value?'active':'all';systemID.value='';severity.value='';special.value='';keyword.value='';overdue.value=false;page.value=1;void load() }
+function resetFilters() { revivedOnly.value = false; blockReason.value = ''; status.value=executor.value?'active':'all';systemID.value='';severity.value='';special.value='';keyword.value='';overdue.value=false;page.value=1;void load() }
 const quickViews = computed(() => [
  {key:'all',label:'全部任务'}, ...(!executor.value ? [{key:'review_mine',label:'待我审核'}] : []),
  {key:'overdue',label:'已逾期'}, {key:'returned',label:'被退回'}, {key:'active',label:'未完成'}, {key:'completed',label:'已完成'},
@@ -53,6 +55,13 @@ const activeView = computed(() => overdue.value ? 'overdue' : ['review_mine','re
 function selectView(value:string) { status.value=['active','completed'].includes(value)?value:'all';overdue.value=value==='overdue';special.value=['review_mine','returned'].includes(value)?value:'';page.value=1 }
 function taskAction(task:RepairTask) { return executor.value ? task.status==='pending_acceptance'?'接收任务':task.status==='in_progress'?'继续修复':'查看进度' : task.status==='pending_org_review'&&auth.hasPermission('remediation.review')?'组织确认':task.status==='pending_security_review'&&auth.canManageSecurityWorkOrders?'开始复测':'查看详情' }
 function blockText(reason?:string) { if (!reason) return ''; return executionBlockReasons[reason]?.text || `任务当前不可执行（${reason}）` }
+// The group admin triages the blocked queue by cause, not by task. The
+// statistics endpoint groups open blocked tasks by execution_blocked_reason, so
+// the workbench can offer one click per cause instead of reading 200 rows.
+const blockBreakdown = computed(() => Object.entries(stats.value?.block_reasons ?? {})
+  .map(([reason, count]) => ({ reason, count, text: executionBlockReasons[reason]?.text || `不可执行（${reason}）`, action: executionBlockReasons[reason]?.action || '请联系集团安全管理员确认任务状态。' }))
+  .sort((a, b) => b.count - a.count))
+function filterByBlockReason(reason: string) { status.value = 'all'; special.value = 'needs_reassignment'; blockReason.value = reason; page.value = 1; void load() }
 function blockAction(reason?:string) { if (!reason) return ''; return executionBlockReasons[reason]?.action || '请联系集团安全管理员确认任务状态。' }
 function severityType(value:string) { return value==='critical'?'danger':value==='high'?'warning':value==='medium'?'primary':'info' }
 const metricCards = computed(() => {
@@ -102,7 +111,9 @@ async function load() {
   const sequence=++loadSequence
   loading.value = true; errorMessage.value=''
   try {
-    const params = { page: page.value, status: status.value, keyword: keyword.value, overdue: overdue.value, work_order_id: executor.value ? '' : orderID.value, business_system_id: systemID.value, severity: severity.value, ...(special.value ? { [special.value]: true } : {}) }
+    const params: Record<string, string | number | boolean> = { page: page.value, status: status.value, keyword: keyword.value, overdue: overdue.value, work_order_id: executor.value ? '' : orderID.value, business_system_id: systemID.value, severity: severity.value, ...(special.value ? { [special.value]: true } : {}) }
+    params['execution_blocked_reason'] = blockReason.value
+    params['revived'] = revivedOnly.value
     const [list, statistics, overview, orderSummary] = await Promise.all([
       apiClient.get<Page<RepairTask>>(base.value, { params }),
       apiClient.get<RepairStatistics>(`${base.value}/statistics`, { params }),
@@ -146,7 +157,7 @@ async function acceptOrder() {
 async function closeOrder() {
   try { const { value } = await ElMessageBox.prompt('所有漏洞必须已有逐项验证或获批处置结果，请填写关闭说明', '关闭主工单', { inputValidator: value => Boolean(value?.trim()) || '请填写说明' }); await apiClient.post(`/security-work-orders/${orderID.value}/close-individual`, { reason: value }); await load(); ElMessage.success('主工单已关闭') } catch (error) { if (error !== 'cancel' && error !== 'close') ElMessage.error(getAPIErrorMessage(error)) }
 }
-watch([status, overdue, orderID, executor, systemID, severity, special], () => { page.value = 1; void load() })
+watch([status, overdue, orderID, executor, systemID, severity, special, blockReason, revivedOnly], () => { page.value = 1; void load() })
 watch(viewKey, syncSavedView)
 watch(() => route.fullPath, () => {
  status.value=typeof route.query.status==='string'?route.query.status:executor.value?'active':'all'
@@ -186,6 +197,12 @@ onMounted(async () => {
     </div>
       <div v-if="selectedTasks.length && !executor" class="selection-bar"><span>已选择 {{ selectedTasks.length }} 项待审核任务</span><el-button type="primary" @click="startReview">进入逐项审核</el-button><small>每项分别填写意见并确认</small></div>
       <div v-if="executor" v-loading="loading" class="executor-layout"><div class="executor-tasks"><article v-for="row in rows" :key="row.id" class="executor-task" :class="{returned:row.return_reason}"><div class="task-card-meta"><el-tag :type="severityType(row.severity)" size="small">{{ severityLabels[row.severity] }}</el-tag><el-tag size="small">{{ outcomes[row.completion_reason ?? ''] || taskStatuses[row.status] }}</el-tag><span>{{ row.task_no }}</span></div><h2><button @click="open(row.id)">{{ row.title }}</button></h2><p class="muted">{{ row.system_name }} · {{ row.organization_name }} · 目标环境：{{ row.target_environment }}</p><div v-if="row.return_reason" class="task-feedback">退回原因：{{ row.return_reason }}</div><div v-if="row.material_needs_review || row.execution_blocked_reason || row.blocked_reason" class="task-feedback"><div v-if="row.material_needs_review">共享材料待复核。</div><div v-if="row.execution_blocked_reason">{{ blockText(row.execution_blocked_reason) }}</div><div v-if="row.execution_blocked_reason" class="muted">{{ blockAction(row.execution_blocked_reason) }}</div><div v-if="row.blocked_reason">{{ row.blocked_reason }}</div></div><div class="task-card-footer"><span :class="row.overdue?'overdue-text':'muted'">截止 {{ dateText(row.due_at) }}{{ row.overdue?' · 已逾期':'' }}</span><el-button :type="['pending_acceptance','in_progress'].includes(row.status)?'primary':'default'" @click="open(row.id)">{{ taskAction(row) }}</el-button></div></article><el-empty v-if="!loading && !rows.length" description="当前视图没有修复任务"><el-button @click="resetFilters">查看全部未完成任务</el-button></el-empty></div><aside class="executor-guide"><h3>一项任务，三步交付</h3><ol><li><strong>确认修复要求</strong><p>核对共享材料、目标环境与期限。</p></li><li><strong>完成部署与自测</strong><p>保留版本号、自测记录和证明附件。</p></li><li><strong>提交组织确认</strong><p>组织确认后进入集团复测。</p></li></ol><p class="guide-note">遇到依赖阻塞或期限冲突，可在任务内提出申请。延期获批前仍按原期限计时。</p></aside></div>
+      <section v-if="!executor && (blockBreakdown.length || stats?.revived)" class="reassign-workbench">
+        <div class="reassign-heading"><strong>待改派队列</strong><span class="muted">按不可执行原因分组；先恢复资产或系统，再决定改派或取消</span></div>
+        <div class="reassign-grid"><button v-for="item in blockBreakdown" :key="item.reason" type="button" class="reassign-card" :aria-pressed="blockReason === item.reason" @click="filterByBlockReason(item.reason)"><span class="reassign-count">{{ item.count }}</span><span class="reassign-text">{{ item.text }}</span><span class="muted">{{ item.action }}</span></button></div>
+        <el-alert v-if="blockReason" type="info" :closable="false" class="reassign-filtered">已按“{{ executionBlockReasons[blockReason]?.text || blockReason }}”筛选 <el-button link type="primary" @click="blockReason = ''; page = 1; load()">查看全部原因</el-button></el-alert>
+        <div v-if="stats?.revived" class="reassign-revived"><el-button text type="warning" @click="status='all'; special=''; blockReason=''; revivedOnly=true; page=1; load()">{{ stats.revived }} 项任务因资产/系统恢复而重新回到当前工作，请确认是否继续</el-button></div>
+      </section>
       <el-table v-else v-loading="loading" :data="rows" :class="{ 'compact-table':compact }" @selection-change="selectedTasks=$event">
         <template #empty><el-empty description="当前筛选下没有修复任务" :image-size="64"><el-button @click="resetFilters">清除筛选</el-button><el-button v-if="auth.hasPermission('remediation.assign')" type="primary" @click="advanced=true">选择工单安排修复</el-button></el-empty></template>
         <el-table-column type="selection" width="42" :selectable="(row:RepairTask)=>(row.status==='pending_org_review'&&auth.hasPermission('remediation.review'))||(row.status==='pending_security_review'&&auth.canManageSecurityWorkOrders)" />
@@ -220,6 +237,7 @@ onMounted(async () => {
 .quick-views { display:flex;gap:24px;padding:0 20px;border-bottom:1px solid var(--line);overflow-x:auto; }.quick-views button { border:0;background:none;color:var(--muted);padding:17px 0;white-space:nowrap;cursor:pointer;font-size:13px;border-bottom:2px solid transparent; }.quick-views button.active { color:var(--cyan);border-bottom-color:var(--cyan); }
 .repair-toolbar { display:flex;gap:8px;padding:16px 20px;align-items:center;flex-wrap:wrap; }.repair-toolbar>.el-input { width:260px; }.repair-toolbar>.el-select { width:120px; }.repair-toolbar .el-button { margin:0; }.toolbar-spacer { flex:1; }.advanced-filters { padding:16px 20px;border-top:1px solid var(--line);background:#f8fafc; }.advanced-filters .el-select { max-width:100%; }.repair-list-panel>.summary { margin:0 20px 16px; }
 .selection-bar { display:flex;gap:14px;align-items:center;flex-wrap:wrap;background:#eaf5f2;padding:12px 20px;color:var(--cyan); }.selection-bar small { color:var(--muted); }.overdue-text { color:var(--el-color-danger);font-size:12px; }.el-pagination { padding:18px 20px; }.assignment-form { margin-top:20px; }.el-tag { margin:2px; }.statistics-disclosure { border:1px solid var(--line);border-radius:10px;padding:0 20px;background:white; }.statistics-disclosure :deep(.el-collapse-item__wrap),.statistics-disclosure :deep(.el-collapse-item__header) { border:0; }.compact-table :deep(td.el-table__cell) { padding:7px 0; }
+.reassign-workbench { margin:16px 0;padding:16px;border:1px solid var(--line);border-radius:9px; }.reassign-heading { display:flex;align-items:baseline;gap:12px;flex-wrap:wrap;margin-bottom:12px; }.reassign-heading strong { font-size:15px;font-weight:500; }.reassign-grid { display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:10px; }.reassign-card { display:grid;gap:4px;text-align:left;padding:12px;border:1px solid var(--line);border-radius:8px;background:#fff;cursor:pointer;font:inherit;color:inherit; }.reassign-card:hover { border-color:var(--cyan); }.reassign-card[aria-pressed='true'] { border-color:var(--cyan);background:#f0f7f6; }.reassign-count { font-size:22px;font-weight:500; }.reassign-text { font-size:13px; }.reassign-card .muted { font-size:12px;line-height:1.6; }.reassign-filtered { margin-top:12px; }
 .executor-layout { display:grid;grid-template-columns:minmax(0,1fr) 270px;gap:20px;padding:20px; }.executor-tasks { display:grid;gap:14px;min-width:0; }.executor-task { padding:20px;border:1px solid var(--line);border-radius:9px; }.executor-task.returned { border-left:3px solid #c88935; }.task-card-meta { display:flex;align-items:center;gap:7px; }.task-card-meta>span:last-child { margin-left:auto;color:var(--muted);font-size:12px; }.executor-task h2 { font-size:16px;font-weight:500;margin:16px 0 8px; }.executor-task h2 button { font:inherit;color:var(--ink);background:none;border:0;padding:0;text-align:left;cursor:pointer; }.task-feedback { background:#fff5e6;color:#895a21;padding:12px;margin-top:16px;border-radius:6px;font-size:13px;line-height:1.7; }.task-card-footer { display:flex;justify-content:space-between;align-items:center;gap:12px;margin-top:20px; }.executor-guide { align-self:start;padding:20px;border:1px solid var(--line);border-radius:9px;font-size:13px; }.executor-guide h3 { margin:0 0 24px;font-size:15px;font-weight:500; }.executor-guide ol { padding-left:18px; }.executor-guide li { margin-bottom:24px; }.executor-guide strong { font-weight:500; }.executor-guide p { color:var(--muted);line-height:1.7;font-size:12px; }.guide-note { background:#f3f6f8;border-radius:6px;padding:12px; }
 @media(max-width:1100px) { .executor-layout { grid-template-columns:1fr; }.executor-guide { display:none; } }
 @media(max-width:760px) { .repair-toolbar { padding:14px; }.repair-toolbar>.el-input { width:100%; }.toolbar-spacer { display:none; }.quick-views { gap:20px;padding:0 14px; }.executor-layout { padding:12px; }.executor-task { padding:15px; }.task-card-footer { flex-wrap:wrap; }.filters>* { max-width:100%; }.stat-grid { gap:10px; } }

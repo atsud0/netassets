@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"netassets/internal/asset"
@@ -316,6 +317,13 @@ func (s *Service) Create(ctx context.Context, principal auth.Principal, in Creat
 	var id string
 	err = tx.QueryRow(ctx, `INSERT INTO asset_candidates(asset_type,asset_value,normalized_value,suggested_data,organization_id,source,source_reference,status,created_by) VALUES($1,$2,$3,$4::jsonb,NULLIF($5,'')::uuid,$6,NULLIF($7,''),'pending',$8::uuid) RETURNING id::text`, in.AssetType, in.AssetValue, normalized, data, in.OrganizationID, in.Source, in.SourceReference, principal.UserID).Scan(&id)
 	if err != nil {
+		// One open discovery represents one asset value (asset_candidates_pending_value_unique).
+		// Two reviewers filing the same host at the same time is ordinary work, not a
+		// server fault: report it as a conflict so the second one opens the pending
+		// discovery instead of seeing an opaque 500.
+		if isUniqueViolation(err) {
+			return Candidate{}, ErrConflict
+		}
 		return Candidate{}, fmt.Errorf("insert asset candidate: %w", err)
 	}
 	if err = s.audit(ctx, tx, principal, in.OrganizationID, "asset_candidate.create", id, "新增待确认资产", map[string]any{"asset_type": in.AssetType, "asset_value": in.AssetValue, "source": in.Source}, requestID, ip); err != nil {
@@ -597,6 +605,14 @@ func validStatus(s string) bool {
 	}
 	return false
 }
+// isUniqueViolation reports whether err is a PostgreSQL unique constraint
+// violation (23505), including the partial indexes used for pending-only
+// reservations.
+func isUniqueViolation(err error) bool {
+	var pgErr *pgconn.PgError
+	return errors.As(err, &pgErr) && pgErr.Code == "23505"
+}
+
 func mapAssetError(err error) error {
 	switch {
 	case errors.Is(err, asset.ErrForbidden):
