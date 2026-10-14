@@ -12,6 +12,7 @@ import WorkingVersionDiffDrawer from '../components/WorkingVersionDiffDrawer.vue
 import ResourceSubmissionHistoryDrawer from '../components/ResourceSubmissionHistoryDrawer.vue'
 import { assetDraftEndpoint, batchAssetUpdateSuccessMessage, draftLastEditedHint, draftTakeoverSummary } from '../utils/inventory-drafts'
 import { reportEditConflict } from '../utils/edit-conflict'
+import { expiryState, expiryTagType } from '../utils/asset-expiry'
 import { formatDateTime } from '../utils/datetime'
 import { assetDirectBatchEndpointQuery, needsDirectChangeReason } from '../utils/asset-direct-change'
 import { createSuggestedColumnMapping, getImportColumnMappingError, importColumnLabel, isImportColumnUsed, serializeImportColumnMapping, type ImportColumn, type ImportColumnMapping, type ImportField } from '../utils/import-column-mapping'
@@ -1103,17 +1104,20 @@ function importanceTag(value: string) { return value === 'core' ? 'danger' : val
 function importStatusTag(value: string) { return value === 'completed' ? 'success' : value === 'partial' ? 'warning' : 'danger' }
 function formatDate(value: string) { return new Intl.DateTimeFormat('zh-CN', { dateStyle: 'short', timeStyle: 'short' }).format(new Date(value)) }
 function expiryLabel(value?: string) {
-  if (!value) return '长期有效'
-  const expiresAt = new Date(value).getTime()
-  const remainingDays = Math.ceil((expiresAt - Date.now()) / 86400000)
-  if (remainingDays < 0) return `已到期 · ${formatDate(value)}`
-  if (remainingDays <= 30) return `即将到期 · ${formatDate(value)}`
-  return formatDate(value)
+  // The state comes from one shared rule (web/src/utils/asset-expiry) instead of
+  // rounding days here. Rounding with Math.ceil made an asset that had been
+  // expired for less than a day report zero remaining days, so it fell through to
+  // the "即将到期" branch - the reported "已到期却显示即将过期".
+  switch (expiryState(value)) {
+    case 'permanent': return '长期有效'
+    case 'expired': return `已到期 · ${formatDate(value!)}`
+    case 'expiring': return `即将到期 · ${formatDate(value!)}`
+    case 'unknown': return `有效期异常 · ${value}`
+    default: return formatDate(value!)
+  }
 }
 function expiryTag(value?: string) {
-  if (!value) return 'info'
-  const remaining = new Date(value).getTime() - Date.now()
-  return remaining < 0 ? 'danger' : remaining <= 30 * 86400000 ? 'warning' : 'success'
+  return expiryTagType(value)
 }
 
 watch(() => route.query.organization_id, (value) => {
