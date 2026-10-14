@@ -21,7 +21,14 @@ const props = defineProps<{
   currentFilters: Record<string, string>
   disabled?: boolean
 }>()
-const emit = defineEmits<{ apply: [filters: Record<string, string>] }>()
+// 'changed' is emitted whenever the set of saved views changes, including when one is
+// deleted. A deletion is a change to what the page is showing: the deleted view was
+// the only name for the filters currently applied, so the host page has to reload its
+// list rather than keep rendering results under a name that no longer exists.
+const emit = defineEmits<{
+  apply: [filters: Record<string, string>]
+  changed: [views: SavedFilterView[]]
+}>()
 
 const views = ref<SavedFilterView[]>([])
 const loading = ref(false)
@@ -84,6 +91,7 @@ async function saveView() {
     dialogVisible.value = false
     await loadViews()
     selectedID.value = response.data.item.id
+    emit('changed', views.value)
   } catch (error) {
     ElMessage.error(getAPIErrorMessage(error, '保存筛选视图失败'))
   } finally {
@@ -103,6 +111,7 @@ async function setDefault() {
     })
     await loadViews()
     selectedID.value = item.id
+    emit('changed', views.value)
     ElMessage.success('已设为本页面默认视图')
   } catch (error) {
     ElMessage.error(getAPIErrorMessage(error, '设置默认视图失败'))
@@ -119,6 +128,7 @@ async function deleteSelected() {
     await apiClient.delete(`/saved-filter-views/${item.id}`)
     selectedID.value = ''
     await loadViews()
+    emit('changed', views.value)
     ElMessage.success('保存视图已删除')
   } catch (error) {
     if (error !== 'cancel' && error !== 'close') ElMessage.error(getAPIErrorMessage(error, '删除保存视图失败'))

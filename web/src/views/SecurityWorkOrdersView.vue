@@ -237,6 +237,13 @@ function applySavedWorkOrderFilters(filters: Record<string, string>) {
   void loadActiveList()
 }
 
+// See reloadAssetsAfterViewChange: the work order list must follow the saved view set,
+// including when the applied view was the one just deleted.
+function reloadWorkOrdersAfterViewChange() {
+  orderPage.value = 1
+  void loadActiveList()
+}
+
 const enabledOrganizations = computed(() => organizations.value.filter(item => item.status === 'enabled' && item.type !== 'group'))
 const scopedAssets = computed(() => assets.value.filter(item => item.organization_id === findingForm.assignee_organization_id && item.status !== 'archived' && (!findingForm.test_batch_id || findingBatchScopeAssetIDs.value.includes(item.id))))
 const scopedSystems = computed(() => systems.value.filter(item => item.organization_id === findingForm.assignee_organization_id && item.status !== 'archived'))
@@ -1069,7 +1076,7 @@ async function onTabChange() {
         <el-button type="primary" plain @click="applyFilter">筛选</el-button>
         <el-button @click="resetFilters">重置</el-button>
       </div>
-      <SavedFilterViews v-show="activeTab === 'orders'" ref="savedFilterViews" page-key="security_work_orders" :current-filters="currentWorkOrderFilters" class="work-order-saved-views" @apply="applySavedWorkOrderFilters" />
+      <SavedFilterViews v-show="activeTab === 'orders'" ref="savedFilterViews" page-key="security_work_orders" :current-filters="currentWorkOrderFilters" class="work-order-saved-views" @apply="applySavedWorkOrderFilters" @changed="reloadWorkOrdersAfterViewChange" />
       <div v-show="activeTab === 'orders'" class="filter-stat-list work-order-stat-list">
         <div class="filter-stat"><span>符合筛选工单</span><strong>{{ orderTotal }}</strong></div>
         <div class="filter-stat"><span>处理中</span><strong>{{ activeOrderCount }}</strong></div>

@@ -336,6 +336,13 @@ function applySavedIssueFilters(savedFilters: Record<string, string>) {
   void loadIssues()
 }
 
+// See reloadAssetsAfterViewChange: the issue list must follow the saved view set,
+// including when the applied view was the one just deleted.
+function reloadIssuesAfterViewChange() {
+  issuePage.value = 1
+  void loadIssues()
+}
+
 function searchIssues() {
   issueTableRef.value?.clearSelection()
   selectedIssues.value = []
@@ -395,7 +402,7 @@ onMounted(async () => {
       <el-select v-model="filters.resource_type" clearable placeholder="全部对象"><el-option label="网络资产" value="asset" /><el-option label="业务系统" value="business_system" /></el-select>
       <el-select v-model="filters.assignee" clearable placeholder="全部负责人"><el-option label="只看我负责的" value="me" /><el-option v-for="user in availableFilterUsers" :key="user.id" :label="user.display_name" :value="user.id" /></el-select>
       <div class="quality-workflow-filter-actions"><el-button type="primary" @click="searchIssues">查询</el-button><el-button @click="resetFilters">重置</el-button></div>
-      <SavedFilterViews ref="savedFilterViews" page-key="data_quality_issues" :current-filters="currentIssueFilters" class="quality-saved-views" @apply="applySavedIssueFilters" />
+      <SavedFilterViews ref="savedFilterViews" page-key="data_quality_issues" :current-filters="currentIssueFilters" class="quality-saved-views" @apply="applySavedIssueFilters" @changed="reloadIssuesAfterViewChange" />
     </div>
 
       <div class="panel quality-workflow-table-panel quality-issue-panel">

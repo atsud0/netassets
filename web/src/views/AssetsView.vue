@@ -292,6 +292,16 @@ function applySavedAssetFilters(filters: Record<string, string>) {
   void loadAssets()
 }
 
+// A saved view was created, changed or deleted. The list itself did not change, but
+// the name the page is filtering by may have, so re-render from the server instead of
+// trusting what is already in the table. Deleting the view that is currently applied
+// is the case that matters: without this the user keeps reading a result set whose
+// only name has just been removed.
+function reloadAssetsAfterViewChange() {
+  page.value = 1
+  void loadAssets()
+}
+
 watch(() => form.organization_id, () => {
   if (!availableSystems.value.some((item) => item.id === form.business_system_id)) form.business_system_id = ''
   if (!availableNetworkAreas.value.some((item) => item.id === form.network_area_id)) form.network_area_id = ''
@@ -1162,7 +1172,7 @@ onMounted(() => {
         <el-button @click="resetAndLoadAssets">查询</el-button>
         <el-button text :aria-pressed="extendedColumns" @click="extendedColumns=!extendedColumns">{{ extendedColumns?'精简字段':'更多字段' }}</el-button><span class="asset-filter-count">共 {{ total }} 条</span>
       </div>
-      <SavedFilterViews v-if="!inventoryMode" ref="savedFilterViews" page-key="assets" :current-filters="currentAssetFilters" @apply="applySavedAssetFilters" />
+      <SavedFilterViews v-if="!inventoryMode" ref="savedFilterViews" page-key="assets" :current-filters="currentAssetFilters" @apply="applySavedAssetFilters" @changed="reloadAssetsAfterViewChange" />
     </div>
 
     <div v-if="inventoryMode" class="panel data-table-panel inventory-draft-panel" v-loading="loading">
