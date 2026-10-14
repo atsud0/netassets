@@ -1159,7 +1159,10 @@ onMounted(() => {
 
     <div class="panel asset-filter-panel network-asset-filter-panel">
       <div class="network-asset-filter-controls" :class="{ 'with-organization-filter': auth.isGroupAdmin }">
-        <el-input v-model="search" clearable placeholder="搜索资产值、名称、系统或负责人" @keyup.enter="resetAndLoadAssets" @clear="resetAndLoadAssets" />
+        <!-- maxlength mirrors savedfilter's q bound of 200 characters. Without it a long keyword
+             is accepted by the box, finds nothing, and can then be rejected when the user
+             saves the filter as a view - a failure the user cannot connect to their input. -->
+        <el-input v-model="search" maxlength="200" clearable placeholder="搜索资产值、名称、系统或负责人" @keyup.enter="resetAndLoadAssets" @clear="resetAndLoadAssets" />
         <el-select v-model="typeFilter" clearable placeholder="全部类型" @change="resetAndLoadAssets" @clear="resetAndLoadAssets">
           <el-option v-for="(label, value) in typeLabels" :key="value" :label="label" :value="value" />
         </el-select>

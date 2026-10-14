@@ -65,6 +65,11 @@ func registerSavedFilterRoutes(api *gin.RouterGroup, requireAuth gin.HandlerFunc
 
 func writeSavedFilterResult(c *gin.Context, logger *slog.Logger, action string, status int, item savedfilter.View, err error) {
 	switch {
+	// A rejected filter names itself. The generic message below lists every possible
+	// cause at once, which left users unable to connect the failure to the one field they
+	// had typed - the reported case being a long search keyword that found no results.
+	case errors.Is(err, savedfilter.ErrFilterField):
+		writeAPIError(c, http.StatusBadRequest, "invalid_view_filter", err.Error())
 	case errors.Is(err, savedfilter.ErrInvalid):
 		writeAPIError(c, http.StatusBadRequest, "invalid_view", "请检查页面、名称和筛选条件；名称最多 100 字")
 	case errors.Is(err, savedfilter.ErrNotFound):

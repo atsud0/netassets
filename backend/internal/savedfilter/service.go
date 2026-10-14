@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"regexp"
+	"sort"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -23,6 +24,11 @@ const MaxViewsPerPage = 20
 
 var (
 	ErrInvalid  = errors.New("invalid input")
+	// ErrFilterField carries the offending filter key and why it was refused, so the
+	// caller can name the field instead of asking the user to re-check everything. A
+	// single long search keyword and an unknown filter key are both "invalid", but only
+	// one of them is something the user can see and fix.
+	ErrFilterField = errors.New("invalid filter field")
 	ErrNotFound = errors.New("not found")
 	ErrConflict = errors.New("conflict")
 	ErrLimit    = errors.New("view limit reached")
@@ -79,6 +85,42 @@ type Service struct{ pool *pgxpool.Pool }
 
 func NewService(pool *pgxpool.Pool) *Service { return &Service{pool: pool} }
 
+// FieldError names the filter key that was refused and the reason, so the API can tell
+// the user which of their inputs to change instead of listing every possible cause.
+type FieldError struct {
+	Field  string
+	Reason string
+}
+
+func (e *FieldError) Error() string { return e.Reason }
+func (e *FieldError) Unwrap() error { return ErrFilterField }
+
+func filterError(field, reason string) error { return &FieldError{Field: field, Reason: reason} }
+
+// FilterFieldLabel maps a saved-view filter key to the label the page shows for it, so
+// an error can say "搜索关键词" instead of "q".
+var FilterFieldLabel = map[string]map[string]string{
+	"assets": {
+		"q": "搜索关键词", "type": "资产类型", "status": "资产状态", "organization_id": "所属组织",
+	},
+	"security_work_orders": {
+		"organization_id": "责任组织", "status": "工单状态", "overdue": "是否逾期",
+	},
+	"data_quality_issues": {
+		"organization_id": "责任组织", "status": "问题状态", "severity": "问题级别",
+		"resource_type": "资源类型", "assignee": "负责人",
+	},
+}
+
+func FieldLabel(pageKey, field string) string {
+	if labels := FilterFieldLabel[pageKey]; labels != nil {
+		if label, ok := labels[field]; ok {
+			return label
+		}
+	}
+	return field
+}
+
 func NormalizeInput(input Input) (Input, error) {
 	input.PageKey = strings.TrimSpace(input.PageKey)
 	input.Name = strings.TrimSpace(input.Name)
@@ -90,10 +132,13 @@ func NormalizeInput(input Input) (Input, error) {
 		input.Filters = map[string]string{}
 	}
 	normalized := make(map[string]string, len(input.Filters))
-	for key, raw := range input.Filters {
+	// Iterate in a fixed order so that a request with several bad filters always
+	// reports the same one. Map order would otherwise make the message a lottery.
+	for _, key := range sortedFilterKeys(input.Filters) {
+		raw := input.Filters[key]
 		field, exists := definition[key]
 		if !exists {
-			return Input{}, ErrInvalid
+			return Input{}, filterError(key, fmt.Sprintf("筛选条件“%s”不被当前页面支持", key))
 		}
 		value := strings.TrimSpace(raw)
 		if value == "" {
@@ -104,23 +149,32 @@ func NormalizeInput(input Input) (Input, error) {
 			maxLength = 128
 		}
 		if utf8.RuneCountInString(value) > maxLength {
-			return Input{}, ErrInvalid
+			return Input{}, filterError(key, fmt.Sprintf("筛选条件“%s”最多 %d 个字，当前 %d 个字", FieldLabel(input.PageKey, key), maxLength, utf8.RuneCountInString(value)))
 		}
 		if len(field.allowedValues) > 0 {
 			if _, exists := field.allowedValues[value]; !exists {
-				return Input{}, ErrInvalid
+				return Input{}, filterError(key, fmt.Sprintf("筛选条件“%s”的取值不被支持", FieldLabel(input.PageKey, key)))
 			}
 		}
 		if field.uuid && !uuidPattern.MatchString(value) {
-			return Input{}, ErrInvalid
+			return Input{}, filterError(key, fmt.Sprintf("筛选条件“%s”的取值不正确", FieldLabel(input.PageKey, key)))
 		}
 		if field.uuidOrMe && value != "me" && !uuidPattern.MatchString(value) {
-			return Input{}, ErrInvalid
+			return Input{}, filterError(key, fmt.Sprintf("筛选条件“%s”的取值不正确", FieldLabel(input.PageKey, key)))
 		}
 		normalized[key] = value
 	}
 	input.Filters = normalized
 	return input, nil
+}
+
+func sortedFilterKeys(filters map[string]string) []string {
+	keys := make([]string, 0, len(filters))
+	for key := range filters {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	return keys
 }
 
 func ValidPageKey(pageKey string) bool {
@@ -169,8 +223,14 @@ func (s *Service) Search(ctx context.Context, p auth.Principal, pageKey string, 
 }
 
 func (s *Service) Create(ctx context.Context, p auth.Principal, input Input, requestID, ipAddress string) (View, error) {
+	// The validation error is returned as-is. Swallowing it here and re-reporting a
+	// generic ErrInvalid is what made every distinct refusal - an over-long keyword,
+	// an unsupported filter key - reach the user as the same unusable message.
 	input, err := NormalizeInput(input)
-	if err != nil || p.UserID == "" {
+	if err != nil {
+		return View{}, err
+	}
+	if p.UserID == "" {
 		return View{}, ErrInvalid
 	}
 	filters, err := json.Marshal(input.Filters)
@@ -212,7 +272,10 @@ func (s *Service) Create(ctx context.Context, p auth.Principal, input Input, req
 
 func (s *Service) Update(ctx context.Context, p auth.Principal, id string, input Input, requestID, ipAddress string) (View, error) {
 	input, err := NormalizeInput(input)
-	if err != nil || p.UserID == "" || !uuidPattern.MatchString(strings.TrimSpace(id)) {
+	if err != nil {
+		return View{}, err
+	}
+	if p.UserID == "" || !uuidPattern.MatchString(strings.TrimSpace(id)) {
 		return View{}, ErrInvalid
 	}
 	filters, _ := json.Marshal(input.Filters)
