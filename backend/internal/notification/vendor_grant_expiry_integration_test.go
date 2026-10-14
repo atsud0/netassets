@@ -227,15 +227,23 @@ func TestExternalVendorGrantLosesAccessWhenEachLinkExpires(t *testing.T) {
 		wantReason string
 	}{
 		{
-			name: "grant deadline passed", grantFrom: now.Add(-72 * time.Hour), grantUntil: now.Add(-time.Hour),
+			// The deadline is moved into the past in place. Constructing the fixture
+			// with an already-past deadline would leave the chain unauthorized from
+			// the start, and the "must start authorized" precondition below would
+			// then skip the case instead of testing anything.
+			name: "grant deadline passed", grantFrom: now.Add(-72 * time.Hour), grantUntil: now.Add(72 * time.Hour),
 			memberFrom: now.Add(-72 * time.Hour), memberTill: now.Add(72 * time.Hour),
-			breakLink:  func(t *testing.T, v *vendorGrantFixture) {},
+			breakLink: func(t *testing.T, v *vendorGrantFixture) {
+				execVendorGrant(t, v, `UPDATE remediation_grants SET valid_until=now()-interval '1 hour' WHERE id=$1::uuid`, v.grantID)
+			},
 			wantReason: "authorization_expired",
 		},
 		{
 			name: "vendor membership expired", grantFrom: now.Add(-72 * time.Hour), grantUntil: now.Add(72 * time.Hour),
-			memberFrom: now.Add(-72 * time.Hour), memberTill: now.Add(-time.Hour),
-			breakLink:  func(t *testing.T, v *vendorGrantFixture) {},
+			memberFrom: now.Add(-72 * time.Hour), memberTill: now.Add(72 * time.Hour),
+			breakLink: func(t *testing.T, v *vendorGrantFixture) {
+				execVendorGrant(t, v, `UPDATE vendor_memberships SET valid_until=now()-interval '1 hour' WHERE vendor_id=$1::uuid AND user_id=$2::uuid`, v.catalogID, v.worker.UserID)
+			},
 			wantReason: "authorization_expired",
 		},
 		{
@@ -293,7 +301,7 @@ func TestExternalVendorGrantLosesAccessWhenEachLinkExpires(t *testing.T) {
 			// Precondition: the chain starts open, so a later denial is caused by the
 			// break and not by a fixture that was never authorized.
 			if !v.grantValid(t) || !v.canRead(t) {
-				t.Skip("fixture did not start authorized; the vendor chain shape changed and this case needs an update")
+				t.Fatalf("fixture did not start authorized (grant_valid=%v can_read=%v); this case would assert nothing, so it fails instead of silently skipping", v.grantValid(t), v.canRead(t))
 			}
 			tc.breakLink(t, v)
 			v.assertFullyRevoked(t, tc.wantReason)

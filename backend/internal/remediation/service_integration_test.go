@@ -431,7 +431,11 @@ func TestAssetRetirementRetiresThenRestoresRemediationTask(t *testing.T) {
 	var assetID string
 	must(t, f.pool.QueryRow(f.ctx, `
 		INSERT INTO assets(asset_type,asset_value,normalized_value,status,created_by)
-		VALUES('ip', $1, $1, 'active', $2::uuid) RETURNING id::text`, "10.20.30.40", f.group.UserID).Scan(&assetID))
+		VALUES('ip', $1, $1, 'active', $2::uuid) RETURNING id::text`,
+		// The address must be unique per run: assets_active_unique_idx rejects a
+		// second active row with the same normalized value, so a hard-coded IP made
+		// this test fail on every re-run against a persistent test database.
+		fmt.Sprintf("10.20.%d.%d", os.Getpid()%250, time.Now().UnixNano()%250), f.group.UserID).Scan(&assetID))
 	_, err := f.pool.Exec(f.ctx, `
 		INSERT INTO asset_organizations(asset_id,organization_id,relationship_type,is_primary)
 		VALUES($1::uuid,$2::uuid,'owner',true)`, assetID, f.org)

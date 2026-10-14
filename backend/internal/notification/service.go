@@ -691,6 +691,18 @@ WHERE child.status='enabled' AND child.deleted_at IS NULL
  u.display_name||'的协作授权需要检查','warning','remediation_grant',g.id::text,'/remediation-people',g.valid_until,g.valid_until
  FROM remediation_grants g JOIN users u ON u.id=g.user_id
  WHERE (g.valid_until<now()+interval '3 days' OR NOT remediation_grant_valid(g.id,g.user_id,g.organization_id,g.business_system_id)) AND remediation_can_manage($1::uuid,g.organization_id,'remediation.people.manage')
+ UNION ALL
+ SELECT 'repair_grant_self:'||g.id::text||':'||extract(epoch FROM g.valid_until)::bigint::text||':'||g.status,
+ 'remediation',
+ CASE WHEN remediation_grant_valid(g.id,g.user_id,g.organization_id,g.business_system_id) THEN '我的协作授权即将到期' ELSE '我的协作授权已失效' END,
+ CASE WHEN remediation_grant_valid(g.id,g.user_id,g.organization_id,g.business_system_id)
+   THEN '你的协作授权将在 3 天内到期，请及时提交整改结果；到期后相关修复任务将无法继续处理。'
+   ELSE '你的协作授权已经失效，相关修复任务不再对你可见。如需继续处理，请联系组织管理员续期。' END,
+ CASE WHEN remediation_grant_valid(g.id,g.user_id,g.organization_id,g.business_system_id) THEN 'warning' ELSE 'danger' END,
+ 'remediation_grant',g.id::text,'/repair/tasks',g.valid_until,g.valid_until
+ FROM remediation_grants g
+ WHERE g.user_id=$1::uuid AND g.status<>'revoked'
+   AND (g.valid_until<now()+interval '3 days' OR NOT remediation_grant_valid(g.id,g.user_id,g.organization_id,g.business_system_id))
 )
 `
 
