@@ -1701,7 +1701,7 @@ func (s *Service) AnalyzeImportColumns(ctx context.Context, principal auth.Princ
 	if err != nil {
 		return ImportColumnAnalysis{}, err
 	}
-	analysis, err := importmapping.Analyze(rows, assetImportFields(definitions))
+	analysis, err := importmapping.Analyze(dropAssetTemplateExampleRows(rows, definitions), assetImportFields(definitions))
 	if err != nil {
 		return ImportColumnAnalysis{}, ErrInvalid
 	}
@@ -1743,10 +1743,13 @@ func (s *Service) PreviewImport(ctx context.Context, principal auth.Principal, o
 		return ImportResult{}, ErrInvalid
 	}
 
-	result := ImportResult{FileName: filepath.Base(fileName), FileType: fileType, ImportMode: mode, Errors: make([]ImportError, 0), TotalCount: len(rows) - 1}
+	result := ImportResult{FileName: filepath.Base(fileName), FileType: fileType, ImportMode: mode, Errors: make([]ImportError, 0), TotalCount: countAssetImportDataRows(rows, headers)}
 	seen := make(map[string]struct{}, result.TotalCount)
 	for index, row := range rows[1:] {
 		rowNumber := index + 2
+		if isAssetTemplateExample(row, headers) {
+			continue
+		}
 		input, inputErr := importInput(row, headers, organizationID)
 		if inputErr != nil {
 			result.FailureCount++
@@ -1906,10 +1909,13 @@ func (s *Service) Import(ctx context.Context, principal auth.Principal, organiza
 		return ImportResult{}, ErrInvalid
 	}
 
-	result := ImportResult{FileName: filepath.Base(fileName), FileType: fileType, ImportMode: mode, Errors: make([]ImportError, 0), TotalCount: len(rows) - 1}
+	result := ImportResult{FileName: filepath.Base(fileName), FileType: fileType, ImportMode: mode, Errors: make([]ImportError, 0), TotalCount: countAssetImportDataRows(rows, headers)}
 	seen := make(map[string]struct{}, result.TotalCount)
 	for index, row := range rows[1:] {
 		rowNumber := index + 2
+		if isAssetTemplateExample(row, headers) {
+			continue
+		}
 		input, inputErr := importInput(row, headers, organizationID)
 		if inputErr != nil {
 			result.FailureCount++
@@ -2443,4 +2449,68 @@ func oneOf(value string, values ...string) bool {
 		}
 	}
 	return false
+}
+
+// assetTemplateExampleRow is the sample data row written as the second line of
+// every generated network-asset import template.
+//
+// Users routinely fill the template in without deleting that sample row, and
+// the importer used to treat it as ordinary data, so the preview counted it and
+// the import wrote "domain / portal.example.com / 门户网站域名" into the real
+// asset ledger. Both paths now drop it.
+//
+// The match is structural rather than positional because explicit column
+// mapping decides where each value lives, and it requires the identifying cells
+// to be untouched: once a user edits the type, the value or the name the row is
+// real data and must be imported rather than silently discarded.
+var assetTemplateExampleRow = []string{"domain", "portal.example.com", "门户网站域名"}
+
+// isAssetTemplateExample reports whether one raw row is the shipped sample row
+// of the network-asset import template.
+func isAssetTemplateExample(row []string, indexes map[string]int) bool {
+	pick := func(key string) string {
+		index, ok := indexes[key]
+		if !ok || index < 0 || index >= len(row) {
+			return ""
+		}
+		return strings.TrimSpace(strings.TrimPrefix(row[index], "\ufeff"))
+	}
+	return pick("type") == assetTemplateExampleRow[0] &&
+		pick("value") == assetTemplateExampleRow[1] &&
+		pick("name") == assetTemplateExampleRow[2]
+}
+
+// countAssetImportDataRows counts the rows that will really be considered, so
+// the preview never promises a record that the import deliberately skips.
+func countAssetImportDataRows(rows [][]string, headers map[string]int) int {
+	total := 0
+	for _, row := range rows[1:] {
+		if isAssetTemplateExample(row, headers) {
+			continue
+		}
+		total++
+	}
+	return total
+}
+
+// dropAssetTemplateExampleRows removes the template sample row before column
+// analysis, otherwise the mapping dialog shows "portal.example.com" as the
+// recognized content of the user's file instead of their actual first record.
+func dropAssetTemplateExampleRows(rows [][]string, definitions []customfield.Definition) [][]string {
+	if len(rows) < 2 {
+		return rows
+	}
+	headers, _, err := importmapping.Resolve(rows[0], nil, assetImportFields(definitions))
+	if err != nil {
+		return rows
+	}
+	kept := make([][]string, 0, len(rows))
+	kept = append(kept, rows[0])
+	for _, row := range rows[1:] {
+		if isAssetTemplateExample(row, headers) {
+			continue
+		}
+		kept = append(kept, row)
+	}
+	return kept
 }

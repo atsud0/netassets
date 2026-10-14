@@ -13,6 +13,7 @@ import (
 	"netassets/internal/auth"
 	"netassets/internal/customfield"
 	"netassets/internal/exportfile"
+	"netassets/internal/importmapping"
 )
 
 func validBusinessSystemInput() CreateInput {
@@ -408,5 +409,84 @@ func TestCheckExpectedVersionRequiresAndMatchesWorkingVersion(t *testing.T) {
 	fresh := 7
 	if err := checkExpectedVersion(current, &fresh); err != nil {
 		t.Fatalf("current expected version = %v, want nil", err)
+	}
+}
+
+// TestTemplateExampleRowIsNotImportedAsBusinessSystem locks the reported bug:
+// the sample row shipped inside the download template was previewed and written
+// as a genuine business system ("CRM_001 / 客户关系管理系统 / 张三"), so the user
+// saw "标题与示例" as the recognized data and placeholder rows polluted the
+// ledger.
+func TestTemplateExampleRowIsNotImportedAsBusinessSystem(t *testing.T) {
+	templateBytes, _, templateName, err := buildTemplate("xlsx", nil)
+	if err != nil {
+		t.Fatalf("build template: %v", err)
+	}
+	rows, _, err := readImportRows(templateName, bytes.NewReader(templateBytes))
+	if err != nil {
+		t.Fatalf("read template: %v", err)
+	}
+	if len(rows) < 2 {
+		t.Fatalf("template has %d rows, want header plus sample row", len(rows))
+	}
+	headers, _, err := resolveBusinessSystemImportHeaders(rows[0], nil, nil)
+	if err != nil {
+		t.Fatalf("resolve headers: %v", err)
+	}
+	if !isBusinessSystemTemplateExample(rows[1], headers) {
+		t.Fatalf("template row %v is not recognized as the shipped sample row", rows[1])
+	}
+	if got := countBusinessSystemImportDataRows(rows, headers); got != len(rows)-2 {
+		t.Fatalf("data row count = %d, want %d (sample row must not be counted)", got, len(rows)-2)
+	}
+
+	// Editing any identifying cell makes the row real data; it must still import.
+	for _, key := range []string{"code", "name", "short_name", "owner_name", "owner_contact"} {
+		edited := append([]string(nil), rows[1]...)
+		edited[headers[key]] += "_edited"
+		if isBusinessSystemTemplateExample(edited, headers) {
+			t.Fatalf("a sample row edited in column %q must be treated as real data", key)
+		}
+		combined := append(rows[:1:1], append([][]string{edited}, rows[2:]...)...)
+		if got := countBusinessSystemImportDataRows(combined, headers); got != len(rows)-1 {
+			t.Fatalf("edited row count = %d, want %d", got, len(rows)-1)
+		}
+	}
+}
+
+func TestBusinessSystemAnalyzeIgnoresTemplateSampleRow(t *testing.T) {
+	templateBytes, _, templateName, err := buildTemplate("xlsx", nil)
+	if err != nil {
+		t.Fatalf("build template: %v", err)
+	}
+	rows, _, err := readImportRows(templateName, bytes.NewReader(templateBytes))
+	if err != nil {
+		t.Fatalf("read template: %v", err)
+	}
+	real := make([]string, len(rows[0]))
+	copy(real, rows[1])
+	real[0], real[1], real[5] = "OAUTH_001", "统一认证平台", "李四"
+	rows = append(rows, real)
+	analysis, err := importmapping.Analyze(dropBusinessSystemTemplateExampleRows(rows, nil), businessSystemImportFields(nil))
+	if err != nil {
+		t.Fatalf("analyze: %v", err)
+	}
+	for _, column := range analysis.Columns {
+		for _, example := range column.Examples {
+			if example == "CRM_001" || example == "客户关系管理系统" || example == "张三" {
+				t.Fatalf("column %d example %q still exposes the shipped template sample", column.Index, example)
+			}
+		}
+	}
+	found := false
+	for _, column := range analysis.Columns {
+		for _, example := range column.Examples {
+			if example == "统一认证平台" {
+				found = true
+			}
+		}
+	}
+	if !found {
+		t.Fatal("analysis no longer shows the real user row")
 	}
 }

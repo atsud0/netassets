@@ -14,6 +14,7 @@ import (
 	"netassets/internal/auth"
 	"netassets/internal/customfield"
 	"netassets/internal/exportfile"
+	"netassets/internal/importmapping"
 )
 
 func TestImportsUseWorkingInventoryOutsideGroupAdmin(t *testing.T) {
@@ -476,5 +477,67 @@ func TestSplitHostPort(t *testing.T) {
 	}
 	if _, _, ok := SplitHostPort("192.168.1.10:99999"); ok {
 		t.Fatal("an out-of-range port must be rejected")
+	}
+}
+
+// TestTemplateExampleRowIsNotImportedAsAsset locks the reported bug: the sample
+// row shipped inside the download template used to be previewed and written as a
+// genuine asset ("domain / portal.example.com / 门户网站域名"), which is how
+// placeholder data reached the real asset ledger.
+func TestTemplateExampleRowIsNotImportedAsAsset(t *testing.T) {
+	templateBytes, _, templateName, err := buildTemplate("xlsx", nil)
+	if err != nil {
+		t.Fatalf("build template: %v", err)
+	}
+	rows, _, err := readImportRows(templateName, bytes.NewReader(templateBytes))
+	if err != nil {
+		t.Fatalf("read template: %v", err)
+	}
+	if len(rows) < 2 {
+		t.Fatalf("template has %d rows, want header plus sample row", len(rows))
+	}
+	headers, _, err := resolveAssetImportHeaders(rows[0], nil, nil)
+	if err != nil {
+		t.Fatalf("resolve headers: %v", err)
+	}
+	if !isAssetTemplateExample(rows[1], headers) {
+		t.Fatalf("template row %v is not recognized as the shipped sample row", rows[1])
+	}
+	if got := countAssetImportDataRows(rows, headers); got != len(rows)-2 {
+		t.Fatalf("data row count = %d, want %d (sample row must not be counted)", got, len(rows)-2)
+	}
+
+	// A user who edits any identifying cell has turned the sample into real data;
+	// it must still be imported instead of being swallowed by the fix.
+	edited := append([]string(nil), rows[1]...)
+	edited[headers["value"]] = "portal.internal.example.com"
+	if isAssetTemplateExample(edited, headers) {
+		t.Fatal("an edited sample row must be treated as real data")
+	}
+	if got := countAssetImportDataRows(append(rows[:1:1], append([][]string{edited}, rows[2:]...)...), headers); got != len(rows)-1 {
+		t.Fatalf("edited sample row count = %d, want %d", got, len(rows)-1)
+	}
+}
+
+func TestAnalyzeImportColumnsIgnoresTemplateSampleRow(t *testing.T) {
+	templateBytes, _, templateName, err := buildTemplate("xlsx", nil)
+	if err != nil {
+		t.Fatalf("build template: %v", err)
+	}
+	rows, _, err := readImportRows(templateName, bytes.NewReader(templateBytes))
+	if err != nil {
+		t.Fatalf("read template: %v", err)
+	}
+	rows = append(rows, []string{"domain", "portal.corp.example.com", "集团门户", "", "", "", "", "", "", "", "", "", "", "", ""})
+	analysis, err := importmapping.Analyze(dropAssetTemplateExampleRows(rows, nil), assetImportFields(nil))
+	if err != nil {
+		t.Fatalf("analyze: %v", err)
+	}
+	for _, column := range analysis.Columns {
+		for _, example := range column.Examples {
+			if example == "portal.example.com" || example == "门户网站域名" {
+				t.Fatalf("column %d example %q still exposes the shipped template sample", column.Index, example)
+			}
+		}
 	}
 }

@@ -1424,7 +1424,7 @@ func (s *Service) AnalyzeImportColumns(ctx context.Context, principal auth.Princ
 	if err != nil {
 		return ImportColumnAnalysis{}, err
 	}
-	analysis, err := importmapping.Analyze(rows, businessSystemImportFields(definitions))
+	analysis, err := importmapping.Analyze(dropBusinessSystemTemplateExampleRows(rows, definitions), businessSystemImportFields(definitions))
 	if err != nil {
 		return ImportColumnAnalysis{}, ErrInvalid
 	}
@@ -1461,10 +1461,13 @@ func (s *Service) PreviewImport(ctx context.Context, principal auth.Principal, o
 	if err != nil {
 		return ImportResult{}, ErrInvalid
 	}
-	result := ImportResult{FileName: filepath.Base(fileName), FileType: fileType, ImportMode: mode, Errors: make([]ImportError, 0), TotalCount: len(rows) - 1}
+	result := ImportResult{FileName: filepath.Base(fileName), FileType: fileType, ImportMode: mode, Errors: make([]ImportError, 0), TotalCount: countBusinessSystemImportDataRows(rows, headers)}
 	seen := make(map[string]struct{}, result.TotalCount)
 	for index, row := range rows[1:] {
 		rowNumber := index + 2
+		if isBusinessSystemTemplateExample(row, headers) {
+			continue
+		}
 		input, rowErr := importInput(row, headers, organizationID)
 		if rowErr != nil {
 			result.FailureCount++
@@ -1564,10 +1567,13 @@ func (s *Service) Import(ctx context.Context, principal auth.Principal, organiza
 	if err != nil {
 		return ImportResult{}, ErrInvalid
 	}
-	result := ImportResult{FileName: filepath.Base(fileName), FileType: fileType, ImportMode: mode, Errors: make([]ImportError, 0), TotalCount: len(rows) - 1}
+	result := ImportResult{FileName: filepath.Base(fileName), FileType: fileType, ImportMode: mode, Errors: make([]ImportError, 0), TotalCount: countBusinessSystemImportDataRows(rows, headers)}
 	seen := make(map[string]struct{}, result.TotalCount)
 	for index, row := range rows[1:] {
 		rowNumber := index + 2
+		if isBusinessSystemTemplateExample(row, headers) {
+			continue
+		}
 		input, rowErr := importInput(row, headers, organizationID)
 		if rowErr != nil {
 			result.FailureCount++
@@ -1984,4 +1990,79 @@ func oneOf(value string, values ...string) bool {
 		}
 	}
 	return false
+}
+
+// countBusinessSystemImportDataRows counts the rows that will actually be
+// considered for import, excluding the template sample row. Reporting
+// len(rows)-1 here would promise the user a record that is deliberately
+// skipped, which is exactly the "recognized data is the title and example"
+// confusion this fix removes.
+func countBusinessSystemImportDataRows(rows [][]string, headers map[string]int) int {
+	total := 0
+	for _, row := range rows[1:] {
+		if isBusinessSystemTemplateExample(row, headers) {
+			continue
+		}
+		total++
+	}
+	return total
+}
+
+// businessSystemTemplateExampleRow is the sample data row that buildTemplate
+// writes as the second line of every generated import template.
+//
+// Users routinely type their real data into the template without deleting that
+// sample row, and the importer previously treated it as ordinary data: the
+// preview counted it, and the import wrote "CRM_001 / 客户关系管理系统 / 张三"
+// into the real ledger as a genuine business system. Both the preview and the
+// import now drop the row, so the file the user sees previews is the file that
+// gets written.
+//
+// The match is structural rather than positional, because column order and the
+// explicit column mapping decide where each value lives. It also requires the
+// identifying cells to be untouched: a user who edited the code or the name has
+// turned the row into real data, and it must be imported instead of dropped.
+var businessSystemTemplateExampleRow = []string{"CRM_001", "客户关系管理系统", "CRM", "运行中", "一般", "张三", "13800000000"}
+
+// isBusinessSystemTemplateExample reports whether one raw row is the shipped
+// sample row of the business-system import template.
+func isBusinessSystemTemplateExample(row []string, indexes map[string]int) bool {
+	pick := func(key string) string {
+		index, ok := indexes[key]
+		if !ok || index < 0 || index >= len(row) {
+			return ""
+		}
+		return strings.TrimSpace(strings.TrimPrefix(row[index], "\ufeff"))
+	}
+	if pick("code") != businessSystemTemplateExampleRow[0] ||
+		pick("name") != businessSystemTemplateExampleRow[1] ||
+		pick("short_name") != businessSystemTemplateExampleRow[2] ||
+		pick("owner_name") != businessSystemTemplateExampleRow[5] ||
+		pick("owner_contact") != businessSystemTemplateExampleRow[6] {
+		return false
+	}
+	return true
+}
+
+// dropBusinessSystemTemplateExampleRows removes the template sample row before
+// column analysis, otherwise the mapping dialog shows "CRM_001 / 客户关系管理
+// 系统" as the recognized content of the user's file instead of their real
+// first record.
+func dropBusinessSystemTemplateExampleRows(rows [][]string, definitions []customfield.Definition) [][]string {
+	if len(rows) < 2 {
+		return rows
+	}
+	headers, _, err := importmapping.Resolve(rows[0], nil, businessSystemImportFields(definitions))
+	if err != nil {
+		return rows
+	}
+	kept := make([][]string, 0, len(rows))
+	kept = append(kept, rows[0])
+	for _, row := range rows[1:] {
+		if isBusinessSystemTemplateExample(row, headers) {
+			continue
+		}
+		kept = append(kept, row)
+	}
+	return kept
 }
