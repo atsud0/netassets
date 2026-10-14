@@ -2,6 +2,7 @@
 import { computed, onMounted, reactive, ref } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { apiClient, getAPIErrorMessage } from '../api/client'
+import { copyTextToClipboard } from '../utils/clipboard'
 
 interface APITokenItem {
   id: string
@@ -97,12 +98,8 @@ async function createToken() {
 }
 
 async function copyToken() {
-  try {
-    await navigator.clipboard.writeText(createdToken.value)
-    ElMessage.success('API Token 已复制')
-  } catch {
-    ElMessage.warning('浏览器无法自动复制，请手动选择并复制 Token')
-  }
+  if (await copyTextToClipboard(createdToken.value)) ElMessage.success('API Token 已复制')
+  else ElMessage.warning('浏览器无法自动复制，请手动选择并复制 Token')
 }
 
 function closeSecretDialog() {

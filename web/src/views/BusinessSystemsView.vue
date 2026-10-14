@@ -12,6 +12,7 @@ import ResourceSubmissionHistoryDrawer from '../components/ResourceSubmissionHis
 import { draftLastEditedHint, draftTakeoverSummary } from '../utils/inventory-drafts'
 import { reportEditConflict } from '../utils/edit-conflict'
 import { formatDateTime } from '../utils/datetime'
+import { copyTextToClipboard } from '../utils/clipboard'
 import { contactPhoneRule, normalizeContactPhone } from '../utils/contact-phone'
 import { createSuggestedColumnMapping, getImportColumnMappingError, importColumnLabel, isImportColumnUsed, serializeImportColumnMapping, type ImportColumn, type ImportColumnMapping, type ImportField } from '../utils/import-column-mapping'
 
@@ -461,13 +462,10 @@ async function loadDetailAssets(systemID: string) {
 }
 
 async function copySystemCode() {
-  if (!detail.value?.code) return
-  try {
-    await navigator.clipboard.writeText(detail.value.code)
-    ElMessage.success('系统编码已复制')
-  } catch {
-    ElMessage.error('复制系统编码失败，请手动选择复制')
-  }
+  // The product is reached over plain HTTP on internal addresses, where the
+  // async Clipboard API does not exist; copyTextToClipboard handles that.
+  if (await copyTextToClipboard(detail.value?.code ?? '')) ElMessage.success('系统编码已复制')
+  else ElMessage.error('复制系统编码失败，请手动选择复制')
 }
 
 async function openDetail(row: BusinessSystem) {
