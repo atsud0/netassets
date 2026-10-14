@@ -14,6 +14,7 @@ import (
 	"netassets/internal/access"
 	"netassets/internal/auth"
 	"netassets/internal/pagination"
+	"netassets/internal/textlength"
 )
 
 var (
@@ -338,7 +339,7 @@ func normalize(input *Input) {
 }
 
 func valid(input Input) bool {
-	return input.OrganizationID != "" && input.Name != "" && len(input.Name) <= 128 && len(input.Code) <= 64 &&
-		len(input.Notes) <= 5000 && input.SortOrder >= 0 && input.SortOrder <= 100000 &&
+	return input.OrganizationID != "" && input.Name != "" && textlength.Count(input.Name) <= 128 && textlength.Count(input.Code) <= 64 &&
+		textlength.Count(input.Notes) <= 5000 && input.SortOrder >= 0 && input.SortOrder <= 100000 &&
 		(input.Status == "enabled" || input.Status == "disabled")
 }

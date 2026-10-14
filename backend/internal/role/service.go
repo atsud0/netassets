@@ -15,6 +15,7 @@ import (
 
 	"netassets/internal/auth"
 	"netassets/internal/pagination"
+	"netassets/internal/textlength"
 )
 
 var (
@@ -351,7 +352,7 @@ func normalizeAndValidate(input *Input, creating bool) error {
 	}
 	sort.Strings(result)
 	input.PermissionKeys = result
-	if (creating && !roleKeyRule.MatchString(input.Key)) || input.Name == "" || len(input.Name) > 128 || len(input.Description) > 5000 || (input.Status != "enabled" && input.Status != "disabled") || len(input.PermissionKeys) == 0 {
+	if (creating && !roleKeyRule.MatchString(input.Key)) || input.Name == "" || textlength.Count(input.Name) > 128 || textlength.Count(input.Description) > 5000 || (input.Status != "enabled" && input.Status != "disabled") || len(input.PermissionKeys) == 0 {
 		return ErrInvalid
 	}
 	return nil

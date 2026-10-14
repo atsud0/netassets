@@ -58,7 +58,7 @@ test('任务中新建资产在提交和审核通过前与集团正式台账隔�
         short_name: organizationName,
         type: 'subsidiary',
         manager: '草稿隔离负责人',
-        contact: 'draft-owner@example.com',
+        contact: '13800000001',
         notes: '填报任务资产草稿隔离自动化测试',
       }),
     })

@@ -19,6 +19,7 @@ import (
 	"netassets/internal/findingstatus"
 	"netassets/internal/notification"
 	"netassets/internal/pagination"
+	"netassets/internal/textlength"
 )
 
 var (
@@ -825,7 +826,7 @@ func (s *Service) LinkDuplicateFinding(ctx context.Context, principal auth.Princ
 	}
 	input.MasterFindingID = strings.TrimSpace(input.MasterFindingID)
 	input.Reason = strings.TrimSpace(input.Reason)
-	if !validUUID(id) || !validUUID(input.MasterFindingID) || id == input.MasterFindingID || input.Reason == "" || len(input.Reason) > 5000 {
+	if !validUUID(id) || !validUUID(input.MasterFindingID) || id == input.MasterFindingID || input.Reason == "" || textlength.Count(input.Reason) > 5000 {
 		return Finding{}, ErrInvalid
 	}
 	if err := s.guardPersonalFinding(ctx, id); err != nil {
@@ -1051,7 +1052,7 @@ func (s *Service) ReviewRisk(ctx context.Context, principal auth.Principal, id s
 		return Finding{}, ErrForbidden
 	}
 	input.Comment = strings.TrimSpace(input.Comment)
-	if !validUUID(id) || input.Comment == "" || len(input.Comment) > 5000 {
+	if !validUUID(id) || input.Comment == "" || textlength.Count(input.Comment) > 5000 {
 		return Finding{}, ErrInvalid
 	}
 	tx, err := s.pool.Begin(ctx)
@@ -1364,7 +1365,7 @@ func (s *Service) Issue(ctx context.Context, principal auth.Principal, id string
 		return WorkOrder{}, ErrForbidden
 	}
 	input.Comment = strings.TrimSpace(input.Comment)
-	if !validUUID(id) || len(input.Comment) > 2000 {
+	if !validUUID(id) || textlength.Count(input.Comment) > 2000 {
 		return WorkOrder{}, ErrInvalid
 	}
 	return s.transition(ctx, principal, id, []string{"draft"}, "issued", "issue", input.Comment, requestID, ipAddress, func(ctx context.Context, tx pgx.Tx) error {
@@ -1383,7 +1384,7 @@ func (s *Service) Issue(ctx context.Context, principal auth.Principal, id string
 
 func (s *Service) Accept(ctx context.Context, principal auth.Principal, id string, input CommentInput, requestID, ipAddress string) (WorkOrder, error) {
 	input.Comment = strings.TrimSpace(input.Comment)
-	if !validUUID(id) || len(input.Comment) > 2000 {
+	if !validUUID(id) || textlength.Count(input.Comment) > 2000 {
 		return WorkOrder{}, ErrInvalid
 	}
 	return s.transition(ctx, principal, id, []string{"issued"}, "in_progress", "accept", input.Comment, requestID, ipAddress, func(ctx context.Context, tx pgx.Tx) error {
@@ -1395,7 +1396,7 @@ func (s *Service) Accept(ctx context.Context, principal auth.Principal, id strin
 func (s *Service) Progress(ctx context.Context, principal auth.Principal, id string, input ProgressInput, requestID, ipAddress string) (WorkOrder, error) {
 	input.Progress = strings.TrimSpace(input.Progress)
 	input.Comment = strings.TrimSpace(input.Comment)
-	if !validUUID(id) || input.Progress == "" || len(input.Progress) > 5000 || len(input.Comment) > 2000 {
+	if !validUUID(id) || input.Progress == "" || textlength.Count(input.Progress) > 5000 || textlength.Count(input.Comment) > 2000 {
 		return WorkOrder{}, ErrInvalid
 	}
 	return s.transition(ctx, principal, id, []string{"in_progress", "returned"}, "in_progress", "progress", input.Comment, requestID, ipAddress, func(ctx context.Context, tx pgx.Tx) error {
@@ -1407,7 +1408,7 @@ func (s *Service) Progress(ctx context.Context, principal auth.Principal, id str
 func (s *Service) Submit(ctx context.Context, principal auth.Principal, id string, input SubmitInput, requestID, ipAddress string) (WorkOrder, error) {
 	input.RemediationResult = strings.TrimSpace(input.RemediationResult)
 	input.Comment = strings.TrimSpace(input.Comment)
-	if !validUUID(id) || input.RemediationResult == "" || len(input.RemediationResult) > 10000 || len(input.Comment) > 2000 {
+	if !validUUID(id) || input.RemediationResult == "" || textlength.Count(input.RemediationResult) > 10000 || textlength.Count(input.Comment) > 2000 {
 		return WorkOrder{}, ErrInvalid
 	}
 	return s.transition(ctx, principal, id, []string{"in_progress", "returned"}, "pending_verification", "submit", input.Comment, requestID, ipAddress, func(ctx context.Context, tx pgx.Tx) error {
@@ -1423,7 +1424,7 @@ func (s *Service) Review(ctx context.Context, principal auth.Principal, id strin
 	input.Decision = strings.TrimSpace(input.Decision)
 	input.VerificationResult = strings.TrimSpace(input.VerificationResult)
 	input.ReturnReason = strings.TrimSpace(input.ReturnReason)
-	if !validUUID(id) || (input.Decision != "returned" && input.Decision != "closed") || len(input.VerificationResult) > 10000 || len(input.ReturnReason) > 2000 ||
+	if !validUUID(id) || (input.Decision != "returned" && input.Decision != "closed") || textlength.Count(input.VerificationResult) > 10000 || textlength.Count(input.ReturnReason) > 2000 ||
 		(input.Decision == "returned" && input.ReturnReason == "") || (input.Decision == "closed" && input.VerificationResult == "") {
 		return WorkOrder{}, ErrInvalid
 	}
@@ -1454,7 +1455,7 @@ func (s *Service) Cancel(ctx context.Context, principal auth.Principal, id strin
 		return WorkOrder{}, ErrForbidden
 	}
 	input.Comment = strings.TrimSpace(input.Comment)
-	if !validUUID(id) || input.Comment == "" || len(input.Comment) > 2000 {
+	if !validUUID(id) || input.Comment == "" || textlength.Count(input.Comment) > 2000 {
 		return WorkOrder{}, ErrInvalid
 	}
 	return s.transition(ctx, principal, id, []string{"draft", "issued", "in_progress", "pending_verification", "returned"}, "cancelled", "cancel", input.Comment, requestID, ipAddress, func(ctx context.Context, tx pgx.Tx) error {
@@ -2065,16 +2066,16 @@ func checkFindingVersion(id string, expected *time.Time, current time.Time) erro
 }
 
 func validRiskAcceptanceInput(input RiskAcceptanceInput) bool {
-	return input.Reason != "" && len(input.Reason) <= 5000 && input.AcceptedUntil.After(time.Now())
+	return input.Reason != "" && textlength.Count(input.Reason) <= 5000 && input.AcceptedUntil.After(time.Now())
 }
 
 func validFindingInput(input FindingInput) bool {
-	return input.Title != "" && len(input.Title) <= 255 && validSeverity(input.Severity) && validFindingStatus(input.Status) &&
+	return input.Title != "" && textlength.Count(input.Title) <= 255 && validSeverity(input.Severity) && validFindingStatus(input.Status) &&
 		validUUID(input.AssigneeOrganizationID) && (input.AssetID != "" || input.BusinessSystemID != "") &&
 		(input.AssetID == "" || validUUID(input.AssetID)) && (input.BusinessSystemID == "" || validUUID(input.BusinessSystemID)) &&
 		(input.TestBatchID == "" || validUUID(input.TestBatchID)) &&
-		len(input.VulnerabilityType) <= 128 && input.Description != "" && len(input.Description) <= 20000 &&
-		len(input.Evidence) <= 30000 && len(input.RemediationAdvice) <= 20000 &&
+		textlength.Count(input.VulnerabilityType) <= 128 && input.Description != "" && textlength.Count(input.Description) <= 20000 &&
+		textlength.Count(input.Evidence) <= 30000 && textlength.Count(input.RemediationAdvice) <= 20000 &&
 		(input.Source == "manual" || input.Source == "import" || input.Source == "api" || input.Source == "plugin")
 }
 
@@ -2087,8 +2088,8 @@ func normalizeWorkOrderInput(input *WorkOrderInput) {
 }
 
 func validWorkOrderInput(input WorkOrderInput) bool {
-	if input.Title == "" || len(input.Title) > 255 || !validUUID(input.AssigneeOrganizationID) ||
-		len(input.Description) > 10000 || input.RemediationRequirement == "" || len(input.RemediationRequirement) > 20000 ||
+	if input.Title == "" || textlength.Count(input.Title) > 255 || !validUUID(input.AssigneeOrganizationID) ||
+		textlength.Count(input.Description) > 10000 || input.RemediationRequirement == "" || textlength.Count(input.RemediationRequirement) > 20000 ||
 		input.DueAt.IsZero() || !input.DueAt.After(time.Now().Add(-time.Minute)) || len(input.FindingIDs) == 0 || len(input.FindingIDs) > 100 {
 		return false
 	}

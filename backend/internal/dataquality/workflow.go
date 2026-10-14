@@ -12,6 +12,7 @@ import (
 	"netassets/internal/access"
 	"netassets/internal/auth"
 	"netassets/internal/pagination"
+	"netassets/internal/textlength"
 )
 
 const qualityPermission = "data_quality.manage"
@@ -416,7 +417,7 @@ func (s *Service) startIssue(ctx context.Context, p auth.Principal, issueID stri
 	if input.AssigneeUserID == "" {
 		input.AssigneeUserID = p.UserID
 	}
-	if !scanUUIDPattern.MatchString(input.AssigneeUserID) || len(input.Note) > 5000 {
+	if !scanUUIDPattern.MatchString(input.AssigneeUserID) || textlength.Count(input.Note) > 5000 {
 		return Issue{}, ErrInvalid
 	}
 	return s.transitionIssue(ctx, p, issueID, requestID, ipAddress, "started", allowedStatuses, "in_progress", input.Note, func(ctx context.Context, tx pgx.Tx, item Issue) error {
@@ -427,7 +428,7 @@ func (s *Service) startIssue(ctx context.Context, p auth.Principal, issueID stri
 func (s *Service) AssignIssue(ctx context.Context, p auth.Principal, issueID string, input StartInput, requestID, ipAddress string) (Issue, error) {
 	input.AssigneeUserID = strings.TrimSpace(input.AssigneeUserID)
 	input.Note = strings.TrimSpace(input.Note)
-	if !scanUUIDPattern.MatchString(input.AssigneeUserID) || len(input.Note) > 5000 {
+	if !scanUUIDPattern.MatchString(input.AssigneeUserID) || textlength.Count(input.Note) > 5000 {
 		return Issue{}, ErrInvalid
 	}
 	return s.transitionIssue(ctx, p, issueID, requestID, ipAddress, "assigned", []string{"pending", "in_progress"}, "", input.Note, func(ctx context.Context, tx pgx.Tx, item Issue) error {
@@ -453,7 +454,7 @@ func (s *Service) SubmitIssue(ctx context.Context, p auth.Principal, issueID str
 
 func (s *Service) submitIssue(ctx context.Context, p auth.Principal, issueID string, input SubmitInput, allowedStatuses []string, requestID, ipAddress string) (Issue, error) {
 	input.Note = strings.TrimSpace(input.Note)
-	if input.Note == "" || len(input.Note) > 5000 {
+	if input.Note == "" || textlength.Count(input.Note) > 5000 {
 		return Issue{}, ErrInvalid
 	}
 	return s.transitionIssue(ctx, p, issueID, requestID, ipAddress, "submitted", allowedStatuses, "pending_review", input.Note, func(ctx context.Context, tx pgx.Tx, item Issue) error {
@@ -467,7 +468,7 @@ func (s *Service) ReviewIssue(ctx context.Context, p auth.Principal, issueID str
 		return Issue{}, ErrForbidden
 	}
 	input.Note = strings.TrimSpace(input.Note)
-	if (!input.Approved && input.Note == "") || len(input.Note) > 5000 {
+	if (!input.Approved && input.Note == "") || textlength.Count(input.Note) > 5000 {
 		return Issue{}, ErrInvalid
 	}
 	eventType, next, resolution := "returned", "in_progress", ""
@@ -486,7 +487,7 @@ func (s *Service) ExemptIssue(ctx context.Context, p auth.Principal, issueID str
 	}
 	input.Reason = strings.TrimSpace(input.Reason)
 	input.ExpiresAt = strings.TrimSpace(input.ExpiresAt)
-	if input.Reason == "" || len(input.Reason) > 5000 {
+	if input.Reason == "" || textlength.Count(input.Reason) > 5000 {
 		return Issue{}, ErrInvalid
 	}
 	var expiresAt *time.Time

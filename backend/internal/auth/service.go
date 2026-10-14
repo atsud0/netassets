@@ -16,6 +16,7 @@ import (
 	"golang.org/x/crypto/bcrypt"
 
 	"netassets/internal/pagination"
+	"netassets/internal/textlength"
 )
 
 const (
@@ -239,7 +240,7 @@ func (s *Service) UpdateProfile(ctx context.Context, principal Principal, input 
 	input.Email = strings.TrimSpace(input.Email)
 	input.MobilePhone = strings.TrimSpace(input.MobilePhone)
 	input.OfficePhone = strings.TrimSpace(input.OfficePhone)
-	if input.DisplayName == "" || len(input.DisplayName) > 128 || len(input.Email) > 255 || len(input.MobilePhone) > 64 || len(input.OfficePhone) > 64 {
+	if input.DisplayName == "" || textlength.Count(input.DisplayName) > 128 || textlength.Count(input.Email) > 255 || textlength.Count(input.MobilePhone) > 64 || textlength.Count(input.OfficePhone) > 64 {
 		return Principal{}, ErrInvalid
 	}
 	tx, err := s.pool.Begin(ctx)
@@ -269,7 +270,7 @@ func (s *Service) UpdateProfile(ctx context.Context, principal Principal, input 
 // ChangePassword verifies the current password and keeps only the current session
 // alive. This protects other devices while not interrupting the user who changed it.
 func (s *Service) ChangePassword(ctx context.Context, principal Principal, input ChangePasswordInput, requestID, ipAddress string) error {
-	if input.CurrentPassword == "" || len(input.NewPassword) < 10 {
+	if input.CurrentPassword == "" || textlength.Count(input.NewPassword) < 10 {
 		return ErrInvalid
 	}
 	tx, err := s.pool.Begin(ctx)

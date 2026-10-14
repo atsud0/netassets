@@ -21,6 +21,7 @@ import (
 	"netassets/internal/auth"
 	"netassets/internal/findingstatus"
 	"netassets/internal/pagination"
+	"netassets/internal/textlength"
 )
 
 const MaxFindingImportRows = 5000
@@ -671,7 +672,7 @@ func findingInputFromImportRow(row []string, headers map[string]int, batchID str
 	if input.Description == "" {
 		return FindingInput{}, "", "", &findingImportRowError{"description_required", "漏洞描述不能为空"}
 	}
-	if len(input.Title) > 255 || len(input.VulnerabilityType) > 128 || len(input.Description) > 20000 || len(input.Evidence) > 30000 || len(input.RemediationAdvice) > 20000 {
+	if textlength.Count(input.Title) > 255 || textlength.Count(input.VulnerabilityType) > 128 || textlength.Count(input.Description) > 20000 || textlength.Count(input.Evidence) > 30000 || textlength.Count(input.RemediationAdvice) > 20000 {
 		return FindingInput{}, "", "", &findingImportRowError{"field_too_long", "漏洞字段内容超过长度限制"}
 	}
 	return input, assetType, assetValue, nil

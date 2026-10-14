@@ -10,6 +10,7 @@ import (
 	"netassets/internal/auth"
 	"netassets/internal/inventorytask"
 	"netassets/internal/notification"
+	"netassets/internal/textlength"
 )
 
 // BlockingFinding is one finding that prevents launch approval. The list is
@@ -116,7 +117,7 @@ func (s *Service) ApproveLaunch(ctx context.Context, principal auth.Principal, i
 		return Request{}, ErrInvalid
 	}
 	input.Comment = strings.TrimSpace(input.Comment)
-	if len(input.Comment) > 20000 {
+	if textlength.Count(input.Comment) > 20000 {
 		return Request{}, ErrInvalid
 	}
 	tx, err := s.pool.Begin(ctx)

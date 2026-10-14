@@ -17,6 +17,7 @@ import (
 	"netassets/internal/auth"
 	"netassets/internal/notification"
 	"netassets/internal/pagination"
+	"netassets/internal/textlength"
 )
 
 var (
@@ -479,7 +480,7 @@ func (s *Service) Withdraw(ctx context.Context, principal auth.Principal, id str
 // cancellable while its converted batch has not been started.
 func (s *Service) Cancel(ctx context.Context, principal auth.Principal, id string, input TransitionInput, requestID, ipAddress string) (Request, error) {
 	input.Comment = strings.TrimSpace(input.Comment)
-	if len(input.Comment) > 2000 {
+	if textlength.Count(input.Comment) > 2000 {
 		return Request{}, ErrInvalid
 	}
 	if orgID, isApplicant := applicantOrg(principal); isApplicant {
@@ -537,7 +538,7 @@ func (s *Service) Reject(ctx context.Context, principal auth.Principal, id strin
 		return Request{}, ErrForbidden
 	}
 	input.Comment = strings.TrimSpace(input.Comment)
-	if input.Comment == "" || len(input.Comment) > 2000 || !validUUID(id) {
+	if input.Comment == "" || textlength.Count(input.Comment) > 2000 || !validUUID(id) {
 		return Request{}, ErrInvalid
 	}
 	return s.managerTransition(ctx, principal, id, []string{"submitted"}, "rejected", "reject", input.Comment, requestID, ipAddress, `
@@ -556,7 +557,7 @@ func (s *Service) Approve(ctx context.Context, principal auth.Principal, id stri
 	}
 	input.Comment = strings.TrimSpace(input.Comment)
 	input.AuthorizationNote = strings.TrimSpace(input.AuthorizationNote)
-	if input.AuthorizationNote == "" || len(input.AuthorizationNote) > 20000 || len(input.Comment) > 2000 {
+	if input.AuthorizationNote == "" || textlength.Count(input.AuthorizationNote) > 20000 || textlength.Count(input.Comment) > 2000 {
 		return Request{}, ErrInvalid
 	}
 	tx, err := s.pool.Begin(ctx)
@@ -945,7 +946,7 @@ func validInput(input Input) bool {
 	if (published == "") == (draft == "") {
 		return false
 	}
-	if input.RequestName == "" || len(input.RequestName) > 255 || input.Background == "" || len(input.Background) > 10000 ||
+	if input.RequestName == "" || textlength.Count(input.RequestName) > 255 || input.Background == "" || textlength.Count(input.Background) > 10000 ||
 		!validTestType(input.TestType) || input.ExpectedLaunchAt.IsZero() || !validUUID(input.ContactUserID) ||
 		(published != "" && !validUUID(published)) || (draft != "" && !validUUID(draft)) {
 		return false

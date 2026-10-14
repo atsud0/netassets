@@ -19,6 +19,7 @@ import (
 	"netassets/internal/access"
 	"netassets/internal/auth"
 	"netassets/internal/pagination"
+	"netassets/internal/textlength"
 )
 
 const MaxAttachmentSize int64 = 20 << 20
@@ -62,7 +63,7 @@ func (s *Service) AddAttachment(ctx context.Context, principal auth.Principal, w
 	input.FileName = sanitizeOriginalFilename(input.FileName)
 	input.Description = strings.TrimSpace(input.Description)
 	ext := strings.ToLower(filepath.Ext(input.FileName))
-	if input.Reader == nil || input.FileName == "" || input.SizeBytes <= 0 || input.SizeBytes > MaxAttachmentSize || len(input.Description) > 500 || !validAttachmentCategory(input.Category) {
+	if input.Reader == nil || input.FileName == "" || input.SizeBytes <= 0 || input.SizeBytes > MaxAttachmentSize || textlength.Count(input.Description) > 500 || !validAttachmentCategory(input.Category) {
 		return Attachment{}, ErrInvalid
 	}
 	if _, ok := allowedAttachmentExtensions[ext]; !ok {

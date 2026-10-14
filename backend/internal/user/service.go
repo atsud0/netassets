@@ -17,6 +17,7 @@ import (
 	"netassets/internal/access"
 	"netassets/internal/auth"
 	"netassets/internal/pagination"
+	"netassets/internal/textlength"
 )
 
 var (
@@ -309,7 +310,7 @@ func (s *Service) Create(ctx context.Context, principal auth.Principal, input Cr
 	input.Email = strings.TrimSpace(input.Email)
 	input.MobilePhone = strings.TrimSpace(input.MobilePhone)
 	input.OfficePhone = strings.TrimSpace(input.OfficePhone)
-	if !usernamePattern.MatchString(input.Username) || len(input.Password) < 10 || input.DisplayName == "" || len(input.DisplayName) > 128 || len(input.Email) > 255 || len(input.MobilePhone) > 64 || len(input.OfficePhone) > 64 {
+	if !usernamePattern.MatchString(input.Username) || textlength.Count(input.Password) < 10 || input.DisplayName == "" || textlength.Count(input.DisplayName) > 128 || textlength.Count(input.Email) > 255 || textlength.Count(input.MobilePhone) > 64 || textlength.Count(input.OfficePhone) > 64 {
 		return User{}, ErrInvalid
 	}
 	if err := normalizeGlobalRoleIDs(&input.GlobalRoleIDs); err != nil {
@@ -372,7 +373,7 @@ func (s *Service) Update(ctx context.Context, principal auth.Principal, userID s
 	input.Email = strings.TrimSpace(input.Email)
 	input.MobilePhone = strings.TrimSpace(input.MobilePhone)
 	input.OfficePhone = strings.TrimSpace(input.OfficePhone)
-	if userID == "" || input.DisplayName == "" || len(input.DisplayName) > 128 || len(input.Email) > 255 || len(input.MobilePhone) > 64 || len(input.OfficePhone) > 64 {
+	if userID == "" || input.DisplayName == "" || textlength.Count(input.DisplayName) > 128 || textlength.Count(input.Email) > 255 || textlength.Count(input.MobilePhone) > 64 || textlength.Count(input.OfficePhone) > 64 {
 		return User{}, ErrInvalid
 	}
 	if err := normalizeGlobalRoleIDs(&input.GlobalRoleIDs); err != nil {
@@ -491,7 +492,7 @@ func (s *Service) ResetPassword(ctx context.Context, principal auth.Principal, u
 		return ErrForbidden
 	}
 	userID = strings.TrimSpace(userID)
-	if userID == "" || len(input.Password) < 10 {
+	if userID == "" || textlength.Count(input.Password) < 10 {
 		return ErrInvalid
 	}
 	if userID == principal.UserID {

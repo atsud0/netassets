@@ -21,6 +21,7 @@ import (
 	"netassets/internal/auth"
 	"netassets/internal/findingstatus"
 	"netassets/internal/pagination"
+	"netassets/internal/textlength"
 )
 
 type pendingFindingImportCandidate struct {
@@ -720,7 +721,7 @@ func (s *Service) LinkFindingImportCandidate(ctx context.Context, principal auth
 	input.ReviewNote = strings.TrimSpace(input.ReviewNote)
 	input.AssetCandidateID = strings.TrimSpace(input.AssetCandidateID)
 	input.PendingAssetDraftID = strings.TrimSpace(input.PendingAssetDraftID)
-	if !validUUID(id) || len(input.ReviewNote) > 2000 ||
+	if !validUUID(id) || textlength.Count(input.ReviewNote) > 2000 ||
 		(input.ScopeAssetID == "" && input.AssetID == "" && input.PendingAssetDraftID == "") ||
 		(input.ScopeAssetID != "" && input.AssetID != "") ||
 		(input.PendingAssetDraftID != "" && (input.ScopeAssetID != "" || input.AssetID != "")) {
@@ -980,7 +981,7 @@ func (s *Service) IgnoreFindingImportCandidate(ctx context.Context, principal au
 	}
 	id = strings.TrimSpace(id)
 	input.ReviewNote = strings.TrimSpace(input.ReviewNote)
-	if !validUUID(id) || input.ReviewNote == "" || len(input.ReviewNote) > 2000 {
+	if !validUUID(id) || input.ReviewNote == "" || textlength.Count(input.ReviewNote) > 2000 {
 		return FindingImportCandidate{}, ErrInvalid
 	}
 	tx, err := s.pool.Begin(ctx)

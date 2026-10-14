@@ -14,6 +14,7 @@ import (
 
 	"netassets/internal/auth"
 	"netassets/internal/pagination"
+	"netassets/internal/textlength"
 )
 
 var (
@@ -204,8 +205,8 @@ func (s *Service) Create(ctx context.Context, principal auth.Principal, input Cr
 	input.Manager = strings.TrimSpace(input.Manager)
 	input.Contact = strings.TrimSpace(input.Contact)
 	input.Notes = strings.TrimSpace(input.Notes)
-	if !codePattern.MatchString(input.Code) || input.Name == "" || len(input.Name) > 255 || !validUUID(input.ParentID) || !validNonGroupType(input.Type) ||
-		len(input.ShortName) > 128 || len(input.Manager) > 128 || len(input.Contact) > 255 || len(input.Notes) > 5000 {
+	if !codePattern.MatchString(input.Code) || input.Name == "" || textlength.Count(input.Name) > 255 || !validUUID(input.ParentID) || !validNonGroupType(input.Type) ||
+		textlength.Count(input.ShortName) > 128 || textlength.Count(input.Manager) > 128 || textlength.Count(input.Contact) > 255 || textlength.Count(input.Notes) > 5000 {
 		return Organization{}, ErrInvalid
 	}
 	allowed, err := s.canOperateOrganization(ctx, principal, input.ParentID, "organization.create")
@@ -272,8 +273,8 @@ func (s *Service) Update(ctx context.Context, principal auth.Principal, organiza
 	input.Manager = strings.TrimSpace(input.Manager)
 	input.Contact = strings.TrimSpace(input.Contact)
 	input.Notes = strings.TrimSpace(input.Notes)
-	if !validUUID(organizationID) || input.Name == "" || len(input.Name) > 255 || len(input.ShortName) > 128 ||
-		len(input.Manager) > 128 || len(input.Contact) > 255 || len(input.Notes) > 5000 {
+	if !validUUID(organizationID) || input.Name == "" || textlength.Count(input.Name) > 255 || textlength.Count(input.ShortName) > 128 ||
+		textlength.Count(input.Manager) > 128 || textlength.Count(input.Contact) > 255 || textlength.Count(input.Notes) > 5000 {
 		return Organization{}, ErrInvalid
 	}
 	allowed, err := s.canOperateOrganization(ctx, principal, organizationID, "organization.update")

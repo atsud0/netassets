@@ -13,6 +13,7 @@ import (
 	"netassets/internal/auth"
 	"netassets/internal/notification"
 	"netassets/internal/pagination"
+	"netassets/internal/textlength"
 )
 
 // The formal asset ledger has two doors. Subsidiaries can only reach it through
@@ -329,7 +330,7 @@ func (s *Service) ConfirmDirectChangeRecheckTask(ctx context.Context, principal 
 	if !assetUUIDPattern.MatchString(id) || !validDirectChangeStatus(input.Status) || input.Status == DirectChangeStatusOpen {
 		return DirectChangeRecheckTask{}, ErrInvalid
 	}
-	if input.Note == "" || len(input.Note) > 2000 {
+	if input.Note == "" || textlength.Count(input.Note) > 2000 {
 		return DirectChangeRecheckTask{}, ErrInvalid
 	}
 	tx, err := s.pool.Begin(ctx)

@@ -73,7 +73,7 @@ test('子单位申请上线安全测试，集团审批通过后自动上报待�
         short_name: organizationName,
         type: 'subsidiary',
         manager: '上线测试负责人',
-        contact: 'launch-test-owner@example.com',
+        contact: '13800000002',
         notes: '上线安全测试申请自动化测试组织',
       }),
     })
@@ -124,7 +124,7 @@ test('子单位申请上线安全测试，集团审批通过后自动上报待�
       short_name: '上线申请系统',
       organization_id: fixture.organizationID,
       owner_name: '王五',
-      owner_contact: 'wangwu@example.com',
+      owner_contact: '13800000003',
       status: 'running',
       level: 'important',
       deployment_type: '子公司公有云',

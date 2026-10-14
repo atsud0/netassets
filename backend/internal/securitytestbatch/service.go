@@ -16,6 +16,7 @@ import (
 
 	"netassets/internal/auth"
 	"netassets/internal/pagination"
+	"netassets/internal/textlength"
 )
 
 var (
@@ -559,8 +560,8 @@ func normalizeInput(input *Input) {
 }
 
 func validInput(input Input) bool {
-	if input.Name == "" || len(input.Name) > 255 || input.Provider == "" || len(input.Provider) > 255 ||
-		input.AuthorizationNote == "" || len(input.AuthorizationNote) > 20000 || len(input.Notes) > 20000 ||
+	if input.Name == "" || textlength.Count(input.Name) > 255 || input.Provider == "" || textlength.Count(input.Provider) > 255 ||
+		input.AuthorizationNote == "" || textlength.Count(input.AuthorizationNote) > 20000 || textlength.Count(input.Notes) > 20000 ||
 		!validTestType(input.TestType) || input.StartAt.IsZero() || input.EndAt.IsZero() || !input.EndAt.After(input.StartAt) ||
 		len(input.AssetIDs) < 1 || len(input.AssetIDs) > maxScopeAssets {
 		return false

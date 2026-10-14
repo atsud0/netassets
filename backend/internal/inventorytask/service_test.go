@@ -689,3 +689,58 @@ func TestRestoreInt64AcceptsWholeJSONNumbers(t *testing.T) {
 		t.Fatal("fractional JSON number must be rejected")
 	}
 }
+
+// TestNormalizeCreateInputAcceptsFullLengthChineseDescription is the guard for the
+// reported defect "填报任务 创建填报任务，任务说明输入过程报错".
+//
+// The dialog advertises 任务说明 最多 5000 字, but the service measured it with
+// len(), which counts UTF-8 BYTES. A Chinese glyph is three bytes, so a perfectly
+// normal explanation of 2000 字 was rejected as "too long" at about a third of
+// the advertised limit. Postgres and the browser both count characters, so the
+// service must too.
+func TestNormalizeCreateInputAcceptsFullLengthChineseDescription(t *testing.T) {
+	start := time.Date(2026, 7, 22, 9, 0, 0, 0, time.UTC)
+	input := CreateInput{
+		Name:        "2026 年第三季度网络资产填报",
+		Description: strings.Repeat("本季度网络资产填报范围说明。", 227), // 4540 characters
+		StartAt:     start,
+		DeadlineAt:  start.Add(24 * time.Hour),
+		// Name is stored in varchar(255) which Postgres counts in characters.
+		OrganizationIDs: []string{"11111111-1111-4111-8111-111111111111"},
+		RequiredFields:  []string{"business_systems", "network_assets"},
+	}
+	if err := normalizeCreateInput(&input); err != nil {
+		t.Fatalf("4540 个中文字的任务说明被拒绝: %v（应按字符而非字节计长）", err)
+	}
+	// The advertised limit is still enforced, in the same unit.
+	over := input
+	over.Description = strings.Repeat("测", 5001)
+	if err := normalizeCreateInput(&over); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("5001 字的任务说明 error = %v, want ErrInvalid", err)
+	}
+	over.Description = strings.Repeat("测", 5000)
+	if err := normalizeCreateInput(&over); err != nil {
+		t.Fatalf("恰好 5000 字的任务说明被拒绝: %v", err)
+	}
+}
+
+// TestNormalizeCreateInputAcceptsFullLengthChineseName covers the same defect on
+// the 255-character task name: 85 中文字 used to be the de-facto maximum.
+func TestNormalizeCreateInputAcceptsFullLengthChineseName(t *testing.T) {
+	start := time.Date(2026, 7, 22, 9, 0, 0, 0, time.UTC)
+	input := CreateInput{
+		Name:            strings.Repeat("填", 255),
+		StartAt:         start,
+		DeadlineAt:      start.Add(24 * time.Hour),
+		OrganizationIDs: []string{"11111111-1111-4111-8111-111111111111"},
+		RequiredFields:  []string{"network_assets"},
+	}
+	if err := normalizeCreateInput(&input); err != nil {
+		t.Fatalf("255 个中文字的任务名称被拒绝: %v（应按字符而非字节计长）", err)
+	}
+	over := input
+	over.Name = strings.Repeat("填", 256)
+	if err := normalizeCreateInput(&over); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("256 字的任务名称 error = %v, want ErrInvalid", err)
+	}
+}

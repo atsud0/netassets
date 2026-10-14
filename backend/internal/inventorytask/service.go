@@ -18,6 +18,7 @@ import (
 	"netassets/internal/exportfile"
 	"netassets/internal/notification"
 	"netassets/internal/pagination"
+	"netassets/internal/textlength"
 )
 
 var (
@@ -879,7 +880,7 @@ func (s *Service) Submit(ctx context.Context, principal auth.Principal, taskID, 
 		return OrganizationProgress{}, ErrForbidden
 	}
 	input.Note = strings.TrimSpace(input.Note)
-	if len(input.Note) > 5000 {
+	if textlength.Count(input.Note) > 5000 {
 		return OrganizationProgress{}, ErrInvalid
 	}
 	tx, err := s.pool.Begin(ctx)
@@ -1421,7 +1422,7 @@ func normalizeCreateInput(input *CreateInput) error {
 	if input.AssetNetworkScope == "" {
 		input.AssetNetworkScope = "all"
 	}
-	if input.Name == "" || len(input.Name) > 255 || len(input.Description) > 5000 || input.StartAt.IsZero() ||
+	if input.Name == "" || textlength.Count(input.Name) > 255 || textlength.Count(input.Description) > 5000 || input.StartAt.IsZero() ||
 		input.DeadlineAt.IsZero() || !input.DeadlineAt.After(input.StartAt) ||
 		(input.Status != "draft" && input.Status != "active") || !validAssetNetworkScope(input.AssetNetworkScope) {
 		return ErrInvalid
@@ -1473,7 +1474,7 @@ func normalizeReviewInput(input *ReviewInput) error {
 	if input.Decision != "approved" && input.Decision != "returned" {
 		return ErrInvalid
 	}
-	if input.Decision == "returned" && (input.ReturnReason == "" || len(input.ReturnReason) > 2000) {
+	if input.Decision == "returned" && (input.ReturnReason == "" || textlength.Count(input.ReturnReason) > 2000) {
 		return ErrInvalid
 	}
 	if input.Decision == "approved" {

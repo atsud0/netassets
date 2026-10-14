@@ -28,6 +28,7 @@ import (
 	"netassets/internal/notification"
 	"netassets/internal/pagination"
 	"netassets/internal/remediationretire"
+	"netassets/internal/textlength"
 )
 
 var (
@@ -1962,7 +1963,7 @@ func normalize(input *CreateInput) {
 	input.SecurityNotes = strings.TrimSpace(input.SecurityNotes)
 }
 func validInput(input CreateInput) bool {
-	if !codePattern.MatchString(input.Code) || input.Name == "" || len(input.Name) > 255 || input.OrganizationID == "" {
+	if !codePattern.MatchString(input.Code) || input.Name == "" || textlength.Count(input.Name) > 255 || input.OrganizationID == "" {
 		return false
 	}
 	if !validOwnerContact(input.OwnerContact) {
