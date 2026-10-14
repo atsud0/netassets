@@ -211,6 +211,25 @@ func TestDirectChangeRecheckIsScopedAndClosedByTheOwningOrganization(t *testing.
 	}, "req-a-again", "127.0.0.1"); !errors.Is(err, ErrConflict) {
 		t.Fatalf("re-closing a closed recheck item = %v, want ErrConflict", err)
 	}
+
+	// The rejected repeat must not touch the stored decision and must not add a
+	// second audit line: the first conclusion stays the only auditable one.
+	reloaded, err := service.GetDirectChangeRecheckTask(ctx, orgA, recheckID)
+	if err != nil {
+		t.Fatalf("reload closed recheck item: %v", err)
+	}
+	if reloaded.Status != DirectChangeStatusConfirmed || reloaded.ConfirmationNote != "确认归属无误" {
+		t.Fatalf("recheck item after rejected repeat = status %q note %q, want confirmed/确认归属无误", reloaded.Status, reloaded.ConfirmationNote)
+	}
+	var confirmAudits int
+	if err := fixture.pool.QueryRow(ctx, `
+		SELECT count(*) FROM audit_logs
+		WHERE action='asset_direct_change_recheck.confirm' AND resource_id=$1::uuid`, recheckID).Scan(&confirmAudits); err != nil {
+		t.Fatalf("count confirmation audits: %v", err)
+	}
+	if confirmAudits != 1 {
+		t.Fatalf("confirmation audit rows = %d, want exactly 1", confirmAudits)
+	}
 }
 
 type directChangeFixture struct {
