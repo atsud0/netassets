@@ -9,6 +9,7 @@ import { createExportJob } from '../api/export-jobs'
 import { useAuthStore } from '../stores/auth'
 import WorkingVersionDiffDrawer from '../components/WorkingVersionDiffDrawer.vue'
 import ResourceSubmissionHistoryDrawer from '../components/ResourceSubmissionHistoryDrawer.vue'
+import { draftLastEditedHint, draftTakeoverSummary } from '../utils/inventory-drafts'
 import { createSuggestedColumnMapping, getImportColumnMappingError, importColumnLabel, isImportColumnUsed, serializeImportColumnMapping, type ImportColumn, type ImportColumnMapping, type ImportField } from '../utils/import-column-mapping'
 
 interface Organization { id: string; code: string; name: string; type: string; status: string }
@@ -24,6 +25,8 @@ interface BusinessSystem {
   task_id?: string; draft_status?: string; operation?: 'create' | 'update' | 'delete'; is_draft?: boolean; source_system_id?: string; version?: number
   custom_values?: Array<{ field_key: string; value: unknown }>
   reporting_status?: 'unreported' | 'pending_review' | 'reported' | 'changed' | 'returned' | 'pending_offline'; is_working_copy?: boolean; published_id?: string
+  assigned_to?: string; assigned_to_name?: string; last_edited_by?: string; last_edited_by_name?: string
+  takeover_reason?: string; taken_over_at?: string; takeover_by_name?: string
 }
 interface FieldChange { field: string; label: string; before: string; after: string }
 interface ChangeHistoryItem {
@@ -383,6 +386,32 @@ async function removeDraft(row: BusinessSystem) {
     ElMessage.success('任务变更已取消')
     await loadDraftSystems()
   } catch (error) { if (error !== 'cancel' && error !== 'close') ElMessage.error(getAPIErrorMessage(error, '删除业务系统草稿失败')) }
+}
+
+function draftOwnerLabel(row: BusinessSystem) {
+  return row.assigned_to_name || row.takeover_by_name || row.assigned_to || ''
+}
+
+function canTakeOverDraft(row: BusinessSystem) {
+  if (!inventoryMode.value || auth.isGroupAdmin) return false
+  if (!row.assigned_to || row.assigned_to === auth.user?.id) return false
+  return row.draft_status === 'editing' || row.draft_status === 'returned'
+}
+
+async function takeoverDraft(row: BusinessSystem) {
+  const { value } = await ElMessageBox.prompt(`确认接管“${row.name}”的填报草稿吗？接管原因会记入审计日志，原填报人会看到该提示。`, '接管填报草稿', {
+    confirmButtonText: '确认接管', cancelButtonText: '取消', inputType: 'textarea',
+    inputPlaceholder: '例如：原填报人休假，值班同事接手',
+    inputValidator: (input) => Boolean(String(input ?? '').trim()) || '请填写接管原因',
+  }).then((result) => ({ value: String(result.value ?? '').trim() })).catch(() => ({ value: '' }))
+  const reason = String(value ?? '').trim()
+  if (!reason) return
+  try {
+    if (!row.version || row.version <= 0) throw new Error('草稿版本信息缺失，请刷新后重试')
+    await apiClient.post(`/inventory-tasks/${inventoryTaskID.value}/organizations/${inventoryOrganizationID.value}/business-system-drafts/${row.id}/takeover`, { expected_version: row.version, reason })
+    ElMessage.success('已接管该草稿，接管原因已记入审计日志')
+    await loadDraftSystems()
+  } catch (error) { ElMessage.error(getAPIErrorMessage(error, '接管业务系统草稿失败')) }
 }
 
 async function requestSystemDeletion(row: BusinessSystem) {
@@ -805,7 +834,8 @@ onMounted(load)
         <el-table-column label="状态/等级" min-width="130"><template #default="scope"><el-tag effect="plain">{{ statusLabel(scope.row.status) }}</el-tag><span class="inline-note">{{ levelLabel(scope.row.level) }}</span></template></el-table-column>
         <el-table-column label="变更类型" width="90"><template #default="scope"><el-tag :type="scope.row.operation === 'delete' ? 'danger' : scope.row.operation === 'update' ? 'warning' : 'success'" effect="plain">{{ draftOperationLabels[scope.row.operation || 'create'] }}</el-tag></template></el-table-column>
         <el-table-column label="草稿状态" width="105"><template #default="scope"><el-tag type="warning" effect="plain">{{ draftStatusLabels[scope.row.draft_status || 'editing'] || scope.row.draft_status }}</el-tag></template></el-table-column>
-        <el-table-column label="操作" width="88" fixed="right" align="right" header-align="right" class-name="table-action-column"><template #default="scope"><RowActions :label="`操作：${scope.row.name || scope.row.title || scope.row.code || scope.row.display_name || scope.row.id}`"><el-button link type="primary" @click="openWorkingVersionDiff(scope.row)">查看变更</el-button><el-button v-if="scope.row.operation !== 'delete'" link type="primary" :disabled="scope.row.draft_status === 'submitted'" @click="openEditDialog(scope.row)">编辑</el-button><el-button link type="danger" :disabled="scope.row.draft_status === 'submitted'" @click="removeDraft(scope.row)">取消上报</el-button></RowActions></template></el-table-column>
+        <el-table-column label="填报归属" min-width="180"><template #default="scope"><span v-if="!draftOwnerLabel(scope.row)" class="list-secondary">尚未分配填报人</span><template v-else><span>{{ draftOwnerLabel(scope.row) }}</span><span v-if="draftTakeoverSummary(scope.row)" class="list-secondary">{{ draftTakeoverSummary(scope.row) }}</span><span v-else-if="draftLastEditedHint(scope.row)" class="list-secondary">{{ draftLastEditedHint(scope.row) }}</span></template></template></el-table-column>
+        <el-table-column label="操作" width="120" fixed="right" align="right" header-align="right" class-name="table-action-column"><template #default="scope"><RowActions :label="`操作：${scope.row.name || scope.row.title || scope.row.code || scope.row.display_name || scope.row.id}`"><el-button link type="primary" @click="openWorkingVersionDiff(scope.row)">查看变更</el-button><el-button v-if="scope.row.operation !== 'delete'" link type="primary" :disabled="scope.row.draft_status === 'submitted'" @click="openEditDialog(scope.row)">编辑</el-button><el-button v-if="canTakeOverDraft(scope.row)" link type="warning" @click="takeoverDraft(scope.row)">接管</el-button><el-button link type="danger" :disabled="scope.row.draft_status === 'submitted'" @click="removeDraft(scope.row)">取消上报</el-button></RowActions></template></el-table-column>
       </el-table>
       <div v-if="draftTotal > 0" class="table-pagination"><el-pagination background layout="total, sizes, prev, pager, next" :total="draftTotal" :current-page="draftPage" :page-size="draftPageSize" :page-sizes="[20, 50, 100]" @current-change="handleDraftPageChange" @size-change="handleDraftPageSizeChange" /></div>
     </div>

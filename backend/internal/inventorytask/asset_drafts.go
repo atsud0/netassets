@@ -30,7 +30,11 @@ type AssetDraft struct {
 	LastEditedBy   string     `json:"last_edited_by,omitempty"`
 	TakeoverReason string     `json:"takeover_reason,omitempty"`
 	TakenOverAt    *time.Time `json:"taken_over_at,omitempty"`
-	IsDraft        bool       `json:"is_draft"`
+
+	AssignedToName   string `json:"assigned_to_name,omitempty"`
+	LastEditedByName string `json:"last_edited_by_name,omitempty"`
+	TakeoverByName   string `json:"takeover_by_name,omitempty"`
+	IsDraft          bool   `json:"is_draft"`
 }
 
 type draftAssignment struct {
@@ -67,6 +71,9 @@ func (s *Service) SearchAssetDrafts(ctx context.Context, principal auth.Principa
 	}
 	rows, err := s.pool.Query(ctx, `
 		SELECT draft.id::text, draft.task_id::text, COALESCE(draft.source_asset_id::text,''), draft.operation, draft.draft_status, draft.version, COALESCE(draft.assigned_to::text,''), COALESCE(draft.last_edited_by::text,''), COALESCE(draft.takeover_reason,''), draft.taken_over_at,
+		       COALESCE((SELECT NULLIF(users.display_name,'') FROM users WHERE users.id=draft.assigned_to), ''),
+		       COALESCE((SELECT NULLIF(users.display_name,'') FROM users WHERE users.id=draft.last_edited_by), ''),
+		       COALESCE((SELECT NULLIF(users.display_name,'') FROM users WHERE users.id=COALESCE(draft.assigned_to, draft.last_edited_by)), ''),
 		       draft.asset_type, draft.asset_value, draft.normalized_value, COALESCE(draft.asset_name, ''),
 		       organization.id::text, organization.organization_code, organization.organization_name,
 		       COALESCE(working_system.id::text, system.id::text, ''), COALESCE(working_system.system_code, system.system_code, ''), COALESCE(working_system.system_name, system.system_name, ''),
@@ -584,6 +591,9 @@ func validateDraftReferences(ctx context.Context, q queryRower, organizationID s
 func loadAssetDraft(ctx context.Context, q queryRower, draftID string) (AssetDraft, error) {
 	row := q.QueryRow(ctx, `
 		SELECT draft.id::text, draft.task_id::text, COALESCE(draft.source_asset_id::text,''), draft.operation, draft.draft_status, draft.version, COALESCE(draft.assigned_to::text,''), COALESCE(draft.last_edited_by::text,''), COALESCE(draft.takeover_reason,''), draft.taken_over_at,
+		       COALESCE((SELECT NULLIF(users.display_name,'') FROM users WHERE users.id=draft.assigned_to), ''),
+		       COALESCE((SELECT NULLIF(users.display_name,'') FROM users WHERE users.id=draft.last_edited_by), ''),
+		       COALESCE((SELECT NULLIF(users.display_name,'') FROM users WHERE users.id=COALESCE(draft.assigned_to, draft.last_edited_by)), ''),
 		       draft.asset_type, draft.asset_value, draft.normalized_value, COALESCE(draft.asset_name, ''),
 		       organization.id::text, organization.organization_code, organization.organization_name,
 		       COALESCE(working_system.id::text, system.id::text, ''), COALESCE(working_system.system_code, system.system_code, ''), COALESCE(working_system.system_name, system.system_name, ''),
@@ -604,6 +614,7 @@ func scanAssetDraft(row rowScanner) (AssetDraft, error) {
 	var item AssetDraft
 	var customValues []byte
 	err := row.Scan(&item.ID, &item.TaskID, &item.SourceAssetID, &item.Operation, &item.DraftStatus, &item.Version, &item.AssignedTo, &item.LastEditedBy, &item.TakeoverReason, &item.TakenOverAt,
+		&item.AssignedToName, &item.LastEditedByName, &item.TakeoverByName,
 		&item.Type, &item.Value, &item.NormalizedValue, &item.Name,
 		&item.OrganizationID, &item.OrganizationCode, &item.OrganizationName,
 		&item.BusinessSystemID, &item.BusinessSystemCode, &item.BusinessSystemName,

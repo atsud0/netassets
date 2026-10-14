@@ -27,17 +27,21 @@ type BusinessSystemDraftInput struct {
 
 type BusinessSystemDraft struct {
 	businesssystem.BusinessSystem
-	TaskID         string              `json:"task_id"`
-	SourceSystemID string              `json:"source_system_id,omitempty"`
-	DraftStatus    string              `json:"draft_status"`
-	Operation      string              `json:"operation"`
-	Version        int                 `json:"version"`
-	AssignedTo     string              `json:"assigned_to,omitempty"`
-	LastEditedBy   string              `json:"last_edited_by,omitempty"`
-	TakeoverReason string              `json:"takeover_reason,omitempty"`
-	TakenOverAt    *time.Time          `json:"taken_over_at,omitempty"`
-	IsDraft        bool                `json:"is_draft"`
-	CustomValues   []customfield.Value `json:"custom_values"`
+	TaskID         string     `json:"task_id"`
+	SourceSystemID string     `json:"source_system_id,omitempty"`
+	DraftStatus    string     `json:"draft_status"`
+	Operation      string     `json:"operation"`
+	Version        int        `json:"version"`
+	AssignedTo     string     `json:"assigned_to,omitempty"`
+	LastEditedBy   string     `json:"last_edited_by,omitempty"`
+	TakeoverReason string     `json:"takeover_reason,omitempty"`
+	TakenOverAt    *time.Time `json:"taken_over_at,omitempty"`
+
+	AssignedToName   string              `json:"assigned_to_name,omitempty"`
+	LastEditedByName string              `json:"last_edited_by_name,omitempty"`
+	TakeoverByName   string              `json:"takeover_by_name,omitempty"`
+	IsDraft          bool                `json:"is_draft"`
+	CustomValues     []customfield.Value `json:"custom_values"`
 }
 
 func businessSystemDraftLabel(input businesssystem.CreateInput) string {

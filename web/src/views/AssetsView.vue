@@ -10,7 +10,7 @@ import SavedFilterViews from '../components/SavedFilterViews.vue'
 import AssetExternalObservations from '../components/AssetExternalObservations.vue'
 import WorkingVersionDiffDrawer from '../components/WorkingVersionDiffDrawer.vue'
 import ResourceSubmissionHistoryDrawer from '../components/ResourceSubmissionHistoryDrawer.vue'
-import { assetDraftEndpoint, batchAssetUpdateSuccessMessage } from '../utils/inventory-drafts'
+import { assetDraftEndpoint, batchAssetUpdateSuccessMessage, draftLastEditedHint, draftTakeoverSummary, normalizeDraftTakeoverReason } from '../utils/inventory-drafts'
 import { assetDirectBatchEndpointQuery, needsDirectChangeReason } from '../utils/asset-direct-change'
 import { createSuggestedColumnMapping, getImportColumnMappingError, importColumnLabel, isImportColumnUsed, serializeImportColumnMapping, type ImportColumn, type ImportColumnMapping, type ImportField } from '../utils/import-column-mapping'
 
@@ -28,6 +28,8 @@ interface Asset {
   is_draft?: boolean; draft_status?: 'editing' | 'submitted' | 'returned' | 'published'; task_id?: string
   source_asset_id?: string; operation?: 'create' | 'update' | 'delete'; version?: number
   reporting_status?: 'unreported' | 'pending_review' | 'reported' | 'changed' | 'returned' | 'pending_offline'; is_working_copy?: boolean; published_id?: string
+  assigned_to?: string; assigned_to_name?: string; last_edited_by?: string; last_edited_by_name?: string
+  takeover_reason?: string; taken_over_at?: string; takeover_by_name?: string
   custom_values?: Array<{ field_key: string; value: unknown }>
 }
 interface NetworkArea {
@@ -650,6 +652,29 @@ async function requestAssetDeletion(item: Asset) {
   }
 }
 
+function canTakeOverDraft(row: Asset) {
+  if (!inventoryMode.value) return false
+  if (!row.assigned_to) return false
+  if (row.assigned_to === auth.user?.id) return false
+  return row.draft_status === 'editing' || row.draft_status === 'returned'
+}
+
+async function takeoverDraft(item: Asset) {
+  const reason = await requestDirectChangeReason(
+    '接管填报草稿',
+    `确认接管“${item.name || item.value}”的填报草稿吗？接管原因会记入审计日志，原填报人会看到该提示。`,
+  ).catch(() => '')
+  if (!reason) return
+  try {
+    if (!item.version || item.version <= 0) throw new Error('草稿版本信息缺失，请刷新后重试')
+    await apiClient.post(`${assetDraftEndpoint(inventoryTaskID.value, inventoryOrganizationID.value, item.id)}/takeover`, { expected_version: item.version, reason })
+    ElMessage.success('已接管该草稿，接管原因已记入审计日志')
+    await refreshAfterMutation()
+  } catch (error) {
+    ElMessage.error(getAPIErrorMessage(error, '接管填报资产草稿失败'))
+  }
+}
+
 async function removeDraft(item: Asset) {
   try {
     await ElMessageBox.confirm(`确认取消任务中的“${draftOperationLabels[item.operation || 'create']}”变更“${item.name || item.value}”吗？`, '取消任务变更', { type: 'warning', confirmButtonText: '确认取消', cancelButtonText: '返回' })
@@ -1151,7 +1176,8 @@ onMounted(() => {
         <el-table-column label="暴露范围" width="105"><template #default="scope">{{ scopeLabel(scope.row.network_scope) }}</template></el-table-column>
         <el-table-column label="变更类型" width="90"><template #default="scope"><el-tag :type="scope.row.operation === 'delete' ? 'danger' : scope.row.operation === 'update' ? 'warning' : 'success'" effect="plain">{{ draftOperationLabels[scope.row.operation || 'create'] }}</el-tag></template></el-table-column>
         <el-table-column label="上报状态" width="105"><template #default="scope"><el-tag type="warning" effect="plain">{{ draftStatusLabels[scope.row.draft_status || 'editing'] || scope.row.draft_status }}</el-tag></template></el-table-column>
-        <el-table-column label="操作" width="88" fixed="right" align="right" header-align="right" class-name="table-action-column"><template #default="scope"><RowActions :label="`操作：${scope.row.name || scope.row.title || scope.row.code || scope.row.display_name || scope.row.id}`"><el-button link type="primary" @click="openWorkingVersionDiff(scope.row)">查看变更</el-button><el-button v-if="scope.row.operation !== 'delete'" link type="primary" :disabled="scope.row.draft_status === 'submitted'" @click="openEditDialog(scope.row)">编辑</el-button><el-button link type="danger" :disabled="scope.row.draft_status === 'submitted'" @click="removeDraft(scope.row)">取消上报</el-button></RowActions></template></el-table-column>
+        <el-table-column label="填报归属" min-width="180"><template #default="scope"><span v-if="!scope.row.assigned_to" class="list-secondary">尚未分配填报人</span><template v-else><span>{{ scope.row.assigned_to }}</span><span v-if="draftTakeoverSummary(scope.row)" class="list-secondary">{{ draftTakeoverSummary(scope.row) }}</span><span v-else-if="draftLastEditedHint(scope.row)" class="list-secondary">{{ draftLastEditedHint(scope.row) }}</span></template></template></el-table-column>
+        <el-table-column label="操作" width="120" fixed="right" align="right" header-align="right" class-name="table-action-column"><template #default="scope"><RowActions :label="`操作：${scope.row.name || scope.row.title || scope.row.code || scope.row.display_name || scope.row.id}`"><el-button link type="primary" @click="openWorkingVersionDiff(scope.row)">查看变更</el-button><el-button v-if="scope.row.operation !== 'delete'" link type="primary" :disabled="scope.row.draft_status === 'submitted'" @click="openEditDialog(scope.row)">编辑</el-button><el-button v-if="canTakeOverDraft(scope.row)" link type="warning" :disabled="scope.row.draft_status === 'submitted'" @click="takeoverDraft(scope.row)">接管</el-button><el-button link type="danger" :disabled="scope.row.draft_status === 'submitted'" @click="removeDraft(scope.row)">取消上报</el-button></RowActions></template></el-table-column>
       </el-table>
       <div v-if="draftTotal > 0" class="table-pagination">
         <el-pagination background layout="total, sizes, prev, pager, next" :total="draftTotal" :current-page="draftPage" :page-size="draftPageSize" :page-sizes="[20, 50, 100]" @current-change="handleDraftPageChange" @size-change="handleDraftPageSizeChange" />
