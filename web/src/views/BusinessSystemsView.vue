@@ -11,6 +11,7 @@ import WorkingVersionDiffDrawer from '../components/WorkingVersionDiffDrawer.vue
 import ResourceSubmissionHistoryDrawer from '../components/ResourceSubmissionHistoryDrawer.vue'
 import { draftLastEditedHint, draftTakeoverSummary } from '../utils/inventory-drafts'
 import { reportEditConflict } from '../utils/edit-conflict'
+import { formatDateTime } from '../utils/datetime'
 import { contactPhoneRule, normalizeContactPhone } from '../utils/contact-phone'
 import { createSuggestedColumnMapping, getImportColumnMappingError, importColumnLabel, isImportColumnUsed, serializeImportColumnMapping, type ImportColumn, type ImportColumnMapping, type ImportField } from '../utils/import-column-mapping'
 
@@ -995,7 +996,7 @@ onMounted(load)
     </el-dialog>
 
     <el-dialog v-model="historyDialogVisible" title="业务系统导入记录" width="980px">
-      <el-table v-loading="historyLoading" :data="importHistory" size="small" empty-text="暂无导入记录" max-height="520"><el-table-column prop="created_at" label="时间" width="175" /><el-table-column prop="organization_name" label="所属组织" min-width="130" /><el-table-column prop="file_name" label="文件名" min-width="190" /><el-table-column label="模式" width="130"><template #default="scope">{{ scope.row.import_mode === 'update_working' ? '覆盖为工作版本' : '重复跳过' }}</template></el-table-column><el-table-column label="结果" min-width="280"><template #default="scope">总数 {{ scope.row.total_count }} · 成功 {{ scope.row.success_count }}（新增 {{ scope.row.created_count }} / 更新 {{ scope.row.updated_count }}）· 重复 {{ scope.row.duplicate_count }} · 失败 {{ scope.row.failure_count }}</template></el-table-column><el-table-column prop="created_by_name" label="操作人" width="110" /></el-table>
+      <el-table v-loading="historyLoading" :data="importHistory" size="small" empty-text="暂无导入记录" max-height="520"><el-table-column label="时间" width="175"><template #default="scope">{{ formatDateTime(scope.row.created_at) }}</template></el-table-column><el-table-column prop="organization_name" label="所属组织" min-width="130" /><el-table-column prop="file_name" label="文件名" min-width="190" /><el-table-column label="模式" width="130"><template #default="scope">{{ scope.row.import_mode === 'update_working' ? '覆盖为工作版本' : '重复跳过' }}</template></el-table-column><el-table-column label="结果" min-width="280"><template #default="scope">总数 {{ scope.row.total_count }} · 成功 {{ scope.row.success_count }}（新增 {{ scope.row.created_count }} / 更新 {{ scope.row.updated_count }}）· 重复 {{ scope.row.duplicate_count }} · 失败 {{ scope.row.failure_count }}</template></el-table-column><el-table-column prop="created_by_name" label="操作人" width="110" /></el-table>
       <div class="table-pagination dialog-pagination">
         <el-pagination background layout="total, sizes, prev, pager, next" :total="importTotal" :current-page="importPage" :page-size="importPageSize" :page-sizes="[20, 50, 100]" @current-change="handleImportPageChange" @size-change="handleImportPageSizeChange" />
       </div>
@@ -1023,7 +1024,7 @@ onMounted(load)
     <el-drawer v-model="changeHistoryVisible" :title="changeHistoryTitle" size="760px">
       <div v-loading="changeHistoryLoading" class="detail-drawer">
         <el-timeline v-if="changeHistoryItems.length" class="change-history-timeline">
-          <el-timeline-item v-for="item in changeHistoryItems" :key="item.id" :timestamp="item.created_at" placement="top">
+          <el-timeline-item v-for="item in changeHistoryItems" :key="item.id" :timestamp="formatDateTime(item.created_at)" placement="top">
             <el-card shadow="never">
               <div class="change-history-title"><strong>{{ item.action_label || item.action }}</strong><span>{{ item.display_name || item.username || '系统用户' }}</span></div>
               <el-table v-if="changesOf(item).length" :data="changesOf(item)" size="small" border class="change-history-table">

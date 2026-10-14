@@ -12,6 +12,7 @@ import WorkingVersionDiffDrawer from '../components/WorkingVersionDiffDrawer.vue
 import ResourceSubmissionHistoryDrawer from '../components/ResourceSubmissionHistoryDrawer.vue'
 import { assetDraftEndpoint, batchAssetUpdateSuccessMessage, draftLastEditedHint, draftTakeoverSummary } from '../utils/inventory-drafts'
 import { reportEditConflict } from '../utils/edit-conflict'
+import { formatDateTime } from '../utils/datetime'
 import { assetDirectBatchEndpointQuery, needsDirectChangeReason } from '../utils/asset-direct-change'
 import { createSuggestedColumnMapping, getImportColumnMappingError, importColumnLabel, isImportColumnUsed, serializeImportColumnMapping, type ImportColumn, type ImportColumnMapping, type ImportField } from '../utils/import-column-mapping'
 
@@ -1379,7 +1380,7 @@ onMounted(() => {
     <el-drawer v-model="changeHistoryVisible" :title="changeHistoryTitle" size="760px">
       <div v-loading="changeHistoryLoading" class="detail-drawer">
         <el-timeline v-if="changeHistoryItems.length" class="change-history-timeline">
-          <el-timeline-item v-for="item in changeHistoryItems" :key="item.id" :timestamp="item.created_at" placement="top">
+          <el-timeline-item v-for="item in changeHistoryItems" :key="item.id" :timestamp="formatDateTime(item.created_at)" placement="top">
             <el-card shadow="never">
               <div class="change-history-title"><strong>{{ item.action_label || item.action }}</strong><span>{{ item.display_name || item.username || '系统用户' }}</span></div>
               <el-table v-if="changesOf(item).length" :data="changesOf(item)" size="small" border class="change-history-table">

@@ -2,6 +2,7 @@
 import { computed, ref } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { apiClient, getAPIErrorMessage } from '../api/client'
+import { formatDateTime } from '../utils/datetime'
 
 interface FieldChange {
   field: string
@@ -63,12 +64,6 @@ const valueLabels: Record<string, string> = {
 }
 
 const title = computed(() => items.value[0]?.resource_name ? `${items.value[0].resource_name} · 上报历史` : '资源上报历史')
-
-function formatDateTime(value?: string) {
-  if (!value) return '—'
-  const date = new Date(value)
-  return Number.isNaN(date.getTime()) ? value : date.toLocaleString('zh-CN', { hour12: false })
-}
 
 function formatValue(value: unknown) {
   if (value === null || value === undefined || value === '') return '—'
