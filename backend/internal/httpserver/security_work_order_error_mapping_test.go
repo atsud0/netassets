@@ -98,10 +98,16 @@ func securityWorkOrderErrorFixtures() []securityWorkOrderFixture {
 			name:    "risk",
 			handler: riskWriter,
 			errors: map[string]error{
-				"forbidden": securityworkorder.ErrForbidden,
-				"invalid":   securityworkorder.ErrInvalid,
-				"not_found": securityworkorder.ErrNotFound,
-				"conflict":  securityworkorder.ErrConflict,
+				"forbidden":      securityworkorder.ErrForbidden,
+				"invalid":        securityworkorder.ErrInvalid,
+				"not_found":      securityworkorder.ErrNotFound,
+				"conflict":       securityworkorder.ErrConflict,
+				"invalid_state":  securityworkorder.ErrState,
+				// A risk decision is a read-modify-write like any other status
+				// action, so a missing or stale optimistic-lock token must be
+				// reported as such instead of leaking as a generic 400.
+				"version_required": securityworkorder.ErrVersionRequired,
+				"edit_conflict":    securityworkorder.ErrEditConflict,
 			},
 		},
 		{
@@ -153,6 +159,10 @@ func TestSecurityWorkOrderErrorMapping(t *testing.T) {
 		"conflict":       http.StatusConflict,
 		"invalid_state":  http.StatusConflict,
 		"individual_409": http.StatusConflict,
+		// Both optimistic-lock failures are 400/409: the client sent a stale or
+		// absent token, which is a retryable request problem, not a server fault.
+		"version_required": http.StatusBadRequest,
+		"edit_conflict":    http.StatusConflict,
 	}
 	for _, fixture := range securityWorkOrderErrorFixtures() {
 		for label, injected := range fixture.errors {
