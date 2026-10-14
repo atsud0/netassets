@@ -90,7 +90,7 @@ func TestUpdateGrantRenewalRestoresAccessAndRefusesShorterDeadline(t *testing.T)
 		SELECT m.valid_until FROM vendor_memberships m
 		JOIN remediation_grants g ON g.user_id=m.user_id
 		JOIN vendors v ON v.catalog_id=m.vendor_id AND v.id=g.vendor_id
-		WHERE g.id=$1::uuid`, f.grant).Scan(&membershipUntil); err != nil {
+		WHERE g.id=$1::uuid AND m.user_id=$2::uuid`, f.grant, f.worker.UserID).Scan(&membershipUntil); err != nil {
 		t.Fatalf("load membership deadline: %v", err)
 	}
 	if !membershipUntil.After(future.Add(-time.Minute)) {
@@ -295,11 +295,17 @@ func TestGrantRenewalReopensAnExpiredVendorMembership(t *testing.T) {
 	f := setup(t)
 	id := f.assign(t, 0, "vg-repair-"+suffixOf(t), f.grant)
 
-	// The vendor's own roster window has already closed while the grant is still
-	// enabled, which is the shape this is meant to repair.
+	// The vendor's own roster window has not opened yet - a re-onboarding roster
+	// entered with the wrong start date. Extending only the end would leave the
+	// window shut for another ten days, so the renewal has to pull the start back
+	// as well or the vendor is told they are working again while the catalog still
+	// says they are not on the roster yet.
 	editFixture(t, f, `
-		UPDATE vendor_memberships SET valid_from=now()-interval '90 days', valid_until=now()-interval '1 day'
+		UPDATE vendor_memberships SET valid_from=now()+interval '10 days', valid_until=now()+interval '20 days'
 		WHERE user_id=$1::uuid`, f.worker.UserID)
+	if _, err := f.s.Detail(f.ctx, f.worker, id, true); err == nil {
+		t.Fatal("the vendor can open the task while their roster window has not opened yet; the precondition would assert nothing")
+	}
 	must(t, f.s.UpdateGrant(f.ctx, f.manager, f.grant, "revoked", time.Time{}, "结束外协合作"))
 
 	future := time.Now().Add(30 * 24 * time.Hour)
@@ -316,10 +322,11 @@ func TestGrantRenewalReopensAnExpiredVendorMembership(t *testing.T) {
 		SELECT m.valid_from, m.valid_until FROM vendor_memberships m
 		JOIN vendors v ON v.catalog_id=m.vendor_id
 		JOIN remediation_grants g ON g.vendor_id=v.id
-		WHERE g.id=$1::uuid AND m.user_id=g.user_id`, f.grant).Scan(&membershipFrom, &membershipUntil); err != nil {
+		WHERE g.id=$1::uuid AND m.user_id=g.user_id AND m.user_id=$2::uuid`, f.grant, f.worker.UserID).Scan(&membershipFrom, &membershipUntil); err != nil {
 		t.Fatalf("load membership window: %v", err)
 	}
-	if membershipFrom.After(time.Now().Add(-time.Minute)) {
+	// The renewed window must have already opened, not merely been moved.
+	if membershipFrom.After(time.Now().Add(time.Minute)) {
 		t.Fatalf("membership starts at %s, still in the future; the renewal reopened nothing", membershipFrom)
 	}
 	if !membershipUntil.After(future.Add(-time.Minute)) {
