@@ -215,3 +215,147 @@ func suffixOf(t *testing.T) string {
 	t.Helper()
 	return time.Now().Format("150405.000000000")
 }
+
+// A renewal that cannot restore the vendor's access must be refused outright. The
+// 修复人员 page offers 续期 next to 结束合作 and reports the result verbatim, so a
+// renewal that succeeds while the vendor stays locked out is the worst outcome: the
+// administrator believes the collaboration is running again and only the vendor -
+// the one party that cannot restore access itself - finds out that it is not.
+func TestGrantRenewalIsRefusedWhenItCannotRestoreTheVendor(t *testing.T) {
+	cases := []struct {
+		name   string
+		broken func(t *testing.T, f *fixture)
+	}{
+		{
+			name: "vendor membership disabled",
+			broken: func(t *testing.T, f *fixture) {
+				editFixture(t, f, `UPDATE vendor_memberships SET status='disabled' WHERE user_id=$1::uuid`, f.worker.UserID)
+			},
+		},
+		{
+			name: "vendor record disabled",
+			broken: func(t *testing.T, f *fixture) {
+				editFixture(t, f, `UPDATE vendors SET status='disabled' WHERE id=(SELECT vendor_id FROM remediation_grants WHERE id=$1::uuid)`, f.grant)
+			},
+		},
+		{
+			name: "vendor record moved to another organization",
+			broken: func(t *testing.T, f *fixture) {
+				var otherOrg string
+				must(t, f.pool.QueryRow(f.ctx, `
+					INSERT INTO organizations(organization_code,organization_name,organization_type)
+					VALUES($1,'其他子公司','subsidiary') RETURNING id::text`, "VOTHER_"+suffixOf(t)).Scan(&otherOrg))
+				editFixture(t, f, `UPDATE vendors SET organization_id=$1::uuid WHERE id=(SELECT vendor_id FROM remediation_grants WHERE id=$2::uuid)`, otherOrg, f.grant)
+			},
+		},
+		{
+			name: "vendor catalog entry disabled",
+			broken: func(t *testing.T, f *fixture) {
+				editFixture(t, f, `
+					UPDATE vendor_catalog SET status='disabled' WHERE id=(
+						SELECT v.catalog_id FROM vendors v JOIN remediation_grants g ON g.vendor_id=v.id WHERE g.id=$1::uuid)`, f.grant)
+			},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			f := setup(t)
+			id := f.assign(t, 0, "vg-norestore-"+suffixOf(t), f.grant)
+			tc.broken(t, f)
+
+			must(t, f.s.UpdateGrant(f.ctx, f.manager, f.grant, "revoked", time.Time{}, "结束外协合作"))
+			err := f.s.UpdateGrant(f.ctx, f.manager, f.grant, "enabled", time.Now().Add(30*24*time.Hour), "续期一个月")
+			if !errors.Is(err, remediation.ErrConflict) {
+				t.Fatalf("renewal that cannot restore access error = %v, want ErrConflict", err)
+			}
+
+			// A refusal must leave nothing half-applied: the grant is still revoked and
+			// the vendor still has no access, so a retry after the chain is repaired
+			// behaves the same as the first attempt.
+			var status string
+			if err := f.pool.QueryRow(f.ctx, `SELECT status FROM remediation_grants WHERE id=$1::uuid`, f.grant).Scan(&status); err != nil {
+				t.Fatalf("load grant status: %v", err)
+			}
+			if status != "revoked" {
+				t.Fatalf("grant status = %q after a refused renewal, want revoked", status)
+			}
+			if _, err := f.s.Detail(f.ctx, f.worker, id, true); !errors.Is(err, remediation.ErrNotFound) {
+				t.Fatalf("the vendor can open the task after a refused renewal: %v", err)
+			}
+		})
+	}
+}
+
+// The refusal above must not turn a recoverable situation into a permanently
+// unusable grant. An expired membership is the recoverable case and it is the whole
+// point of a renewal: the same button that the previous test refuses must, once the
+// unrepairable links are intact, both reopen the vendor's window and hand the task
+// back - without the administrator having to know which table to edit.
+func TestGrantRenewalReopensAnExpiredVendorMembership(t *testing.T) {
+	f := setup(t)
+	id := f.assign(t, 0, "vg-repair-"+suffixOf(t), f.grant)
+
+	// The vendor's own roster window has already closed while the grant is still
+	// enabled, which is the shape this is meant to repair.
+	editFixture(t, f, `
+		UPDATE vendor_memberships SET valid_from=now()-interval '90 days', valid_until=now()-interval '1 day'
+		WHERE user_id=$1::uuid`, f.worker.UserID)
+	must(t, f.s.UpdateGrant(f.ctx, f.manager, f.grant, "revoked", time.Time{}, "结束外协合作"))
+
+	future := time.Now().Add(30 * 24 * time.Hour)
+	must(t, f.s.UpdateGrant(f.ctx, f.manager, f.grant, "enabled", future, "续期一个月"))
+
+	if _, err := f.s.Detail(f.ctx, f.worker, id, true); err != nil {
+		t.Fatalf("the vendor still cannot open the task after the renewal: %v", err)
+	}
+
+	// The membership window is what the vendor catalog shows, so it must be reopened
+	// and must not stop short of the renewed grant deadline.
+	var membershipFrom, membershipUntil time.Time
+	if err := f.pool.QueryRow(f.ctx, `
+		SELECT m.valid_from, m.valid_until FROM vendor_memberships m
+		JOIN vendors v ON v.catalog_id=m.vendor_id
+		JOIN remediation_grants g ON g.vendor_id=v.id
+		WHERE g.id=$1::uuid AND m.user_id=g.user_id`, f.grant).Scan(&membershipFrom, &membershipUntil); err != nil {
+		t.Fatalf("load membership window: %v", err)
+	}
+	if membershipFrom.After(time.Now().Add(-time.Minute)) {
+		t.Fatalf("membership starts at %s, still in the future; the renewal reopened nothing", membershipFrom)
+	}
+	if !membershipUntil.After(future.Add(-time.Minute)) {
+		t.Fatalf("membership ends at %s, which is before the renewed grant deadline %s", membershipUntil, future)
+	}
+}
+
+// The refusal is also reachable after the membership was disabled, so repairing the
+// roster the way the 厂商 page does must make the very same renewal succeed. This
+// guards against a fix that simply refuses every renewal.
+func TestGrantRenewalSucceedsOnceTheRosterIsRepaired(t *testing.T) {
+	f := setup(t)
+	id := f.assign(t, 0, "vg-repair2-"+suffixOf(t), f.grant)
+
+	editFixture(t, f, `UPDATE vendor_memberships SET status='disabled' WHERE user_id=$1::uuid`, f.worker.UserID)
+	must(t, f.s.UpdateGrant(f.ctx, f.manager, f.grant, "revoked", time.Time{}, "结束外协合作"))
+	if err := f.s.UpdateGrant(f.ctx, f.manager, f.grant, "enabled", time.Now().Add(30*24*time.Hour), "续期一个月"); !errors.Is(err, remediation.ErrConflict) {
+		t.Fatalf("renewal error = %v, want ErrConflict while the person is off the vendor roster", err)
+	}
+
+	editFixture(t, f, `
+		UPDATE vendor_memberships SET status='enabled', valid_from=now()-interval '1 day', valid_until=now()+interval '365 days'
+		WHERE user_id=$1::uuid`, f.worker.UserID)
+	must(t, f.s.UpdateGrant(f.ctx, f.manager, f.grant, "enabled", time.Now().Add(30*24*time.Hour), "修复厂商名册后续期"))
+
+	if _, err := f.s.Detail(f.ctx, f.worker, id, true); err != nil {
+		t.Fatalf("the repaired vendor still cannot open the task: %v", err)
+	}
+}
+
+// editFixture applies one fixture edit. It exists because a pgx Exec returns a
+// command tag alongside its error, which cannot be forwarded into a single-error
+// helper; wrapping it here keeps each case of a table readable as one statement.
+func editFixture(t *testing.T, f *fixture, sql string, args ...any) {
+	t.Helper()
+	if _, err := f.pool.Exec(f.ctx, sql, args...); err != nil {
+		t.Fatalf("fixture edit %q: %v", sql, err)
+	}
+}

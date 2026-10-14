@@ -267,11 +267,46 @@ func (s *Service) UpdateGrant(ctx context.Context, p auth.Principal, id, status 
 	} else {
 		until = currentUntil
 	}
+	// A renewal that cannot restore the vendor's access is worse than a refusal: the
+	// page reports success, the grant row says "enabled", and the person still cannot
+	// open their own tasks because a link further down the chain is broken. The vendor
+	// is the only party who cannot repair that themselves.
+	//
+	// What counts as repairable is decided here, not guessed by the caller: an expired
+	// membership is exactly what this renewal is for - the deadline extension below
+	// pulls it forward. What is not repairable is a person who is no longer on the
+	// vendor roster at all, or a vendor, catalog entry or account that has been
+	// disabled, reassigned to another organization or deleted. Those need the 厂商 page
+	// or an administrator, so the renewal is refused instead of silently reporting a
+	// collaboration that nobody can work on.
+	if status == "enabled" {
+		var restorable bool
+		if err = tx.QueryRow(ctx, `
+			SELECT EXISTS(SELECT 1 FROM remediation_grants g
+			 JOIN users u ON u.id=g.user_id AND u.status='enabled' AND u.deleted_at IS NULL
+			 JOIN organizations o ON o.id=g.organization_id AND o.status='enabled' AND o.deleted_at IS NULL
+			 JOIN business_systems b ON b.id=g.business_system_id AND b.owner_organization_id=g.organization_id AND b.deleted_at IS NULL AND b.system_status<>'archived'
+			 JOIN vendors v ON v.id=g.vendor_id AND v.status='enabled' AND v.organization_id=g.organization_id
+			 JOIN vendor_catalog c ON c.id=v.catalog_id AND c.status='enabled'
+			 WHERE g.id=$1::uuid
+			   AND EXISTS(SELECT 1 FROM vendor_memberships vm WHERE vm.vendor_id=c.id AND vm.user_id=g.user_id
+			              AND vm.status='enabled' AND vm.valid_from<=$2::timestamptz))`, id, until).Scan(&restorable); err != nil {
+			return err
+		}
+		if !restorable {
+			return ErrConflict
+		}
+	}
 	if _, err = tx.Exec(ctx, `UPDATE remediation_grants SET status=$2,valid_until=$3 WHERE id=$1::uuid`, id, status, until); err != nil {
 		return dbError(err)
 	}
 	if status == "enabled" {
-		if _, err = tx.Exec(ctx, `UPDATE vendor_memberships m SET valid_until=GREATEST(m.valid_until,$2) FROM remediation_grants g JOIN vendors v ON v.id=g.vendor_id WHERE g.id=$1::uuid AND m.vendor_id=v.catalog_id AND m.user_id=g.user_id AND m.status='enabled'`, id, until); err != nil {
+		// The membership is the vendor's own record of when this person is available.
+		// A renewal that leaves it behind would silently revoke the vendor one day
+		// later, so the new grant deadline is pushed onto it as well. The start is
+		// pulled forward for the same reason: a membership whose window has already
+		// closed cannot be re-opened by extending its end alone.
+		if _, err = tx.Exec(ctx, `UPDATE vendor_memberships m SET valid_from=LEAST(m.valid_from,now()),valid_until=GREATEST(m.valid_until,$2) FROM remediation_grants g JOIN vendors v ON v.id=g.vendor_id WHERE g.id=$1::uuid AND m.vendor_id=v.catalog_id AND m.user_id=g.user_id AND m.status='enabled'`, id, until); err != nil {
 			return err
 		}
 	}
