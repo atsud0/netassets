@@ -37,7 +37,7 @@ var (
 	// overwriting: an unconditional UPDATE is exactly how two operators lose
 	// each other's status decisions.
 	ErrVersionRequired = errors.New("expected_updated_at is required")
-	uuidPattern     = regexp.MustCompile(`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$`)
+	uuidPattern        = regexp.MustCompile(`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$`)
 )
 
 type Finding struct {
@@ -170,6 +170,13 @@ func findingAssetLinkState(assetID, pendingDraftID string, assetDeleted bool) st
 	}
 }
 
+// FindingSummaryStats keeps "pending" strictly equal to the vulnerability
+// lifecycle status (FindingPending). Every other waiting state lives in its own
+// counter so a group manager can never read one number as five different
+// backlogs: asset association, remediation acceptance, organization review,
+// security review, accepted risk and expired accepted risk each have their own
+// field, and severity counters are counted over the whole visible scope rather
+// than over the pending subset.
 type FindingSummaryStats struct {
 	Total    int `json:"total"`
 	Pending  int `json:"pending"`
@@ -177,6 +184,13 @@ type FindingSummaryStats struct {
 	High     int `json:"high"`
 	Medium   int `json:"medium"`
 	Low      int `json:"low"`
+
+	PendingAssetLink          int `json:"pending_asset_link"`
+	PendingAcceptance         int `json:"pending_acceptance"`
+	PendingOrganizationReview int `json:"pending_organization_review"`
+	PendingSecurityReview     int `json:"pending_security_review"`
+	RiskAccepted              int `json:"risk_accepted"`
+	RiskAcceptedExpired       int `json:"risk_accepted_expired"`
 }
 
 type FindingSummary struct {
@@ -293,8 +307,8 @@ type RiskAcceptanceInput struct {
 }
 
 type RiskReviewInput struct {
-	Comment          string     `json:"comment"`
-	AcceptedUntil    *time.Time `json:"accepted_until"`
+	Comment           string     `json:"comment"`
+	AcceptedUntil     *time.Time `json:"accepted_until"`
 	ExpectedUpdatedAt *time.Time `json:"expected_updated_at,omitempty"`
 }
 
@@ -353,7 +367,13 @@ func (s *Service) SummarizeFindings(ctx context.Context, principal auth.Principa
 		       count(*) FILTER (WHERE f.severity = 'critical')::int,
 		       count(*) FILTER (WHERE f.severity = 'high')::int,
 		       count(*) FILTER (WHERE f.severity = 'medium')::int,
-		       count(*) FILTER (WHERE f.severity = 'low')::int
+		       count(*) FILTER (WHERE f.severity = 'low')::int,
+		       count(*) FILTER (WHERE f.asset_link_status <> 'live')::int,
+		       count(*) FILTER (WHERE f.remediation_status = 'pending_acceptance')::int,
+		       count(*) FILTER (WHERE f.remediation_status = 'pending_org_review')::int,
+		       count(*) FILTER (WHERE f.remediation_status = 'pending_security_review')::int,
+		       count(*) FILTER (WHERE f.status = 'risk_accepted')::int,
+		       count(*) FILTER (WHERE f.risk_acceptance_expired_at IS NOT NULL)::int
 		FROM security_findings f
 		WHERE (
 		        $2::boolean
@@ -374,7 +394,9 @@ func (s *Service) SummarizeFindings(ctx context.Context, principal auth.Principa
 		)
 		AND ($3::text = '' OR f.assignee_organization_id::text = $3)`,
 		principal.UserID, principal.CanManageSecurityFindings(), organizationID).Scan(
-		&result.Total, &result.Pending, &result.Critical, &result.High, &result.Medium, &result.Low)
+		&result.Total, &result.Pending, &result.Critical, &result.High, &result.Medium, &result.Low,
+		&result.PendingAssetLink, &result.PendingAcceptance, &result.PendingOrganizationReview,
+		&result.PendingSecurityReview, &result.RiskAccepted, &result.RiskAcceptedExpired)
 	if err != nil {
 		return FindingSummaryStats{}, fmt.Errorf("summarize security findings: %w", err)
 	}

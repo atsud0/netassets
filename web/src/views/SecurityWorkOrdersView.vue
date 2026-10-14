@@ -16,7 +16,27 @@ import {
 } from '../constants/findingStatus'
 
 interface ListResponse<T> { items: T[]; total: number; page: number; page_size: number }
-interface FindingSummaryStats { total: number; pending: number; critical: number; high: number; medium: number; low: number }
+interface FindingSummaryStats {
+  total: number; pending: number; critical: number; high: number; medium: number; low: number
+  pending_asset_link: number; pending_acceptance: number; pending_organization_review: number
+  pending_security_review: number; risk_accepted: number; risk_accepted_expired: number
+}
+
+// "待处理" is only the vulnerability lifecycle status. Every other waiting state
+// is a separate dimension so nobody reads one number as the whole backlog.
+const findingSummaryDimensions = [
+  { key: 'pending', label: '待处理', hint: '仅统计漏洞生命周期状态为「待处理」的发现', tone: 'tone-pending' },
+  { key: 'pending_asset_link', label: '待关联资产', hint: '尚未绑定正式资产的发现（含待关联漏洞候选）', tone: 'tone-pending' },
+  { key: 'pending_acceptance', label: '待整改受理', hint: '已进入整改任务但尚未被受理', tone: 'tone-pending' },
+  { key: 'pending_organization_review', label: '待组织复核', hint: '整改结果已提交，等待资产所属组织复核', tone: 'tone-pending' },
+  { key: 'pending_security_review', label: '待安全复核', hint: '等待集团安全管理员复核整改结果', tone: 'tone-pending' },
+  { key: 'risk_accepted', label: '风险接受中', hint: '已接受风险且尚未到期', tone: 'tone-total' },
+  { key: 'risk_accepted_expired', label: '风险接受已到期', hint: '接受期限已到但状态尚未回收，需要重新处置', tone: 'tone-critical' },
+] as const
+
+function findingSummaryValue(key: keyof FindingSummaryStats) {
+  return findingSummary[key] ?? 0
+}
 interface ItemResponse<T> { item: T }
 interface Organization { id: string; code: string; name: string; type: string; status: string }
 interface Asset { id: string; value: string; name?: string; organization_id: string; business_system_id?: string; network_scope: string; status: string }
@@ -90,7 +110,11 @@ const organizations = ref<Organization[]>([])
 const assets = ref<Asset[]>([])
 const systems = ref<BusinessSystem[]>([])
 const findings = ref<Finding[]>([])
-const findingSummary = reactive<FindingSummaryStats>({ total: 0, pending: 0, critical: 0, high: 0, medium: 0, low: 0 })
+const findingSummary = reactive<FindingSummaryStats>({
+  total: 0, pending: 0, critical: 0, high: 0, medium: 0, low: 0,
+  pending_asset_link: 0, pending_acceptance: 0, pending_organization_review: 0,
+  pending_security_review: 0, risk_accepted: 0, risk_accepted_expired: 0,
+})
 const findingOptions = ref<Finding[]>([])
 const workOrders = ref<WorkOrder[]>([])
 const orderPage = ref(1)
@@ -998,12 +1022,23 @@ async function onTabChange() {
       </el-tabs>
       <div v-if="activeTab === 'findings'" class="finding-summary-cards" aria-label="漏洞与安全发现汇总">
         <div class="finding-summary-card tone-total"><span>发现总数</span><strong>{{ findingSummary.total }}</strong></div>
-        <div class="finding-summary-card tone-pending"><span>待处理</span><strong>{{ findingSummary.pending }}</strong></div>
         <div class="finding-summary-card tone-critical"><span>严重</span><strong>{{ findingSummary.critical }}</strong></div>
         <div class="finding-summary-card tone-high"><span>高危</span><strong>{{ findingSummary.high }}</strong></div>
         <div class="finding-summary-card tone-medium"><span>中危</span><strong>{{ findingSummary.medium }}</strong></div>
         <div class="finding-summary-card tone-low"><span>低危</span><strong>{{ findingSummary.low }}</strong></div>
       </div>
+      <el-collapse v-if="activeTab === 'findings'" class="finding-summary-dimensions">
+        <el-collapse-item name="dimensions" title="其他待办口径（不计入「待处理」）">
+          <div class="finding-dimension-cards">
+            <el-tooltip v-for="dimension in findingSummaryDimensions" :key="dimension.key" :content="dimension.hint" placement="top">
+              <div class="finding-summary-card" :class="dimension.tone" :aria-label="`${dimension.label}：${dimension.hint}`">
+                <span>{{ dimension.label }}</span>
+                <strong>{{ findingSummaryValue(dimension.key) }}</strong>
+              </div>
+            </el-tooltip>
+          </div>
+        </el-collapse-item>
+      </el-collapse>
       <div v-if="activeTab === 'candidates'" class="filter-bar candidate-filter-bar">
         <el-select v-model="candidateBatchFilter" clearable filterable placeholder="全部测试批次" style="width: 260px">
           <el-option v-for="item in usableTestBatches" :key="item.id" :label="`${item.name}（${item.code}）`" :value="item.id" />
@@ -1349,7 +1384,9 @@ async function onTabChange() {
 
 <style scoped>
 .security-panel { overflow: hidden; }
-.finding-summary-cards { display:grid; grid-template-columns:repeat(6, minmax(110px, 1fr)); gap:12px; margin:14px 0 18px; }
+.finding-summary-cards { display:grid; grid-template-columns:repeat(5, minmax(110px, 1fr)); gap:12px; margin:14px 0 10px; }
+.finding-summary-dimensions { margin:0 0 18px; }.finding-summary-dimensions :deep(.el-collapse-item__header) { font-size:13px;color:var(--muted); }
+.finding-dimension-cards { display:grid; grid-template-columns:repeat(auto-fit, minmax(150px, 1fr)); gap:12px; padding:4px 0 6px; }
 .finding-summary-card { min-height:78px; padding:14px 16px; border:1px solid var(--line); border-radius:12px; background:#fff; display:flex; flex-direction:column; justify-content:space-between; box-shadow:0 2px 8px rgba(15,23,42,.03); }
 .finding-summary-card span { color:var(--muted); font-size:13px; }
 .finding-summary-card strong { color:var(--navy); font-size:27px; line-height:1; }

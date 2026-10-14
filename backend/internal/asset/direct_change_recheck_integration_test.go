@@ -224,7 +224,7 @@ func TestDirectChangeRecheckIsScopedAndClosedByTheOwningOrganization(t *testing.
 	var confirmAudits int
 	if err := fixture.pool.QueryRow(ctx, `
 		SELECT count(*) FROM audit_logs
-		WHERE action='asset_direct_change_recheck.confirm' AND resource_id=$1::uuid`, recheckID).Scan(&confirmAudits); err != nil {
+		WHERE action='asset_direct_change_recheck.confirm' AND resource_id::uuid=$1::uuid`, recheckID).Scan(&confirmAudits); err != nil {
 		t.Fatalf("count confirmation audits: %v", err)
 	}
 	if confirmAudits != 1 {
