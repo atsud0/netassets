@@ -120,10 +120,7 @@ onMounted(load)
 
 <template>
   <section>
-    <div class="page-heading">
-      <div>
-        <h1>回收站</h1>
-      </div>
+    <div class="page-heading"><h1>回收站</h1>
       <div class="page-heading-actions">
         <el-button :loading="loading" @click="load">刷新</el-button>
       </div>

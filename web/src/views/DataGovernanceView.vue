@@ -476,10 +476,7 @@ onMounted(load)
 
 <template>
   <section>
-    <div class="page-heading">
-      <div>
-      <h1>数据治理</h1>
-      </div>
+    <div class="page-heading"><h1>数据治理</h1>
       <div class="button-row"><el-button v-if="activeTab === 'quality'" type="primary" @click="openRuleCreate">新增质量规则</el-button><el-button v-else type="primary" @click="openCreate">新增自定义字段</el-button></div>
     </div>
     <div class="panel governance-filter-panel"><el-tabs v-model="activeTab" @tab-change="onTabChange"><el-tab-pane label="网络资产字段" name="asset" /><el-tab-pane label="业务系统字段" name="business_system" /><el-tab-pane label="数据质量规则" name="quality" /></el-tabs></div>

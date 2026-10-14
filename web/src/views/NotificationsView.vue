@@ -132,10 +132,7 @@ onMounted(load)
 
 <template>
   <section>
-    <div class="page-heading">
-      <div>
-        <h1>消息中心</h1>
-      </div>
+    <div class="page-heading"><h1>消息中心</h1>
       <div class="page-heading-actions">
         <el-button :loading="markingAll" :disabled="!summary.unread_count" @click="markAllRead">全部标记已读</el-button>
       </div>

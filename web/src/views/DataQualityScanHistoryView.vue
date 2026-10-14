@@ -76,10 +76,7 @@ onMounted(() => { void loadHistory() })
 
 <template>
   <section class="page-stack">
-    <div class="page-heading">
-      <div>
-        <h1>巡检历史</h1>
-      </div>
+    <div class="page-heading"><h1>巡检历史</h1>
       <div class="page-heading-actions">
         <el-button :loading="loading" @click="loadHistory">刷新</el-button>
         <el-button @click="router.push('/data-quality-issues')">返回质量整改</el-button>

@@ -199,10 +199,7 @@ onMounted(loadOrganizations)
 
 <template>
   <section>
-    <div class="page-heading">
-      <div>
-        <h1>组织架构</h1>
-      </div>
+    <div class="page-heading"><h1>组织架构</h1>
       <div class="page-heading-actions">
         <el-button :loading="loading" @click="loadOrganizations">刷新</el-button>
         <el-button v-if="enabledParents.length" type="primary" @click="openCreateDialog()">新增组织</el-button>

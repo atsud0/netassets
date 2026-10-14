@@ -1001,10 +1001,7 @@ onMounted(async () => {
 
 <template>
   <section>
-    <div class="page-heading">
-      <div>
-        <h1>填报任务</h1>
-      </div>
+    <div class="page-heading"><h1>填报任务</h1>
       <el-button v-if="auth.isGroupAdmin" type="primary" :disabled="eligibleOrganizations.length === 0" @click="openCreateDialog">创建任务</el-button>
     </div>
 

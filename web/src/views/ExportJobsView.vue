@@ -105,10 +105,7 @@ onBeforeUnmount(() => { if (timer !== undefined) window.clearInterval(timer) })
 
 <template>
   <section>
-    <div class="page-heading">
-      <div>
-        <h1>导出任务</h1>
-      </div>
+    <div class="page-heading"><h1>导出任务</h1>
       <div class="page-heading-actions">
         <el-button :loading="loading" @click="load()">刷新</el-button>
         <el-button @click="router.push('/assets')">返回网络资产</el-button>

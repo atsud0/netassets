@@ -240,8 +240,8 @@ async function savePolicy(row: SelfServicePolicy) {
   <section>
     <div class="page-heading">
       <div>
-      <h1>待确认资产</h1>
-      <p>漏洞导入发现的未建档资产会先进入这里；确认归属后生成该组织的未上报工作版本，发布时自动入库并释放关联漏洞。</p>
+        <h1>待确认资产</h1>
+        <p>漏洞导入发现的未建档资产会先进入这里；确认归属后生成该组织的未上报工作版本，发布时自动入库并释放关联漏洞。</p>
       </div>
       <div class="button-row"><el-button @click="load">刷新</el-button><el-button type="primary" @click="openCreate">新增待确认资产</el-button></div>
     </div>

@@ -777,10 +777,7 @@ function formatDate(value?: string) {
 
 <template>
   <section data-testid="security-test-requests-page">
-    <div class="page-heading">
-      <div>
-        <h1>上线测试申请</h1>
-      </div>
+    <div class="page-heading"><h1>上线测试申请</h1>
       <div v-if="isApplicant" class="button-row">
         <el-button type="primary" data-testid="create-security-test-request" @click="openCreate">新建测试申请</el-button>
       </div>

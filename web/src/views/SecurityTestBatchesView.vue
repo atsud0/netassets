@@ -661,10 +661,7 @@ function formatTime(value?: string) {
 
 <template>
   <section data-testid="security-test-batches-page">
-    <div class="page-heading">
-      <div>
-        <h1>安全测试</h1>
-      </div>
+    <div class="page-heading"><h1>安全测试</h1>
       <div class="button-row">
         <el-button type="primary" data-testid="create-security-test-batch" @click="openCreate">新建测试批次</el-button>
       </div>

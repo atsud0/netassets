@@ -379,10 +379,7 @@ onMounted(async () => {
 
 <template>
   <section class="page-stack">
-    <div class="page-heading">
-      <div>
-      <h1>质量整改</h1>
-      </div>
+    <div class="page-heading"><h1>质量整改</h1>
       <el-button v-if="isGroupAdmin" type="primary" @click="router.push('/data-governance')">执行质量巡检</el-button>
     </div>
 

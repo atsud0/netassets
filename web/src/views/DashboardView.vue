@@ -142,10 +142,7 @@ onMounted(() => { void load();void loadRepair() })
 
 <template>
   <section v-loading="loading">
-    <div class="page-heading">
-      <div>
-        <h1>今天，先处理关键事项</h1>
-      </div>
+    <div class="page-heading"><h1>今天，先处理关键事项</h1>
       <div class="heading-actions">
         <el-button v-if="auth.hasPermission('inventory.manage')" @click="router.push('/inventory-tasks')">{{ auth.isGroupAdmin ? '创建填报任务' : '处理填报任务' }}</el-button>
         <el-button type="primary" @click="canUseRepair ? toRepair() : toWorkOrders()">{{ canUseRepair ? '查看修复任务' : '处理安全工单' }}</el-button>

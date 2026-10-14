@@ -151,9 +151,7 @@ onMounted(async () => {
 <template>
   <section>
     <div class="page-heading">
-      <div>
-        <h1>审计日志</h1>
-      </div>
+      <h1>审计日志</h1>
     </div>
 
     <div class="panel audit-filter-panel">

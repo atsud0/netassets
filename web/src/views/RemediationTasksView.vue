@@ -209,8 +209,7 @@ onMounted(async () => {
 
 <template>
   <section class="repair-page">
-    <div class="page-heading"><div>
-    <h1>{{ executor ? '我的修复任务' : '修复任务' }}</h1></div><div class="workspace-actions"><el-button v-if="!executor && auth.hasPermission('remediation.people.manage')" @click="$router.push('/remediation-people')">人员与授权</el-button><el-button v-if="!executor && auth.hasPermission('remediation.assign')" type="primary" @click="advanced = true">选择工单派发</el-button></div></div>
+    <div class="page-heading"><h1>{{ executor ? '我的修复任务' : '修复任务' }}</h1><div class="workspace-actions"><el-button v-if="!executor && auth.hasPermission('remediation.people.manage')" @click="$router.push('/remediation-people')">人员与授权</el-button><el-button v-if="!executor && auth.hasPermission('remediation.assign')" type="primary" @click="advanced = true">选择工单派发</el-button></div></div>
     <el-alert v-if="errorMessage" :title="errorMessage" type="error" :closable="false"><el-button @click="load">重新加载</el-button></el-alert>
     <div v-if="overviewStats" class="stat-grid"><button v-for="metric in metricCards" :key="metric.label" class="stat-card" :class="{danger:metric.danger}" @click="selectMetric(metric)"><span>{{ metric.label }}</span><strong>{{ metric.value }}</strong><small>{{ metric.hint }}</small></button></div>
     <section class="panel repair-list-panel">

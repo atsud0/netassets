@@ -1135,10 +1135,7 @@ onMounted(() => {
     >
       <template #default><el-button size="small" @click="router.push('/inventory-tasks')">返回填报任务</el-button></template>
     </el-alert>
-    <div class="page-heading">
-      <div>
-        <h1>网络资产</h1>
-      </div>
+    <div class="page-heading"><h1>网络资产</h1>
       <div class="button-row ledger-page-actions asset-page-actions">
         <el-dropdown v-if="!inventoryMode">
           <el-button :loading="exporting">导出台账</el-button>

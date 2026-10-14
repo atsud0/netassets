@@ -999,10 +999,7 @@ async function onTabChange() {
 
 <template>
   <section class="page-stack" v-loading="loading">
-    <div class="page-heading">
-      <div>
-        <h1>安全工单</h1>
-      </div>
+    <div class="page-heading"><h1>安全工单</h1>
       <div v-if="auth.canManageSecurityFindings || auth.canManageSecurityWorkOrders" class="heading-actions">
         <el-button v-if="auth.canManageSecurityFindings" @click="openFindingImport">批量导入漏洞</el-button>
         <el-button v-if="auth.canManageSecurityFindings" @click="openCreateFinding">登记安全发现</el-button>

@@ -174,9 +174,7 @@ async function changePassword() {
 <template>
   <section class="profile-page">
     <div class="page-heading">
-      <div>
-        <h1>账户设置</h1>
-      </div>
+      <h1>账户设置</h1>
     </div>
 
     <el-alert v-if="mustChangePassword" class="password-required-alert" type="warning" :closable="false" show-icon title="首次登录必须修改临时密码" description="完成密码修改前，系统仅允许访问账户设置和退出登录。" />
