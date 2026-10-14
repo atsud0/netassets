@@ -699,10 +699,18 @@ WHERE child.status='enabled' AND child.deleted_at IS NULL
    THEN '你的协作授权将在 3 天内到期，请及时提交整改结果；到期后相关修复任务将无法继续处理。'
    ELSE '你的协作授权已经失效，相关修复任务不再对你可见。如需继续处理，请联系组织管理员续期。' END,
  CASE WHEN remediation_grant_valid(g.id,g.user_id,g.organization_id,g.business_system_id) THEN 'warning' ELSE 'danger' END,
- 'remediation_grant',g.id::text,'/repair/tasks',g.valid_until,g.valid_until
+ 'remediation_grant',g.id::text,'/repair/tasks',
+ CASE WHEN g.status='revoked' THEN COALESCE(g.recorded_revoked_at,g.valid_until) ELSE g.valid_until END,
+ CASE WHEN g.status='revoked' THEN NULL::timestamptz ELSE g.valid_until END
  FROM remediation_grants g
- WHERE g.user_id=$1::uuid AND g.status<>'revoked'
-   AND (g.valid_until<now()+interval '3 days' OR NOT remediation_grant_valid(g.id,g.user_id,g.organization_id,g.business_system_id))
+ WHERE g.user_id=$1::uuid
+   AND (
+     (g.status<>'revoked' AND (g.valid_until<now()+interval '3 days' OR NOT remediation_grant_valid(g.id,g.user_id,g.organization_id,g.business_system_id)))
+     -- A revocation is the one grant change the holder cannot predict and cannot
+     -- undo: the task leaves their list at the same instant. Only recent revocations
+     -- notify, so a grant that ended months ago does not remind its holder forever.
+     OR (g.status='revoked' AND g.recorded_revoked_at>now()-interval '7 days')
+   )
 )
 `
 
