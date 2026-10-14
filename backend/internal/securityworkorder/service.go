@@ -615,12 +615,24 @@ func (s *Service) createFindingInTx(ctx context.Context, tx pgx.Tx, principal au
 	if input.AssetID != "" {
 		eventType = notification.EventFindingCreatedOnAsset
 		requiredPermission = "asset.manage"
+		// The primary organization row carries the accountable owner, but nothing in
+		// the schema guarantees that every asset has one: the uniqueness rule is on
+		// (asset_id, organization_id, relationship_type), not on "exactly one primary".
+		// An asset whose primary row is missing must still produce a finding and a
+		// notification, so a missing row means "no targeted owner" rather than a
+		// failed insert. Reading the row as an optional lookup also keeps a multi-row
+		// primary configuration from aborting the registration.
+		var ownerUserID *string
 		if err := tx.QueryRow(ctx, `
-			SELECT COALESCE(owner_user_id::text, '')
+			SELECT owner_user_id::text
 			FROM asset_organizations
 			WHERE asset_id = $1::uuid AND is_primary
-		`, input.AssetID).Scan(&targetUserID); err != nil {
+			ORDER BY created_at
+			LIMIT 1
+		`, input.AssetID).Scan(&ownerUserID); err != nil && !errors.Is(err, pgx.ErrNoRows) {
 			return "", "", fmt.Errorf("load finding asset owner: %w", err)
+		} else if ownerUserID != nil {
+			targetUserID = *ownerUserID
 		}
 	}
 	level := "info"
