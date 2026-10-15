@@ -34,7 +34,7 @@ test('在非安全上下文（HTTP 内网地址）中复制系统编码仍然成
   const created = await request.post('/api/v1/business-systems', {
     data: {
       code: `COPYSYS_${suffix}`, name: `复制编码验证_${suffix}`, short_name: '', organization_id: flat[0]!.id,
-      owner_name: 'E2E', owner_contact: '', status: 'running', level: 'normal', deployment_type: 'other',
+      owner_name: 'E2E', owner_contact: '13800000011', status: 'running', level: 'normal', deployment_type: 'other',
       internet_exposure: 'unknown', description: '', contains_personal_information: 'unknown',
       contains_sensitive_personal_information: 'unknown', personal_information_record_count: null,
       data_volume_over_100k: 'unknown', contains_important_data: 'unknown', contains_core_data: 'unknown',

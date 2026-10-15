@@ -89,7 +89,7 @@ test('已有资产和业务系统的修改删除先进入任务草稿，审核�
       short_name: name,
       organization_id: organization.id,
       owner_name: '系统负责人',
-      owner_contact: 'system-owner@example.com',
+      owner_contact: '13800000012',
       status: 'running',
       level: 'normal',
       deployment_type: '子公司私有云',
@@ -133,6 +133,7 @@ test('已有资产和业务系统的修改删除先进入任务草稿，审核�
       owner_name: '资产负责人',
       notes: '已有正式网络资产',
       expires_at: null,
+      direct_change_reason: '验证已有资源任务草稿隔离',
     })
 
     const updateAsset = (await request('/assets', {
@@ -209,7 +210,7 @@ test('已有资产和业务系统的修改删除先进入任务草稿，审核�
         short_name: '审核后系统',
         organization_id: fixture.organizationID,
         owner_name: '新系统负责人',
-        owner_contact: 'new-system-owner@example.com',
+        owner_contact: '13800000019',
         status: 'running',
         level: 'important',
         deployment_type: '集团云',
@@ -489,7 +490,7 @@ test('已有资产和业务系统的修改删除先进入任务草稿，审核�
         short_name: '自动发布系统',
         organization_id: fixture.organizationID,
         owner_name: '自动发布负责人',
-        owner_contact: 'auto-owner@example.com',
+        owner_contact: '13800000014',
         status: 'running',
         level: 'important',
         deployment_type: '集团云',

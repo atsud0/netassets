@@ -108,6 +108,7 @@ test('集团创建子公司账号，子公司隔离登记业务系统和网络�
       body: JSON.stringify({
         type: 'domain', value, name: `集团权限测试资产_${Date.now()}`, organization_id: organizationID,
         environment: 'production', network_scope: 'public', status: 'active', importance: 'normal',
+        direct_change_reason: '验证集团权限测试资产',
       }),
     })
     if (!response.ok) throw new Error(`create group asset failed: ${response.status}`)
@@ -491,6 +492,7 @@ test('集团创建子公司账号，子公司隔离登记业务系统和网络�
         status: 'active',
         importance: 'normal',
         owner_name: '范围验证负责人',
+        direct_change_reason: '验证网络范围排除逻辑',
       }),
     })
     return response.status
@@ -511,7 +513,7 @@ test('集团创建子公司账号，子公司隔离登记业务系统和网络�
   const crossOrganizationStatus = await page.evaluate(async (organizationID) => {
     const response = await fetch('/api/v1/assets', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ type: 'domain', value: `forbidden-${Date.now()}.example.com`, organization_id: organizationID }),
+      body: JSON.stringify({ type: 'domain', value: `forbidden-${Date.now()}.example.com`, organization_id: organizationID, direct_change_reason: '验证越权新增拒绝' }),
     })
     return response.status
   }, rootOrganizationID)
@@ -523,10 +525,10 @@ test('集团创建子公司账号，子公司隔离登记业务系统和网络�
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         type: 'domain', value, name: '越权修改', organization_id: '00000000-0000-0000-0000-000000000000',
-        environment: 'production', network_scope: 'public', status: 'active', importance: 'normal',
+        environment: 'production', network_scope: 'public', status: 'active', importance: 'normal', direct_change_reason: '验证跨组织修改拒绝',
       }),
     })
-    const deleteResponse = await fetch(`/api/v1/assets/${assetID}`, { method: 'DELETE' })
+    const deleteResponse = await fetch(`/api/v1/assets/${assetID}?direct_change_reason=${encodeURIComponent('验证字段变更历史')}`, { method: 'DELETE' })
     return [patchResponse.status, deleteResponse.status]
   }, { assetID: groupAssetID, value: groupAsset })
   expect(crossOrganizationMutationStatuses).toEqual([403, 403])
@@ -684,7 +686,7 @@ test('集团创建子公司账号，子公司隔离登记业务系统和网络�
     const findingResponse = await fetch('/api/v1/security-findings', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        title: `未授权访问漏洞_PW_${suffixValue}`, severity: 'high', status: 'open',
+        title: `未授权访问漏洞_PW_${suffixValue}`, severity: 'high', status: 'pending',
         assignee_organization_id: organization.id, asset_id: asset.id, business_system_id: system.id,
         vulnerability_type: '未授权访问', description: '互联网入口未校验登录态即可访问敏感功能。',
         evidence: 'E2E 脱敏验证记录', remediation_advice: '补充统一身份认证与服务端权限校验。',
@@ -878,6 +880,7 @@ test('集团创建安全测试批次并批量导入授权范围内漏洞', async
         body: JSON.stringify({
           ...asset,
           environment: 'production', network_scope: 'public', status: 'active', importance: 'important',
+          direct_change_reason: '验证安全测试批次资产范围',
         }),
       })
       if (!response.ok) throw new Error(`create scope asset failed: ${response.status}`)
@@ -1061,6 +1064,7 @@ test('集团管理员可从回收站恢复误删网络资产并保留审计记�
       body: JSON.stringify({
         type: 'domain', value, name: `回收站测试资产_${Date.now()}`, organization_id: group.id,
         environment: 'production', network_scope: 'public', status: 'active', importance: 'normal',
+        direct_change_reason: '验证回收站恢复流程',
       }),
     })
     if (!response.ok) throw new Error(`create asset failed: ${response.status}`)
@@ -1069,7 +1073,7 @@ test('集团管理员可从回收站恢复误删网络资产并保留审计记�
   const assetID = created.item.id as string
 
   const deleteStatus = await page.evaluate(async (id) => {
-    const response = await fetch(`/api/v1/assets/${id}`, { method: 'DELETE' })
+    const response = await fetch(`/api/v1/assets/${id}?direct_change_reason=${encodeURIComponent('验证回收站恢复流程')}`, { method: 'DELETE' })
     return response.status
   }, assetID)
   expect(deleteStatus).toBe(204)
@@ -1123,7 +1127,7 @@ test('资产与业务系统保存字段级变更历史并可在资产页面查�
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         type: 'domain', value: assetValue, name: originalAssetName, organization_id: group.id,
-        environment: 'production', network_scope: 'public', status: 'active', importance: 'normal', owner_name: '张三', notes: '首次登记',
+        environment: 'production', network_scope: 'public', status: 'active', importance: 'normal', owner_name: '张三', notes: '首次登记', direct_change_reason: '验证字段变更历史',
       }),
     })
     if (!createAssetResponse.ok) throw new Error(`create asset failed: ${createAssetResponse.status}`)
@@ -1133,7 +1137,7 @@ test('资产与业务系统保存字段级变更历史并可在资产页面查�
       method: 'PATCH', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         type: 'domain', value: assetValue, name: updatedAssetName, organization_id: group.id,
-        environment: 'testing', network_scope: 'private', status: 'active', importance: 'important', owner_name: '李四', notes: '',
+        environment: 'testing', network_scope: 'private', status: 'active', importance: 'important', owner_name: '李四', notes: '', direct_change_reason: '验证字段变更历史',
       }),
     })
     if (!updateAssetResponse.ok) throw new Error(`update asset failed: ${updateAssetResponse.status}`)
@@ -1195,7 +1199,7 @@ test('资产与业务系统保存字段级变更历史并可在资产页面查�
   await expect(historyDrawer.getByText(updatedAssetName, { exact: true })).toBeVisible()
 
   await page.evaluate(async ({ assetID, systemID }) => {
-    await fetch(`/api/v1/assets/${assetID}`, { method: 'DELETE' })
+    await fetch(`/api/v1/assets/${assetID}?direct_change_reason=${encodeURIComponent('验证字段变更历史')}`, { method: 'DELETE' })
     await fetch(`/api/v1/business-systems/${systemID}`, { method: 'DELETE' })
   }, { assetID: result.assetID, systemID: result.systemID })
 })
@@ -1211,7 +1215,7 @@ test('集团管理员可批量归档恢复业务系统并批量调整资产状�
     const assetData = await assetResponse.json()
     const systemData = await systemResponse.json()
     for (const item of assetData.items.filter((entry: { name?: string }) => entry.name?.startsWith('批量测试资产_'))) {
-      await fetch(`/api/v1/assets/${item.id}`, { method: 'DELETE' })
+      await fetch(`/api/v1/assets/${item.id}?direct_change_reason=${encodeURIComponent('验证批量资产操作')}`, { method: 'DELETE' })
     }
     for (const item of systemData.items.filter((entry: { name?: string }) => entry.name?.startsWith('批量测试系统_'))) {
       await fetch(`/api/v1/business-systems/${item.id}`, { method: 'DELETE' })
@@ -1257,7 +1261,7 @@ test('集团管理员可批量归档恢复业务系统并批量调整资产状�
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           type: 'domain', value: `batch-${suffix}-${index + 1}.example.com`, name: assetNames[index], organization_id: group.id,
-          environment: 'production', network_scope: 'public', status: 'active', importance: 'normal',
+          environment: 'production', network_scope: 'public', status: 'active', importance: 'normal', direct_change_reason: '验证批量资产操作',
         }),
       })
       assets.push(created.item)
@@ -1331,7 +1335,7 @@ test('集团管理员可批量归档恢复业务系统并批量调整资产状�
   expect(verification.systemsRestored).toBeTruthy()
 
   await page.evaluate(async ({ assetIDs, systemIDs }) => {
-    for (const id of assetIDs) await fetch(`/api/v1/assets/${id}`, { method: 'DELETE' })
+    for (const id of assetIDs) await fetch(`/api/v1/assets/${id}?direct_change_reason=${encodeURIComponent('验证批量资产操作')}`, { method: 'DELETE' })
     for (const id of systemIDs) await fetch(`/api/v1/business-systems/${id}`, { method: 'DELETE' })
   }, { assetIDs: fixture.assets.map((item: { id: string }) => item.id), systemIDs: fixture.systems.map((item: { id: string }) => item.id) })
 })

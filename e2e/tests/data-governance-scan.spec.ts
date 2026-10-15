@@ -120,6 +120,7 @@ test('独立测试组织完成质量巡检、子公司整改和集团复核闭�
       importance: 'normal',
       owner_name: `责任人_${stamp}`,
       notes: '用于验证集团数据质量治理闭环',
+      direct_change_reason: '验证集团数据质量治理闭环',
     }),
     201,
     '创建测试资产',
@@ -201,9 +202,14 @@ test('独立测试组织完成质量巡检、子公司整改和集团复核闭�
   expect(assignees.map((item) => item.username)).not.toContain(adminUsername)
 
   await adminPage.goto('/data-quality-issues')
-  const issueRow = adminPage.locator('.el-table__row').filter({ hasText: ruleName })
+  const issueRow = adminPage.locator('.quality-issue-panel .el-table__row')
+    .filter({ hasText: ruleName })
+    .filter({ hasText: assetName })
   await expect(issueRow).toBeVisible()
-  await issueRow.getByRole('button', { name: '开始整改' }).click()
+  await issueRow.getByRole('button', { name: /^操作：/ }).click()
+  const rowActions = adminPage.getByRole('dialog', { name: /^操作：/ })
+  await expect(rowActions).toBeVisible()
+  await rowActions.getByRole('button', { name: '开始整改', exact: true }).click()
   const assigneeDialog = adminPage.getByRole('dialog', { name: '开始整改' })
   await expect(assigneeDialog).toBeVisible()
   await assigneeDialog.locator('.el-select').click()
@@ -212,7 +218,9 @@ test('独立测试组织完成质量巡检、子公司整改和集团复核闭�
   await adminPage.keyboard.press('Escape')
 
   requireStatus(await api(adminPage, '/auth/logout', `${requestPrefix}-admin-logout-1`, 'POST'), 204, '集团管理员退出')
-  await adminContext.close()
+  // Keep this context open until the Playwright worker tears down. Closing it while
+  // the SPA still has background reference-data requests can race the test trace
+  // writer; the session is already logged out and no later step uses this page.
 
   const childContext = await browser.newContext()
   const childPage = await childContext.newPage()

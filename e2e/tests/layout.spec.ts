@@ -668,7 +668,7 @@ test('网络资产名称与访问标识聚合展示且名称打开详情', async
       body: JSON.stringify({
         type: 'domain', value: assetValue, name: assetName, organization_id: group.id,
         business_system_id: system.item.id, environment: 'production', network_scope: 'public',
-        status: 'active', importance: 'normal',
+        status: 'active', importance: 'normal', direct_change_reason: '验证资产列表展示',
       }),
     })
     if (!assetResponse.ok) throw new Error(`create asset failed: ${assetResponse.status}`)

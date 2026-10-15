@@ -37,14 +37,14 @@ test('组织管理员直接派给外包人员，个人提交后逐项组织确�
   await login(page, process.env.E2E_USERNAME ?? 'admin', password!)
   const group = (await api(page, '/organizations?page_size=100')).items.find((o: { type: string }) => o.type === 'group')
   const org = (await api(page, '/organizations', { parent_id: group.id, code: `RP_${suffix}`, name: `修复验收组织_${suffix}`, short_name: '修复验收', type: 'subsidiary', manager: '王工', contact: 'repair@example.com', notes: '' })).item
-  const system = (await api(page, '/business-systems', { code: `RP_SYS_${suffix}`, name: `修复验收系统_${suffix}`, organization_id: org.id, owner_name: '王工', owner_contact: 'repair@example.com', status: 'running', level: 'normal', internet_exposure: 'yes', contains_personal_information: 'no', contains_sensitive_personal_information: 'no', contains_important_data: 'no', contains_core_data: 'no', data_volume_over_100k: 'no', custom_values: [] })).item
+  const system = (await api(page, '/business-systems', { code: `RP_SYS_${suffix}`, name: `修复验收系统_${suffix}`, organization_id: org.id, owner_name: '王工', owner_contact: '13800000018', status: 'running', level: 'normal', internet_exposure: 'yes', contains_personal_information: 'no', contains_sensitive_personal_information: 'no', contains_important_data: 'no', contains_core_data: 'no', data_volume_over_100k: 'no', custom_values: [] })).item
   const roles = (await api(page, '/roles/assignable?page_size=100')).items
   const orgRole = roles.find((r: { key: string }) => r.key === 'organization_admin')
   await api(page, '/users', { username: `rp_manager_${suffix}`, password: temporary, display_name: '修复组织管理员', appointments: [{ organization_id: org.id, is_primary: true, assignments: [{ role_id: orgRole.id, data_scope: 'organization' }] }], global_role_ids: [] })
   const vendor = await api(page, '/vendors', { organization_id: org.id, name: `外包厂商_${suffix}`, contact: '项目负责人', status: 'enabled' })
   const worker = await api(page, '/remediation-grants', { organization_id: org.id, business_system_id: system.id, vendor_id: vendor.id, participant_type: 'external', username: `rp_worker_${suffix}`, display_name: '外包开发张工', password: temporary, valid_until: new Date(Date.now() + 30 * 86400000).toISOString() })
   const findingIDs: string[] = []
-  for (const index of [1, 2]) findingIDs.push((await api(page, '/security-findings', { title: `修复验证漏洞${index}_${suffix}`, severity: 'high', status: 'open', assignee_organization_id: org.id, business_system_id: system.id, vulnerability_type: '输入验证', description: `需要修复的公开描述${index}`, evidence: '按说明验证输入校验', remediation_advice: '完善输入校验并自测', source: 'manual', discovered_at: new Date().toISOString() })).item.id)
+  for (const index of [1, 2]) findingIDs.push((await api(page, '/security-findings', { title: `修复验证漏洞${index}_${suffix}`, severity: 'high', status: 'pending', assignee_organization_id: org.id, business_system_id: system.id, vulnerability_type: '输入验证', description: `需要修复的公开描述${index}`, evidence: '按说明验证输入校验', remediation_advice: '完善输入校验并自测', source: 'manual', discovered_at: new Date().toISOString() })).item.id)
   const order = (await api(page, '/security-work-orders', { execution_mode: 'individual', title: `修复工作台验收_${suffix}`, assignee_organization_id: org.id, description: '组织直接派给具体人员', remediation_requirement: '部署到生产并验证', due_at: new Date(Date.now() + 7 * 86400000).toISOString(), finding_ids: findingIDs })).item
   await api(page, `/security-work-orders/${order.id}/issue`, { comment: '下发个人修复工单' })
 
@@ -184,7 +184,7 @@ test('材料复核、版本差异、执行计划和批量派单部分失败', as
   const due = new Date(Date.now() + 2 * 86400000).toISOString()
   const grant = await api(page, '/remediation-grants', { organization_id: system.organization_id, business_system_id: system.id, participant_type: 'internal', username, display_name: '材料复核开发', password: temporary, valid_until: new Date(Date.now() + 30 * 86400000).toISOString() })
   const findingIDs: string[] = []
-  for (const n of [1, 2]) findingIDs.push((await api(page, '/security-findings', { title: `材料变更漏洞${n}_${suffix}`, severity: 'high', status: 'open', assignee_organization_id: system.organization_id, business_system_id: system.id, description: '内部漏洞原始描述', evidence: '内部原始证据', source: 'manual', discovered_at: new Date().toISOString() })).item.id)
+  for (const n of [1, 2]) findingIDs.push((await api(page, '/security-findings', { title: `材料变更漏洞${n}_${suffix}`, severity: 'high', status: 'pending', assignee_organization_id: system.organization_id, business_system_id: system.id, description: '内部漏洞原始描述', evidence: '内部原始证据', source: 'manual', discovered_at: new Date().toISOString() })).item.id)
   const order = (await api(page, '/security-work-orders', { execution_mode: 'individual', title: `材料复核工单_${suffix}`, assignee_organization_id: system.organization_id, remediation_requirement: '部署生产后验证', due_at: due, finding_ids: findingIDs })).item
   await api(page, `/security-work-orders/${order.id}/issue`, { comment: '下发' })
   await api(page, `/security-work-orders/${order.id}/accept`, { comment: '安排人员' })

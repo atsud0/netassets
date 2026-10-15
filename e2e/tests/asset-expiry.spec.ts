@@ -50,6 +50,7 @@ async function uploadCSV<T>(page: Page, path: string, requestID: string, organiz
   return page.evaluate(async ({ path, requestID, organizationID, filename, csv }) => {
     const form = new FormData()
     form.append('organization_id', organizationID)
+    form.append('direct_change_reason', '验证有效期资产导入')
     form.append('file', new File([`\uFEFF${csv}`], filename, { type: 'text/csv;charset=utf-8' }))
     const response = await fetch(`/api/v1${path}`, {
       method: 'POST',
@@ -86,6 +87,7 @@ function assetPayload(item: AssetItem, expiresAt: string | null) {
     owner_name: item.owner_name ?? '',
     notes: item.notes ?? '',
     expires_at: expiresAt,
+    direct_change_reason: '验证有效期全链路',
   }
 }
 
@@ -119,6 +121,7 @@ test('网络资产有效期贯通台账、导入导出、质量巡检和自动�
       type: 'domain', value: lifecycleValue, name: `生命周期资产_${stamp}`, organization_id: group!.id,
       business_system_id: '', environment: 'production', network_scope: 'public', network_area_id: '',
       status: 'active', importance: 'important', owner_name: '有效期测试责任人', notes: '验证有效期全链路', expires_at: originalExpiry,
+      direct_change_reason: '验证有效期全链路',
     }),
     201,
     '创建带有效期资产',
@@ -218,6 +221,7 @@ test('网络资产有效期贯通台账、导入导出、质量巡检和自动�
       type: 'domain', value: expiringValue, name: `临近到期资产_${stamp}`, organization_id: group!.id,
       business_system_id: '', environment: 'testing', network_scope: 'public', network_area_id: '',
       status: 'active', importance: 'normal', owner_name: '到期整改责任人', notes: '用于验证到期巡检', expires_at: scanExpiry,
+      direct_change_reason: '验证到期巡检',
     }),
     201,
     '创建临近到期资产',
@@ -261,10 +265,10 @@ test('网络资产有效期贯通台账、导入导出、质量巡检和自动�
   expect(issue).toMatchObject({ rule_type: 'expiry', expiry_warning_days: 30, target_field: 'expires_at' })
 
   await page.goto('/data-quality-issues')
-  const issueRow = page.locator('.quality-issue-panel .el-table__row').filter({ hasText: ruleName }).first()
-  await expect(issueRow).toBeVisible()
-  await expect(issueRow).toContainText('有效期至（提前 30 天提醒）')
-  await expect(issueRow).toContainText(`临近到期资产_${stamp}`)
+  const issueRows = page.locator('.quality-issue-panel .el-table__row').filter({ hasText: ruleName })
+  const expiringIssueRow = issueRows.filter({ hasText: `临近到期资产_${stamp}` })
+  await expect(expiringIssueRow).toBeVisible()
+  await expect(expiringIssueRow).toContainText('有效期至（提前 30 天提醒）')
 
   requireStatus(
     await api<{ item: AssetItem }>(page, `/assets/${expiringAsset.id}`, `${requestPrefix}-clear-expiry`, 'PATCH', assetPayload(expiringAsset, null)),
@@ -306,6 +310,6 @@ test('网络资产有效期贯通台账、导入导出、质量巡检和自动�
 
   const cleanupIDs = [lifecycleAsset.id, expiringAsset.id, importedItems[0].id]
   for (const id of cleanupIDs) {
-    requireStatus(await api(page, `/assets/${id}`, `${requestPrefix}-cleanup-${id}`, 'DELETE'), 204, `清理测试资产 ${id}`)
+    requireStatus(await api(page, `/assets/${id}?direct_change_reason=${encodeURIComponent('清理有效期 E2E 测试资产')}`, `${requestPrefix}-cleanup-${id}`, 'DELETE'), 204, `清理测试资产 ${id}`)
   }
 })

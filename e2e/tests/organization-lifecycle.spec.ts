@@ -66,7 +66,7 @@ test('集团管理员可管理组织完整生命周期、影响检查和树形�
 
   const createOrganization = async (parentID: string, code: string, name: string, type: Organization['type']) => {
     const payload = await expectStatus(await request.post('/api/v1/organizations', {
-      data: { parent_id: parentID, code, name, short_name: name, type, manager: 'E2E', contact: 'e2e@example.invalid', notes: '组织生命周期自动化回归' },
+      data: { parent_id: parentID, code, name, short_name: name, type, manager: 'E2E', contact: '13800000017', notes: '组织生命周期自动化回归' },
     }), 201, `创建组织 ${name}`) as { item: Organization }
     return payload.item
   }
@@ -92,7 +92,7 @@ test('集团管理员可管理组织完整生命周期、影响检查和树形�
   await expectStatus(await request.post('/api/v1/business-systems', {
     data: {
       code: `LIFESYS_${suffix}`, name: `生命周期系统_${suffix}`, short_name: '', organization_id: blocked.id,
-      owner_name: 'E2E', owner_contact: 'e2e@example.invalid', status: 'running', level: 'normal', deployment_type: 'other',
+      owner_name: 'E2E', owner_contact: '13800000017', status: 'running', level: 'normal', deployment_type: 'other',
       internet_exposure: 'yes', description: '', contains_personal_information: 'no', contains_sensitive_personal_information: 'no',
       personal_information_record_count: null, data_volume_over_100k: 'no', contains_important_data: 'no', contains_core_data: 'no',
       data_storage_location: '', security_notes: '',
@@ -104,6 +104,7 @@ test('集团管理员可管理组织完整生命周期、影响检查和树形�
       type: 'domain', value: `life-${suffix}.example.com`, name: `生命周期资产_${suffix}`, organization_id: blocked.id,
       business_system_id: '', environment: 'production', network_scope: 'public', network_area_id: '', status: 'active',
       importance: 'normal', owner_user_id: '', owner_name: 'E2E', notes: '', expires_at: null,
+      direct_change_reason: '验证组织停用影响检查',
     },
   }), 201, '创建组织网络资产')
 

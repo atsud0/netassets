@@ -98,10 +98,7 @@ test('网络资产责任人绑定、候选范围和精确通知回归', async ({
     owner: `owner_target_${suffix}`,
     peer: `owner_peer_${suffix}`,
   }
-  const contexts: BrowserContext[] = []
-
   const admin = await loginContext(browser, baseURL, adminUsername, adminPassword!)
-  contexts.push(admin.context)
   try {
     const rolesResponse = await admin.context.request.get('/api/v1/roles?page=1&page_size=100')
     await expectStatus(rolesResponse, 200, '读取角色')
@@ -161,7 +158,6 @@ test('网络资产责任人绑定、候选范围和精确通知回归', async ({
     const actor = await loginContext(browser, baseURL, usernames.actor, temporaryPassword)
     const owner = await loginContext(browser, baseURL, usernames.owner, temporaryPassword)
     const peer = await loginContext(browser, baseURL, usernames.peer, temporaryPassword)
-    contexts.push(actor.context, owner.context, peer.context)
 
     const ownerOptionsResponse = await actor.context.request.get(`/api/v1/assets/owner-options?organization_id=${organization.id}&page=1&page_size=100`)
     await expectStatus(ownerOptionsResponse, 200, '读取责任人候选')
@@ -185,6 +181,7 @@ test('网络资产责任人绑定、候选范围和精确通知回归', async ({
         owner_name: '外部联系方式见补充说明',
         notes: 'E2E 责任人精确通知测试',
         expires_at: null,
+        direct_change_reason: '验证责任人通知链路',
       },
     })
     await expectStatus(createAssetResponse, 201, '创建绑定责任人的网络资产')
@@ -201,26 +198,43 @@ test('网络资产责任人绑定、候选范围和精确通知回归', async ({
     await expect(assetRow).toContainText('网络资产责任人')
 
     const archiveResponse = await actor.context.request.patch(`/api/v1/assets/${asset.id}`, {
-      data: editableAsset(asset, { status: 'archived' }),
+      data: { ...editableAsset(asset, { status: 'archived' }), direct_change_reason: '验证资产归档通知' },
     })
     await expectStatus(archiveResponse, 200, '归档绑定责任人的网络资产')
     asset = (await archiveResponse.json() as { item: AssetItem }).item
 
-    await expect.poll(async () => (await assetMessages(owner.context, asset.id)).length).toBe(1)
-    expect(await assetMessages(peer.context, asset.id)).toHaveLength(0)
-    expect(await assetMessages(admin.context, asset.id)).toHaveLength(1)
+    await expect.poll(async () => (await assetMessages(owner.context, asset.id)).length).toBe(3)
+    const ownerAfterArchive = await assetMessages(owner.context, asset.id)
+    expect(ownerAfterArchive.filter((item) => item.title === '网络资产已归档')).toHaveLength(1)
+    expect(ownerAfterArchive.filter((item) => item.title === '集团直接变更正式台账资产，待本组织复核')).toHaveLength(2)
+    expect(ownerAfterArchive.some((item) => item.message.includes('验证资产归档通知'))).toBeTruthy()
+    expect(ownerAfterArchive.some((item) => item.message.includes('验证责任人通知链路'))).toBeTruthy()
+
+    const peerAfterArchive = await assetMessages(peer.context, asset.id)
+    expect(peerAfterArchive).toHaveLength(2)
+    expect(peerAfterArchive.every((item) => item.title === '集团直接变更正式台账资产，待本组织复核')).toBeTruthy()
+    expect(await assetMessages(admin.context, asset.id)).toHaveLength(3)
 
     const reactivateResponse = await actor.context.request.patch(`/api/v1/assets/${asset.id}`, {
-      data: editableAsset(asset, { status: 'active', owner_user_id: '' }),
+      data: { ...editableAsset(asset, { status: 'active', owner_user_id: '' }), direct_change_reason: '验证责任人解绑通知' },
     })
     await expectStatus(reactivateResponse, 200, '清空责任人并启用网络资产')
     asset = (await reactivateResponse.json() as { item: AssetItem }).item
     expect(asset.owner_user_id ?? '').toBe('')
 
-    await expect.poll(async () => (await assetMessages(peer.context, asset.id)).length).toBe(1)
-    expect(await assetMessages(owner.context, asset.id)).toHaveLength(2)
-    expect(await assetMessages(admin.context, asset.id)).toHaveLength(2)
+    await expect.poll(async () => (await assetMessages(peer.context, asset.id)).length).toBe(4)
+    const peerAfterReactivate = await assetMessages(peer.context, asset.id)
+    expect(peerAfterReactivate.filter((item) => item.title === '集团直接变更正式台账资产，待本组织复核')).toHaveLength(3)
+    expect(peerAfterReactivate.filter((item) => item.title === '网络资产状态已调整')).toHaveLength(1)
+    expect(peerAfterReactivate.some((item) => item.message.includes('验证责任人解绑通知'))).toBeTruthy()
+    const ownerAfterReactivate = await assetMessages(owner.context, asset.id)
+    expect(ownerAfterReactivate).toHaveLength(5)
+    expect(ownerAfterReactivate.filter((item) => item.title === '集团直接变更正式台账资产，待本组织复核')).toHaveLength(3)
+    expect(ownerAfterReactivate.filter((item) => item.title === '网络资产状态已调整')).toHaveLength(1)
+    expect(ownerAfterReactivate.some((item) => item.message.includes('验证责任人解绑通知'))).toBeTruthy()
+    expect(await assetMessages(admin.context, asset.id)).toHaveLength(5)
   } finally {
-    await Promise.all(contexts.map((context) => context.close()))
+    // Playwright owns these contexts; explicit close races with trace finalization
+    // when a background notification request is still in flight.
   }
 })
