@@ -21,6 +21,62 @@ import (
 // writes and their own side effect on vendor_memberships. Editing a row directly
 // cannot reach them, so a regression there would pass every existing test.
 
+// Creating an external person is the only supported way to create a vendor grant
+// from the UI. Keep the association invariant explicit here: the grant points to the
+// organization-scoped vendors row, while the roster points to that row's global
+// vendor_catalog identity. A test that only checks Detail can miss either side of
+// this relationship if a query happens to fall back to a broad user lookup.
+func TestCreateExternalPersonPersistsTheCompleteVendorAssociation(t *testing.T) {
+	f := setup(t)
+
+	var grantVendor, vendorCatalog, vendorOrganization, memberVendor string
+	var participantType string
+	var memberCount int
+	if err := f.pool.QueryRow(f.ctx, `
+		SELECT g.vendor_id::text, v.catalog_id::text, v.organization_id::text,
+		       g.participant_type, COUNT(vm.user_id)::int
+		FROM remediation_grants g
+		JOIN vendors v ON v.id=g.vendor_id
+		LEFT JOIN vendor_memberships vm
+		  ON vm.vendor_id=v.catalog_id AND vm.user_id=g.user_id
+		WHERE g.id=$1::uuid
+		GROUP BY g.vendor_id, v.catalog_id, v.organization_id, g.participant_type`, f.grant).
+		Scan(&grantVendor, &vendorCatalog, &vendorOrganization, &participantType, &memberCount); err != nil {
+		t.Fatalf("load external grant association: %v", err)
+	}
+	if grantVendor == "" || vendorCatalog == "" {
+		t.Fatal("external grant has no vendor record or vendor catalog association")
+	}
+	if vendorOrganization != f.org {
+		t.Fatalf("vendor organization = %q, want grant organization %q", vendorOrganization, f.org)
+	}
+	if participantType != "external" {
+		t.Fatalf("grant participant_type = %q, want external", participantType)
+	}
+	if memberCount != 1 {
+		t.Fatalf("external grant has %d matching vendor membership rows, want exactly one", memberCount)
+	}
+	if err := f.pool.QueryRow(f.ctx, `
+		SELECT vm.vendor_id::text FROM vendor_memberships vm
+		WHERE vm.user_id=(SELECT user_id FROM remediation_grants WHERE id=$1::uuid)
+		  AND vm.vendor_id=$2::uuid`, f.grant, vendorCatalog).Scan(&memberVendor); err != nil {
+		t.Fatalf("load vendor membership catalog link: %v", err)
+	}
+	if memberVendor != vendorCatalog {
+		t.Fatalf("membership vendor = %q, want catalog %q (membership must use vendor_catalog.id)", memberVendor, vendorCatalog)
+	}
+
+	var valid bool
+	if err := f.pool.QueryRow(f.ctx, `
+		SELECT remediation_grant_valid(g.id,g.user_id,g.organization_id,g.business_system_id)
+		FROM remediation_grants g WHERE g.id=$1::uuid`, f.grant).Scan(&valid); err != nil {
+		t.Fatalf("check service-created vendor grant validity: %v", err)
+	}
+	if !valid {
+		t.Fatal("service-created external vendor grant is not valid while all association links are live")
+	}
+}
+
 // Grant management must be reachable through the service and must revoke access at
 // the same instant. Editing the row by hand would not exercise the service's
 // permission check, its audit record, or the notification the revoked person gets.
