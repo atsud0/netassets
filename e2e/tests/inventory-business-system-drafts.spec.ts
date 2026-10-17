@@ -226,8 +226,8 @@ test('任务中新建业务系统在提交和审核通过前与正式台账隔�
 
   await page.goto(`/systems?mode=inventory&task_id=${fixture.taskID}&organization_id=${fixture.organizationID}&task_name=${encodeURIComponent(taskName)}`)
   await expect(page.getByText(`正在填报：${taskName} · ${organizationName}`)).toBeVisible()
-  await expect(page.getByText(systemName, { exact: true })).toBeVisible()
-  await expect(page.getByText(/未提交时集团在正式台账中不可见/)).toBeVisible()
+  await expect(page.locator('.inventory-draft-panel').getByRole('button', { name: systemName, exact: true })).toBeVisible()
+  await expect(page.getByText(/选择纳入本次任务并提交审核后，才会发布到集团正式台账/)).toBeVisible()
 
   await logout(page)
   await login(page, adminUsername, adminPassword!)

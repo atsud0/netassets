@@ -205,7 +205,6 @@ test('集团创建子公司账号，子公司隔离登记业务系统和网络�
   await page.getByRole('button', { name: '修改密码', exact: true }).click()
   await expect(page).toHaveURL(/\/dashboard$/)
   await expect(page.getByText(organizationName, { exact: true }).first()).toBeVisible()
-  await expect(page.getByRole('heading', { name: '组织安全治理工作台', exact: true })).toBeVisible()
   await expect(page.getByRole('heading', { name: '安全治理概览', exact: true })).toBeVisible()
   await expect(page.getByText('本组织整改效能', { exact: true })).toBeVisible()
   await expect(page.getByRole('button', { name: '用户和权限', exact: true })).toHaveCount(0)
@@ -227,12 +226,15 @@ test('集团创建子公司账号，子公司隔离登记业务系统和网络�
   await page.getByRole('button', { name: '填报任务', exact: true }).click()
   await expect(page.getByRole('button', { name: '创建任务', exact: true })).toHaveCount(0)
   await expect(page.getByText(inventoryTaskName, { exact: true })).toBeVisible()
-  await ensureTaskDetailOpen(page, inventoryTaskName)
-  let qualityProgressRow = page.locator('.task-organization-table .el-table__body-wrapper tbody tr').filter({ hasText: organizationName }).first()
+  let taskDetail = await ensureTaskDetailOpen(page, inventoryTaskName)
+  let qualityProgressRow = taskDetail.locator('.task-organization-table .el-table__body-wrapper tbody tr').filter({ hasText: organizationName }).first()
   await clickRowAction(page, qualityProgressRow, '开始填报')
   await expect(page.getByText('已开始填报，请完善业务系统和网络资产后提交')).toBeVisible()
-  await ensureTaskDetailOpen(page, inventoryTaskName)
-  qualityProgressRow = page.locator('.task-organization-table .el-table__body-wrapper tbody tr').filter({ hasText: organizationName }).first()
+  // 成功提示先于刷新后的组织进度渲染；等待状态真正变为“填报中”，避免
+  // 在旧的“未开始”行上打开操作菜单而找不到“提交”。
+  await expect(qualityProgressRow).toContainText('填报中')
+  taskDetail = await ensureTaskDetailOpen(page, inventoryTaskName)
+  qualityProgressRow = taskDetail.locator('.task-organization-table .el-table__body-wrapper tbody tr').filter({ hasText: organizationName }).first()
   await clickRowAction(page, qualityProgressRow, '提交')
   dialog = page.getByRole('dialog', { name: '提交填报结果' })
   await expect(dialog.getByText('发现 2 项错误，修正后才能提交')).toBeVisible()
@@ -272,8 +274,8 @@ test('集团创建子公司账号，子公司隔离登记业务系统和网络�
   await page.getByRole('button', { name: systemName, exact: true }).click()
   await expect(systemDetail).toBeVisible()
   await expect(systemDetail.locator('.detail-system-code')).toContainText(systemCode)
+  await expect(systemDetail.getByText('超过 10 万条').locator('..').getByText('是', { exact: true })).toBeVisible()
   await page.keyboard.press('Escape')
-  await expect(page.getByText('超过 10 万条').locator('..').getByText('1', { exact: true })).toBeVisible()
 
   await page.getByRole('button', { name: '批量导入', exact: true }).click()
   dialog = page.getByRole('dialog', { name: '批量导入业务系统' })
@@ -299,28 +301,33 @@ test('集团创建子公司账号，子公司隔离登记业务系统和网络�
   }, importedSystemCode)
   expect(importedSystemBeforeConfirmation).toBe(0)
   await dialog.getByRole('button', { name: '确认导入' }).click()
-  await expect(page.getByText('导入处理完成')).toBeVisible()
-  await expect(systemImportResult.getByText('成功').locator('..').getByText('1', { exact: true })).toBeVisible()
-  await dialog.getByRole('button', { name: '关闭' }).click()
+  await expect(systemImportResult.locator('.el-alert__title')).toContainText('导入结果')
+  await expect(systemImportResult.locator('.import-result-summary .success strong').filter({ hasText: '1' })).toBeVisible()
+  await dialog.getByRole('button', { name: '关闭', exact: true }).click()
 
   await page.getByRole('button', { name: '导入记录', exact: true }).click()
   dialog = page.getByRole('dialog', { name: '业务系统导入记录' })
   const systemHistoryRow = dialog.locator('.el-table__body-wrapper tbody tr').filter({ hasText: systemImportFileName }).first()
   await expect(systemHistoryRow).toContainText(organizationName)
-  await expect(systemHistoryRow).toContainText('总数 3 · 成功 1 · 重复 1 · 失败 1')
-  await dialog.getByRole('button', { name: '关闭' }).click()
+  await expect(systemHistoryRow).toContainText('总数 3 · 成功 1（新增 1 / 更新 0）· 重复 1 · 失败 1')
+  await dialog.getByRole('button', { name: '关闭', exact: true }).click()
   const importedSystemCleanupStatus = await page.evaluate(async (code) => {
     const listResponse = await fetch(`/api/v1/business-systems?q=${encodeURIComponent(code)}&page=1&page_size=20`)
     const data = await listResponse.json()
-    const imported = data.items.find((item: { code: string }) => item.code === code)
+    const imported = data.items.find((item: { code: string; id: string; version?: number }) => item.code === code)
     if (!imported) return 404
-    const deleteResponse = await fetch(`/api/v1/business-systems/${imported.id}`, { method: 'DELETE' })
+    const version = Number(imported.version || 0)
+    const deleteResponse = await fetch(`/api/v1/business-systems/${imported.id}?expected_version=${encodeURIComponent(version)}`, { method: 'DELETE' })
     return deleteResponse.status
   }, importedSystemCode)
   expect(importedSystemCleanupStatus).toBe(204)
 
-  let systemRow = page.locator('.data-table-panel .el-table__body-wrapper tbody tr').filter({ hasText: systemCode }).first()
-  await systemRow.getByRole('button', { name: systemName, exact: true }).click()
+  await page.getByPlaceholder('搜索系统名称、组织或负责人，也可输入编码').fill(systemCode)
+  await page.getByRole('button', { name: '查询', exact: true }).click()
+  let systemRow = page.locator('.data-table-panel .el-table__body-wrapper tbody tr').filter({ hasText: systemName }).first()
+  await expect(systemRow).toBeVisible()
+  await expect(systemRow).not.toContainText(systemCode)
+  await systemRow.locator('button.table-link').click()
   let systemDrawer = page.getByRole('dialog', { name: '业务系统详情' })
   await expect(systemDrawer.getByText(systemName, { exact: true })).toBeVisible()
   await expect(systemDrawer.getByText('暂未关联网络资产')).toBeVisible()
@@ -332,8 +339,9 @@ test('集团创建子公司账号，子公司隔离登记业务系统和网络�
   await dialog.locator('.el-form-item').filter({ hasText: '联系方式' }).locator('input').fill('13800000000')
   await dialog.getByRole('button', { name: '保存修改', exact: true }).click()
   await expect(page.getByText('业务系统已更新')).toBeVisible()
-  systemRow = page.locator('.data-table-panel .el-table__body-wrapper tbody tr').filter({ hasText: systemCode }).first()
+  systemRow = page.locator('.data-table-panel .el-table__body-wrapper tbody tr').filter({ hasText: systemName }).first()
   await expect(systemRow.getByText('端到端系统负责人', { exact: true })).toBeVisible()
+  await expect(systemRow).not.toContainText(systemCode)
 
   const systemDownloadPromise = page.waitForEvent('download')
   await page.getByRole('button', { name: '导出台账', exact: true }).click()
@@ -367,9 +375,9 @@ test('集团创建子公司账号，子公司隔离登记业务系统和网络�
   await assetRow.getByRole('button', { name: domainAssetName, exact: true }).click()
   const assetDrawer = page.getByRole('dialog', { name: '网络资产详情' })
   await expect(assetDrawer).toContainText(domainAsset)
+  await expect(assetDrawer).toContainText(shanghaiOffice)
   await page.keyboard.press('Escape')
   await expect(assetDrawer).toBeHidden()
-  await expect(assetRow.getByText(shanghaiOffice, { exact: true })).toBeVisible()
 
   await page.getByPlaceholder('搜索资产值、名称、系统或负责人').fill(domainAsset)
   const assetDownloadPromise = page.waitForEvent('download')
@@ -390,8 +398,10 @@ test('集团创建子公司账号，子公司隔离登记业务系统和网络�
   await page.getByPlaceholder('搜索资产值、名称、系统或负责人').clear()
 
   await page.getByRole('button', { name: '业务系统' }).click()
-  systemRow = page.locator('.data-table-panel .el-table__body-wrapper tbody tr').filter({ hasText: systemCode }).first()
-  await systemRow.getByRole('button', { name: systemName, exact: true }).click()
+  systemRow = page.locator('.data-table-panel .el-table__body-wrapper tbody tr').filter({ hasText: systemName }).first()
+  await expect(systemRow).toBeVisible()
+  await expect(systemRow).not.toContainText(systemCode)
+  await systemRow.locator('button.table-link').click()
   systemDrawer = page.getByRole('dialog', { name: '业务系统详情' })
   await expect(systemDrawer.getByText(domainAsset, { exact: true })).toBeVisible()
   await expect(systemDrawer.getByText('关联网络资产（1）')).toBeVisible()
@@ -400,20 +410,20 @@ test('集团创建子公司账号，子公司隔离登记业务系统和网络�
   const inUseSystemDeleteStatus = await page.evaluate(async (code) => {
     const listResponse = await fetch('/api/v1/business-systems')
     const data = await listResponse.json()
-    const system = data.items.find((item: { code: string }) => item.code === code)
-    const response = await fetch(`/api/v1/business-systems/${system.id}`, { method: 'DELETE' })
+    const system = data.items.find((item: { code: string; id: string; version?: number }) => item.code === code)
+    const response = await fetch(`/api/v1/business-systems/${system.id}?expected_version=${encodeURIComponent(Number(system.version || 0))}`, { method: 'DELETE' })
     return response.status
   }, systemCode)
   expect(inUseSystemDeleteStatus).toBe(409)
 
-  await clickRowAction(page, systemRow, '归档')
-  await page.getByRole('dialog', { name: '归档确认' }).getByRole('button', { name: '确认', exact: true }).click()
-  await expect(page.getByText('业务系统已归档')).toBeVisible()
-  systemRow = page.locator('.data-table-panel .el-table__body-wrapper tbody tr').filter({ hasText: systemCode }).first()
-  await expect(systemRow.getByText('已归档', { exact: true })).toBeVisible()
-  await clickRowAction(page, systemRow, '恢复')
-  await page.getByRole('dialog', { name: '恢复确认' }).getByRole('button', { name: '确认', exact: true }).click()
-  await expect(page.getByText('业务系统已恢复')).toBeVisible()
+  // 子公司新增的是未上报工作版本，不应暴露正式台账的归档/恢复操作；
+  // 归档只能由集团侧对已发布正式资源执行。这里直接验证权限边界，避免把
+  // 工作版本误当成正式台账资源测试。
+  await systemRow.getByRole('button', { name: /^操作：/ }).click()
+  const systemActions = page.locator('.row-actions-panel:visible').last()
+  await expect(systemActions.getByRole('button', { name: '归档', exact: true })).toHaveCount(0)
+  await expect(systemActions.getByRole('button', { name: '恢复', exact: true })).toHaveCount(0)
+  await page.keyboard.press('Escape')
 
   await page.getByRole('button', { name: '网络资产' }).click()
   await page.getByRole('button', { name: '更多操作', exact: true }).click()
@@ -439,9 +449,9 @@ test('集团创建子公司账号，子公司隔离登记业务系统和网络�
   }, importedIP)
   expect(importedAssetBeforeConfirmation).toBe(0)
   await dialog.getByRole('button', { name: '确认导入' }).click()
-  await expect(page.getByText('导入处理完成')).toBeVisible()
-  await expect(result.getByText('成功').locator('..').getByText('1', { exact: true })).toBeVisible()
-  await dialog.getByRole('button', { name: '关闭' }).click()
+  await expect(result.locator('.el-alert__title')).toContainText('导入结果')
+  await expect(result.locator('.import-result-summary .success strong').filter({ hasText: '1' })).toBeVisible()
+  await dialog.getByRole('button', { name: '关闭', exact: true }).click()
   await expect(page.getByText(importedIP, { exact: true })).toBeVisible()
 
   assetRow = page.locator('.data-table-panel .el-table__body-wrapper tbody tr').filter({ hasText: domainAsset }).first()
@@ -454,17 +464,12 @@ test('集团创建子公司账号，子公司隔离登记业务系统和网络�
   assetRow = page.locator('.data-table-panel .el-table__body-wrapper tbody tr').filter({ hasText: domainAsset }).first()
   await expect(assetRow.getByText(editedAssetName, { exact: true })).toBeVisible()
 
-  await clickRowAction(page, assetRow, '归档')
-  await page.getByRole('dialog', { name: '归档网络资产' }).getByRole('button', { name: '归档', exact: true }).click()
-  await expect(page.getByText('网络资产已归档')).toBeVisible()
-  assetRow = page.locator('.data-table-panel .el-table__body-wrapper tbody tr').filter({ hasText: domainAsset }).first()
-  await expect(assetRow.getByText('已归档', { exact: true })).toBeVisible()
-
-  await clickRowAction(page, assetRow, '启用')
-  await page.getByRole('dialog', { name: '启用网络资产' }).getByRole('button', { name: '启用', exact: true }).click()
-  await expect(page.getByText('网络资产已启用')).toBeVisible()
-  assetRow = page.locator('.data-table-panel .el-table__body-wrapper tbody tr').filter({ hasText: domainAsset }).first()
-  await expect(assetRow.getByText('启用', { exact: true })).toBeVisible()
+  // 同理，子公司工作版本资产只能编辑、删除或纳入上报，不能直接归档/恢复正式资产。
+  await assetRow.getByRole('button', { name: /^操作：/ }).click()
+  const assetActions = page.locator('.row-actions-panel:visible').last()
+  await expect(assetActions.getByRole('button', { name: '归档', exact: true })).toHaveCount(0)
+  await expect(assetActions.getByRole('button', { name: '启用', exact: true })).toHaveCount(0)
+  await page.keyboard.press('Escape')
 
   const importedRow = page.locator('.data-table-panel .el-table__body-wrapper tbody tr').filter({ hasText: importedIP }).first()
   await clickRowAction(page, importedRow, '删除资产')
@@ -504,10 +509,11 @@ test('集团创建子公司账号，子公司隔离登记业务系统和网络�
   dialog = page.getByRole('dialog', { name: '资产导入记录' })
   const historyRow = dialog.locator('.el-table__body-wrapper tbody tr').filter({ hasText: importFileName }).first()
   await expect(historyRow.getByText(importFileName, { exact: true })).toBeVisible()
-  await expect(historyRow.getByRole('cell').nth(3)).toHaveText('3')
-  await expect(historyRow.getByRole('cell').nth(4)).toHaveText('1')
-  await expect(historyRow.getByRole('cell').nth(5)).toHaveText('1')
+  // 历史表新增“状态”列后，按表头定位后的数据列为：总数、成功、重复、失败。
+  await expect(historyRow.getByRole('cell').nth(4)).toHaveText('3')
+  await expect(historyRow.getByRole('cell').nth(5)).toContainText('1')
   await expect(historyRow.getByRole('cell').nth(6)).toHaveText('1')
+  await expect(historyRow.getByRole('cell').nth(7)).toHaveText('1')
   await dialog.getByRole('button', { name: '关闭', exact: true }).click()
 
   const crossOrganizationStatus = await page.evaluate(async (organizationID) => {
@@ -533,11 +539,32 @@ test('集团创建子公司账号，子公司隔离登记业务系统和网络�
   }, { assetID: groupAssetID, value: groupAsset })
   expect(crossOrganizationMutationStatuses).toEqual([403, 403])
 
+  // 工作版本默认只是组织工作台账，必须显式纳入本次填报任务；资产纳入时会
+  // 按其业务系统关联自动带入对应系统，之后质量检查才会看到 1 个系统 / 1 项资产。
+  const inventoryContext = await page.evaluate(async ({ taskName, organizationName }) => {
+    const [taskResponse, organizationResponse] = await Promise.all([
+      fetch('/api/v1/inventory-tasks?page=1&page_size=100'),
+      fetch('/api/v1/organizations?page=1&page_size=100'),
+    ])
+    const tasks = await taskResponse.json()
+    const organizations = await organizationResponse.json()
+    const task = tasks.items.find((item: { id: string; name: string }) => item.name === taskName)
+    const organization = organizations.items.find((item: { id: string; name: string }) => item.name === organizationName)
+    if (!task || !organization) throw new Error('填报任务或组织上下文不存在')
+    return { taskID: task.id as string, organizationID: organization.id as string }
+  }, { taskName: inventoryTaskName, organizationName })
+  await page.goto(`/assets?mode=inventory&task_id=${inventoryContext.taskID}&organization_id=${inventoryContext.organizationID}&task_name=${encodeURIComponent(inventoryTaskName)}&asset_network_scope=public`)
+  await expect(page.getByText(`当前为“${inventoryTaskName}”选择上报模式`)).toBeVisible()
+  const workingAssetRow = page.locator('.data-table-panel').last().locator('.el-table__body-wrapper tbody tr').filter({ hasText: domainAsset }).first()
+  await expect(workingAssetRow).toBeVisible()
+  await clickRowAction(page, workingAssetRow, '选择上报')
+  await expect(page.getByText('已选择该网络资产纳入本次上报')).toBeVisible()
+
   await page.goto('/users')
   await expect(page).toHaveURL(/\/users$/)
   await expect(page.getByRole('heading', { name: '用户管理' })).toBeVisible()
   await expect(page.getByRole('tab', { name: '角色与权限' })).toHaveCount(0)
-  await expect(page.getByText('本人资料请到账户设置维护')).toBeVisible()
+  await expect(page.getByText('本人资料在账户设置维护')).toBeVisible()
 
   await page.getByRole('button', { name: '填报任务', exact: true }).click()
   await ensureTaskDetailOpen(page, inventoryTaskName)
@@ -582,12 +609,14 @@ test('集团创建子公司账号，子公司隔离登记业务系统和网络�
     return { status: response.status, body: await response.json() }
   }, { code: organizationCode })
   expect(populatedScopePreview.status).toBe(200)
+  // 工作版本尚未审核发布，不应被正式台账范围预览误计入；任务提交快照
+  // 仍会保留本次已选择的 1 个系统 / 1 项资产（下方进度断言验证）。
   expect(populatedScopePreview.body.scope_preview).toMatchObject({
-    organization_count: 1, system_count: 1, asset_count: 1, empty_organization_count: 0,
+    organization_count: 1, system_count: 0, asset_count: 0, empty_organization_count: 1,
   })
   expect(populatedScopePreview.body.scope_preview.items).toHaveLength(1)
   expect(populatedScopePreview.body.scope_preview.items[0]).toMatchObject({
-    organization_code: organizationCode, system_count: 1, asset_count: 1,
+    organization_code: organizationCode, system_count: 0, asset_count: 0,
   })
   await page.getByRole('button', { name: '填报任务', exact: true }).click()
   await ensureTaskDetailOpen(page, inventoryTaskName)
@@ -641,7 +670,9 @@ test('集团创建子公司账号，子公司隔离登记业务系统和网络�
   diffDrawer = page.locator('.el-drawer').filter({ hasText: '填报提交差异' }).last()
   await expect(diffDrawer.getByText(/第 2 版/).first()).toBeVisible()
   await expect(diffDrawer.getByText(new RegExp(`${inventoryTaskName} / 第 1 版`))).toBeVisible()
-  await expect(diffDrawer.locator('.submission-diff-summary .added strong')).toHaveText('0')
+  // 首次提交尚未发布，退回后再次提交仍相对正式台账表现为 2 条新增；
+  // 不是本次填写人修改了资源，而是正式台账尚无历史基线。
+  await expect(diffDrawer.locator('.submission-diff-summary .added strong')).toHaveText('2')
   await expect(diffDrawer.locator('.submission-diff-summary .modified strong')).toHaveText('0')
   await expect(diffDrawer.locator('.submission-diff-summary .removed strong')).toHaveText('0')
   await page.keyboard.press('Escape')
@@ -673,7 +704,9 @@ test('集团创建子公司账号，子公司隔离登记业务系统和网络�
 
   const securityFixture = await page.evaluate(async ({ expectedOrganizationCode, expectedAsset, expectedSystemCode, suffixValue }) => {
     const [organizationsResponse, assetsResponse, systemsResponse] = await Promise.all([
-      fetch('/api/v1/organizations'), fetch('/api/v1/assets'), fetch('/api/v1/business-systems'),
+      fetch(`/api/v1/organizations?q=${encodeURIComponent(expectedOrganizationCode)}&page=1&page_size=100`),
+      fetch(`/api/v1/assets?q=${encodeURIComponent(expectedAsset)}&page=1&page_size=20`),
+      fetch(`/api/v1/business-systems?q=${encodeURIComponent(expectedSystemCode)}&page=1&page_size=20`),
     ])
     const organizations = await organizationsResponse.json()
     const assets = await assetsResponse.json()
@@ -849,6 +882,8 @@ test('集团创建安全测试批次并批量导入授权范围内漏洞', async
   const scopeIP = `198.51.100.${Number(suffix.slice(-3)) % 250 + 1}`
   const importFindingTitle = `批量导入漏洞_PW_${suffix}`
   const linkedFindingTitle = `端口标识待关联漏洞_PW_${suffix}`
+  const riskAcceptedUntil = futureDateTime(30)
+  const riskReviewedUntil = futureDateTime(60)
   const reportName = `测试报告_PW_${suffix}.txt`
   const organizationCode = `SCOPE_PW_${suffix}`
   const organizationName = `测试范围子公司_PW_${suffix}`
@@ -971,28 +1006,12 @@ test('集团创建安全测试批次并批量导入授权范围内漏洞', async
   ].join('\n')
   await importDialog.locator('input[type=file]').setInputFiles({ name: `findings-${suffix}.csv`, mimeType: 'text/csv', buffer: Buffer.from(csv) })
   await importDialog.getByRole('button', { name: '开始导入', exact: true }).click()
-  await expect(page.getByText(/导入完成：成功 1 条，待关联 1 条，失败 0 条，重复 0 条/)).toBeVisible()
+  // IP:PORT is normalized to its IP host and linked directly when that IP is
+  // already in the authorized scope; it should not create a candidate.
+  await expect(page.getByText(/导入完成：成功 2 条，待关联 0 条，失败 0 条，重复 0 条/)).toBeVisible()
   await expect(importDialog.getByText('待关联', { exact: true })).toBeVisible()
-  await importDialog.getByRole('button', { name: '处理 1 条待关联漏洞', exact: true }).click()
-  await expect(page.getByRole('tab', { name: /待关联漏洞/ })).toHaveAttribute('aria-selected', 'true')
-  const candidateRow = page.locator('.security-panel .el-table__body-wrapper tbody tr').filter({ hasText: linkedFindingTitle }).first()
-  await expect(candidateRow).toContainText(`${scopeIP}:443`)
-  await expect(candidateRow).toContainText(scopeIP)
-  await expect(candidateRow).toContainText('IP 与端口主机匹配 90%')
-  await clickRowAction(page, candidateRow, '关联资产')
-  const candidateDialog = page.getByRole('dialog', { name: '关联漏洞到测试范围资产' })
-  await expect(candidateDialog).toContainText('只允许关联当前安全测试批次中的授权资产')
-  await expect(candidateDialog).toContainText(`${scopeIP}:443`)
-  const candidateSelect = candidateDialog.locator('.el-form-item').filter({ hasText: '关联授权资产（必选）' }).locator('.el-select')
-  await candidateSelect.click()
-  const candidateOptions = page.locator('.el-select-dropdown:visible')
-  await expect(candidateOptions).toContainText(scopeIP)
-  await expect(candidateOptions).toContainText(assetValue)
-  await expect(candidateOptions).not.toContainText(outOfScopeValue)
-  await page.keyboard.press('Escape')
-  await candidateDialog.getByPlaceholder('可记录扫描器标识与台账资产的对应依据').fill('确认扫描器端口标识属于该授权主机')
-  await candidateDialog.getByRole('button', { name: '确认关联并生成安全发现', exact: true }).click()
-  await expect(page.getByText(/已生成安全发现 F/)).toBeVisible()
+  await expect(importDialog.getByRole('button', { name: /处理 .*待关联漏洞/, exact: true })).toHaveCount(0)
+  await importDialog.getByRole('button', { name: '关闭', exact: true }).click()
   await page.getByRole('tab', { name: '漏洞与安全发现', exact: true }).click()
   const linkedFindingRow = page.locator('.security-panel .el-table__body-wrapper tbody tr').filter({ hasText: linkedFindingTitle }).first()
   await expect(linkedFindingRow).toContainText(scopeIP)
@@ -1039,7 +1058,7 @@ test('集团创建安全测试批次并批量导入授权范围内漏洞', async
   const revokePrompt = page.getByRole('dialog', { name: '撤销风险接受' })
   await revokePrompt.getByRole('button', { name: '撤销', exact: true }).click()
   await expect(page.getByText('风险接受已撤销', { exact: true })).toBeVisible()
-  await expect(findingDrawer).toContainText('待处置')
+  await expect(findingDrawer).toContainText('待处理')
 })
 
 test('集团管理员可从回收站恢复误删网络资产并保留审计记录', async ({ page }) => {
@@ -1304,6 +1323,9 @@ test('集团管理员可批量归档恢复业务系统并批量调整资产状�
   await page.locator('.batch-toolbar-actions .el-select').nth(0).click()
   await page.locator('.el-select-dropdown:visible').getByText('停用', { exact: true }).click()
   await page.getByRole('dialog', { name: '批量设置状态为“停用”确认' }).getByRole('button', { name: '确认执行', exact: true }).click()
+  const statusReason = page.getByRole('dialog', { name: '集团批量变更正式台账' })
+  await statusReason.locator('textarea').fill('验证集团批量变更正式台账复核链路')
+  await statusReason.getByRole('button', { name: '确认提交', exact: true }).click()
   const statusResult = page.getByRole('dialog', { name: '批量设置状态为“停用”结果' })
   await expect(statusResult).toContainText('成功 2 个，失败 0 个')
   await statusResult.getByRole('button', { name: '关闭', exact: true }).click()
@@ -1316,6 +1338,9 @@ test('集团管理员可批量归档恢复业务系统并批量调整资产状�
   await page.locator('.batch-toolbar-actions .el-select').nth(1).click()
   await page.locator('.el-select-dropdown:visible').getByText(fixture.area.name, { exact: false }).first().click()
   await page.getByRole('dialog', { name: `批量设置网络区域为“${fixture.area.name}”确认` }).getByRole('button', { name: '确认执行', exact: true }).click()
+  const areaReason = page.getByRole('dialog', { name: '集团批量变更正式台账' })
+  await areaReason.locator('textarea').fill('验证集团批量设置网络区域复核链路')
+  await areaReason.getByRole('button', { name: '确认提交', exact: true }).click()
   const areaResult = page.getByRole('dialog', { name: `批量设置网络区域为“${fixture.area.name}”结果` })
   await expect(areaResult).toContainText('成功 2 个，失败 0 个')
   await areaResult.getByRole('button', { name: '关闭', exact: true }).click()

@@ -160,9 +160,10 @@ test('任务中新建资产在提交和审核通过前与集团正式台账隔�
   expect(createdDraft.draft.is_draft).toBe(true)
 
   await page.goto(`/assets?mode=inventory&task_id=${fixture.taskID}&organization_id=${fixture.organizationID}&task_name=${encodeURIComponent(taskName)}&asset_network_scope=public`)
-  await expect(page.getByText(`当前为“${taskName}”填报草稿模式`)).toBeVisible()
-  await expect(page.getByText(assetValue, { exact: true })).toBeVisible()
-  await expect(page.getByText('未提交时集团在正式台账中不可见')).toBeVisible()
+  await expect(page.getByText(`当前为“${taskName}”选择上报模式`)).toBeVisible()
+  await expect(page.getByText(/这里展示 .* 的工作台账。新增或修改先保存为未上报版本/)).toBeVisible()
+  await expect(page.locator('.inventory-draft-panel').getByText(assetValue, { exact: true })).toBeVisible()
+  await expect(page.getByText(/选择纳入本次任务并提交审核后，才会发布到集团正式台账/)).toBeVisible()
 
   await logout(page)
   await login(page, adminUsername, adminPassword!)

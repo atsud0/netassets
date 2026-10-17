@@ -820,11 +820,16 @@ func appendConfiguredQualityRules(ctx context.Context, q qualityCheckQuerier, ta
 	if err != nil {
 		return fmt.Errorf("load configured quality rules: %w", err)
 	}
-	defer rows.Close()
+	// Read and close the rule cursor before evaluating each rule.  The caller
+	// commonly passes a pgx transaction; issuing QueryRow on that connection
+	// while rows is still open returns "conn busy" and makes an otherwise valid
+	// submission fail with HTTP 500.
+	rules := make([]dataquality.Rule, 0)
 	for rows.Next() {
 		var rule dataquality.Rule
 		var rawConditions []byte
 		if err := rows.Scan(&rule.ID, &rule.RuleName, &rule.ResourceType, &rule.TargetField, &rule.Severity, &rawConditions); err != nil {
+			rows.Close()
 			return err
 		}
 		rule.RuleType = "required"
@@ -832,8 +837,17 @@ func appendConfiguredQualityRules(ctx context.Context, q qualityCheckQuerier, ta
 			continue
 		}
 		if err := json.Unmarshal(rawConditions, &rule.Conditions); err != nil {
+			rows.Close()
 			return fmt.Errorf("decode configured quality rule conditions: %w", err)
 		}
+		rules = append(rules, rule)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return err
+	}
+	rows.Close()
+	for _, rule := range rules {
 		missing, err := configuredMissingCount(ctx, q, rule, taskID, organizationID, assetNetworkScope)
 		if err != nil {
 			return err
@@ -849,7 +863,7 @@ func appendConfiguredQualityRules(ctx context.Context, q qualityCheckQuerier, ta
 			result.WarningCount++
 		}
 	}
-	return rows.Err()
+	return nil
 }
 
 func configuredMissingCount(ctx context.Context, q qualityCheckQuerier, rule dataquality.Rule, taskID, organizationID, assetNetworkScope string) (int64, error) {

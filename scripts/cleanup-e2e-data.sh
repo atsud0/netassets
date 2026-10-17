@@ -33,7 +33,8 @@ common_targets_sql() {
 CREATE TEMP TABLE e2e_organizations ON COMMIT DROP AS
   SELECT id
   FROM organizations
-  WHERE organization_code ~ '^(SUB|SCOPE|ROLE)_PW_[0-9]+$';
+  WHERE organization_code ~ '^(SUB|SCOPE|ROLE)_PW_[0-9]+$'
+     OR organization_code ~ '^(DRAFT|BS_DRAFT|EXISTING_DRAFT|OWNER|STR_ORG)_[0-9]+$';
 
 CREATE TEMP TABLE e2e_tasks ON COMMIT DROP AS
   SELECT id
@@ -70,6 +71,28 @@ CREATE TEMP TABLE e2e_systems ON COMMIT DROP AS
   FROM business_systems
   WHERE owner_organization_id IN (SELECT id FROM e2e_organizations)
      OR system_code ~ '^(SYS_PW|HISTORY|BATCH_SYS)_[0-9]+';
+
+CREATE TEMP TABLE e2e_business_system_drafts ON COMMIT DROP AS
+  SELECT id
+  FROM inventory_business_system_drafts
+  WHERE task_id IN (SELECT id FROM e2e_tasks)
+     OR organization_id IN (SELECT id FROM e2e_organizations)
+     OR source_system_id IN (SELECT id FROM e2e_systems);
+
+CREATE TEMP TABLE e2e_asset_drafts ON COMMIT DROP AS
+  SELECT id
+  FROM inventory_asset_drafts
+  WHERE task_id IN (SELECT id FROM e2e_tasks)
+     OR organization_id IN (SELECT id FROM e2e_organizations)
+     OR source_asset_id IN (SELECT id FROM e2e_assets)
+     OR business_system_draft_id IN (SELECT id FROM e2e_business_system_drafts);
+
+CREATE TEMP TABLE e2e_security_test_requests ON COMMIT DROP AS
+  SELECT id
+  FROM security_test_requests
+  WHERE applicant_organization_id IN (SELECT id FROM e2e_organizations)
+     OR request_name ~ '^上线测试申请.*_[0-9]+$'
+     OR request_code ~ '^STR_[0-9]+$';
 
 CREATE TEMP TABLE e2e_network_areas ON COMMIT DROP AS
   SELECT id
@@ -136,6 +159,9 @@ CREATE TEMP TABLE e2e_resource_ids ON COMMIT DROP AS
   UNION SELECT id::text FROM e2e_findings
   UNION SELECT id::text FROM e2e_assets
   UNION SELECT id::text FROM e2e_systems
+  UNION SELECT id::text FROM e2e_business_system_drafts
+  UNION SELECT id::text FROM e2e_asset_drafts
+  UNION SELECT id::text FROM e2e_security_test_requests
   UNION SELECT id::text FROM e2e_network_areas
   UNION SELECT id::text FROM e2e_users
   UNION SELECT id::text FROM e2e_asset_imports
@@ -158,6 +184,9 @@ UNION ALL SELECT 'security_work_orders', count(*) FROM e2e_work_orders
 UNION ALL SELECT 'security_findings', count(*) FROM e2e_findings
 UNION ALL SELECT 'assets', count(*) FROM e2e_assets
 UNION ALL SELECT 'business_systems', count(*) FROM e2e_systems
+UNION ALL SELECT 'inventory_business_system_drafts', count(*) FROM e2e_business_system_drafts
+UNION ALL SELECT 'inventory_asset_drafts', count(*) FROM e2e_asset_drafts
+UNION ALL SELECT 'security_test_requests', count(*) FROM e2e_security_test_requests
 UNION ALL SELECT 'network_areas', count(*) FROM e2e_network_areas
 UNION ALL SELECT 'users', count(*) FROM e2e_users
 UNION ALL SELECT 'asset_imports', count(*) FROM e2e_asset_imports
@@ -225,6 +254,19 @@ DELETE FROM custom_field_definitions WHERE id IN (SELECT id FROM e2e_custom_fiel
 DELETE FROM security_work_orders WHERE id IN (SELECT id FROM e2e_work_orders);
 DELETE FROM security_findings WHERE id IN (SELECT id FROM e2e_findings);
 DELETE FROM security_test_batches WHERE id IN (SELECT id FROM e2e_batches);
+-- Request scope snapshots enforce exactly one published/working asset reference;
+-- clear the scoped rows before deleting a working asset draft (SET NULL would
+-- violate that check constraint), then remove the E2E requests themselves.
+DELETE FROM security_test_request_scope_assets
+WHERE request_id IN (SELECT id FROM e2e_security_test_requests)
+   OR working_asset_id IN (SELECT id FROM e2e_asset_drafts)
+   OR published_asset_id IN (SELECT id FROM e2e_assets);
+DELETE FROM security_test_requests WHERE id IN (SELECT id FROM e2e_security_test_requests);
+-- Working-version drafts are not always removed by deleting the task: daily
+-- organization work versions have task_id NULL. Delete them explicitly before
+-- their referenced organizations and formal resources.
+DELETE FROM inventory_asset_drafts WHERE id IN (SELECT id FROM e2e_asset_drafts);
+DELETE FROM inventory_business_system_drafts WHERE id IN (SELECT id FROM e2e_business_system_drafts);
 DELETE FROM inventory_tasks WHERE id IN (SELECT id FROM e2e_tasks);
 DELETE FROM business_systems WHERE id IN (SELECT id FROM e2e_systems);
 DELETE FROM assets WHERE id IN (SELECT id FROM e2e_assets);

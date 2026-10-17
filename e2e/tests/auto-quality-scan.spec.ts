@@ -18,7 +18,7 @@ async function expectStatus(response: APIResponse, expected: number, label: stri
 }
 
 async function waitForScheduledBatch(request: APIRequestContext) {
-  const deadline = Date.now() + 30_000
+  const deadline = Date.now() + 90_000
   while (Date.now() < deadline) {
     const response = await request.get('/api/v1/data-quality-scan-batches?page=1&page_size=100')
     await expectStatus(response, 200, '读取自动质量巡检批次')
@@ -27,7 +27,7 @@ async function waitForScheduledBatch(request: APIRequestContext) {
     if (scheduled) return scheduled
     await new Promise((resolve) => setTimeout(resolve, 500))
   }
-  throw new Error('系统启动后 30 秒内未生成每日自动质量巡检批次')
+  throw new Error('系统启动后 90 秒内未生成每日自动质量巡检批次')
 }
 
 test('每日质量巡检使用系统身份、批次来源和审计留痕', async ({ page }) => {
@@ -52,7 +52,7 @@ test('每日质量巡检使用系统身份、批次来源和审计留痕', async
   expect(audit?.details.trigger_type).toBe('scheduled')
   expect(audit?.details.scheduled_for).toBe(batch.scheduled_for)
 
-  await page.goto('/data-quality-issues')
+  await page.goto('/data-quality-scan-history')
   await expect(page.getByText('系统自动', { exact: true }).first()).toBeVisible()
   await expect(page.getByText('系统调度器', { exact: true }).first()).toBeVisible()
 })

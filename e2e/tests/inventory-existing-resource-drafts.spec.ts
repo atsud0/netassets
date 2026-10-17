@@ -360,7 +360,10 @@ test('已有资产和业务系统的修改删除先进入任务草稿，审核�
 
   await page.goto(`/inventory-tasks?task_id=${fixture.reviewTaskID}&organization_id=${fixture.organizationID}`)
   await expect(page.getByRole('heading', { name: `已有资源审核任务_${suffix}`, exact: true })).toBeVisible()
-  await page.getByRole('button', { name: '查看差异', exact: true }).click()
+  const taskDetail = page.getByRole('dialog', { name: '填报任务详情' })
+  const progressRow = taskDetail.locator('tbody tr').filter({ hasText: `已有资源草稿子公司_${suffix}` }).first()
+  await progressRow.getByRole('button', { name: /操作：/ }).click()
+  await page.locator('.row-actions-panel:visible').getByRole('button', { name: '查看差异', exact: true }).click()
   await expect(page.getByText('带“本次新增 / 本次修改 / 本次删除”标记的是子公司在本任务内发起、尚待发布的台账变更')).toBeVisible()
   const diffGroups = page.locator('.submission-diff-group')
   await diffGroups.nth(0).getByRole('tab', { name: '修改（1）', exact: true }).click()
@@ -470,7 +473,7 @@ test('已有资产和业务系统的修改删除先进入任务草稿，审核�
   expect(blocked.body.error.code).toBe('resource_in_use')
   expect(blocked.drafts.items[0].draft_status).toBe('editing')
 
-  const autoPublished = await page.evaluate(async ({ fixture, taskID, draftID, autoUpdatedSystemName }) => {
+  const autoPublished = await page.evaluate(async ({ fixture, taskID, draftID, expectedVersion, autoUpdatedSystemName }) => {
     async function request(path: string, init?: RequestInit) {
       const response = await fetch(`/api/v1${path}`, {
         ...init,
@@ -481,7 +484,7 @@ test('已有资产和业务系统的修改删除先进入任务草稿，审核�
       return text ? JSON.parse(text) : null
     }
 
-    await request(`/inventory-tasks/${taskID}/organizations/${fixture.organizationID}/business-system-drafts/${draftID}`, { method: 'DELETE' })
+    await request(`/inventory-tasks/${taskID}/organizations/${fixture.organizationID}/business-system-drafts/${draftID}?expected_version=${expectedVersion}`, { method: 'DELETE' })
     await request(`/inventory-tasks/${taskID}/organizations/${fixture.organizationID}/business-systems/${fixture.linkedSystem.id}/update-draft`, {
       method: 'POST',
       body: JSON.stringify({
@@ -514,7 +517,7 @@ test('已有资产和业务系统的修改删除先进入任务草稿，审核�
     const formal = (await request(`/business-systems/${fixture.linkedSystem.id}`)).item
     const drafts = await request(`/inventory-tasks/${taskID}/organizations/${fixture.organizationID}/business-system-drafts?page=1&page_size=20`)
     return { progress, formal, drafts }
-  }, { fixture, taskID: autoTask.id as string, draftID: blocked.draft.id as string, autoUpdatedSystemName })
+  }, { fixture, taskID: autoTask.id as string, draftID: blocked.draft.id as string, expectedVersion: blocked.draft.version as number, autoUpdatedSystemName })
 
   expect(autoPublished.progress.status).toBe('approved')
   expect(autoPublished.formal.name).toBe(autoUpdatedSystemName)

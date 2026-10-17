@@ -10,9 +10,16 @@ async function login(page: Page, username: string, password: string) {
   await expect(page).not.toHaveURL(/\/login(?:\?|$)/)
 }
 
+async function openBackupActions(page: Page, row: ReturnType<Page['locator']>) {
+  await row.getByRole('button', { name: /操作：/ }).click()
+  const panel = page.locator('.row-actions-panel:visible')
+  await expect(panel).toBeVisible()
+  return panel
+}
+
 async function downloadBackupFile(page: Page, label: string, expectedFilename: string) {
   const downloadPromise = page.waitForEvent('download')
-  await page.locator('.el-dropdown-menu:visible').getByRole('link', { name: label, exact: true }).click()
+  await page.locator('.row-actions-panel:visible').getByRole('link', { name: label, exact: true }).click()
   const download = await downloadPromise
   expect(download.suggestedFilename()).toBe(expectedFilename)
 }
@@ -44,10 +51,11 @@ test('集团管理员可在 Web 端完成系统备份、校验、下载和删除
     backupID = backupIDs[0]?.trim() ?? ''
     expect(backupID).toMatch(/^netassets-[0-9]{8}T[0-9]{6}Z-[a-f0-9]{8}$/)
 
-    // 新备份被前端插入列表首位；当前表格在常规宽度下不渲染固定列副本。
-    const actionRow = page.locator('.backup-table .el-table__body-wrapper tbody tr').first()
-    await expect(actionRow.getByRole('button', { name: '校验', exact: true })).toBeVisible()
-    await actionRow.getByRole('button', { name: '校验', exact: true }).click()
+    // 操作列使用 RowActions 菜单；按备份编号锁定真实行，避免分页或固定列副本误选。
+    const actionRow = page.locator('.backup-table tbody tr').filter({ hasText: backupID }).first()
+    await expect(actionRow).toBeVisible()
+    let actions = await openBackupActions(page, actionRow)
+    await actions.getByRole('button', { name: '校验', exact: true }).click()
     await expect(page.getByText('备份文件校验通过', { exact: true })).toBeVisible({ timeout: 180_000 })
 
     const expectedFiles: Array<[string, string]> = [
@@ -56,11 +64,12 @@ test('集团管理员可在 Web 端完成系统备份、校验、下载和删除
       ['校验清单', `${backupID}-manifest.txt`],
     ]
     for (const [label, filename] of expectedFiles) {
-      await actionRow.getByRole('button', { name: '下载', exact: true }).click()
+      actions = await openBackupActions(page, actionRow)
       await downloadBackupFile(page, label, filename)
     }
 
-    await actionRow.getByRole('button', { name: '删除', exact: true }).click()
+    actions = await openBackupActions(page, actionRow)
+    await actions.getByRole('button', { name: '删除', exact: true }).click()
     const deleteDialog = page.getByRole('dialog', { name: '删除系统备份' })
     await expect(deleteDialog).toBeVisible()
     await deleteDialog.getByRole('button', { name: '永久删除', exact: true }).click()

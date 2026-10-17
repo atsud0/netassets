@@ -1182,8 +1182,16 @@ func queryBusinessSystem(ctx context.Context, querier interface {
 // system. Get is intentionally called first so existence, permission and
 // organization-scope checks remain identical to the detail endpoint.
 func (s *Service) SearchRelatedAssets(ctx context.Context, principal auth.Principal, systemID string, page pagination.Query) (pagination.Result[RelatedAsset], error) {
-	if _, err := s.Get(ctx, principal, systemID); err != nil {
+	detail, err := s.Get(ctx, principal, systemID)
+	if err != nil {
 		return pagination.Result[RelatedAsset]{}, err
+	}
+	// Organization users see working versions before they are published. Their
+	// newly created assets are drafts linked by business_system_draft_id rather
+	// than rows in system_assets, so the formal-ledger query below would report
+	// an empty relationship even though the two working versions are linked.
+	if detail.IsWorkingCopy {
+		return s.searchWorkingRelatedAssets(ctx, detail.BusinessSystem, page)
 	}
 
 	var total int
@@ -1221,6 +1229,53 @@ func (s *Service) SearchRelatedAssets(ctx context.Context, principal auth.Princi
 	}
 	if err := rows.Err(); err != nil {
 		return pagination.Result[RelatedAsset]{}, fmt.Errorf("iterate related assets: %w", err)
+	}
+	return pagination.NewResult(items, total, page), nil
+}
+
+func (s *Service) searchWorkingRelatedAssets(ctx context.Context, system BusinessSystem, page pagination.Query) (pagination.Result[RelatedAsset], error) {
+	rows, err := s.pool.Query(ctx, `
+WITH related AS (
+    SELECT d.id::text AS asset_id, d.asset_type, d.asset_value, COALESCE(d.asset_name,'') AS asset_name,
+           d.organization_id::text AS organization_id, d.status, d.importance, d.network_scope, COALESCE(d.owner_name,'') AS owner_name
+    FROM inventory_asset_drafts d
+    WHERE d.business_system_draft_id = $1::uuid
+      AND d.draft_status IN ('editing','submitted','returned')
+      AND d.operation <> 'delete'
+    UNION ALL
+    SELECT a.id::text AS asset_id, a.asset_type, a.asset_value, COALESCE(a.asset_name,'') AS asset_name,
+           ao.organization_id::text AS organization_id, a.status, a.importance, a.network_scope, COALESCE(ao.owner_name,'') AS owner_name
+    FROM system_assets sa
+    JOIN assets a ON a.id = sa.asset_id AND a.deleted_at IS NULL
+    JOIN asset_organizations ao ON ao.asset_id = a.id AND ao.is_primary
+    WHERE NULLIF($2,'')::uuid IS NOT NULL
+      AND sa.business_system_id = NULLIF($2,'')::uuid
+      AND NOT EXISTS (
+          SELECT 1 FROM inventory_asset_drafts d
+          WHERE d.source_asset_id = a.id
+            AND d.business_system_draft_id = $1::uuid
+            AND d.draft_status IN ('editing','submitted','returned')
+      )
+)
+SELECT asset_id, asset_type, asset_value, asset_name, organization_id, status, importance, network_scope, owner_name, count(*) OVER()
+FROM related
+ORDER BY asset_type, asset_value, asset_id
+LIMIT $3 OFFSET $4`, system.ID, system.PublishedID, page.PageSize, page.Offset())
+	if err != nil {
+		return pagination.Result[RelatedAsset]{}, fmt.Errorf("list working related assets: %w", err)
+	}
+	defer rows.Close()
+	items := make([]RelatedAsset, 0, page.PageSize)
+	total := 0
+	for rows.Next() {
+		var item RelatedAsset
+		if err := rows.Scan(&item.ID, &item.Type, &item.Value, &item.Name, &item.OrganizationID, &item.Status, &item.Importance, &item.NetworkScope, &item.OwnerName, &total); err != nil {
+			return pagination.Result[RelatedAsset]{}, fmt.Errorf("scan working related asset: %w", err)
+		}
+		items = append(items, item)
+	}
+	if err := rows.Err(); err != nil {
+		return pagination.Result[RelatedAsset]{}, fmt.Errorf("iterate working related assets: %w", err)
 	}
 	return pagination.NewResult(items, total, page), nil
 }

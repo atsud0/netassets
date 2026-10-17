@@ -50,12 +50,14 @@ test('在非安全上下文（HTTP 内网地址）中复制系统编码仍然成
   await page.getByRole('button', { name: '登录' }).click()
   await expect(page).not.toHaveURL(/\/login(?:\?|$)/)
 
-  await page.goto(`/business-systems?q=${code}`)
-  const row = page.locator('tbody tr').filter({ hasText: code }).first()
+  await page.goto('/systems')
+  const searchInput = page.getByPlaceholder('搜索系统名称、组织或负责人，也可输入编码')
+  await searchInput.fill(code)
+  await page.getByRole('button', { name: '查询', exact: true }).click()
+  // 编码是接口/去重字段，列表不展示；用人类可识别的系统名称锁定结果行。
+  const row = page.locator('tbody tr').filter({ hasText: `复制编码验证_${suffix}` }).first()
   await expect(row).toBeVisible()
-  await row.getByRole('button').first().click()
-  const detailAction = page.locator('.el-dropdown-menu__item').filter({ hasText: '详情' }).first()
-  if (await detailAction.count()) await detailAction.click()
+  await row.getByRole('button', { name: `复制编码验证_${suffix}`, exact: true }).click()
 
   const codeCell = page.locator('.detail-system-code').first()
   await expect(codeCell).toBeVisible()

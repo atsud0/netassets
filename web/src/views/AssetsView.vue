@@ -733,10 +733,12 @@ async function runBatchUpdate(payload: { status?: string; network_area_id?: stri
       items: response.data.result.items.map((item) => ({ ...item, resource_name: item.item?.name || item.item?.value || names.get(item.id) || item.id })),
     }
     batchResultTitle.value = `批量${action}结果`
-    batchResultVisible.value = true
     if (response.data.result.failure_count === 0) ElMessage.success(batchAssetUpdateSuccessMessage(response.data.result))
     await refreshAfterMutation()
     selectedAssets.value = []
+    // Refreshing the ledger can recreate the table subtree and close a dialog
+    // opened before it. Show the per-item result after the refresh completes.
+    batchResultVisible.value = true
   } catch (error) {
     if (error !== 'cancel' && error !== 'close') ElMessage.error(getAPIErrorMessage(error, `批量${action}失败`))
   } finally {
@@ -1142,13 +1144,15 @@ onMounted(() => {
     <el-alert
       v-if="inventoryMode"
       :title="`当前为“${inventoryTaskName}”选择上报模式`"
-      :description="`这里展示 ${inventoryOrganizationName} 的工作台账。新增或修改先保存为未上报版本，选择纳入本次任务并提交审核后，才会发布到集团正式台账。`"
       type="warning"
       :closable="false"
       show-icon
       class="inventory-draft-alert"
     >
-      <template #default><el-button size="small" @click="router.push('/inventory-tasks')">返回填报任务</el-button></template>
+      <template #default>
+        <span>这里展示 {{ inventoryOrganizationName }} 的工作台账。新增或修改先保存为未上报版本，选择纳入本次任务并提交审核后，才会发布到集团正式台账。</span>
+        <el-button size="small" @click="router.push('/inventory-tasks')">返回填报任务</el-button>
+      </template>
     </el-alert>
     <div class="page-heading"><h1>网络资产</h1>
       <div class="button-row ledger-page-actions asset-page-actions">

@@ -479,6 +479,7 @@ async function openDetail(row: BusinessSystem) {
       detail.value = row
       detailCustomFields.value = customFields.value
       detailCustomValues.value = Object.fromEntries((row.custom_values || []).map((item) => [item.field_key, item.value]))
+      await loadDetailAssets(row.id)
       return
     }
     const [response, customResponse] = await Promise.all([
@@ -531,7 +532,7 @@ async function runBatchArchive(archive: boolean) {
     )
     batchLoading.value = true
     const response = await apiClient.post<{ result: BatchOperationResult }>('/business-systems/batch/archive', {
-      items: targets.map((item) => ({ id: item.id, expected_version: item.version })), archived: archive,
+      ids: targets.map((item) => item.id), archived: archive,
     })
     const names = new Map(targets.map((item) => [item.id, item.name]))
     batchResult.value = {
@@ -539,10 +540,13 @@ async function runBatchArchive(archive: boolean) {
       items: response.data.result.items.map((item) => ({ ...item, resource_name: item.item?.name || names.get(item.id) || item.id })),
     }
     batchResultTitle.value = `批量${action}结果`
-    batchResultVisible.value = true
     if (response.data.result.failure_count === 0) ElMessage.success(`已成功${action} ${response.data.result.success_count} 个业务系统`)
     await refreshAfterMutation()
     selectedSystems.value = []
+    // Show the result after the ledger refresh.  The refresh can trigger a
+    // table/component update; opening the dialog before it makes the result
+    // disappear intermittently for batch archive/restore operations.
+    batchResultVisible.value = true
   } catch (error) {
     if (error !== 'cancel' && error !== 'close') ElMessage.error(getAPIErrorMessage(error, `批量${action}业务系统失败`))
   } finally { batchLoading.value = false }
