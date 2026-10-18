@@ -180,10 +180,6 @@ async function assign() {
     await load()
   } catch (error) { ElMessage.error(getAPIErrorMessage(error)) } finally { busy.value = false }
 }
-async function acceptOrder() {
-  if (busy.value) return; busy.value = true
-  try { await apiClient.post(`/security-work-orders/${orderID.value}/accept`, { comment: '接收工单，安排个人修复任务' }); await load(); ElMessage.success('工单已接收，可以开始派单') } catch (error) { ElMessage.error(getAPIErrorMessage(error)) } finally { busy.value = false }
-}
 async function closeOrder() {
   try { const { value } = await ElMessageBox.prompt('所有漏洞必须已有逐项验证或获批处置结果，请填写关闭说明', '关闭主工单', { inputValidator: value => Boolean(value?.trim()) || '请填写说明' }); await apiClient.post(`/security-work-orders/${orderID.value}/close-individual`, { reason: value }); await load(); ElMessage.success('主工单已关闭') } catch (error) { if (error !== 'cancel' && error !== 'close') ElMessage.error(getAPIErrorMessage(error)) }
 }
@@ -218,10 +214,9 @@ onMounted(async () => {
       <div v-if="advanced" class="advanced-filters"><div class="filters"><el-select v-if="!executor" v-model="orderID" clearable filterable placeholder="全部个人派单工单" style="width:300px"><el-option v-for="order in orders.filter(o => !onlyUnassigned || o.remediation_counts?.unassigned > 0)" :key="order.id" :value="order.id" :label="`${order.number} ${order.title}`" /></el-select>
       <el-checkbox v-if="!executor" v-model="onlyUnassigned" @change="orderID = ''">只选含未分派项的工单</el-checkbox>
       <el-select v-model="status" placeholder="全部状态" style="width:160px"><el-option label="全部状态（含已完成）" value="all" /><el-option label="未完成任务" value="active" /><el-option v-for="(label, value) in taskStatuses" :key="value" :label="label" :value="value" /></el-select><el-select v-model="systemID" clearable filterable placeholder="业务系统" style="width:200px"><el-option v-for="s in systems" :key="s.id" :value="s.id" :label="s.system_name" /></el-select><el-select v-model="special" clearable placeholder="快速筛选" style="width:170px"><el-option label="被退回" value="returned" /><el-option label="三天内到期" value="due_soon" /><el-option label="存在阻塞" value="blocked" /><el-option label="申请处理中" value="pending_request" /><el-option label="材料待复核" value="material_needs_review" /><el-option v-if="!executor" label="待改派（不可执行）" value="needs_reassignment" /><el-option v-if="!executor" label="待我审核" value="review_mine" /></el-select><el-checkbox v-model="overdue">仅逾期</el-checkbox><el-button :loading="loading" @click="page = 1; load()">查询</el-button>
-<el-button text @click="resetFilters">重置条件</el-button></div><p v-if="!executor && !orderID" class="muted">选择个人派单工单后，可接收主工单、查看待分派漏洞并安排具体人员。</p></div>
+<el-button text @click="resetFilters">重置条件</el-button></div><p v-if="!executor && !orderID" class="muted">选择个人派单工单后，可查看待分派漏洞并安排具体人员。</p></div>
       <div v-if="summary" class="summary"><span>{{ summary.work_order_no }} · 共 {{ summary.total }} 项 · 待分派 {{ summary.unassigned }} 项 · 截止 {{ dateText(summary.due_at) }}</span><span v-for="(count, value) in summary.counts" :key="value">{{ taskStatuses[value] }} {{ count }}</span>
-      <el-button v-if="auth.hasPermission('remediation.assign') && summary.status === 'issued'" type="primary" :loading="busy" @click="acceptOrder">接收主工单</el-button>
-      <el-button v-if="auth.hasPermission('remediation.assign') && summary.status === 'in_progress'" type="primary" @click="openAssign">派发修复任务</el-button>
+      <el-button v-if="auth.hasPermission('remediation.assign') && ['issued', 'in_progress'].includes(summary.status) && summary.unassigned > 0" type="primary" @click="openAssign">派发修复任务</el-button>
       <el-button v-if="auth.canManageSecurityWorkOrders && ['in_progress','pending_verification'].includes(summary.status)" @click="closeOrder">关闭主工单</el-button>
     </div>
       <div v-if="selectedTasks.length && !executor" class="selection-bar"><span>已选择 {{ selectedTasks.length }} 项待审核任务</span><el-button type="primary" @click="startReview">进入逐项审核</el-button><small>每项分别填写意见并确认</small></div>

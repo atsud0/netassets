@@ -58,7 +58,6 @@ test('组织管理员直接派给外包人员，个人提交后逐项组织确�
     await login(manager, `rp_manager_${suffix}`, temporary)
     await changePassword(manager, temporary, formal)
     await manager.goto(`/remediation?work_order_id=${order.id}`)
-    await manager.getByRole('button', { name: '接收主工单', exact: true }).click()
     await manager.getByRole('button', { name: '派发修复任务', exact: true }).click()
     const dialog = manager.getByRole('dialog', { name: '派发修复任务' })
     await dialog.locator('thead .el-checkbox').click()
@@ -187,7 +186,6 @@ test('材料复核、版本差异、执行计划和批量派单部分失败', as
   for (const n of [1, 2]) findingIDs.push((await api(page, '/security-findings', { title: `材料变更漏洞${n}_${suffix}`, severity: 'high', status: 'pending', assignee_organization_id: system.organization_id, business_system_id: system.id, description: '内部漏洞原始描述', evidence: '内部原始证据', source: 'manual', discovered_at: new Date().toISOString() })).item.id)
   const order = (await api(page, '/security-work-orders', { execution_mode: 'individual', title: `材料复核工单_${suffix}`, assignee_organization_id: system.organization_id, remediation_requirement: '部署生产后验证', due_at: due, finding_ids: findingIDs })).item
   await api(page, `/security-work-orders/${order.id}/issue`, { comment: '下发' })
-  await api(page, `/security-work-orders/${order.id}/accept`, { comment: '安排人员' })
   const assignment = (id: string, grantID: string) => ({ finding_id: id, grant_id: grantID, due_at: due, target_environment: '生产环境', deployment_required: true, material: { title: '已批准公开漏洞', severity: 'high', description: '第一版公开描述', requirement: '生产验证', evidence: '公开复现步骤', remediation_advice: '修复输入校验' } })
   const partial = await page.evaluate(async ({ orderID, items, key }) => {
     const send = async () => {
