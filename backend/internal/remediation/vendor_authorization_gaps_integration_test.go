@@ -26,6 +26,124 @@ import (
 // organization-scoped vendors row, while the roster points to that row's global
 // vendor_catalog identity. A test that only checks Detail can miss either side of
 // this relationship if a query happens to fall back to a broad user lookup.
+// Invitation acceptance is a separate production path from CreatePerson. It must
+// materialize the same vendor association rather than creating a grant that looks
+// external but has no catalog membership behind it. This test intentionally drives
+// Invite and AcceptInvitation, then asks the notification service about the newly
+// created principal: a database assertion alone would not prove that the identity
+// can actually use the resulting authorization chain.
+func TestAcceptVendorInvitationPersistsAssociationAndSelfNotification(t *testing.T) {
+	f := setup(t)
+	validUntil := time.Now().Add(48 * time.Hour)
+	username := "invited_vendor_" + suffixOf(t)
+
+	invitation, err := f.s.Invite(f.ctx, f.manager, remediation.PersonInput{
+		OrganizationID:  f.org,
+		SystemID:        f.system,
+		VendorID:        vendorIDForGrant(t, f),
+		ParticipantType: "external",
+		Username:        username,
+		DisplayName:     "受邀外部执行人员",
+		ValidUntil:      validUntil,
+	})
+	must(t, err)
+	token, ok := invitation["token"].(string)
+	if !ok || token == "" {
+		t.Fatalf("vendor invitation did not return an acceptance token: %v", invitation["token"])
+	}
+	invitationID, ok := invitation["id"].(string)
+	if !ok || invitationID == "" {
+		t.Fatalf("vendor invitation did not return an id: %v", invitation["id"])
+	}
+	wantedVendor := vendorIDForGrant(t, f)
+	var invitationVendor, invitationParticipant string
+	if err := f.pool.QueryRow(f.ctx, `
+		SELECT COALESCE(vendor_id::text,''), participant_type
+		FROM remediation_invitations WHERE id=$1::uuid`, invitationID).
+		Scan(&invitationVendor, &invitationParticipant); err != nil {
+		t.Fatalf("load vendor invitation association: %v", err)
+	}
+	if invitationVendor != wantedVendor || invitationParticipant != "external" {
+		t.Fatalf("invitation vendor association=(%q,%q), want (%q,external)", invitationVendor, invitationParticipant, wantedVendor)
+	}
+
+	accepted, err := f.s.AcceptInvitation(f.ctx, nil, remediation.AcceptInvitationInput{
+		Token:    token,
+		Password: "Invited-Vendor-Password-123",
+	})
+	must(t, err)
+	userID, ok := accepted["user_id"].(string)
+	if !ok || userID == "" {
+		t.Fatalf("accepted vendor invitation returned user_id=%v", accepted["user_id"])
+	}
+	grantID, ok := accepted["id"].(string)
+	if !ok || grantID == "" {
+		t.Fatalf("accepted vendor invitation returned grant id=%v", accepted["id"])
+	}
+
+	var grantVendor, catalogID, membershipVendor, participantType string
+	var membershipCount int
+	if err := f.pool.QueryRow(f.ctx, `
+		SELECT g.vendor_id::text, v.catalog_id::text, g.participant_type,
+		       (SELECT count(*)::int FROM vendor_memberships vm
+		          WHERE vm.vendor_id=v.catalog_id AND vm.user_id=g.user_id)
+		FROM remediation_grants g
+		JOIN vendors v ON v.id=g.vendor_id
+		WHERE g.id=$1::uuid AND g.user_id=$2::uuid`, grantID, userID).
+		Scan(&grantVendor, &catalogID, &participantType, &membershipCount); err != nil {
+		t.Fatalf("load accepted vendor grant association: %v", err)
+	}
+	if grantVendor == "" || catalogID == "" {
+		t.Fatal("accepted invitation created no organization vendor/catalog association")
+	}
+	if grantVendor != wantedVendor {
+		t.Fatalf("accepted grant vendor=%q, want invited vendor=%q", grantVendor, wantedVendor)
+	}
+	if participantType != "external" {
+		t.Fatalf("accepted grant participant_type=%q, want external", participantType)
+	}
+	if membershipCount != 1 {
+		t.Fatalf("accepted grant has %d matching vendor membership rows, want exactly one", membershipCount)
+	}
+	if err := f.pool.QueryRow(f.ctx, `
+		SELECT vendor_id::text FROM vendor_memberships
+		WHERE vendor_id=$1::uuid AND user_id=$2::uuid`, catalogID, userID).Scan(&membershipVendor); err != nil {
+		t.Fatalf("load accepted vendor membership: %v", err)
+	}
+	if membershipVendor != catalogID {
+		t.Fatalf("accepted membership vendor=%q, want vendor_catalog.id=%q", membershipVendor, catalogID)
+	}
+
+	var valid bool
+	if err := f.pool.QueryRow(f.ctx, `
+		SELECT remediation_grant_valid(id,user_id,organization_id,business_system_id)
+		FROM remediation_grants WHERE id=$1::uuid`, grantID).Scan(&valid); err != nil {
+		t.Fatalf("check accepted vendor grant validity: %v", err)
+	}
+	if !valid {
+		t.Fatal("accepted vendor invitation is not authorized while all association links are live")
+	}
+
+	vendorPrincipal := auth.Principal{UserID: userID}
+	items, _, err := notification.NewService(f.pool).Search(f.ctx, vendorPrincipal, notification.SearchInput{Page: pageOf(100)})
+	must(t, err)
+	for _, item := range items.Items {
+		if item.ResourceType == "remediation_grant" && item.ResourceID == grantID {
+			return
+		}
+	}
+	t.Fatalf("accepted vendor received no self authorization notification for grant %s", grantID)
+}
+
+func vendorIDForGrant(t *testing.T, f *fixture) string {
+	t.Helper()
+	var id string
+	if err := f.pool.QueryRow(f.ctx, `SELECT vendor_id::text FROM remediation_grants WHERE id=$1::uuid`, f.grant).Scan(&id); err != nil {
+		t.Fatalf("load fixture vendor id: %v", err)
+	}
+	return id
+}
+
 func TestCreateExternalPersonPersistsTheCompleteVendorAssociation(t *testing.T) {
 	f := setup(t)
 
