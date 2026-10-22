@@ -51,8 +51,20 @@ func registerInventoryTaskRoutes(api *gin.RouterGroup, requireAuth gin.HandlerFu
 		}
 		c.JSON(http.StatusOK, result)
 	})
+	group.GET("/resource-submissions/:resourceType/:resourceID/restore-state", func(c *gin.Context) {
+		state, err := service.ResourceSubmissionRestoreState(c.Request.Context(), mustPrincipal(c), c.Param("resourceType"), c.Param("resourceID"))
+		if writeResourceSubmissionRestoreError(c, logger, err) {
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"item": state})
+	})
 	group.POST("/resource-submissions/:resourceType/:resourceID/:submissionID/restore", func(c *gin.Context) {
-		result, err := service.RestoreResourceSubmission(c.Request.Context(), mustPrincipal(c), c.Param("resourceType"), c.Param("resourceID"), c.Param("submissionID"), c.GetString("request_id"), c.ClientIP())
+		var input inventorytask.ResourceSubmissionRestoreInput
+		if err := c.ShouldBindJSON(&input); err != nil {
+			writeAPIError(c, http.StatusBadRequest, "invalid_restore", "恢复需要提供确认时的工作版本标识和 expected_version")
+			return
+		}
+		result, err := service.RestoreResourceSubmission(c.Request.Context(), mustPrincipal(c), c.Param("resourceType"), c.Param("resourceID"), c.Param("submissionID"), input, c.GetString("request_id"), c.ClientIP())
 		if writeResourceSubmissionRestoreError(c, logger, err) {
 			return
 		}
@@ -556,6 +568,8 @@ func writeResourceSubmissionRestoreError(c *gin.Context, logger *slog.Logger, er
 		writeAPIError(c, http.StatusNotFound, "submission_not_found", "资源、上报版本或对应正式台账不存在")
 	case errors.Is(err, inventorytask.ErrState):
 		writeAPIError(c, http.StatusConflict, "invalid_submission_state", "仅已发布且非下线申请的历史版本可以恢复")
+	case errors.Is(err, inventorytask.ErrEditConflict):
+		writeAPIError(c, http.StatusConflict, "draft_edit_conflict", "工作版本已被其他人更新，请刷新后重新确认恢复")
 	case errors.Is(err, inventorytask.ErrConflict):
 		writeAPIError(c, http.StatusConflict, "working_version_conflict", "当前工作版本已纳入填报任务、正在审核，或当前必填自定义字段无法满足，请处理后重试")
 	default:

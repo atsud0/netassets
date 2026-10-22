@@ -23,15 +23,15 @@ import (
 const MaxViewsPerPage = 20
 
 var (
-	ErrInvalid  = errors.New("invalid input")
+	ErrInvalid = errors.New("invalid input")
 	// ErrFilterField carries the offending filter key and why it was refused, so the
 	// caller can name the field instead of asking the user to re-check everything. A
 	// single long search keyword and an unknown filter key are both "invalid", but only
 	// one of them is something the user can see and fix.
 	ErrFilterField = errors.New("invalid filter field")
-	ErrNotFound = errors.New("not found")
-	ErrConflict = errors.New("conflict")
-	ErrLimit    = errors.New("view limit reached")
+	ErrNotFound    = errors.New("not found")
+	ErrConflict    = errors.New("conflict")
+	ErrLimit       = errors.New("view limit reached")
 )
 
 var uuidPattern = regexp.MustCompile(`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-5][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$`)

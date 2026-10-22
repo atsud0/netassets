@@ -152,9 +152,9 @@ func TestNormalizeInputNamesTheOffendingFilter(t *testing.T) {
 func TestNormalizeInputReportsTheSameFieldEveryTime(t *testing.T) {
 	input := Input{PageKey: "assets", Name: "视图", Filters: map[string]string{
 		"zzz_unknown": "x",
-		"type":         "host",
-		"q":            strings.Repeat("a", 500),
-		"status":       "gone",
+		"type":        "host",
+		"q":           strings.Repeat("a", 500),
+		"status":      "gone",
 	}}
 	first := ""
 	for attempt := 0; attempt < 50; attempt++ {

@@ -11,8 +11,13 @@ import (
 const MaxBatchItems = 200
 
 type BatchArchiveInput struct {
-	IDs      []string `json:"ids"`
-	Archived bool     `json:"archived"`
+	Items    []BatchArchiveItem `json:"items"`
+	Archived bool               `json:"archived"`
+}
+
+type BatchArchiveItem struct {
+	ID              string `json:"id"`
+	ExpectedVersion int    `json:"expected_version"`
 }
 
 type BatchOperationItem struct {
@@ -31,20 +36,25 @@ type BatchOperationResult struct {
 }
 
 func (s *Service) SetArchivedBatch(ctx context.Context, principal auth.Principal, input BatchArchiveInput, requestID, ipAddress string) (BatchOperationResult, error) {
-	if !principal.HasPermission("system.manage") {
+	// Lifecycle changes affect the formal system record and intentionally do
+	// not go through organization working versions. Reject the whole batch at
+	// the boundary for non-group admins, rather than disguising authorization
+	// failures as per-item validation failures.
+	if !principal.HasRole(auth.RoleGroupAdmin) || !principal.HasPermission("system.manage") {
 		return BatchOperationResult{}, ErrForbidden
 	}
-	ids, err := normalizeBatchIDs(input.IDs)
+	items, err := normalizeBatchArchiveItems(input.Items)
 	if err != nil {
 		return BatchOperationResult{}, err
 	}
-	result := BatchOperationResult{TotalCount: len(ids), Items: make([]BatchOperationItem, 0, len(ids))}
+	result := BatchOperationResult{TotalCount: len(items), Items: make([]BatchOperationItem, 0, len(items))}
 	action := "归档"
 	if !input.Archived {
 		action = "恢复"
 	}
-	for _, id := range ids {
-		item, itemErr := s.SetArchived(ctx, principal, id, input.Archived, requestID, ipAddress)
+	for _, target := range items {
+		id := target.ID
+		item, itemErr := s.SetArchived(ctx, principal, id, input.Archived, &target.ExpectedVersion, requestID, ipAddress)
 		if itemErr == nil {
 			result.SuccessCount++
 			itemCopy := item
@@ -58,27 +68,28 @@ func (s *Service) SetArchivedBatch(ctx context.Context, principal auth.Principal
 	return result, nil
 }
 
-func normalizeBatchIDs(values []string) ([]string, error) {
+func normalizeBatchArchiveItems(values []BatchArchiveItem) ([]BatchArchiveItem, error) {
 	if len(values) == 0 || len(values) > MaxBatchItems {
 		return nil, ErrInvalid
 	}
-	ids := make([]string, 0, len(values))
+	items := make([]BatchArchiveItem, 0, len(values))
 	seen := make(map[string]struct{}, len(values))
 	for _, value := range values {
-		id := strings.TrimSpace(value)
-		if id == "" {
+		id := strings.TrimSpace(value.ID)
+		if id == "" || value.ExpectedVersion <= 0 {
 			return nil, ErrInvalid
 		}
 		if _, exists := seen[id]; exists {
 			continue
 		}
 		seen[id] = struct{}{}
-		ids = append(ids, id)
+		value.ID = id
+		items = append(items, value)
 	}
-	if len(ids) == 0 {
+	if len(items) == 0 {
 		return nil, ErrInvalid
 	}
-	return ids, nil
+	return items, nil
 }
 
 func businessSystemBatchError(err error, action string) (string, string) {
@@ -89,6 +100,10 @@ func businessSystemBatchError(err error, action string) (string, string) {
 		return "not_found", "业务系统不存在"
 	case errors.Is(err, ErrInvalid):
 		return "invalid_id", "业务系统编号不正确"
+	case errors.Is(err, ErrVersionRequired):
+		return "expected_version_required", "缺少业务系统版本，请刷新后重试"
+	case errors.Is(err, ErrFormalVersionConflict):
+		return "formal_version_conflict", "业务系统已被其他人修改，请刷新后重试"
 	default:
 		return "internal_error", action + "失败，请稍后重试"
 	}

@@ -153,14 +153,14 @@ const taskSelect = `SELECT t.id,t.task_no,t.work_order_id,w.work_order_no,w.stat
  JOIN remediation_material_versions m ON m.task_id=t.id AND m.revision=t.material_revision `
 
 type Filter struct {
-	OrderID, Status, Keyword, SystemID, Severity, ExecutionBlockedReason                                        string
+	OrderID, Status, Keyword, SystemID, Severity, ExecutionBlockedReason                                          string
 	Mine, Overdue, DueSoon, Returned, NeedsReassignment, Blocked, PendingRequest, ReviewMine, MaterialNeedsReview bool
 	// Revived selects tasks whose asset or system was restored. Restoration clears
 	// the retirement marker and puts the task back into current work, but nobody
 	// owns the follow-up, so the group needs one list of "came back, nobody is
 	// looking at it yet".
 	Revived bool
-	Page                                                                                                          pagination.Query
+	Page    pagination.Query
 }
 
 // blockedReasons lists every reason remediation_task_execution_state() can
@@ -392,7 +392,9 @@ func (s *Service) Act(ctx context.Context, p auth.Principal, id, action, key str
 		// One predicate decides executability for the guard, the list column and
 		// the detail panel. The retired-task rule above is now a special case of
 		// it, so it is stated once, in SQL, with an explanation attached.
-		if reason, blocked := executionBlock(ctx, tx, p, t); blocked {
+		if reason, blocked, blockErr := executionBlock(ctx, tx, p, t); blockErr != nil {
+			return nil, blockErr
+		} else if blocked {
 			details["execution_blocked_reason"] = reason
 			details["execution_action"] = action
 			return nil, ErrConflict

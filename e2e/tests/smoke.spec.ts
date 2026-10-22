@@ -1156,6 +1156,7 @@ test('资产与业务系统保存字段级变更历史并可在资产页面查�
       method: 'PATCH', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         type: 'domain', value: assetValue, name: updatedAssetName, organization_id: group.id,
+        expected_version: createdAsset.item.version,
         environment: 'testing', network_scope: 'private', status: 'active', importance: 'important', owner_name: '李四', notes: '', direct_change_reason: '验证字段变更历史',
       }),
     })
@@ -1179,6 +1180,7 @@ test('资产与业务系统保存字段级变更历史并可在资产页面查�
       method: 'PATCH', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         code: systemCode, name: `历史测试系统_${suffix}`, organization_id: group.id, status: 'running', level: 'important',
+        expected_version: createdSystem.item.version,
         internet_exposure: 'partial', contains_personal_information: 'yes', contains_sensitive_personal_information: 'yes',
         personal_information_record_count: 120000, data_volume_over_100k: 'no', contains_important_data: 'pending', contains_core_data: 'no',
         data_storage_location: '上海数据中心', security_notes: '需完成加密整改',

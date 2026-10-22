@@ -159,6 +159,7 @@ func createInputFromAsset(item Asset) CreateInput {
 		Type: item.Type, Value: item.Value, Name: item.Name, OrganizationID: item.OrganizationID,
 		BusinessSystemID: item.BusinessSystemID, Environment: item.Environment, NetworkScope: item.NetworkScope,
 		NetworkAreaID: item.NetworkAreaID, Status: item.Status, Importance: item.Importance, OwnerUserID: item.OwnerUserID, OwnerName: item.OwnerName, Notes: item.Notes, ExpiresAt: item.ExpiresAt, CustomValues: item.CustomValues,
+		ExpectedVersion: func() *int { v := item.Version; return &v }(),
 	}
 }
 
@@ -170,6 +171,10 @@ func assetBatchError(err error) (string, string) {
 		return "not_found", "网络资产或所选网络区域不存在"
 	case errors.Is(err, ErrTaskBound):
 		return "task_bound", "该资产已纳入填报任务，请在对应任务内处理"
+	case errors.Is(err, ErrVersionRequired):
+		return "expected_version_required", "资产版本信息缺失，请刷新后重试"
+	case errors.Is(err, ErrEditConflict):
+		return "asset_edit_conflict", "资产已被其他人修改，请刷新后重试"
 	case errors.Is(err, ErrInvalid):
 		return "invalid", "资产编号、状态或网络区域不符合要求"
 	case errors.Is(err, ErrConflict):

@@ -605,6 +605,7 @@ func validStatus(s string) bool {
 	}
 	return false
 }
+
 // isUniqueViolation reports whether err is a PostgreSQL unique constraint
 // violation (23505), including the partial indexes used for pending-only
 // reservations.

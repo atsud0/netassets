@@ -96,6 +96,8 @@ func TestWorkingRestoreLocksVersionAndIncrementsIt(t *testing.T) {
 	input.Code = "BS_RESTORE_001"
 	input.Name = "恢复后的业务系统"
 	input.OrganizationID = organizationID
+	zeroVersion := 0
+	input.ExpectedVersion = &zeroVersion
 
 	restored, err := service.RestorePublishedVersion(ctx, principal, publishedID, input, "req-bs-restore-create", "127.0.0.1")
 	if err != nil {
@@ -103,6 +105,13 @@ func TestWorkingRestoreLocksVersionAndIncrementsIt(t *testing.T) {
 	}
 	if restored.Version <= 0 || restored.LastEditedBy != userID {
 		t.Fatalf("restored working version = version %d last_edited_by %q, want a versioned draft owned by the actor", restored.Version, restored.LastEditedBy)
+	}
+	var formalVersion, sourceVersion int
+	if err := pool.QueryRow(ctx, `SELECT bs.version, draft.source_system_version FROM business_systems bs JOIN inventory_business_system_drafts draft ON draft.id=$2::uuid WHERE bs.id=$1::uuid`, publishedID, restored.ID).Scan(&formalVersion, &sourceVersion); err != nil {
+		t.Fatalf("load restored working version source revision: %v", err)
+	}
+	if sourceVersion != formalVersion {
+		t.Fatalf("restored working source version = %d, want current formal version %d", sourceVersion, formalVersion)
 	}
 
 	update := input
@@ -117,6 +126,8 @@ func TestWorkingRestoreLocksVersionAndIncrementsIt(t *testing.T) {
 
 	restoreInput := input
 	restoreInput.Name = "再次恢复的业务系统"
+	restoreInput.ExpectedVersion = &edited.Version
+	restoreInput.ExpectedWorkingVersionID = restored.ID
 	restoredAgain, err := service.RestorePublishedVersion(ctx, principal, publishedID, restoreInput, "req-bs-restore-replace", "127.0.0.1")
 	if err != nil {
 		t.Fatalf("restore over an existing working version: %v", err)
@@ -126,6 +137,12 @@ func TestWorkingRestoreLocksVersionAndIncrementsIt(t *testing.T) {
 	}
 	if restoredAgain.Version != edited.Version+1 {
 		t.Fatalf("version after restore = %d, want %d", restoredAgain.Version, edited.Version+1)
+	}
+	if err := pool.QueryRow(ctx, `SELECT source_system_version FROM inventory_business_system_drafts WHERE id=$1::uuid`, restoredAgain.ID).Scan(&sourceVersion); err != nil {
+		t.Fatalf("reload restored draft source version: %v", err)
+	}
+	if sourceVersion != formalVersion {
+		t.Fatalf("source version after restoring existing draft = %d, want preserved base version %d", sourceVersion, formalVersion)
 	}
 
 	var storedName string

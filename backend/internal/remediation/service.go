@@ -250,18 +250,22 @@ func loadTask(ctx context.Context, q queryer, id string) (Task, error) {
  FROM remediation_tasks WHERE id=$1::uuid`, id).Scan(&t.ID, &t.WorkOrderID, &t.FindingID, &t.OrganizationID, &t.SystemID, &t.AssigneeID, &t.GrantID, &t.Status, &t.Version, &t.MaterialRevision, &t.SubmissionID, &t.DueAt, &t.TargetEnvironment, &t.DeploymentRequired, &t.ExpectedCompletion, &t.BlockedDependency, &t.BlockedUntil, &t.MaterialNeedsReview, &t.SourceRevision, &t.AssigneeSnapshot, &t.AssetRetiredAt, &t.SystemRetiredAt)
 	return t, dbError(err)
 }
+
 // executionBlock asks the single executability predicate why an assignee action
 // cannot proceed. It returns the machine reason (asset_retired,
 // authorization_expired, ...) so the audit trail explains the refusal instead of
 // leaving a bare conflict. A closed task is not blocked here: the state machine
 // reports that with a more precise error.
-func executionBlock(ctx context.Context, q queryer, p auth.Principal, t Task) (string, bool) {
+func executionBlock(ctx context.Context, q queryer, p auth.Principal, t Task) (string, bool, error) {
 	var canExecute bool
 	var reason *string
-	if err := q.QueryRow(ctx, `SELECT can_execute, reason FROM remediation_task_execution_state($1::uuid,$2::uuid)`, p.UserID, t.ID).Scan(&canExecute, &reason); err != nil || canExecute || reason == nil {
-		return "", false
+	if err := q.QueryRow(ctx, `SELECT can_execute, reason FROM remediation_task_execution_state($1::uuid,$2::uuid)`, p.UserID, t.ID).Scan(&canExecute, &reason); err != nil {
+		return "", false, dbError(err)
 	}
-	return *reason, true
+	if canExecute || reason == nil {
+		return "", false, nil
+	}
+	return *reason, true, nil
 }
 
 func authorizeTask(ctx context.Context, q queryer, p auth.Principal, t Task, executor bool) error {
@@ -289,6 +293,20 @@ func lockTask(ctx context.Context, tx pgx.Tx, p auth.Principal, id string, execu
 	if !validID(id) {
 		return Task{}, ErrNotFound
 	}
+	var workOrderID string
+	if err := tx.QueryRow(ctx, `SELECT work_order_id::text FROM remediation_tasks WHERE id=$1::uuid`, id).Scan(&workOrderID); err != nil {
+		return Task{}, dbError(err)
+	}
+	var state string
+	if err := tx.QueryRow(ctx, `SELECT status FROM security_work_orders WHERE id=$1::uuid FOR UPDATE`, workOrderID).Scan(&state); err != nil {
+		return Task{}, dbError(err)
+	}
+	if state == "closed" || state == "cancelled" {
+		return Task{}, ErrConflict
+	}
+	if _, err := tx.Exec(ctx, `SELECT id FROM remediation_tasks WHERE id=$1::uuid FOR UPDATE`, id); err != nil {
+		return Task{}, dbError(err)
+	}
 	t, err := loadTask(ctx, tx, id)
 	if err != nil {
 		return t, err
@@ -296,17 +314,7 @@ func lockTask(ctx context.Context, tx pgx.Tx, p auth.Principal, id string, execu
 	if err = authorizeTask(ctx, tx, p, t, executor); err != nil {
 		return t, err
 	}
-	var state string
-	if err = tx.QueryRow(ctx, `SELECT status FROM security_work_orders WHERE id=$1::uuid FOR UPDATE`, t.WorkOrderID).Scan(&state); err != nil {
-		return t, err
-	}
-	if state == "closed" || state == "cancelled" {
-		return t, ErrConflict
-	}
-	if _, err = tx.Exec(ctx, `SELECT id FROM remediation_tasks WHERE id=$1::uuid FOR UPDATE`, id); err != nil {
-		return t, err
-	}
-	return loadTask(ctx, tx, id)
+	return t, nil
 }
 
 // Denied requests contain route templates, not sensitive query strings or bodies.

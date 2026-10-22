@@ -225,7 +225,7 @@ make ps                   # 查看容器状态
 make logs                 # 跟踪应用日志
 make migrate-up           # 执行一次数据库迁移
 make migrate-down         # 回滚一条迁移
-make test                 # Podman 内后端测试、修复集成测试及前端测试/构建
+make test                 # Podman 内后端单元/数据库集成测试及前端测试/构建
 make e2e                  # 容器内运行全部 Playwright 测试
 make e2e-roles            # 容器内运行角色边界回归测试
 make acceptance-preflight # 生产上线前配置验收
@@ -257,12 +257,12 @@ NETASSETS_RESTORE_CONFIRM=YES make restore \
 Go、Node.js 和浏览器运行统一使用 Podman，宿主机仅用于编辑代码。
 
 ```bash
-make test-backend          # 全部后端单元测试 + 修复工作台数据库集成测试
+make test-backend          # 全部后端单元测试 + 数据库集成测试
 make test-frontend         # npm ci、前端单元测试及生产构建
 make fmt                   # 容器内 gofmt
 ```
 
-上述命令使用 `compose.dev.yaml` 和独立的 `netassets-dev` 项目。测试 PostgreSQL 使用临时内存卷，不连接现有应用数据库；Go 与 npm 依赖使用独立缓存卷。后端其他模块需要数据库的测试默认跳过，修复工作台集成测试单独注入测试数据库地址执行。
+上述命令使用 `compose.dev.yaml` 和独立的 `netassets-dev` 项目。测试 PostgreSQL 使用临时内存卷，不连接现有应用数据库；Go 与 npm 依赖使用独立缓存卷。后端先运行单元测试，再注入 `NETASSETS_TEST_DATABASE_URL` 对全部包执行数据库集成测试；第二轮使用 `-p 1 -count=1`，避免共用测试数据库的包并发清理数据，也避免测试缓存掩盖实际结果。
 
 ```bash
 # 清理开发测试容器；保留工具链缓存卷

@@ -226,22 +226,25 @@ func TestBusinessSystemFieldChangesSkipsUnchangedFields(t *testing.T) {
 	}
 }
 
-func TestNormalizeBatchIDsDeduplicatesAndValidatesLimit(t *testing.T) {
-	ids, err := normalizeBatchIDs([]string{" system-a ", "system-b", "system-a"})
+func TestNormalizeBatchArchiveItemsDeduplicatesAndRequiresVersions(t *testing.T) {
+	items, err := normalizeBatchArchiveItems([]BatchArchiveItem{{ID: " system-a ", ExpectedVersion: 2}, {ID: "system-b", ExpectedVersion: 3}, {ID: "system-a", ExpectedVersion: 2}})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(ids) != 2 || ids[0] != "system-a" || ids[1] != "system-b" {
-		t.Fatalf("unexpected normalized ids: %#v", ids)
+	if len(items) != 2 || items[0].ID != "system-a" || items[1].ID != "system-b" {
+		t.Fatalf("unexpected normalized items: %#v", items)
 	}
-	if _, err := normalizeBatchIDs(nil); err != ErrInvalid {
+	if _, err := normalizeBatchArchiveItems(nil); err != ErrInvalid {
 		t.Fatalf("empty batch error = %v, want ErrInvalid", err)
 	}
-	tooMany := make([]string, MaxBatchItems+1)
-	for index := range tooMany {
-		tooMany[index] = fmt.Sprintf("system-%d", index)
+	if _, err := normalizeBatchArchiveItems([]BatchArchiveItem{{ID: "system-a"}}); err != ErrInvalid {
+		t.Fatalf("missing version error = %v, want ErrInvalid", err)
 	}
-	if _, err := normalizeBatchIDs(tooMany); err != ErrInvalid {
+	tooMany := make([]BatchArchiveItem, MaxBatchItems+1)
+	for index := range tooMany {
+		tooMany[index] = BatchArchiveItem{ID: fmt.Sprintf("system-%d", index), ExpectedVersion: 1}
+	}
+	if _, err := normalizeBatchArchiveItems(tooMany); err != ErrInvalid {
 		t.Fatalf("oversized batch error = %v, want ErrInvalid", err)
 	}
 }
@@ -393,6 +396,18 @@ func TestNormalizeSelectedExportIDs(t *testing.T) {
 	}
 	if _, err := normalizeSelectedExportIDs(tooMany); !errors.Is(err, ErrInvalid) {
 		t.Fatalf("oversized selection error = %v, want ErrInvalid", err)
+	}
+}
+
+func TestSetImportTargetExpectedVersionOnlySetsDraftVersion(t *testing.T) {
+	input := CreateInput{}
+	setImportTargetExpectedVersion(importUpdateTarget{Kind: "formal", Version: 7}, &input)
+	if input.ExpectedVersion != nil {
+		t.Fatal("formal import target unexpectedly received a draft expected_version")
+	}
+	setImportTargetExpectedVersion(importUpdateTarget{Kind: "draft", Version: 12}, &input)
+	if input.ExpectedVersion == nil || *input.ExpectedVersion != 12 {
+		t.Fatalf("draft import target expected_version = %v, want 12", input.ExpectedVersion)
 	}
 }
 

@@ -117,10 +117,14 @@ func TestDirectLedgerWritesRequireReasonAndRaiseRecheckItem(t *testing.T) {
 	// Delete: the item survives the soft delete because the asset row is only
 	// flagged, and the before state is what the organization needs to notice the
 	// asset is gone.
-	if err := service.Delete(ctx, group, created.ID, nil, "集团确认该资产已下线", "req-delete", "127.0.0.1"); err != nil {
+	var deleteVersion int
+	if err := fixture.pool.QueryRow(ctx, `SELECT version FROM assets WHERE id=$1::uuid`, created.ID).Scan(&deleteVersion); err != nil {
+		t.Fatalf("load asset version before delete: %v", err)
+	}
+	if err := service.Delete(ctx, group, created.ID, &deleteVersion, "集团确认该资产已下线", "req-delete", "127.0.0.1"); err != nil {
 		t.Fatalf("direct delete: %v", err)
 	}
-	if err := service.Delete(ctx, group, created.ID, nil, "集团确认该资产已下线", "req-delete-again", "127.0.0.1"); !errors.Is(err, ErrNotFound) {
+	if err := service.Delete(ctx, group, created.ID, &deleteVersion, "集团确认该资产已下线", "req-delete-again", "127.0.0.1"); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("deleting an already deleted asset = %v, want ErrNotFound", err)
 	}
 	var deleteRechecks int

@@ -612,7 +612,7 @@ func TestBuildResourceSubmissionChangesClassifiesUnchangedSnapshots(t *testing.T
 func TestRestoreResourceSubmissionRejectsInvalidIdentifiersBeforeDatabaseAccess(t *testing.T) {
 	service := &Service{}
 	principal := auth.Principal{Roles: []string{"organization_admin"}, Permissions: []string{"inventory.manage", "asset.manage"}}
-	_, err := service.RestoreResourceSubmission(context.Background(), principal, "network_asset", "invalid", "also-invalid", "", "")
+	_, err := service.RestoreResourceSubmission(context.Background(), principal, "network_asset", "invalid", "also-invalid", ResourceSubmissionRestoreInput{}, "", "")
 	if !errors.Is(err, ErrInvalid) {
 		t.Fatalf("RestoreResourceSubmission() error = %v, want ErrInvalid", err)
 	}
@@ -621,7 +621,7 @@ func TestRestoreResourceSubmissionRejectsInvalidIdentifiersBeforeDatabaseAccess(
 func TestRestoreResourceSubmissionRejectsGroupAdminBeforeDatabaseAccess(t *testing.T) {
 	service := &Service{}
 	principal := auth.Principal{Roles: []string{"group_admin"}, Permissions: []string{"inventory.manage", "asset.manage"}}
-	_, err := service.RestoreResourceSubmission(context.Background(), principal, "network_asset", "11111111-1111-4111-8111-111111111111", "22222222-2222-4222-8222-222222222222", "", "")
+	_, err := service.RestoreResourceSubmission(context.Background(), principal, "network_asset", "11111111-1111-4111-8111-111111111111", "22222222-2222-4222-8222-222222222222", ResourceSubmissionRestoreInput{}, "", "")
 	if !errors.Is(err, ErrForbidden) {
 		t.Fatalf("RestoreResourceSubmission() error = %v, want ErrForbidden", err)
 	}
@@ -636,7 +636,7 @@ func TestRestoreResourceSubmissionRequiresInventoryAndResourcePermissionsBeforeD
 		{Roles: []string{"organization_admin"}, Permissions: []string{"inventory.manage"}},
 	}
 	for _, principal := range cases {
-		_, err := service.RestoreResourceSubmission(context.Background(), principal, "network_asset", resourceID, submissionID, "", "")
+		_, err := service.RestoreResourceSubmission(context.Background(), principal, "network_asset", resourceID, submissionID, ResourceSubmissionRestoreInput{}, "", "")
 		if !errors.Is(err, ErrForbidden) {
 			t.Fatalf("permissions=%v error=%v, want ErrForbidden", principal.Permissions, err)
 		}

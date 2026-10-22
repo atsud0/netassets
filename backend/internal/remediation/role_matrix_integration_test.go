@@ -569,3 +569,94 @@ func TestRoleMatrixDraftWorkOrderHiddenFromOrganizationRoles(t *testing.T) {
 		t.Fatalf("group admin GetWorkOrder(draft) error = %v", err)
 	}
 }
+
+func TestRoleMatrixVendorCompletesFullRemediationReview(t *testing.T) {
+	f := setupRoleMatrix(t)
+	orgAdminB := createRoleMatrixScopedPrincipal(t, f.pool, "rm_org_admin_review_"+strings.ReplaceAll(time.Now().Format("150405.000000000"), ".", ""), "organization_admin", f.orgB)
+
+	readVersion := func(p auth.Principal, executor bool) int {
+		t.Helper()
+		detail, err := f.repairs.Detail(f.ctx, p, f.remediationTaskID, executor)
+		if err != nil {
+			t.Fatalf("read remediation task: %v", err)
+		}
+		return int(detail["version"].(float64))
+	}
+	eta := time.Now().Add(12 * time.Hour)
+	if _, err := f.repairs.Act(f.ctx, f.vendor, f.remediationTaskID, "accept", "", remediation.ActionInput{
+		ExpectedVersion: readVersion(f.vendor, true), ExpectedCompletion: &eta,
+	}, true); err != nil {
+		t.Fatalf("vendor accept remediation: %v", err)
+	}
+	if _, err := f.repairs.Act(f.ctx, f.vendor, f.remediationTaskID, "progress", "", remediation.ActionInput{
+		ExpectedVersion: readVersion(f.vendor, true), Progress: "修复已部署并完成自测", ExpectedCompletion: &eta,
+	}, true); err != nil {
+		t.Fatalf("vendor progress remediation: %v", err)
+	}
+	deployedAt := time.Now().Add(-time.Minute)
+	submitted, err := f.repairs.Act(f.ctx, f.vendor, f.remediationTaskID, "submit", "vendor-role-matrix-submit", remediation.ActionInput{
+		ExpectedVersion: readVersion(f.vendor, true), Summary: "修复输入校验并部署至生产", DeploymentStatus: "target",
+		ChangeReference: "release-role-matrix-1", DeployedAt: &deployedAt, SelfTestResult: "生产环境复测通过",
+	}, true)
+	if err != nil {
+		t.Fatalf("vendor submit remediation: %v", err)
+	}
+	if submitted["status"] != "pending_org_review" {
+		t.Fatalf("vendor submit status = %v, want pending_org_review", submitted["status"])
+	}
+	submittedDetail, err := f.repairs.Detail(f.ctx, f.vendor, f.remediationTaskID, true)
+	if err != nil {
+		t.Fatalf("read submitted remediation task: %v", err)
+	}
+	submissionID, ok := submittedDetail["current_submission_id"].(string)
+	if !ok || submissionID == "" {
+		t.Fatalf("submitted task detail missing current_submission_id: %#v", submittedDetail)
+	}
+
+	orgReviewVersion := readVersion(orgAdminB, false)
+	if _, err := f.repairs.Act(f.ctx, orgAdminB, f.remediationTaskID, "organization-review", "", remediation.ActionInput{
+		ExpectedVersion: orgReviewVersion, SubmissionID: submissionID, Decision: "pass", Reason: "组织确认已部署并留存证据",
+	}, false); err != nil {
+		t.Fatalf("organization review remediation: %v", err)
+	}
+	// Organization roles may perform only their review stage, not the group's
+	// independent security verification stage.
+	verifiedAt := time.Now()
+	if _, err := f.repairs.Act(f.ctx, orgAdminB, f.remediationTaskID, "security-review", "", remediation.ActionInput{
+		ExpectedVersion: readVersion(orgAdminB, false), SubmissionID: submissionID, Decision: "pass", Reason: "越权安全复核",
+		VerifiedEnvironment: "生产", VerifiedAt: &verifiedAt,
+	}, false); !errors.Is(err, remediation.ErrForbidden) {
+		t.Fatalf("organization security-review error = %v, want remediation.ErrForbidden", err)
+	}
+	if _, err := f.repairs.Act(f.ctx, f.securityAdmin, f.remediationTaskID, "security-review", "", remediation.ActionInput{
+		ExpectedVersion: readVersion(f.securityAdmin, false), SubmissionID: submissionID, Decision: "pass", Reason: "集团安全复测通过",
+		VerifiedEnvironment: "生产", VerifiedAt: &verifiedAt,
+	}, false); err != nil {
+		t.Fatalf("group security review remediation: %v", err)
+	}
+
+	var taskStatus, findingStatus, remediationStatus string
+	if err := f.pool.QueryRow(f.ctx, `
+		SELECT t.status, f.status, f.remediation_status
+		FROM remediation_tasks t JOIN security_findings f ON f.id=t.finding_id
+		WHERE t.id=$1::uuid`, f.remediationTaskID).Scan(&taskStatus, &findingStatus, &remediationStatus); err != nil {
+		t.Fatalf("read completed remediation state: %v", err)
+	}
+	if taskStatus != "completed" || findingStatus != "fixed" || remediationStatus != "completed" {
+		t.Fatalf("completion state task/finding/remediation=%s/%s/%s, want completed/fixed/completed", taskStatus, findingStatus, remediationStatus)
+	}
+	if _, err := f.repairs.Detail(f.ctx, f.vendor, f.remediationTaskID, true); err != nil {
+		t.Fatalf("vendor should retain own completed task history: %v", err)
+	}
+	page, _ := pagination.Normalize(1, 50)
+	findings, err := f.orders.SearchFindings(f.ctx, f.vendor, "", "", "", page)
+	if err != nil {
+		t.Fatalf("vendor SearchFindings error = %v", err)
+	}
+	if findings.Total != 0 || len(findings.Items) != 0 {
+		t.Fatalf("vendor sees %d group findings, want no rows", findings.Total)
+	}
+	if _, err := f.repairs.Detail(f.ctx, f.vendor, f.individualOrderID, true); !errors.Is(err, remediation.ErrNotFound) {
+		t.Fatalf("vendor access to parent work order error = %v, want remediation.ErrNotFound", err)
+	}
+}

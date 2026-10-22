@@ -211,7 +211,7 @@ func (s *Service) RestoreAsset(ctx context.Context, principal auth.Principal, as
 
 	command, err := tx.Exec(ctx, `
 		UPDATE assets
-		SET deleted_at = NULL, updated_by = $2::uuid, updated_at = now()
+		SET deleted_at = NULL, version=version+1, updated_by = $2::uuid, updated_at = now()
 		WHERE id = $1::uuid AND deleted_at IS NOT NULL
 	`, assetID, principal.UserID)
 	if err != nil {
@@ -273,14 +273,18 @@ func (s *Service) RestoreBusinessSystem(ctx context.Context, principal auth.Prin
 		return fmt.Errorf("begin business system restore: %w", err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
+	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtext('netassets-remediation'))`); err != nil {
+		return fmt.Errorf("lock remediation work during business system restore: %w", err)
+	}
 
 	var organizationID, systemCode, systemName string
+	var systemVersion int
 	err = tx.QueryRow(ctx, `
-		SELECT owner_organization_id::text, system_code, system_name
+		SELECT owner_organization_id::text, system_code, system_name, version
 		FROM business_systems
 		WHERE id = $1::uuid AND deleted_at IS NOT NULL
 		FOR UPDATE
-	`, systemID).Scan(&organizationID, &systemCode, &systemName)
+	`, systemID).Scan(&organizationID, &systemCode, &systemName, &systemVersion)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return ErrNotFound
 	}
@@ -303,9 +307,9 @@ func (s *Service) RestoreBusinessSystem(ctx context.Context, principal auth.Prin
 
 	command, err := tx.Exec(ctx, `
 		UPDATE business_systems
-		SET deleted_at = NULL, system_status = 'archived', updated_by = $2::uuid, updated_at = now()
-		WHERE id = $1::uuid AND deleted_at IS NOT NULL
-	`, systemID, principal.UserID)
+		SET deleted_at = NULL, system_status = 'archived', updated_by = $2::uuid, updated_at = now(), version=version+1
+		WHERE id = $1::uuid AND deleted_at IS NOT NULL AND version=$3
+	`, systemID, principal.UserID, systemVersion)
 	if err != nil {
 		var pgErr *pgconn.PgError
 		if errors.As(err, &pgErr) && pgErr.Code == "23505" {

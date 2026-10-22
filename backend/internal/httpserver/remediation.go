@@ -259,22 +259,22 @@ func registerRemediationRoutes(api *gin.RouterGroup, requireAuth gin.HandlerFunc
 		}
 		respond(c, gin.H{"items": results}, nil)
 	})
-		secured.POST("/remediation-tasks/acknowledge-revived", func(c *gin.Context) {
-			var in struct {
-				TaskIDs []string `json:"task_ids"`
-				Reason  string   `json:"reason"`
-			}
-			if !bind(c, &in) {
-				return
-			}
-			key := c.GetHeader("Idempotency-Key")
-			items, err := s.AcknowledgeRevived(c.Request.Context(), mustPrincipal(c), in.TaskIDs, in.Reason, key)
-			if err != nil {
-				respond(c, nil, err)
-				return
-			}
-			respond(c, gin.H{"items": items}, nil)
-		})
+	secured.POST("/remediation-tasks/acknowledge-revived", func(c *gin.Context) {
+		var in struct {
+			TaskIDs []string `json:"task_ids"`
+			Reason  string   `json:"reason"`
+		}
+		if !bind(c, &in) {
+			return
+		}
+		key := c.GetHeader("Idempotency-Key")
+		items, err := s.AcknowledgeRevived(c.Request.Context(), mustPrincipal(c), in.TaskIDs, in.Reason, key)
+		if err != nil {
+			respond(c, nil, err)
+			return
+		}
+		respond(c, gin.H{"items": items}, nil)
+	})
 	secured.POST("/security-work-orders/:id/close-individual", func(c *gin.Context) {
 		var in struct {
 			Reason string `json:"reason"`
@@ -391,7 +391,7 @@ func registerRemediationRoutes(api *gin.RouterGroup, requireAuth gin.HandlerFunc
 			c.Header("Content-Type", "application/octet-stream")
 			c.Status(200)
 			_, err = io.Copy(c.Writer, out.File)
-			if auditErr := s.RecordDownloadResult(c.Request.Context(), mustPrincipal(c), c.Param("id"), c.Param("attachmentID"), err == nil); auditErr != nil {
+			if auditErr := s.RecordDownloadResult(c.Request.Context(), mustPrincipal(c), c.Param("id"), c.Param("attachmentID"), err == nil, executor); auditErr != nil {
 				logger.Error("record repair download result", "error", auditErr)
 			}
 			if err != nil {

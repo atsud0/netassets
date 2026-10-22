@@ -114,23 +114,26 @@ function canRestore(item: SubmissionHistoryItem) {
   return props.allowRestore && item.status === 'approved' && item.operation !== 'delete'
 }
 
+interface RestoreState {
+  working_version_id: string
+  expected_version: number
+}
+
 async function restoreSubmission(item: SubmissionHistoryItem) {
   if (!resourceID.value || !canRestore(item) || restoringSubmissionID.value) return
+  const basePath = `/inventory-tasks/resource-submissions/${props.resourceType}/${resourceID.value}`
+  restoringSubmissionID.value = item.submission_id
   try {
+    // Freeze the copy being replaced BEFORE confirmation. Never refresh this
+    // token automatically after a conflict: the operator must confirm again.
+    const state = await apiClient.get<{ item: RestoreState }>(`${basePath}/restore-state`)
     await ElMessageBox.confirm(
-      '该操作不会修改集团正式台账，而会将此历史版本生成新的未上报工作版本。当前已有未上报工作版本时，其内容将被替换。是否继续？',
+      '该操作不会修改集团正式台账，而会将此历史版本生成新的未上报工作版本。当前已有未上报工作版本时，其内容将被替换；确认后若有人修改，将提示冲突。是否继续？',
       '恢复历史版本',
       { confirmButtonText: '恢复为工作版本', cancelButtonText: '取消', type: 'warning' },
     )
-  } catch (error) {
-    if (error === 'cancel' || error === 'close') return
-    throw error
-  }
-
-  restoringSubmissionID.value = item.submission_id
-  try {
     const response = await apiClient.post<{ result: { working_version_id: string; warnings?: string[] } }>(
-      `/inventory-tasks/resource-submissions/${props.resourceType}/${resourceID.value}/${item.submission_id}/restore`,
+      `${basePath}/${item.submission_id}/restore`, state.data.item,
     )
     ElMessage.success('已恢复为未上报工作版本，请在台账页面复核后选择纳入填报任务')
     if (response.data.result.warnings?.length) {
@@ -138,7 +141,9 @@ async function restoreSubmission(item: SubmissionHistoryItem) {
     }
     emit('restored', response.data.result.working_version_id)
   } catch (error) {
-    ElMessage.error(getAPIErrorMessage(error, '恢复资源历史版本失败'))
+    if (error !== 'cancel' && error !== 'close') {
+      ElMessage.error(getAPIErrorMessage(error, '恢复资源历史版本失败'))
+    }
   } finally {
     restoringSubmissionID.value = ''
   }

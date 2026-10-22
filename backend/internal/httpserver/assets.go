@@ -160,6 +160,8 @@ func registerAssetRoutes(api *gin.RouterGroup, requireAuth gin.HandlerFunc, serv
 				return
 			}
 			writeAPIError(c, http.StatusBadRequest, "invalid_batch", "单次请选择 1 至 200 个资产，并指定有效状态或网络区域")
+		case errors.Is(err, asset.ErrForbidden):
+			writeAPIError(c, http.StatusForbidden, "forbidden", "当前账号无权批量更新网络资产")
 		case err != nil:
 			logger.Error("batch update assets", "error", err, "request_id", c.GetString("request_id"))
 			writeAPIError(c, http.StatusInternalServerError, "internal_error", "批量更新网络资产失败")
@@ -306,7 +308,7 @@ func registerAssetRoutes(api *gin.RouterGroup, requireAuth gin.HandlerFunc, serv
 		item, err := service.Update(c.Request.Context(), mustPrincipal(c), c.Param("id"), input, c.GetString("request_id"), c.ClientIP())
 		switch {
 		case errors.Is(err, asset.ErrVersionRequired):
-			writeAPIError(c, http.StatusBadRequest, "expected_version_required", "编辑网络资产工作版本需要提供 expected_version")
+			writeAPIError(c, http.StatusBadRequest, "expected_version_required", "编辑网络资产需要提供 expected_version")
 		case errors.Is(err, asset.ErrForbidden):
 			writeAPIError(c, http.StatusForbidden, "forbidden", "当前账号无权编辑该资产或变更其所属组织")
 		case errors.Is(err, asset.ErrInvalid):
@@ -330,7 +332,7 @@ func registerAssetRoutes(api *gin.RouterGroup, requireAuth gin.HandlerFunc, serv
 			strings.TrimSpace(c.Query("direct_change_reason")), c.GetString("request_id"), c.ClientIP())
 		switch {
 		case errors.Is(err, asset.ErrVersionRequired):
-			writeAPIError(c, http.StatusBadRequest, "expected_version_required", "删除网络资产工作版本需要提供 expected_version")
+			writeAPIError(c, http.StatusBadRequest, "expected_version_required", "删除网络资产需要提供 expected_version")
 		case errors.Is(err, asset.ErrEditConflict):
 			writeAPIError(c, http.StatusConflict, "asset_edit_conflict", "资产已被其他人修改，请刷新后重试")
 		case errors.Is(err, asset.ErrForbidden):

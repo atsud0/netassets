@@ -553,7 +553,11 @@ function assetPayload(item: Asset, overrides: Partial<typeof form> = {}) {
     type: item.type, value: item.value, name: item.name ?? '', organization_id: item.organization_id,
     business_system_id: item.business_system_id ?? '', network_area_id: item.network_area_id ?? '', environment: item.environment, network_scope: item.network_scope,
     status: item.status, importance: item.importance, owner_user_id: item.owner_user_id ?? '', owner_name: item.owner_name ?? '', notes: item.notes ?? '', expires_at: item.expires_at ?? null,
-    custom_values: item.custom_values ?? [], ...overrides,
+    custom_values: item.custom_values ?? [],
+    // 归档/启用走正式资产 PATCH，同样必须携带读取时的版本，避免把
+    // 页面打开后别人已经做过的修改覆盖掉。
+    ...(item.version !== undefined && item.version > 0 ? { expected_version: item.version } : {}),
+    ...overrides,
     // 集团管理员归档/启用同样是直改正式台账，必须带上变更原因。
     ...(directLedgerWrite.value && directChangeReasonRequired.value ? { direct_change_reason: directChangeReason.value } : {}),
   }
@@ -601,7 +605,7 @@ async function submit() {
           : await apiClient.post<{ item: Asset }>('/assets', payload)
     }
     const id = editingAssetID.value || response.data.item.id
-    if (!inventoryMode.value && customFields.value.length && !response.data.item.is_working_copy) await apiClient.put(`/assets/${id}/custom-fields`, { values: customFields.value.map((field) => ({ field_key: field.field_key, value: customValues[field.field_key] })) })
+    if (!inventoryMode.value && customFields.value.length && !response.data.item.is_working_copy) await apiClient.put(`/assets/${id}/custom-fields`, { values: customFields.value.map((field) => ({ field_key: field.field_key, value: customValues[field.field_key] })), expected_version: response.data.item.version || 0 })
     ElMessage.success(inventoryMode.value ? (editingIsDraft.value ? '本次上报内容已更新' : (editingAssetID.value ? '资产变更已保存，请选择后纳入本次上报' : '资产已保存为未上报状态，请选择后纳入本次上报')) : (response.data.item.is_working_copy ? (editingAssetID.value ? '网络资产已更新，当前仍为未上报状态' : '网络资产已新增，默认未上报') : (editingAssetID.value ? '网络资产已更新' : '网络资产已新增')))
     editDialogVisible.value = false
     resetDirectChangeReason()

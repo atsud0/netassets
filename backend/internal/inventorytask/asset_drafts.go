@@ -17,6 +17,7 @@ import (
 	"netassets/internal/inventorydraft"
 	"netassets/internal/notification"
 	"netassets/internal/pagination"
+	"netassets/internal/remediationretire"
 )
 
 type AssetDraft struct {
@@ -115,6 +116,12 @@ func (s *Service) validateAssetDraftCustomValues(ctx context.Context, values []c
 	}
 	if _, _, err := customfield.ValidateValues(definitions, values); err != nil {
 		return nil, ErrInvalid
+	}
+	// json.Marshal(nil) produces the JSON scalar null. Submission snapshots
+	// and working-version diffs expect custom_values to be an array and call
+	// jsonb_array_elements, so an empty form must be persisted as [] instead.
+	if values == nil {
+		values = []customfield.Value{}
 	}
 	return json.Marshal(values)
 }
@@ -222,14 +229,15 @@ func (s *Service) createAssetChangeDraft(ctx context.Context, principal auth.Pri
 	var currentSystemDraftID string
 	var currentSource string
 	var normalizedValue string
+	var sourceAssetVersion int
 	err = tx.QueryRow(ctx, `
-		SELECT formal.asset_type,formal.asset_value,formal.normalized_value,COALESCE(formal.asset_name,''),owner.organization_id::text,
+		SELECT formal.version,formal.asset_type,formal.asset_value,formal.normalized_value,COALESCE(formal.asset_name,''),owner.organization_id::text,
 		       COALESCE(link.business_system_id::text,''),formal.environment,formal.network_scope,COALESCE(formal.network_area_id::text,''),
 		       formal.status,formal.importance,COALESCE(formal.source,'manual'),COALESCE(owner.owner_user_id::text,''),COALESCE(owner.owner_name,''),COALESCE(formal.notes,''),formal.expires_at
 		FROM assets formal JOIN asset_organizations owner ON owner.asset_id=formal.id AND owner.is_primary
 		LEFT JOIN system_assets link ON link.asset_id=formal.id AND link.is_primary
 		WHERE formal.id::text=$1 AND owner.organization_id::text=$2 AND formal.deleted_at IS NULL
-	`, sourceAssetID, organizationID).Scan(&current.Type, &current.Value, &normalizedValue, &current.Name, &current.OrganizationID, &current.BusinessSystemID, &current.Environment, &current.NetworkScope, &current.NetworkAreaID, &current.Status, &current.Importance, &currentSource, &current.OwnerUserID, &current.OwnerName, &current.Notes, &current.ExpiresAt)
+	`, sourceAssetID, organizationID).Scan(&sourceAssetVersion, &current.Type, &current.Value, &normalizedValue, &current.Name, &current.OrganizationID, &current.BusinessSystemID, &current.Environment, &current.NetworkScope, &current.NetworkAreaID, &current.Status, &current.Importance, &currentSource, &current.OwnerUserID, &current.OwnerName, &current.Notes, &current.ExpiresAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return AssetDraft{}, ErrNotFound
 	}
@@ -277,17 +285,13 @@ func (s *Service) createAssetChangeDraft(ctx context.Context, principal auth.Pri
 	}
 	var id string
 	err = tx.QueryRow(ctx, `
-		INSERT INTO inventory_asset_drafts(task_id,organization_id,operation,source_asset_id,asset_type,asset_value,normalized_value,asset_name,environment,network_scope,network_area_id,business_system_id,business_system_draft_id,status,importance,source,owner_user_id,owner_name,notes,expires_at,custom_values,created_by,updated_by,assigned_to,last_edited_by)
-		VALUES($1::uuid,$2::uuid,$3,$4::uuid,$5,$6,$7,NULLIF($8,''),$9,$10,NULLIF($11,'')::uuid,NULLIF($12,'')::uuid,NULLIF($13,'')::uuid,$14,$15,$16,NULLIF($17,'')::uuid,NULLIF($18,''),NULLIF($19,''),$20,$21::jsonb,$22::uuid,$22::uuid,$22::uuid,$22::uuid)
-		ON CONFLICT (organization_id,source_asset_id) WHERE source_asset_id IS NOT NULL AND draft_status IN `+inventorydraft.ActiveSQL+` DO UPDATE SET
-		operation=EXCLUDED.operation,asset_type=EXCLUDED.asset_type,asset_value=EXCLUDED.asset_value,normalized_value=EXCLUDED.normalized_value,asset_name=EXCLUDED.asset_name,
-		environment=EXCLUDED.environment,network_scope=EXCLUDED.network_scope,network_area_id=EXCLUDED.network_area_id,business_system_id=EXCLUDED.business_system_id,business_system_draft_id=EXCLUDED.business_system_draft_id,
-		status=EXCLUDED.status,importance=EXCLUDED.importance,source=EXCLUDED.source,owner_user_id=EXCLUDED.owner_user_id,owner_name=EXCLUDED.owner_name,notes=EXCLUDED.notes,expires_at=EXCLUDED.expires_at,custom_values=EXCLUDED.custom_values,
-		draft_status='editing',version=inventory_asset_drafts.version+1,last_edited_by=EXCLUDED.last_edited_by,updated_by=EXCLUDED.updated_by,updated_at=now()
-		WHERE inventory_asset_drafts.draft_status IN `+inventorydraft.EditableSQL+` RETURNING id::text
-	`, taskID, organizationID, operation, sourceAssetID, current.Type, current.Value, normalizedValue, current.Name, current.Environment, current.NetworkScope, current.NetworkAreaID, current.BusinessSystemID, currentSystemDraftID, current.Status, current.Importance, currentSource, current.OwnerUserID, current.OwnerName, current.Notes, current.ExpiresAt, customValues, principal.UserID).Scan(&id)
+		INSERT INTO inventory_asset_drafts(task_id,organization_id,operation,source_asset_id,source_asset_version,asset_type,asset_value,normalized_value,asset_name,environment,network_scope,network_area_id,business_system_id,business_system_draft_id,status,importance,source,owner_user_id,owner_name,notes,expires_at,custom_values,created_by,updated_by,assigned_to,last_edited_by)
+		VALUES($1::uuid,$2::uuid,$3,$4::uuid,NULLIF($5,0),$6,$7,$8,NULLIF($9,''),$10,$11,NULLIF($12,'')::uuid,NULLIF($13,'')::uuid,NULLIF($14,'')::uuid,$15,$16,$17,NULLIF($18,'')::uuid,NULLIF($19,''),NULLIF($20,''),$21,$22::jsonb,$23::uuid,$23::uuid,$23::uuid,$23::uuid)
+		ON CONFLICT (organization_id,source_asset_id) WHERE source_asset_id IS NOT NULL AND draft_status IN `+inventorydraft.ActiveSQL+` DO NOTHING
+		RETURNING id::text
+	`, taskID, organizationID, operation, sourceAssetID, sourceAssetVersion, current.Type, current.Value, normalizedValue, current.Name, current.Environment, current.NetworkScope, current.NetworkAreaID, current.BusinessSystemID, currentSystemDraftID, current.Status, current.Importance, currentSource, current.OwnerUserID, current.OwnerName, current.Notes, current.ExpiresAt, customValues, principal.UserID).Scan(&id)
 	if errors.Is(err, pgx.ErrNoRows) {
-		return AssetDraft{}, ErrState
+		return AssetDraft{}, ErrConflict
 	}
 	if err != nil {
 		return AssetDraft{}, mapDraftDatabaseError(err)
@@ -676,9 +680,14 @@ func settleFindingImportCandidate(ctx context.Context, tx pgx.Tx, draftID, asset
 		return fmt.Errorf("accept published finding import asset candidate: %w", err)
 	}
 	if _, err := tx.Exec(ctx, `
-		UPDATE security_findings
+		UPDATE security_findings f
 		SET asset_id=$2::uuid, pending_asset_draft_id=NULL, updated_by=$3::uuid, updated_at=now()
-		WHERE pending_asset_draft_id=$1::uuid`, draftID, assetID, userID); err != nil {
+		WHERE f.id IN (
+		  SELECT candidate.imported_finding_id
+		  FROM security_finding_import_candidates candidate
+		  JOIN asset_candidates ac ON ac.id=candidate.asset_candidate_id
+		  WHERE ac.working_version_draft_id=$1::uuid AND candidate.imported_finding_id IS NOT NULL
+		) AND f.pending_asset_draft_id=$1::uuid`, draftID, assetID, userID); err != nil {
 		return fmt.Errorf("attach published asset to findings: %w", err)
 	}
 	// Publication is the end of the import queue for this discovery. Leaving the
@@ -687,13 +696,6 @@ func settleFindingImportCandidate(ctx context.Context, tx pgx.Tx, draftID, asset
 	if _, err := tx.Exec(ctx, `
 		UPDATE security_finding_import_candidates candidate
 		SET status='imported', matched_asset_id=$2::uuid,
-		    imported_finding_id=(
-		        SELECT f.id FROM security_findings f
-		        WHERE f.asset_id=$2::uuid
-		          AND f.pending_asset_draft_id IS NULL
-		          AND lower(btrim(f.title))=lower(btrim(candidate.title))
-		        ORDER BY f.created_at LIMIT 1
-		    ),
 		    reviewed_by=$3::uuid, reviewed_at=now(), updated_at=now()
 		WHERE candidate.asset_candidate_id IN (
 		    SELECT id FROM asset_candidates WHERE working_version_draft_id=$1::uuid
@@ -726,12 +728,20 @@ func settleFindingImportCandidate(ctx context.Context, tx pgx.Tx, draftID, asset
 }
 
 func publishAssetDrafts(ctx context.Context, tx pgx.Tx, principal auth.Principal, taskID, organizationID, requestID, ipAddress string) error {
-	rows, err := tx.Query(ctx, `SELECT id::text,operation,COALESCE(source_asset_id::text,''),asset_type,asset_value,normalized_value,COALESCE(asset_name,''),environment,network_scope,COALESCE(network_area_id::text,''),COALESCE(business_system_id::text,''),COALESCE(business_system_draft_id::text,''),status,importance,source,COALESCE(owner_user_id::text,''),COALESCE(owner_name,''),COALESCE(notes,''),expires_at,custom_values FROM inventory_asset_drafts WHERE task_id::text=$1 AND organization_id::text=$2 AND draft_status='submitted' ORDER BY created_at FOR UPDATE`, taskID, organizationID)
+	// Publication changes formal asset availability, ownership and system
+	// bindings. Serialize it with remediation assignment and retirement so a
+	// task cannot be created from a stale asset snapshot while this transaction
+	// is settling findings and links.
+	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtext('netassets-remediation'))`); err != nil {
+		return fmt.Errorf("lock remediation work during asset draft publication: %w", err)
+	}
+	rows, err := tx.Query(ctx, `SELECT id::text,operation,COALESCE(source_asset_id::text,''),COALESCE(source_asset_version,0),asset_type,asset_value,normalized_value,COALESCE(asset_name,''),environment,network_scope,COALESCE(network_area_id::text,''),COALESCE(business_system_id::text,''),COALESCE(business_system_draft_id::text,''),status,importance,source,COALESCE(owner_user_id::text,''),COALESCE(owner_name,''),COALESCE(notes,''),expires_at,custom_values FROM inventory_asset_drafts WHERE task_id::text=$1 AND organization_id::text=$2 AND draft_status='submitted' ORDER BY created_at FOR UPDATE`, taskID, organizationID)
 	if err != nil {
 		return fmt.Errorf("load submitted asset drafts: %w", err)
 	}
 	type draft struct {
 		id, operation, sourceID, typ, value, normalized, name, environment, scope, areaID, systemID, systemDraftID, status, importance, source, ownerUserID, ownerName, notes string
+		sourceVersion                                                                                                                                                         int
 		expiresAt                                                                                                                                                             *time.Time
 		customValues                                                                                                                                                          []customfield.Value
 	}
@@ -739,7 +749,7 @@ func publishAssetDrafts(ctx context.Context, tx pgx.Tx, principal auth.Principal
 	for rows.Next() {
 		var item draft
 		var raw []byte
-		if err := rows.Scan(&item.id, &item.operation, &item.sourceID, &item.typ, &item.value, &item.normalized, &item.name, &item.environment, &item.scope, &item.areaID, &item.systemID, &item.systemDraftID, &item.status, &item.importance, &item.source, &item.ownerUserID, &item.ownerName, &item.notes, &item.expiresAt, &raw); err != nil {
+		if err := rows.Scan(&item.id, &item.operation, &item.sourceID, &item.sourceVersion, &item.typ, &item.value, &item.normalized, &item.name, &item.environment, &item.scope, &item.areaID, &item.systemID, &item.systemDraftID, &item.status, &item.importance, &item.source, &item.ownerUserID, &item.ownerName, &item.notes, &item.expiresAt, &raw); err != nil {
 			rows.Close()
 			return fmt.Errorf("scan submitted asset draft: %w", err)
 		}
@@ -777,12 +787,40 @@ func publishAssetDrafts(ctx context.Context, tx pgx.Tx, principal auth.Principal
 			}
 			resourceID = item.sourceID
 			action, summary = "asset.update", "审核发布填报网络资产变更"
-			result, err := tx.Exec(ctx, `UPDATE assets SET asset_type=$2,asset_value=$3,normalized_value=$4,asset_name=NULLIF($5,''),environment=$6,network_scope=$7,network_area_id=NULLIF($8,'')::uuid,status=$9,importance=$10,notes=NULLIF($11,''),expires_at=$12,updated_by=$13::uuid,updated_at=now() WHERE id::text=$1 AND deleted_at IS NULL`, item.sourceID, item.typ, item.value, item.normalized, item.name, item.environment, item.scope, item.areaID, item.status, item.importance, item.notes, item.expiresAt, principal.UserID)
+			var previousStatus string
+			if item.sourceVersion == 0 {
+				return ErrConflict
+			}
+			if err := tx.QueryRow(ctx, `SELECT status FROM assets WHERE id=$1::uuid AND deleted_at IS NULL AND version=$2 FOR UPDATE`, item.sourceID, item.sourceVersion).Scan(&previousStatus); errors.Is(err, pgx.ErrNoRows) {
+				return ErrConflict
+			} else if err != nil {
+				return fmt.Errorf("load published asset status: %w", err)
+			}
+			result, err := tx.Exec(ctx, `UPDATE assets SET asset_type=$2,asset_value=$3,normalized_value=$4,asset_name=NULLIF($5,''),environment=$6,network_scope=$7,network_area_id=NULLIF($8,'')::uuid,status=$9,importance=$10,notes=NULLIF($11,''),expires_at=$12,version=version+1,updated_by=$13::uuid,updated_at=now() WHERE id::text=$1 AND deleted_at IS NULL AND version=$14`, item.sourceID, item.typ, item.value, item.normalized, item.name, item.environment, item.scope, item.areaID, item.status, item.importance, item.notes, item.expiresAt, principal.UserID, item.sourceVersion)
 			if err != nil {
 				return mapDraftDatabaseError(err)
 			}
 			if result.RowsAffected() == 0 {
-				return ErrNotFound
+				return ErrConflict
+			}
+			if previousStatus != item.status {
+				if item.status == "archived" {
+					if _, err := remediationretire.Retire(ctx, tx, principal.UserID, remediationretire.AssetColumn,
+						"finding_id IN (SELECT id FROM security_findings WHERE asset_id = $1::uuid)", resourceID,
+						"asset_retired", map[string]any{"asset_id": resourceID, "source": "inventory_task", "reason": "关联资产已归档，整改任务待改派"}); err != nil {
+						return err
+					}
+				} else if previousStatus == "archived" {
+					revivedTaskIDs, err := remediationretire.Revive(ctx, tx, remediationretire.AssetColumn,
+						"finding_id IN (SELECT id FROM security_findings WHERE asset_id = $1::uuid)", resourceID)
+					if err != nil {
+						return err
+					}
+					if err := remediationretire.RecordEvents(ctx, tx, principal.UserID, "asset_restored", revivedTaskIDs,
+						map[string]any{"asset_id": resourceID, "source": "inventory_task", "reason": "资产已恢复，整改任务待重新确认资产状态"}); err != nil {
+						return err
+					}
+				}
 			}
 		case "delete":
 			if item.sourceID == "" {
@@ -790,12 +828,20 @@ func publishAssetDrafts(ctx context.Context, tx pgx.Tx, principal auth.Principal
 			}
 			resourceID = item.sourceID
 			action, summary = "asset.delete", "审核发布填报网络资产删除"
-			result, err := tx.Exec(ctx, `UPDATE assets SET deleted_at=now(),updated_by=$2::uuid,updated_at=now() WHERE id::text=$1 AND deleted_at IS NULL`, item.sourceID, principal.UserID)
+			if item.sourceVersion == 0 {
+				return ErrConflict
+			}
+			result, err := tx.Exec(ctx, `UPDATE assets SET deleted_at=now(),version=version+1,updated_by=$2::uuid,updated_at=now() WHERE id::text=$1 AND deleted_at IS NULL AND version=$3`, item.sourceID, principal.UserID, item.sourceVersion)
 			if err != nil {
 				return fmt.Errorf("delete published asset: %w", err)
 			}
 			if result.RowsAffected() == 0 {
-				return ErrNotFound
+				return ErrConflict
+			}
+			if _, err := remediationretire.Retire(ctx, tx, principal.UserID, remediationretire.AssetColumn,
+				"finding_id IN (SELECT id FROM security_findings WHERE asset_id = $1::uuid)", resourceID,
+				"asset_retired", map[string]any{"asset_id": resourceID, "source": "inventory_task", "reason": "关联资产已删除，整改任务待改派"}); err != nil {
+				return err
 			}
 		default:
 			return ErrInvalid

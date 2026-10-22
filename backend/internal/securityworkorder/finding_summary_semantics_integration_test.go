@@ -139,6 +139,11 @@ func TestFindingSummarySeparatesLifecycleFromWaitingDimensions(t *testing.T) {
 		t.Fatalf("record previous acceptance status: %v", err)
 	}
 
+	// Soft deletion retires the association; it must not inflate the queue for
+	// findings that have never been linked to any asset.
+	if _, err := pool.Exec(ctx, `UPDATE assets SET deleted_at=now() WHERE id=$1::uuid`, assetID); err != nil {
+		t.Fatalf("retire summary fixture asset: %v", err)
+	}
 	service := NewService(pool, t.TempDir())
 	manager := auth.Principal{UserID: userID, Permissions: []string{"asset.manage", "system.manage", "security.finding.manage"}}
 	stats, err := service.SummarizeFindings(ctx, manager, "")

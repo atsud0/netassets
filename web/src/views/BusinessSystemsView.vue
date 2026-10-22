@@ -332,7 +332,7 @@ async function submit() {
         : await apiClient.post<{ item: BusinessSystem }>('/business-systems', payload)
     }
     const id = editingID.value || response.data.item.id
-    if (!inventoryMode.value && customFields.value.length && !response.data.item.is_working_copy) await apiClient.put(`/business-systems/${id}/custom-fields`, { values: customPayload })
+    if (!inventoryMode.value && customFields.value.length && !response.data.item.is_working_copy) await apiClient.put(`/business-systems/${id}/custom-fields`, { values: customPayload, expected_version: response.data.item.version || 0 })
     ElMessage.success(inventoryMode.value ? (editingIsDraft.value ? '本次上报内容已更新' : (editingID.value ? '系统变更已保存，请选择后纳入本次上报' : '系统已保存为未上报状态，请选择后纳入本次上报')) : (response.data.item.is_working_copy ? (editingID.value ? '业务系统已更新，当前仍为未上报状态' : '业务系统已新增，默认未上报') : (editingID.value ? '业务系统已更新' : '业务系统已新增')))
     dialogVisible.value = false
     await refreshAfterMutation()
@@ -532,7 +532,7 @@ async function runBatchArchive(archive: boolean) {
     )
     batchLoading.value = true
     const response = await apiClient.post<{ result: BatchOperationResult }>('/business-systems/batch/archive', {
-      ids: targets.map((item) => item.id), archived: archive,
+      items: targets.map((item) => ({ id: item.id, expected_version: item.version || 0 })), archived: archive,
     })
     const names = new Map(targets.map((item) => [item.id, item.name]))
     batchResult.value = {
@@ -555,7 +555,7 @@ async function runBatchArchive(archive: boolean) {
 async function changeArchive(row: BusinessSystem, archive: boolean) {
   try {
     await ElMessageBox.confirm(archive ? `确认归档“${row.name}”吗？归档后仍可恢复，关联资产不会被删除。` : `确认恢复“${row.name}”吗？恢复后状态为“运行中”。`, archive ? '归档确认' : '恢复确认', { type: archive ? 'warning' : 'info', confirmButtonText: '确认', cancelButtonText: '取消' })
-    await apiClient.post(`/business-systems/${row.id}/${archive ? 'archive' : 'restore'}`)
+    await apiClient.post(`/business-systems/${row.id}/${archive ? 'archive' : 'restore'}`, undefined, { params: { expected_version: row.version || 0 } })
     ElMessage.success(archive ? '业务系统已归档' : '业务系统已恢复')
     await refreshAfterMutation()
     if (detailVisible.value && detail.value?.id === row.id) await openDetail(row)
@@ -869,8 +869,8 @@ onMounted(load)
       <div v-else class="batch-toolbar">
         <div><strong>批量操作</strong><span>已选择 {{ selectedSystems.length }} 个业务系统，单次最多 200 个</span></div>
         <div class="batch-toolbar-actions">
-          <el-button :disabled="selectedSystems.length === 0" :loading="batchLoading" @click="runBatchArchive(false)">批量恢复</el-button>
-          <el-button type="warning" plain :disabled="selectedSystems.length === 0" :loading="batchLoading" @click="runBatchArchive(true)">批量归档</el-button>
+          <template v-if="auth.isGroupAdmin"><el-button :disabled="selectedSystems.length === 0" :loading="batchLoading" @click="runBatchArchive(false)">批量恢复</el-button>
+          <el-button type="warning" plain :disabled="selectedSystems.length === 0" :loading="batchLoading" @click="runBatchArchive(true)">批量归档</el-button></template>
           <el-dropdown :disabled="selectedSystems.length === 0 || selectedExporting">
             <el-button :loading="selectedExporting" :disabled="selectedSystems.length === 0">导出选中</el-button>
             <template #dropdown>
@@ -895,7 +895,7 @@ onMounted(load)
 
         <el-table-column prop="owner_name" label="负责人" min-width="90"><template #default="scope">{{ scope.row.owner_name || '—' }}</template></el-table-column>
         <el-table-column v-if="!auth.isGroupAdmin && !inventoryMode" label="上报状态" width="130"><template #default="scope"><el-tag :type="scope.row.reporting_status === 'reported' ? 'success' : 'warning'" effect="plain">{{ reportingStatusLabels[scope.row.reporting_status || 'reported'] }}</el-tag></template></el-table-column>
-        <el-table-column label="操作" fixed="right" width="88" align="right" header-align="right" class-name="table-action-column"><template #default="scope"><RowActions :label="`操作：${scope.row.name || scope.row.title || scope.row.code || scope.row.display_name || scope.row.id}`"><template v-if="!inventoryMode"><template v-if="scope.row.is_working_copy"><el-button link type="primary" @click="openWorkingVersionDiff(scope.row)">查看变更</el-button><el-button link type="primary" @click="openEditDialog(scope.row)">编辑</el-button><el-button link type="danger" @click="remove(scope.row)">删除</el-button></template><template v-else><el-button link type="primary" @click="openChangeHistory(scope.row)">历史</el-button><el-button link type="primary" @click="openEditDialog(scope.row)">编辑</el-button><el-button link :type="scope.row.status === 'archived' ? 'success' : 'warning'" @click="changeArchive(scope.row, scope.row.status !== 'archived')">{{ scope.row.status === 'archived' ? '恢复' : '归档' }}</el-button><el-button link type="danger" @click="remove(scope.row)">删除</el-button></template></template><template v-else><template v-if="scope.row.is_working_copy"><el-button link type="primary" @click="openWorkingVersionDiff(scope.row)">查看变更</el-button><el-button v-if="!scope.row.task_id" link type="primary" @click="selectWorkspaceBusinessSystem(scope.row)">选择上报</el-button></template><template v-else><el-button link type="primary" @click="openEditDialog(scope.row)">修改后上报</el-button><el-button link type="danger" @click="requestSystemDeletion(scope.row)">申请下线</el-button></template></template></RowActions></template></el-table-column>
+        <el-table-column label="操作" fixed="right" width="88" align="right" header-align="right" class-name="table-action-column"><template #default="scope"><RowActions :label="`操作：${scope.row.name || scope.row.title || scope.row.code || scope.row.display_name || scope.row.id}`"><template v-if="!inventoryMode"><template v-if="scope.row.is_working_copy"><el-button link type="primary" @click="openWorkingVersionDiff(scope.row)">查看变更</el-button><el-button link type="primary" @click="openEditDialog(scope.row)">编辑</el-button><el-button link type="danger" @click="remove(scope.row)">删除</el-button></template><template v-else><el-button link type="primary" @click="openChangeHistory(scope.row)">历史</el-button><el-button link type="primary" @click="openEditDialog(scope.row)">编辑</el-button><el-button v-if="auth.isGroupAdmin" link :type="scope.row.status === 'archived' ? 'success' : 'warning'" @click="changeArchive(scope.row, scope.row.status !== 'archived')">{{ scope.row.status === 'archived' ? '恢复' : '归档' }}</el-button><el-button link type="danger" @click="remove(scope.row)">删除</el-button></template></template><template v-else><template v-if="scope.row.is_working_copy"><el-button link type="primary" @click="openWorkingVersionDiff(scope.row)">查看变更</el-button><el-button v-if="!scope.row.task_id" link type="primary" @click="selectWorkspaceBusinessSystem(scope.row)">选择上报</el-button></template><template v-else><el-button link type="primary" @click="openEditDialog(scope.row)">修改后上报</el-button><el-button link type="danger" @click="requestSystemDeletion(scope.row)">申请下线</el-button></template></template></RowActions></template></el-table-column>
       </el-table>
       <div class="table-pagination">
         <el-pagination background layout="total, sizes, prev, pager, next" :total="total" :current-page="page" :page-size="pageSize" :page-sizes="[20, 50, 100]" @current-change="handlePageChange" @size-change="handlePageSizeChange" />
@@ -1018,7 +1018,7 @@ onMounted(load)
           <div class="form-section-title">关联网络资产（{{ detailAssetTotal }}）</div>
           <el-table v-loading="detailAssetLoading" :data="detailAssets" size="small" empty-text="暂未关联网络资产" max-height="360"><el-table-column label="资产" min-width="210"><template #default="scope"><div class="organization-name-cell"><strong>{{ scope.row.value }}</strong><span>{{ scope.row.name || assetTypeLabel(scope.row.type) }}</span></div></template></el-table-column><el-table-column label="范围" width="80"><template #default="scope">{{ scope.row.network_scope === 'public' ? '公网' : scope.row.network_scope === 'private' ? '内网' : '待确认' }}</template></el-table-column><el-table-column label="状态" width="90"><template #default="scope">{{ assetStatusLabel(scope.row.status) }}</template></el-table-column><el-table-column prop="owner_name" label="负责人" min-width="90" /></el-table>
           <div v-if="detailAssetTotal > 0" class="table-pagination dialog-pagination"><el-pagination background small layout="total, sizes, prev, pager, next" :total="detailAssetTotal" :current-page="detailAssetPage" :page-size="detailAssetPageSize" :page-sizes="[20, 50, 100]" @current-change="handleDetailAssetPageChange" @size-change="handleDetailAssetPageSizeChange" /></div>
-          <div class="detail-actions"><el-button type="primary" plain @click="openResourceSubmissionHistory(detail as BusinessSystem)">上报历史</el-button><template v-if="!inventoryMode"><el-button v-if="!detail.is_working_copy" @click="openChangeHistory(detail as BusinessSystem)">变更历史</el-button><el-button @click="openEditDialog(detail as BusinessSystem)">编辑系统</el-button><el-button v-if="!detail.is_working_copy" :type="detail.status === 'archived' ? 'success' : 'warning'" @click="changeArchive(detail, detail.status !== 'archived')">{{ detail.status === 'archived' ? '恢复系统' : '归档系统' }}</el-button></template></div>
+          <div class="detail-actions"><el-button type="primary" plain @click="openResourceSubmissionHistory(detail as BusinessSystem)">上报历史</el-button><template v-if="!inventoryMode"><el-button v-if="!detail.is_working_copy" @click="openChangeHistory(detail as BusinessSystem)">变更历史</el-button><el-button @click="openEditDialog(detail as BusinessSystem)">编辑系统</el-button><el-button v-if="!detail.is_working_copy && auth.isGroupAdmin" :type="detail.status === 'archived' ? 'success' : 'warning'" @click="changeArchive(detail, detail.status !== 'archived')">{{ detail.status === 'archived' ? '恢复系统' : '归档系统' }}</el-button></template></div>
         </template>
       </div>
     </el-drawer>

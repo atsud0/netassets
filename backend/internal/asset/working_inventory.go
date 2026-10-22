@@ -54,7 +54,7 @@ func (s *Service) searchWorkingCreates(ctx context.Context, p auth.Principal, f 
  COALESCE(bs.id::text,'') business_system_id,COALESCE(bs.system_code,'') business_system_code,COALESCE(bs.system_name,'') business_system_name,
  a.environment,a.network_scope,COALESCE(na.id::text,'') network_area_id,COALESCE(na.area_name,'') network_area_name,a.status,a.importance,a.source,
  COALESCE(ao.owner_user_id::text,'') owner_user_id,COALESCE(u.username,'') owner_username,COALESCE(u.display_name,'') owner_display_name,COALESCE(ao.owner_name,'') owner_name,
- COALESCE(a.notes,'') notes,a.expires_at,a.created_at,a.updated_at,'reported'::text reporting_status,false is_working_copy,''::text published_id,''::text task_id,''::text draft_status,''::text operation,0 version,''::text assigned_to,''::text last_edited_by,''::text takeover_reason,'[]'::jsonb custom_values
+ COALESCE(a.notes,'') notes,a.expires_at,a.created_at,a.updated_at,'reported'::text reporting_status,false is_working_copy,''::text published_id,''::text task_id,''::text draft_status,''::text operation,a.version,''::text assigned_to,''::text last_edited_by,''::text takeover_reason,'[]'::jsonb custom_values
  FROM assets a JOIN asset_organizations ao ON ao.asset_id=a.id AND ao.is_primary JOIN organizations o ON o.id=ao.organization_id
  LEFT JOIN users u ON u.id=ao.owner_user_id LEFT JOIN asset_network_areas na ON na.id=a.network_area_id
  LEFT JOIN LATERAL (SELECT b.id,b.system_code,b.system_name FROM system_assets sa JOIN business_systems b ON b.id=sa.business_system_id WHERE sa.asset_id=a.id AND b.deleted_at IS NULL ORDER BY sa.is_primary DESC,sa.created_at LIMIT 1) bs ON true
@@ -173,6 +173,11 @@ WHERE `+predicate+` AND d.organization_id IN (SELECT id FROM accessible) AND d.d
 }
 
 func (s *Service) validateWorkingValues(ctx context.Context, values []customfield.Value) ([]byte, error) {
+	// jsonb_array_elements is used by diff/snapshot queries; persist an empty
+	// array, never the JSON scalar null, when the form has no custom fields.
+	if values == nil {
+		values = []customfield.Value{}
+	}
 	defs, err := customfield.NewService(s.pool).EnabledDefinitions(ctx, "asset")
 	if err != nil {
 		return nil, err
@@ -392,11 +397,11 @@ func (s *Service) createWorkingUpdate(ctx context.Context, p auth.Principal, cur
 	if e != nil {
 		return Asset{}, e
 	}
-	if e = s.ensureWorkingValueAvailable(ctx, tx, in.Type, normalized, "", ""); e != nil {
+	if e = s.ensureWorkingValueAvailable(ctx, tx, in.Type, normalized, "", current.ID); e != nil {
 		return Asset{}, e
 	}
 	var id string
-	e = tx.QueryRow(ctx, `INSERT INTO inventory_asset_drafts(task_id,organization_id,operation,source_asset_id,asset_type,asset_value,normalized_value,asset_name,environment,network_scope,network_area_id,business_system_id,business_system_draft_id,status,importance,source,owner_user_id,owner_name,notes,expires_at,custom_values,draft_status,created_by,updated_by) VALUES(NULL,$1::uuid,'update',$2::uuid,$3,$4,$5,NULLIF($6,''),$7::text,$8::text,NULLIF($9,'')::uuid,NULLIF($10,'')::uuid,NULLIF($11,'')::uuid,$12::text,$13::text,$14,NULLIF($15,'')::uuid,NULLIF($16,''),NULLIF($17,''),$18,$19::jsonb,'editing',$20::uuid,$20::uuid) RETURNING id::text`, in.OrganizationID, current.ID, in.Type, in.Value, normalized, in.Name, in.Environment, in.NetworkScope, in.NetworkAreaID, bs, bsd, in.Status, in.Importance, current.Source, in.OwnerUserID, in.OwnerName, in.Notes, in.ExpiresAt, raw, p.UserID).Scan(&id)
+	e = tx.QueryRow(ctx, `INSERT INTO inventory_asset_drafts(task_id,organization_id,operation,source_asset_id,source_asset_version,asset_type,asset_value,normalized_value,asset_name,environment,network_scope,network_area_id,business_system_id,business_system_draft_id,status,importance,source,owner_user_id,owner_name,notes,expires_at,custom_values,draft_status,created_by,updated_by) VALUES(NULL,$1::uuid,'update',$2::uuid,$21,$3,$4,$5,NULLIF($6,''),$7::text,$8::text,NULLIF($9,'')::uuid,NULLIF($10,'')::uuid,NULLIF($11,'')::uuid,$12::text,$13::text,$14,NULLIF($15,'')::uuid,NULLIF($16,''),NULLIF($17,''),$18,$19::jsonb,'editing',$20::uuid,$20::uuid) RETURNING id::text`, in.OrganizationID, current.ID, in.Type, in.Value, normalized, in.Name, in.Environment, in.NetworkScope, in.NetworkAreaID, bs, bsd, in.Status, in.Importance, current.Source, in.OwnerUserID, in.OwnerName, in.Notes, in.ExpiresAt, raw, p.UserID, current.Version).Scan(&id)
 	if e != nil {
 		return Asset{}, mapUnreportedDB(e)
 	}
@@ -583,7 +588,7 @@ func (s *Service) createWorkingDelete(ctx context.Context, p auth.Principal, cur
 		return err
 	}
 	var id string
-	err = tx.QueryRow(ctx, `INSERT INTO inventory_asset_drafts(task_id,organization_id,operation,source_asset_id,asset_type,asset_value,normalized_value,asset_name,environment,network_scope,network_area_id,business_system_id,status,importance,source,owner_user_id,owner_name,notes,expires_at,custom_values,draft_status,created_by,updated_by) VALUES(NULL,$1::uuid,'delete',$2::uuid,$3,$4,$5,NULLIF($6,''),$7::text,$8::text,NULLIF($9,'')::uuid,NULLIF($10,'')::uuid,$11,$12,$13,NULLIF($14,'')::uuid,NULLIF($15,''),NULLIF($16,''),$17,$18::jsonb,'editing',$19::uuid,$19::uuid) RETURNING id::text`, current.OrganizationID, current.ID, current.Type, current.Value, current.NormalizedValue, current.Name, current.Environment, current.NetworkScope, current.NetworkAreaID, current.BusinessSystemID, current.Status, current.Importance, current.Source, current.OwnerUserID, current.OwnerName, current.Notes, current.ExpiresAt, raw, p.UserID).Scan(&id)
+	err = tx.QueryRow(ctx, `INSERT INTO inventory_asset_drafts(task_id,organization_id,operation,source_asset_id,source_asset_version,asset_type,asset_value,normalized_value,asset_name,environment,network_scope,network_area_id,business_system_id,status,importance,source,owner_user_id,owner_name,notes,expires_at,custom_values,draft_status,created_by,updated_by) VALUES(NULL,$1::uuid,'delete',$2::uuid,$20,$3,$4,$5,NULLIF($6,''),$7::text,$8::text,NULLIF($9,'')::uuid,NULLIF($10,'')::uuid,$11,$12,$13,NULLIF($14,'')::uuid,NULLIF($15,''),NULLIF($16,''),$17,$18::jsonb,'editing',$19::uuid,$19::uuid) RETURNING id::text`, current.OrganizationID, current.ID, current.Type, current.Value, current.NormalizedValue, current.Name, current.Environment, current.NetworkScope, current.NetworkAreaID, current.BusinessSystemID, current.Status, current.Importance, current.Source, current.OwnerUserID, current.OwnerName, current.Notes, current.ExpiresAt, raw, p.UserID, current.Version).Scan(&id)
 	if err != nil {
 		return mapUnreportedDB(err)
 	}

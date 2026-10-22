@@ -159,20 +159,28 @@ func TestP03RealScannerExportRunsThroughCandidateAndPublication(t *testing.T) {
 	// Step 3: a group reviewer confirms one discovery and it becomes an
 	// organization working version, not a formal asset.
 	candidateID := pending.Items[0].AssetCandidateID
-	accepted, err := candidates.AcceptWithAfterCreate(ctx, groupAdmin, candidateID, assetcandidate.AcceptInput{
-		CreateInput: asset.CreateInput{
-			OrganizationID: organizationID, Name: "P0-3 已确认资产", Environment: "production",
-			NetworkScope: "public", Status: "active", Importance: "normal", OwnerName: "P0-3 测试子公司",
+	var accepted asset.Asset
+	batchResult := candidates.BatchAcceptWithAfterCreate(ctx, groupAdmin, assetcandidate.BatchAcceptInput{Items: []assetcandidate.BatchAcceptItem{{
+		CandidateID: candidateID,
+		Input: assetcandidate.AcceptInput{
+			CreateInput: asset.CreateInput{
+				OrganizationID: organizationID, Name: "P0-3 已确认资产", Environment: "production",
+				NetworkScope: "public", Status: "active", Importance: "normal", OwnerName: "P0-3 测试子公司",
+			},
+			ReviewNote: "漏洞导入发现，确认归属",
 		},
-		ReviewNote: "漏洞导入发现，确认归属",
-	}, "p03-accept", "127.0.0.1", func(callbackCtx context.Context, tx pgx.Tx, created asset.Asset) error {
-		return findings.LinkAcceptedAssetCandidateInTx(callbackCtx, tx, groupAdmin, candidateID, created.ID, "p03-accept", "127.0.0.1")
+	}}}, "p03-accept", "127.0.0.1", func(callbackCtx context.Context, tx pgx.Tx, acceptedCandidateID string, created asset.Asset) error {
+		if acceptedCandidateID != candidateID {
+			return errors.New("batch callback received the wrong candidate")
+		}
+		accepted = created
+		return findings.LinkAcceptedAssetCandidateInTx(callbackCtx, tx, groupAdmin, acceptedCandidateID, created.ID, "p03-accept", "127.0.0.1")
 	})
-	if err != nil {
-		t.Fatalf("Accept(asset candidate) error = %v", err)
+	if len(batchResult.Items) != 1 || !batchResult.Items[0].Succeeded || batchResult.Failed != 0 {
+		t.Fatalf("BatchAccept(asset candidate) result = %+v, want one successful item", batchResult)
 	}
 	if accepted.ID == "" {
-		t.Fatal("Accept(asset candidate) returned no working version")
+		t.Fatal("BatchAccept(asset candidate) callback returned no working version")
 	}
 	// The same transaction that creates the working version released the
 	// findings. A failure in that callback would roll the candidate and draft
@@ -201,7 +209,54 @@ func TestP03RealScannerExportRunsThroughCandidateAndPublication(t *testing.T) {
 	if attachedToDraft == 0 {
 		t.Fatal("confirming a discovery left its findings unreleased; the import queue and the asset ledger disagree")
 	}
-	t.Logf("working version %s carries %d findings", draftID, attachedToDraft)
+	// The owner organization must see imported findings against its unpublished
+	// working version; otherwise the asset draft and security backlog diverge
+	// until group publication.
+	orgFindings, err := findings.SearchFindings(ctx, orgAdmin, organizationID, "", "", page)
+	if err != nil {
+		t.Fatalf("organization SearchFindings(working version) error = %v", err)
+	}
+	if orgFindings.Total < attachedToDraft {
+		t.Fatalf("organization sees %d findings while %d are linked to its working version", orgFindings.Total, attachedToDraft)
+	}
+	orgSummary, err := findings.SummarizeFindings(ctx, orgAdmin, organizationID)
+	if err != nil {
+		t.Fatalf("organization SummarizeFindings(working version) error = %v", err)
+	}
+	if orgSummary.PendingAssetLink < attachedToDraft {
+		t.Fatalf("organization pending asset-link summary = %d, want at least %d working-version findings", orgSummary.PendingAssetLink, attachedToDraft)
+	}
+	t.Logf("working version %s carries %d findings visible to its organization", draftID, attachedToDraft)
+
+	// A failed batch callback must roll back the candidate and its draft. This
+	// protects the retry endpoint from a false "accepted" row whose findings
+	// were never linked. Use another scanner discovery so the successful path
+	// above remains available for the publication part of this scenario.
+	var rollbackCandidateID string
+	for _, item := range pending.Items {
+		if item.AssetCandidateID != "" && item.AssetCandidateID != candidateID {
+			rollbackCandidateID = item.AssetCandidateID
+			break
+		}
+	}
+	if rollbackCandidateID != "" {
+		rollbackResult := candidates.BatchAcceptWithAfterCreate(ctx, groupAdmin, assetcandidate.BatchAcceptInput{Items: []assetcandidate.BatchAcceptItem{{
+			CandidateID: rollbackCandidateID,
+			Input:       assetcandidate.AcceptInput{CreateInput: asset.CreateInput{OrganizationID: organizationID, Name: "应回滚资产", Environment: "production", NetworkScope: "public", Status: "active", Importance: "normal"}},
+		}}}, "p03-accept-rollback", "127.0.0.1", func(context.Context, pgx.Tx, string, asset.Asset) error {
+			return errors.New("deliberate finding-link failure")
+		})
+		if rollbackResult.Failed != 1 || rollbackResult.Succeeded != 0 {
+			t.Fatalf("failed batch callback result = %+v, want one failed row", rollbackResult)
+		}
+		var rollbackDraftID, rollbackStatus string
+		if err := pool.QueryRow(ctx, `SELECT COALESCE(working_version_draft_id::text,''), status FROM asset_candidates WHERE id=$1::uuid`, rollbackCandidateID).Scan(&rollbackDraftID, &rollbackStatus); err != nil {
+			t.Fatalf("load rolled-back candidate: %v", err)
+		}
+		if rollbackDraftID != "" || rollbackStatus != "pending" {
+			t.Fatalf("failed batch callback left candidate draft=%q status=%q, want empty/pending", rollbackDraftID, rollbackStatus)
+		}
+	}
 
 	// Step 4: the subsidiary selects the working version into its own inventory
 	// task, submits it, and the group publishes it.

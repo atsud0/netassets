@@ -369,7 +369,7 @@ func (s *Service) SummarizeFindings(ctx context.Context, principal auth.Principa
 		       count(*) FILTER (WHERE f.severity = 'high')::int,
 		       count(*) FILTER (WHERE f.severity = 'medium')::int,
 		       count(*) FILTER (WHERE f.severity = 'low')::int,
-		       count(*) FILTER (WHERE f.asset_link_status <> 'live')::int,
+		       count(*) FILTER (WHERE f.asset_link_status IN ('pending', 'unlinked'))::int,
 		       count(*) FILTER (WHERE f.remediation_status = 'pending_acceptance')::int,
 		       count(*) FILTER (WHERE f.remediation_status = 'pending_org_review')::int,
 		       count(*) FILTER (WHERE f.remediation_status = 'pending_security_review')::int,
@@ -382,6 +382,13 @@ func (s *Service) SummarizeFindings(ctx context.Context, principal auth.Principa
 		            (
 		                (f.asset_id IS NOT NULL AND EXISTS (SELECT 1 FROM finding_permission_accessible scope WHERE scope.permission_key = 'asset.manage' AND scope.id = f.assignee_organization_id))
 		                OR (f.asset_id IS NULL AND f.business_system_id IS NOT NULL AND EXISTS (SELECT 1 FROM finding_permission_accessible scope WHERE scope.permission_key = 'system.manage' AND scope.id = f.assignee_organization_id))
+                        OR (f.pending_asset_draft_id IS NOT NULL AND EXISTS (
+                            SELECT 1 FROM inventory_asset_drafts pending_draft
+                            JOIN finding_permission_accessible scope ON scope.permission_key = 'asset.manage' AND scope.id = pending_draft.organization_id
+                            WHERE pending_draft.id = f.pending_asset_draft_id
+                              AND pending_draft.organization_id = f.assignee_organization_id
+                              AND pending_draft.draft_status IN ('editing','submitted','returned')
+                        ))
 		            )
 		            OR (
 		                f.assignee_organization_id IN (SELECT id FROM accessible)
@@ -472,6 +479,14 @@ func (s *Service) SearchFindings(ctx context.Context, principal auth.Principal, 
 		                    SELECT 1 FROM finding_permission_accessible scope
 		                    WHERE scope.permission_key = 'system.manage' AND scope.id = f.assignee_organization_id
 		                ))
+		                OR (f.pending_asset_draft_id IS NOT NULL AND EXISTS (
+		                    SELECT 1 FROM inventory_asset_drafts pending_draft
+		                    JOIN finding_permission_accessible scope
+		                      ON scope.permission_key = 'asset.manage' AND scope.id = pending_draft.organization_id
+		                    WHERE pending_draft.id = f.pending_asset_draft_id
+		                      AND pending_draft.organization_id = f.assignee_organization_id
+		                      AND pending_draft.draft_status IN ('editing','submitted','returned')
+		                ))
 		            )
 		            OR (
 		                f.assignee_organization_id IN (SELECT id FROM accessible)
@@ -520,6 +535,14 @@ func (s *Service) SearchFindings(ctx context.Context, principal auth.Principal, 
                                 SELECT 1 FROM finding_permission_accessible scope
                                 WHERE scope.permission_key = 'system.manage' AND scope.id = f.assignee_organization_id
                             ))
+                            OR (f.pending_asset_draft_id IS NOT NULL AND EXISTS (
+                                SELECT 1 FROM inventory_asset_drafts pending_draft
+                                JOIN finding_permission_accessible scope
+                                  ON scope.permission_key = 'asset.manage' AND scope.id = pending_draft.organization_id
+                                WHERE pending_draft.id = f.pending_asset_draft_id
+                                  AND pending_draft.organization_id = f.assignee_organization_id
+                                  AND pending_draft.draft_status IN ('editing','submitted','returned')
+                            ))
                         )
                         OR (
                             f.assignee_organization_id IN (SELECT id FROM accessible)
@@ -547,6 +570,12 @@ func (s *Service) CreateFinding(ctx context.Context, principal auth.Principal, i
 	}
 	normalizeFindingInput(&input)
 	if !validFindingInput(input) {
+		return Finding{}, ErrInvalid
+	}
+	if input.PendingAssetDraftID != "" {
+		// A pending asset link is an import-pipeline transition, not a public
+		// finding-edit escape hatch. Otherwise a caller could point a finding at
+		// another organization's unpublished draft.
 		return Finding{}, ErrInvalid
 	}
 	if input.Source != "import" && (input.ImportStatusRaw != "" || input.ImportStatusNormalized != "" || input.ImportStatusMappingReason != "") {
@@ -586,6 +615,22 @@ func (s *Service) CreateFinding(ctx context.Context, principal auth.Principal, i
 }
 
 func (s *Service) createFindingInTx(ctx context.Context, tx pgx.Tx, principal auth.Principal, input FindingInput, requestID, ipAddress string) (string, string, error) {
+	if input.PendingAssetDraftID != "" {
+		if input.Source != "import" || input.AssetID != "" || !validUUID(input.PendingAssetDraftID) {
+			return "", "", ErrInvalid
+		}
+		var draftMatches bool
+		if err := tx.QueryRow(ctx, `SELECT EXISTS(
+			SELECT 1 FROM inventory_asset_drafts
+			WHERE id=$1::uuid AND organization_id=$2::uuid AND operation='create'
+			  AND draft_status IN ('editing','submitted','returned')
+		)`, input.PendingAssetDraftID, input.AssigneeOrganizationID).Scan(&draftMatches); err != nil {
+			return "", "", fmt.Errorf("validate finding pending asset draft in transaction: %w", err)
+		}
+		if !draftMatches {
+			return "", "", ErrConflict
+		}
+	}
 	code, err := newCode("F")
 	if err != nil {
 		return "", "", fmt.Errorf("generate finding code: %w", err)
@@ -635,6 +680,19 @@ func (s *Service) createFindingInTx(ctx context.Context, tx pgx.Tx, principal au
 		} else if ownerUserID != nil {
 			targetUserID = *ownerUserID
 		}
+	} else if input.PendingAssetDraftID != "" {
+		// An unpublished network asset is still an asset, not a business
+		// system. Asset-only operators must receive its findings as well.
+		eventType = notification.EventFindingCreatedOnAsset
+		requiredPermission = "asset.manage"
+		var ownerUserID *string
+		if err := tx.QueryRow(ctx, `SELECT owner_user_id::text FROM inventory_asset_drafts
+			WHERE id=$1::uuid AND organization_id=$2::uuid`, input.PendingAssetDraftID, input.AssigneeOrganizationID).Scan(&ownerUserID); err != nil {
+			return "", "", fmt.Errorf("load finding draft asset owner: %w", err)
+		}
+		if ownerUserID != nil {
+			targetUserID = *ownerUserID
+		}
 	}
 	level := "info"
 	if input.Severity == "medium" {
@@ -646,7 +704,7 @@ func (s *Service) createFindingInTx(ctx context.Context, tx pgx.Tx, principal au
 		EventType: eventType, Category: notification.CategoryFindingReceived,
 		TargetOrganizationID: input.AssigneeOrganizationID, TargetUserID: targetUserID, ActorUserID: principal.UserID, RequiredPermission: requiredPermission,
 		ResourceType: "security_finding", ResourceID: id, ResourceLabel: code + "《" + input.Title + "》", BatchKey: requestID, Level: level,
-		Details: map[string]any{"severity": input.Severity, "asset_id": input.AssetID, "business_system_id": input.BusinessSystemID, "test_batch_id": input.TestBatchID},
+		Details: map[string]any{"severity": input.Severity, "asset_id": input.AssetID, "pending_asset_draft_id": input.PendingAssetDraftID, "business_system_id": input.BusinessSystemID, "test_batch_id": input.TestBatchID},
 	}); err != nil {
 		return "", "", err
 	}
@@ -669,23 +727,45 @@ func (s *Service) UpdateFinding(ctx context.Context, principal auth.Principal, i
 		return Finding{}, ErrVersionRequired
 	}
 	normalizeFindingInput(&input)
+	if input.PendingAssetDraftID != "" {
+		return Finding{}, ErrInvalid
+	}
 	if !validFindingInput(input) {
 		return Finding{}, ErrInvalid
 	}
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return Finding{}, fmt.Errorf("begin update finding: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	// Match remediation's lock order: orchestration lock, then finding row.
+	// Work-order creation also locks the finding before inserting its links.
+	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtext('netassets-remediation'))`); err != nil {
+		return Finding{}, err
+	}
 	var currentOrganizationID, currentStatus string
-	var linked, activelyLinked bool
-	if err := s.pool.QueryRow(ctx, `
-		SELECT f.assignee_organization_id::text, f.status,
-		       EXISTS (SELECT 1 FROM security_work_order_findings link WHERE link.finding_id = f.id),
-		       EXISTS (
-		           SELECT 1 FROM security_work_order_findings link
-		           JOIN security_work_orders wo ON wo.id = link.work_order_id
-		           WHERE link.finding_id = f.id AND wo.status NOT IN ('closed', 'cancelled')
-		       )
-		FROM security_findings f WHERE f.id::text = $1`, id).Scan(&currentOrganizationID, &currentStatus, &linked, &activelyLinked); errors.Is(err, pgx.ErrNoRows) {
+	var updatedAt time.Time
+	if err := tx.QueryRow(ctx, `
+		SELECT assignee_organization_id::text, status, updated_at
+		FROM security_findings WHERE id=$1::uuid FOR UPDATE`, id).
+		Scan(&currentOrganizationID, &currentStatus, &updatedAt); errors.Is(err, pgx.ErrNoRows) {
 		return Finding{}, ErrNotFound
 	} else if err != nil {
-		return Finding{}, fmt.Errorf("load finding update constraints: %w", err)
+		return Finding{}, fmt.Errorf("lock finding update constraints: %w", err)
+	}
+	if err := checkFindingVersion(id, input.ExpectedUpdatedAt, updatedAt); err != nil {
+		return Finding{}, err
+	}
+	// Use a new statement AFTER the row lock: a creator we waited for may have
+	// committed links without changing the finding's updated_at.
+	var linked, activelyLinked bool
+	if err := tx.QueryRow(ctx, `
+		SELECT EXISTS (SELECT 1 FROM security_work_order_findings WHERE finding_id=$1::uuid),
+		       EXISTS (SELECT 1 FROM security_work_order_findings link
+		               JOIN security_work_orders wo ON wo.id=link.work_order_id
+		               WHERE link.finding_id=$1::uuid AND wo.status NOT IN ('closed','cancelled'))`, id).
+		Scan(&linked, &activelyLinked); err != nil {
+		return Finding{}, fmt.Errorf("load finding work order constraints: %w", err)
 	}
 	if linked && input.AssigneeOrganizationID != currentOrganizationID {
 		return Finding{}, ErrConflict
@@ -706,21 +786,13 @@ func (s *Service) UpdateFinding(ctx context.Context, principal auth.Principal, i
 	if input.Status == findingstatus.Duplicate || input.DuplicateOfFindingID != "" {
 		return Finding{}, ErrConflict
 	}
-	if err := s.validateReferences(ctx, input.AssigneeOrganizationID, input.AssetID, input.BusinessSystemID); err != nil {
+	if err := validateFindingReferences(ctx, tx, input.AssigneeOrganizationID, input.AssetID, input.BusinessSystemID); err != nil {
 		return Finding{}, err
 	}
 	if input.TestBatchID != "" {
-		if err := s.validateFindingBatchScope(ctx, input.TestBatchID, input.AssigneeOrganizationID, input.AssetID); err != nil {
+		if err := validateFindingBatchScope(ctx, tx, input.TestBatchID, input.AssigneeOrganizationID, input.AssetID); err != nil {
 			return Finding{}, err
 		}
-	}
-	tx, err := s.pool.Begin(ctx)
-	if err != nil {
-		return Finding{}, fmt.Errorf("begin update finding: %w", err)
-	}
-	defer func() { _ = tx.Rollback(ctx) }()
-	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtext('netassets-remediation'))`); err != nil {
-		return Finding{}, err
 	}
 	var personalLinked bool
 	if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM remediation_tasks t JOIN security_work_orders w ON w.id=t.work_order_id WHERE t.finding_id=$1::uuid AND t.status<>'cancelled' AND w.status NOT IN ('closed','cancelled'))`, id).Scan(&personalLinked); err != nil {
@@ -1373,9 +1445,15 @@ func (s *Service) Issue(ctx context.Context, principal auth.Principal, id string
 			return fmt.Errorf("set work order issued time: %w", err)
 		}
 		if _, err := tx.Exec(ctx, `
-			UPDATE security_findings SET status = 'in_progress', updated_at = now(), updated_by = $2::uuid
-			WHERE id IN (SELECT finding_id FROM security_work_order_findings WHERE work_order_id::text = $1)
-			  AND status IN ('pending', 'confirmed')`, id, principal.UserID); err != nil {
+			UPDATE security_work_order_findings l SET finding_status_before_issue=f.status
+			FROM security_findings f
+			WHERE l.work_order_id=$1::uuid AND l.finding_id=f.id AND f.status IN ('pending', 'confirmed', 'in_progress')`, id); err != nil {
+			return fmt.Errorf("save finding status before issue: %w", err)
+		}
+		if _, err := tx.Exec(ctx, `
+			UPDATE security_findings SET status='in_progress', updated_at=now(), updated_by=$2::uuid
+			WHERE id IN (SELECT finding_id FROM security_work_order_findings WHERE work_order_id=$1::uuid)
+			  AND status IN ('pending','confirmed')`, id, principal.UserID); err != nil {
 			return fmt.Errorf("assign security findings: %w", err)
 		}
 		return nil
@@ -1463,15 +1541,15 @@ func (s *Service) Cancel(ctx context.Context, principal auth.Principal, id strin
 			return err
 		}
 		_, err := tx.Exec(ctx, `
-			UPDATE security_findings f SET status = 'pending', updated_at = now(), updated_by = $2::uuid
-			WHERE f.id IN (SELECT finding_id FROM security_work_order_findings WHERE work_order_id::text = $1)
-			  AND f.status = 'in_progress'
-			  AND NOT EXISTS (
-				SELECT 1 FROM security_work_order_findings other_link
-				JOIN security_work_orders other ON other.id = other_link.work_order_id
-				WHERE other_link.finding_id = f.id AND other.id::text <> $1
-				  AND other.status NOT IN ('closed', 'cancelled')
-			  )`, id, principal.UserID)
+			-- Legacy links have no recoverable pre-issue state. 'confirmed' is the
+			-- conservative fallback: this finding is known to be real and remains
+			-- actionable, unlike resetting it to an untriaged 'pending' state.
+			UPDATE security_findings f SET status=COALESCE(l.finding_status_before_issue,'confirmed'), updated_at=now(), updated_by=$2::uuid
+			FROM security_work_order_findings l
+			WHERE l.work_order_id=$1::uuid AND l.finding_id=f.id AND f.status='in_progress'
+			  -- Cancelling an unissued draft must not change finding state.
+			  AND EXISTS (SELECT 1 FROM security_work_orders w WHERE w.id=l.work_order_id AND w.issued_at IS NOT NULL)
+			  AND NOT EXISTS (SELECT 1 FROM security_work_order_findings other_link JOIN security_work_orders other ON other.id=other_link.work_order_id WHERE other_link.finding_id=f.id AND other.id<>$1::uuid AND other.status NOT IN ('closed','cancelled'))`, id, principal.UserID)
 		return err
 	})
 }
@@ -1636,15 +1714,21 @@ func (s *Service) getFinding(ctx context.Context, id string) (Finding, error) {
 }
 
 func (s *Service) validateReferences(ctx context.Context, organizationID, assetID, systemID string) error {
+	return validateFindingReferences(ctx, s.pool, organizationID, assetID, systemID)
+}
+
+// Use the caller's transaction when a finding row is locked. Acquiring another
+// pool connection here could exhaust the pool while other edits wait on locks.
+func validateFindingReferences(ctx context.Context, db queryer, organizationID, assetID, systemID string) error {
 	var valid bool
-	if err := s.pool.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM organizations WHERE id::text = $1 AND status = 'enabled' AND deleted_at IS NULL AND organization_type <> 'group')`, organizationID).Scan(&valid); err != nil {
+	if err := db.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM organizations WHERE id::text = $1 AND status = 'enabled' AND deleted_at IS NULL AND organization_type <> 'group')`, organizationID).Scan(&valid); err != nil {
 		return fmt.Errorf("validate finding organization: %w", err)
 	}
 	if !valid {
 		return ErrNotFound
 	}
 	if assetID != "" {
-		if err := s.pool.QueryRow(ctx, `
+		if err := db.QueryRow(ctx, `
 			SELECT EXISTS (
 				SELECT 1 FROM assets a JOIN asset_organizations ao ON ao.asset_id = a.id
 				WHERE a.id::text = $1 AND ao.organization_id::text = $2 AND a.deleted_at IS NULL
@@ -1656,7 +1740,7 @@ func (s *Service) validateReferences(ctx context.Context, organizationID, assetI
 		}
 	}
 	if systemID != "" {
-		if err := s.pool.QueryRow(ctx, `
+		if err := db.QueryRow(ctx, `
 			SELECT EXISTS (SELECT 1 FROM business_systems WHERE id::text = $1 AND owner_organization_id::text = $2 AND deleted_at IS NULL)`, systemID, organizationID).Scan(&valid); err != nil {
 			return fmt.Errorf("validate finding business system: %w", err)
 		}
@@ -1668,11 +1752,15 @@ func (s *Service) validateReferences(ctx context.Context, organizationID, assetI
 }
 
 func (s *Service) validateFindingBatchScope(ctx context.Context, batchID, organizationID, assetID string) error {
+	return validateFindingBatchScope(ctx, s.pool, batchID, organizationID, assetID)
+}
+
+func validateFindingBatchScope(ctx context.Context, db queryer, batchID, organizationID, assetID string) error {
 	if assetID == "" {
 		return ErrInvalid
 	}
 	var valid bool
-	if err := s.pool.QueryRow(ctx, `
+	if err := db.QueryRow(ctx, `
 		SELECT EXISTS (
 			SELECT 1 FROM security_test_batches b
 			JOIN security_test_scope_assets scope ON scope.batch_id = b.id
@@ -1688,6 +1776,36 @@ func (s *Service) validateFindingBatchScope(ctx context.Context, batchID, organi
 }
 
 func validateFindingsForWorkOrder(ctx context.Context, tx pgx.Tx, organizationID string, findingIDs []string) (string, error) {
+	// Lock requested findings in a stable order before checking active links.
+	// Concurrent creators for overlapping findings serialize here; the waiter
+	// then observes the first transaction's committed work-order link.
+	rows, err := tx.Query(ctx, `
+		SELECT id::text, severity
+		FROM security_findings
+		WHERE id = ANY($1::uuid[]) AND assignee_organization_id::text = $2
+		  AND status IN ('pending', 'confirmed', 'in_progress')
+		ORDER BY id
+		FOR UPDATE`, findingIDs, organizationID)
+	if err != nil {
+		return "", fmt.Errorf("load work order findings: %w", err)
+	}
+	found := make(map[string]string, len(findingIDs))
+	for rows.Next() {
+		var id, severity string
+		if err := rows.Scan(&id, &severity); err != nil {
+			rows.Close()
+			return "", fmt.Errorf("scan work order finding: %w", err)
+		}
+		found[id] = severity
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return "", fmt.Errorf("iterate work order findings: %w", err)
+	}
+	rows.Close()
+	if len(found) != len(findingIDs) {
+		return "", ErrNotFound
+	}
 	var activeLinked bool
 	if err := tx.QueryRow(ctx, `
 		SELECT EXISTS (
@@ -1700,34 +1818,10 @@ func validateFindingsForWorkOrder(ctx context.Context, tx pgx.Tx, organizationID
 	if activeLinked {
 		return "", ErrConflict
 	}
-	rows, err := tx.Query(ctx, `
-		SELECT id::text, severity
-		FROM security_findings
-		WHERE id = ANY($1::uuid[]) AND assignee_organization_id::text = $2
-		  AND status IN ('pending', 'confirmed', 'in_progress')
-		FOR UPDATE`, findingIDs, organizationID)
-	if err != nil {
-		return "", fmt.Errorf("load work order findings: %w", err)
-	}
-	defer rows.Close()
-	found := make(map[string]string, len(findingIDs))
-	for rows.Next() {
-		var id, severity string
-		if err := rows.Scan(&id, &severity); err != nil {
-			return "", fmt.Errorf("scan work order finding: %w", err)
-		}
-		found[id] = severity
-	}
-	if err := rows.Err(); err != nil {
-		return "", fmt.Errorf("iterate work order findings: %w", err)
-	}
-	if len(found) != len(findingIDs) {
-		return "", ErrNotFound
-	}
 	severity := "info"
-	for _, id := range findingIDs {
-		if severityRank(found[id]) > severityRank(severity) {
-			severity = found[id]
+	for _, itemSeverity := range found {
+		if severityRank(itemSeverity) > severityRank(severity) {
+			severity = itemSeverity
 		}
 	}
 	return severity, nil
@@ -2014,6 +2108,7 @@ func normalizeFindingInput(input *FindingInput) {
 	input.AssigneeOrganizationID = strings.TrimSpace(input.AssigneeOrganizationID)
 	input.AssetID = strings.TrimSpace(input.AssetID)
 	input.BusinessSystemID = strings.TrimSpace(input.BusinessSystemID)
+	input.PendingAssetDraftID = strings.TrimSpace(input.PendingAssetDraftID)
 	input.TestBatchID = strings.TrimSpace(input.TestBatchID)
 	input.VulnerabilityType = strings.TrimSpace(input.VulnerabilityType)
 	input.Description = strings.TrimSpace(input.Description)

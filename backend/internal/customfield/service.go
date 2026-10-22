@@ -20,6 +20,10 @@ var (
 	ErrNotFound  = errors.New("not found")
 	ErrInvalid   = errors.New("invalid")
 	ErrConflict  = errors.New("conflict")
+	// ErrVersionRequired and ErrVersionConflict protect formal business-system
+	// custom values, which are a second write endpoint for the same resource.
+	ErrVersionRequired = errors.New("expected_version is required")
+	ErrVersionConflict = errors.New("resource version conflict")
 )
 
 type Definition struct {
@@ -289,10 +293,20 @@ func (s *Service) ActiveDefinitions(ctx context.Context, p auth.Principal, typ, 
 }
 
 type ValuesInput struct {
-	Values []Value `json:"values"`
+	Values          []Value `json:"values"`
+	ExpectedVersion *int    `json:"expected_version,omitempty"`
 }
 
 func (s *Service) SaveValues(ctx context.Context, p auth.Principal, typ, id string, in ValuesInput, rid, ip string) error {
+	// This endpoint writes directly to formal custom_field_values. Non-group
+	// administrators must submit custom fields through the asset/system working
+	// version payload instead of bypassing inventory review.
+	if (typ == "business_system" || typ == "asset") && !p.HasRole("group_admin") {
+		return ErrForbidden
+	}
+	if (typ == "business_system" || typ == "asset") && (in.ExpectedVersion == nil || *in.ExpectedVersion <= 0) {
+		return ErrVersionRequired
+	}
 	org, err := resourceOrg(ctx, s.pool, typ, id)
 	if err != nil {
 		return err
@@ -358,7 +372,7 @@ func (s *Service) SaveValues(ctx context.Context, p auth.Principal, typ, id stri
 		}
 		value, present := provided[d.FieldKey]
 		if !present {
-			value = existing[d.FieldKey]
+			value, present = existing[d.FieldKey]
 		}
 		if !present || isBlank(value) {
 			return ErrInvalid
@@ -369,6 +383,24 @@ func (s *Service) SaveValues(ctx context.Context, p auth.Principal, typ, id stri
 		return err
 	}
 	defer tx.Rollback(ctx)
+	if typ == "business_system" || typ == "asset" {
+		var nextVersion int
+		table := "business_systems"
+		if typ == "asset" {
+			table = "assets"
+		}
+		query := `UPDATE ` + table + `
+			SET version=version+1, updated_by=$1::uuid, updated_at=now()
+			WHERE id=$2::uuid AND deleted_at IS NULL AND version=$3
+			RETURNING version`
+		err = tx.QueryRow(ctx, query, p.UserID, id, *in.ExpectedVersion).Scan(&nextVersion)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return ErrVersionConflict
+		}
+		if err != nil {
+			return err
+		}
+	}
 	for key, value := range provided {
 		d := byKey[key]
 		raw, _ := json.Marshal(value)

@@ -38,9 +38,19 @@ func (s *Service) RestorePublishedVersion(ctx context.Context, principal auth.Pr
 		return Asset{}, ErrForbidden
 	}
 
+	if input.ExpectedVersion == nil || *input.ExpectedVersion < 0 {
+		return Asset{}, ErrVersionRequired
+	}
+	if (*input.ExpectedVersion == 0) != (input.ExpectedWorkingVersionID == "") {
+		return Asset{}, ErrInvalid
+	}
+
 	working, err := s.getWorkingBySource(ctx, principal, current.ID)
 	switch {
 	case err == nil:
+		if input.ExpectedWorkingVersionID != working.ID || *input.ExpectedVersion != working.Version {
+			return Asset{}, ErrEditConflict
+		}
 		if working.TaskID != "" || working.DraftStatus == "submitted" {
 			return Asset{}, ErrTaskBound
 		}
@@ -48,6 +58,9 @@ func (s *Service) RestorePublishedVersion(ctx context.Context, principal auth.Pr
 	case !errors.Is(err, ErrNotFound):
 		return Asset{}, err
 	default:
+		if *input.ExpectedVersion != 0 {
+			return Asset{}, ErrEditConflict
+		}
 		return s.createRestoredWorking(ctx, principal, current, input, requestID, ipAddress)
 	}
 }
@@ -83,13 +96,14 @@ func (s *Service) restoreWorking(ctx context.Context, principal auth.Principal, 
 	if err = s.ensureWorkingValueAvailable(ctx, tx, input.Type, normalizedValue, current.ID, current.PublishedID); err != nil {
 		return Asset{}, err
 	}
-	// The restore is issued from an immutable submission snapshot rather than
-	// from an editor holding the row version, so the transaction re-reads and
-	// locks the draft instead of trusting a version resolved outside it. This
-	// keeps a concurrent edit from being overwritten by a stale restore.
+	// A lock serializes writers but cannot authorize overwriting edits made
+	// after the operator confirmed the restore. Compare the confirmed token.
 	baseVersion, err := lockWorkingVersion(ctx, tx, current.ID)
 	if err != nil {
 		return Asset{}, err
+	}
+	if input.ExpectedWorkingVersionID != current.ID || input.ExpectedVersion == nil || baseVersion != *input.ExpectedVersion {
+		return Asset{}, ErrEditConflict
 	}
 	result, err := tx.Exec(ctx, `
 		UPDATE inventory_asset_drafts
@@ -157,16 +171,19 @@ func (s *Service) createRestoredWorking(ctx context.Context, principal auth.Prin
 	if err != nil {
 		return Asset{}, err
 	}
+	if err = s.ensureWorkingValueAvailable(ctx, tx, input.Type, normalized, "", current.ID); err != nil {
+		return Asset{}, err
+	}
 	var id string
 	err = tx.QueryRow(ctx, `
 		INSERT INTO inventory_asset_drafts(
-			task_id,organization_id,operation,source_asset_id,asset_type,asset_value,
+			task_id,organization_id,operation,source_asset_id,source_asset_version,asset_type,asset_value,
 			normalized_value,asset_name,environment,network_scope,network_area_id,
 			business_system_id,business_system_draft_id,status,importance,source,
 			owner_user_id,owner_name,notes,expires_at,custom_values,draft_status,
 			created_by,updated_by,version,assigned_to,last_edited_by
 		) VALUES(
-			NULL,$1::uuid,'update',$2::uuid,$3,$4,$5,NULLIF($6,''),$7,$8,
+			NULL,$1::uuid,'update',$2::uuid,$21,$3,$4,$5,NULLIF($6,''),$7,$8,
 			NULLIF($9,'')::uuid,NULLIF($10,'')::uuid,NULLIF($11,'')::uuid,$12,$13,$14,
 			NULLIF($15,'')::uuid,NULLIF($16,''),NULLIF($17,''),$18,$19::jsonb,
 			'editing',$20::uuid,$20::uuid,1,$20::uuid,$20::uuid
@@ -174,7 +191,7 @@ func (s *Service) createRestoredWorking(ctx context.Context, principal auth.Prin
 	`, input.OrganizationID, current.ID, input.Type, input.Value, normalized, input.Name,
 		input.Environment, input.NetworkScope, input.NetworkAreaID, bs, bsd, input.Status,
 		input.Importance, current.Source, input.OwnerUserID, input.OwnerName, input.Notes,
-		input.ExpiresAt, raw, principal.UserID).Scan(&id)
+		input.ExpiresAt, raw, principal.UserID, current.Version).Scan(&id)
 	if err != nil {
 		return Asset{}, mapUnreportedDB(err)
 	}

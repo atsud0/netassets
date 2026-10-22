@@ -32,13 +32,18 @@ import (
 )
 
 var (
-	ErrForbidden       = errors.New("forbidden")
-	ErrNotFound        = errors.New("not found")
-	ErrConflict        = errors.New("conflict")
-	ErrInUse           = errors.New("in use")
-	ErrInvalid         = errors.New("invalid input")
-	ErrEditConflict    = errors.New("working version has been updated by another user")
-	ErrVersionRequired = errors.New("expected_version is required")
+	ErrForbidden = errors.New("forbidden")
+	ErrNotFound  = errors.New("not found")
+	ErrConflict  = errors.New("conflict")
+	// ErrFormalVersionConflict is returned when a formal business-system row
+	// changed between the read and the compare-and-swap write. Keep it separate
+	// from ErrConflict (duplicate system code) so HTTP clients can show the
+	// correct retry instruction instead of claiming the code already exists.
+	ErrFormalVersionConflict = errors.New("formal business system version conflict")
+	ErrInUse                 = errors.New("in use")
+	ErrInvalid               = errors.New("invalid input")
+	ErrEditConflict          = errors.New("working version has been updated by another user")
+	ErrVersionRequired       = errors.New("expected_version is required")
 	// ErrInvalidOwnerContact wraps ErrInvalid so existing callers that only
 	// check for a generic invalid input keep working, while the HTTP layer can
 	// still point at the offending field.
@@ -88,6 +93,8 @@ type BusinessSystem struct {
 }
 
 type CreateInput struct {
+	// Restore-only token: empty ID and version 0 assert that no active working copy exists.
+	ExpectedWorkingVersionID             string              `json:"-"`
 	Code                                 string              `json:"code"`
 	Name                                 string              `json:"name"`
 	ShortName                            string              `json:"short_name"`
@@ -108,10 +115,9 @@ type CreateInput struct {
 	DataStorageLocation                  string              `json:"data_storage_location"`
 	SecurityNotes                        string              `json:"security_notes"`
 	CustomValues                         []customfield.Value `json:"custom_values,omitempty"`
-	// ExpectedVersion is only meaningful for working-version (draft) writes. It
-	// carries the optimistic-lock value the client last saw; direct working-space
-	// updates and deletes must reject stale writes instead of silently
-	// overwriting another editor's change.
+	// ExpectedVersion carries the optimistic-lock value the client last saw.
+	// Formal and working-version writes reject stale revisions. Historical
+	// restores alone accept zero to assert that no working copy existed.
 	ExpectedVersion *int `json:"expected_version,omitempty"`
 }
 
@@ -212,7 +218,7 @@ func (s *Service) List(ctx context.Context, principal auth.Principal) ([]Busines
                p.contains_personal_information, p.contains_sensitive_personal_information,
                p.personal_information_record_count, p.data_volume_over_100k,
                p.contains_important_data, p.contains_core_data, COALESCE(p.data_storage_location, ''), COALESCE(p.notes, ''),
-               bs.created_at, bs.updated_at
+               bs.created_at, bs.updated_at, bs.version
         FROM business_systems bs
         JOIN organizations o ON o.id = bs.owner_organization_id
         JOIN business_system_data_security_profiles p ON p.business_system_id = bs.id
@@ -233,7 +239,7 @@ func (s *Service) List(ctx context.Context, principal auth.Principal) ([]Busines
 			&item.InternetExposure, &item.Description, &item.ContainsPersonalInformation,
 			&item.ContainsSensitivePersonalInformation, &item.PersonalInformationRecordCount,
 			&item.DataVolumeOver100K, &item.ContainsImportantData, &item.ContainsCoreData,
-			&item.DataStorageLocation, &item.SecurityNotes, &item.CreatedAt, &item.UpdatedAt); err != nil {
+			&item.DataStorageLocation, &item.SecurityNotes, &item.CreatedAt, &item.UpdatedAt, &item.Version); err != nil {
 			return nil, fmt.Errorf("scan business system: %w", err)
 		}
 		items = append(items, item)
@@ -287,7 +293,7 @@ func (s *Service) SearchWithFilter(ctx context.Context, principal auth.Principal
                p.contains_personal_information, p.contains_sensitive_personal_information,
                p.personal_information_record_count, p.data_volume_over_100k,
                p.contains_important_data, p.contains_core_data, COALESCE(p.data_storage_location, ''), COALESCE(p.notes, ''),
-               bs.created_at, bs.updated_at, count(*) OVER ()
+               bs.created_at, bs.updated_at, bs.version, count(*) OVER ()
         FROM business_systems bs
         JOIN organizations o ON o.id = bs.owner_organization_id
         JOIN business_system_data_security_profiles p ON p.business_system_id = bs.id
@@ -314,7 +320,7 @@ func (s *Service) SearchWithFilter(ctx context.Context, principal auth.Principal
 			&item.InternetExposure, &item.Description, &item.ContainsPersonalInformation,
 			&item.ContainsSensitivePersonalInformation, &item.PersonalInformationRecordCount,
 			&item.DataVolumeOver100K, &item.ContainsImportantData, &item.ContainsCoreData,
-			&item.DataStorageLocation, &item.SecurityNotes, &item.CreatedAt, &item.UpdatedAt, &total); err != nil {
+			&item.DataStorageLocation, &item.SecurityNotes, &item.CreatedAt, &item.UpdatedAt, &item.Version, &total); err != nil {
 			return pagination.Result[BusinessSystem]{}, fmt.Errorf("scan business system page: %w", err)
 		}
 		items = append(items, item)
@@ -707,10 +713,10 @@ func (s *Service) create(ctx context.Context, principal auth.Principal, input Cr
             system_status, system_level, deployment_type, internet_exposure, description, created_by, updated_by
         ) VALUES ($1, $2, NULLIF($3, ''), $4::uuid, NULLIF($5, ''), NULLIF($6, ''), $7, $8,
                   NULLIF($9, ''), $10, NULLIF($11, ''), $12::uuid, $12::uuid)
-        RETURNING id::text, created_at, updated_at
+        RETURNING id::text, created_at, updated_at, version
     `, input.Code, input.Name, input.ShortName, input.OrganizationID, input.OwnerName, input.OwnerContact,
 		input.Status, input.Level, input.DeploymentType, input.InternetExposure, input.Description, principal.UserID).
-		Scan(&item.ID, &item.CreatedAt, &item.UpdatedAt)
+		Scan(&item.ID, &item.CreatedAt, &item.UpdatedAt, &item.Version)
 	if err != nil {
 		var pgErr *pgconn.PgError
 		if errors.As(err, &pgErr) && pgErr.Code == "23505" {
@@ -830,9 +836,6 @@ func (s *Service) Update(ctx context.Context, principal auth.Principal, systemID
 	if err != nil {
 		return BusinessSystem{}, err
 	}
-	if usesWorkingInventory(principal) {
-		return s.createWorkingUpdate(ctx, principal, current, input, requestID, ipAddress)
-	}
 	allowed, err := access.CanOperateOrganization(ctx, s.pool, principal, current.OrganizationID, "system.manage")
 	if err != nil {
 		return BusinessSystem{}, err
@@ -847,12 +850,34 @@ func (s *Service) Update(ctx context.Context, principal auth.Principal, systemID
 	if !allowed {
 		return BusinessSystem{}, ErrForbidden
 	}
+	if input.ExpectedVersion == nil || *input.ExpectedVersion <= 0 {
+		return BusinessSystem{}, ErrVersionRequired
+	}
+	if usesWorkingInventory(principal) {
+		if *input.ExpectedVersion != current.Version {
+			return BusinessSystem{}, ErrFormalVersionConflict
+		}
+		return s.createWorkingUpdate(ctx, principal, current, input, requestID, ipAddress)
+	}
 
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return BusinessSystem{}, fmt.Errorf("begin business system update: %w", err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
+	// Serialize system ownership/binding changes with remediation assignment and lifecycle transitions.
+	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtext('netassets-remediation'))`); err != nil {
+		return BusinessSystem{}, fmt.Errorf("lock remediation work during system update: %w", err)
+	}
+	var lockedVersion int
+	if err := tx.QueryRow(ctx, `SELECT version FROM business_systems WHERE id=$1::uuid AND deleted_at IS NULL FOR UPDATE`, systemID).Scan(&lockedVersion); errors.Is(err, pgx.ErrNoRows) {
+		return BusinessSystem{}, ErrNotFound
+	} else if err != nil {
+		return BusinessSystem{}, fmt.Errorf("lock business system version: %w", err)
+	}
+	if lockedVersion != *input.ExpectedVersion {
+		return BusinessSystem{}, ErrFormalVersionConflict
+	}
 	var organizationCode, organizationName, organizationStatus string
 	if err := tx.QueryRow(ctx, `SELECT organization_code, organization_name, status FROM organizations WHERE id = $1::uuid AND deleted_at IS NULL`, input.OrganizationID).
 		Scan(&organizationCode, &organizationName, &organizationStatus); errors.Is(err, pgx.ErrNoRows) {
@@ -872,20 +897,41 @@ func (s *Service) Update(ctx context.Context, principal auth.Principal, systemID
 			return BusinessSystem{}, ErrInUse
 		}
 	}
-	_, err = tx.Exec(ctx, `
+	command, err := tx.Exec(ctx, `
 		UPDATE business_systems SET system_code=$1, system_name=$2, short_name=NULLIF($3,''),
 			owner_organization_id=$4::uuid, owner_name=NULLIF($5,''), owner_contact=NULLIF($6,''),
-			system_status=$7, system_level=$8, deployment_type=NULLIF($9,''), internet_exposure=$10,
-			description=NULLIF($11,''), updated_by=$12::uuid, updated_at=now()
-		WHERE id=$13::uuid AND deleted_at IS NULL
+			system_status=$7::text, status_before_archive=CASE WHEN $7::text='archived' THEN CASE WHEN system_status='archived' THEN status_before_archive ELSE system_status END ELSE NULL END,
+			system_level=$8, deployment_type=NULLIF($9,''), internet_exposure=$10,
+			description=NULLIF($11,''), updated_by=$12::uuid, updated_at=now(),version=version+1
+		WHERE id=$13::uuid AND deleted_at IS NULL AND version=$14
 	`, input.Code, input.Name, input.ShortName, input.OrganizationID, input.OwnerName, input.OwnerContact,
-		input.Status, input.Level, input.DeploymentType, input.InternetExposure, input.Description, principal.UserID, systemID)
+		input.Status, input.Level, input.DeploymentType, input.InternetExposure, input.Description, principal.UserID, systemID, *input.ExpectedVersion)
 	if err != nil {
 		var pgErr *pgconn.PgError
 		if errors.As(err, &pgErr) && pgErr.Code == "23505" {
 			return BusinessSystem{}, ErrConflict
 		}
 		return BusinessSystem{}, fmt.Errorf("update business system: %w", err)
+	}
+	if command.RowsAffected() == 0 {
+		return BusinessSystem{}, ErrFormalVersionConflict
+	}
+	if current.Status != input.Status {
+		if input.Status == "archived" {
+			if _, err := remediationretire.Retire(ctx, tx, principal.UserID, remediationretire.SystemColumn, "business_system_id = $1::uuid", systemID,
+				"system_retired", map[string]any{"business_system_id": systemID, "reason": "关联业务系统已归档，整改任务待改派"}); err != nil {
+				return BusinessSystem{}, err
+			}
+		} else if current.Status == "archived" {
+			revivedTaskIDs, err := remediationretire.Revive(ctx, tx, remediationretire.SystemColumn, "business_system_id = $1::uuid", systemID)
+			if err != nil {
+				return BusinessSystem{}, err
+			}
+			if err := remediationretire.RecordEvents(ctx, tx, principal.UserID, "system_restored", revivedTaskIDs,
+				map[string]any{"business_system_id": systemID, "reason": "业务系统已恢复，整改任务待重新确认系统状态"}); err != nil {
+				return BusinessSystem{}, err
+			}
+		}
 	}
 	_, err = tx.Exec(ctx, `
 		UPDATE business_system_data_security_profiles SET contains_personal_information=$1,
@@ -921,7 +967,13 @@ func (s *Service) Update(ctx context.Context, principal auth.Principal, systemID
 	return item, nil
 }
 
-func (s *Service) SetArchived(ctx context.Context, principal auth.Principal, systemID string, archived bool, requestID, ipAddress string) (BusinessSystem, error) {
+func (s *Service) SetArchived(ctx context.Context, principal auth.Principal, systemID string, archived bool, expectedVersion *int, requestID, ipAddress string) (BusinessSystem, error) {
+	// Archiving/restoring mutates lifecycle state and retires or revives remediation
+	// tasks. Until lifecycle changes have a reviewable working-version model, only
+	// the formal-inventory writer may apply them. Batch operations delegate here.
+	if usesWorkingInventory(principal) {
+		return BusinessSystem{}, ErrForbidden
+	}
 	if !principal.HasPermission("system.manage") {
 		return BusinessSystem{}, ErrForbidden
 	}
@@ -940,6 +992,9 @@ func (s *Service) SetArchived(ctx context.Context, principal auth.Principal, sys
 	if !allowed {
 		return BusinessSystem{}, ErrForbidden
 	}
+	if expectedVersion == nil || *expectedVersion <= 0 {
+		return BusinessSystem{}, ErrVersionRequired
+	}
 	status := "running"
 	action, summary := "business_system.restore", "恢复业务系统"
 	eventType := notification.EventBusinessSystemRestored
@@ -953,12 +1008,39 @@ func (s *Service) SetArchived(ctx context.Context, principal auth.Principal, sys
 		return BusinessSystem{}, fmt.Errorf("begin business system status update: %w", err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
-	command, err := tx.Exec(ctx, `UPDATE business_systems SET system_status=$1, updated_by=$2::uuid, updated_at=now() WHERE id=$3::uuid AND deleted_at IS NULL`, status, principal.UserID, systemID)
+	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtext('netassets-remediation'))`); err != nil {
+		return BusinessSystem{}, fmt.Errorf("lock remediation work during system status update: %w", err)
+	}
+	var effectiveStatus string
+	err = tx.QueryRow(ctx, `UPDATE business_systems
+		SET system_status=CASE WHEN $1='archived' THEN 'archived' WHEN system_status='archived' THEN COALESCE(status_before_archive,'running') ELSE system_status END,
+		    status_before_archive=CASE WHEN $1='archived' THEN CASE WHEN system_status='archived' THEN status_before_archive ELSE system_status END ELSE NULL END,
+		    updated_by=$2::uuid, updated_at=now(),version=version+1
+		WHERE id=$3::uuid AND deleted_at IS NULL AND version=$4
+		RETURNING system_status`, status, principal.UserID, systemID, *expectedVersion).Scan(&effectiveStatus)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return BusinessSystem{}, ErrFormalVersionConflict
+	}
 	if err != nil {
 		return BusinessSystem{}, fmt.Errorf("set business system status: %w", err)
 	}
-	if command.RowsAffected() == 0 {
-		return BusinessSystem{}, ErrNotFound
+	status = effectiveStatus
+	if current.Status != status {
+		if archived {
+			if _, err := remediationretire.Retire(ctx, tx, principal.UserID, remediationretire.SystemColumn, "business_system_id = $1::uuid", systemID,
+				"system_retired", map[string]any{"business_system_id": systemID, "reason": "关联业务系统已归档，整改任务待改派"}); err != nil {
+				return BusinessSystem{}, err
+			}
+		} else {
+			revivedTaskIDs, err := remediationretire.Revive(ctx, tx, remediationretire.SystemColumn, "business_system_id = $1::uuid", systemID)
+			if err != nil {
+				return BusinessSystem{}, err
+			}
+			if err := remediationretire.RecordEvents(ctx, tx, principal.UserID, "system_restored", revivedTaskIDs,
+				map[string]any{"business_system_id": systemID, "reason": "业务系统已恢复，整改任务待重新确认系统状态"}); err != nil {
+				return BusinessSystem{}, err
+			}
+		}
 	}
 	changesJSON, err := json.Marshal([]fieldChange{{Field: "system_status", Label: "运行状态", Before: businessSystemStatusLabel(current.Status), After: businessSystemStatusLabel(status)}})
 	if err != nil {
@@ -1007,9 +1089,6 @@ func (s *Service) Delete(ctx context.Context, principal auth.Principal, systemID
 	if err != nil {
 		return err
 	}
-	if usesWorkingInventory(principal) {
-		return s.createWorkingDelete(ctx, principal, current)
-	}
 	allowed, err := access.CanOperateOrganization(ctx, s.pool, principal, current.OrganizationID, "system.manage")
 	if err != nil {
 		return err
@@ -1017,12 +1096,14 @@ func (s *Service) Delete(ctx context.Context, principal auth.Principal, systemID
 	if !allowed {
 		return ErrForbidden
 	}
-	var linkedAssets int
-	if err := s.pool.QueryRow(ctx, `SELECT count(*) FROM system_assets sa JOIN assets a ON a.id=sa.asset_id WHERE sa.business_system_id=$1::uuid AND a.deleted_at IS NULL`, systemID).Scan(&linkedAssets); err != nil {
-		return fmt.Errorf("check business system assets: %w", err)
+	if expectedVersion == nil || *expectedVersion <= 0 {
+		return ErrVersionRequired
 	}
-	if linkedAssets > 0 {
-		return ErrInUse
+	if usesWorkingInventory(principal) {
+		if *expectedVersion != current.Version {
+			return ErrFormalVersionConflict
+		}
+		return s.createWorkingDelete(ctx, principal, current)
 	}
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
@@ -1035,12 +1116,28 @@ func (s *Service) Delete(ctx context.Context, principal auth.Principal, systemID
 	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtext('netassets-remediation'))`); err != nil {
 		return fmt.Errorf("lock remediation work during business system delete: %w", err)
 	}
-	command, err := tx.Exec(ctx, `UPDATE business_systems SET deleted_at=now(), system_status='archived', updated_by=$1::uuid, updated_at=now() WHERE id=$2::uuid AND deleted_at IS NULL`, principal.UserID, systemID)
+	var lockedVersion int
+	if err := tx.QueryRow(ctx, `SELECT version FROM business_systems WHERE id=$1::uuid AND deleted_at IS NULL FOR UPDATE`, systemID).Scan(&lockedVersion); errors.Is(err, pgx.ErrNoRows) {
+		return ErrNotFound
+	} else if err != nil {
+		return fmt.Errorf("lock business system version for delete: %w", err)
+	}
+	if lockedVersion != *expectedVersion {
+		return ErrFormalVersionConflict
+	}
+	var linkedAssets int
+	if err := tx.QueryRow(ctx, `SELECT count(*) FROM system_assets sa JOIN assets a ON a.id=sa.asset_id AND a.deleted_at IS NULL WHERE sa.business_system_id=$1::uuid`, systemID).Scan(&linkedAssets); err != nil {
+		return fmt.Errorf("check business system assets: %w", err)
+	}
+	if linkedAssets > 0 {
+		return ErrInUse
+	}
+	command, err := tx.Exec(ctx, `UPDATE business_systems SET deleted_at=now(), system_status='archived', status_before_archive=CASE WHEN system_status='archived' THEN status_before_archive ELSE system_status END, updated_by=$1::uuid, updated_at=now(),version=version+1 WHERE id=$2::uuid AND deleted_at IS NULL AND version=$3`, principal.UserID, systemID, *expectedVersion)
 	if err != nil {
 		return fmt.Errorf("delete business system: %w", err)
 	}
 	if command.RowsAffected() == 0 {
-		return ErrNotFound
+		return ErrFormalVersionConflict
 	}
 	// The system disappearing invalidates its open remediation work. Record it as
 	// a retirement (same contract as asset retirement) rather than leaving the
@@ -1159,7 +1256,7 @@ func queryBusinessSystem(ctx context.Context, querier interface {
 			p.contains_personal_information, p.contains_sensitive_personal_information, p.personal_information_record_count,
 			p.data_volume_over_100k, p.contains_important_data, p.contains_core_data, COALESCE(p.data_storage_location,''), COALESCE(p.notes,''),
 			(SELECT count(*) FROM system_assets sa JOIN assets a ON a.id = sa.asset_id AND a.deleted_at IS NULL WHERE sa.business_system_id = bs.id),
-			bs.created_at, bs.updated_at
+			bs.created_at, bs.updated_at,bs.version
 		FROM business_systems bs JOIN organizations o ON o.id=bs.owner_organization_id
 		JOIN business_system_data_security_profiles p ON p.business_system_id=bs.id
 		WHERE bs.id::text=$1 %s
@@ -1168,7 +1265,7 @@ func queryBusinessSystem(ctx context.Context, querier interface {
 		&item.OwnerName, &item.OwnerContact, &item.Status, &item.Level, &item.DeploymentType, &item.InternetExposure,
 		&item.Description, &item.ContainsPersonalInformation, &item.ContainsSensitivePersonalInformation, &item.PersonalInformationRecordCount,
 		&item.DataVolumeOver100K, &item.ContainsImportantData, &item.ContainsCoreData, &item.DataStorageLocation, &item.SecurityNotes,
-		&item.AssetCount, &item.CreatedAt, &item.UpdatedAt)
+		&item.AssetCount, &item.CreatedAt, &item.UpdatedAt, &item.Version)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return BusinessSystem{}, ErrNotFound
 	}
@@ -1379,7 +1476,10 @@ func customFieldTemplateHint(definition customfield.Definition) string {
 	return definition.Description
 }
 
-type importUpdateTarget struct{ ID, Kind, DraftStatus, TaskID, Operation string }
+type importUpdateTarget struct {
+	ID, Kind, DraftStatus, TaskID, Operation string
+	Version                                  int
+}
 
 func normalizeImportMode(principal auth.Principal, mode string) (string, error) {
 	mode = strings.TrimSpace(mode)
@@ -1397,7 +1497,7 @@ func normalizeImportMode(principal auth.Principal, mode string) (string, error) 
 
 func (s *Service) findImportUpdateTarget(ctx context.Context, organizationID, code string) (importUpdateTarget, bool, error) {
 	var target importUpdateTarget
-	err := s.pool.QueryRow(ctx, `SELECT id::text,'draft',draft_status,COALESCE(task_id::text,''),operation FROM inventory_business_system_drafts WHERE organization_id=$1::uuid AND system_code=$2 AND draft_status IN('editing','submitted','returned') ORDER BY updated_at DESC LIMIT 1`, organizationID, code).Scan(&target.ID, &target.Kind, &target.DraftStatus, &target.TaskID, &target.Operation)
+	err := s.pool.QueryRow(ctx, `SELECT id::text,'draft',draft_status,COALESCE(task_id::text,''),operation,version FROM inventory_business_system_drafts WHERE organization_id=$1::uuid AND system_code=$2 AND draft_status IN('editing','submitted','returned') ORDER BY updated_at DESC LIMIT 1`, organizationID, code).Scan(&target.ID, &target.Kind, &target.DraftStatus, &target.TaskID, &target.Operation, &target.Version)
 	if err == nil {
 		return target, true, nil
 	}
@@ -1407,7 +1507,7 @@ func (s *Service) findImportUpdateTarget(ctx context.Context, organizationID, co
 	var formalID string
 	err = s.pool.QueryRow(ctx, `SELECT id::text FROM business_systems WHERE owner_organization_id=$1::uuid AND system_code=$2 AND deleted_at IS NULL LIMIT 1`, organizationID, code).Scan(&formalID)
 	if err == nil {
-		err = s.pool.QueryRow(ctx, `SELECT id::text,'draft',draft_status,COALESCE(task_id::text,''),operation FROM inventory_business_system_drafts WHERE source_system_id=$1::uuid AND draft_status IN('editing','submitted','returned') ORDER BY updated_at DESC LIMIT 1`, formalID).Scan(&target.ID, &target.Kind, &target.DraftStatus, &target.TaskID, &target.Operation)
+		err = s.pool.QueryRow(ctx, `SELECT id::text,'draft',draft_status,COALESCE(task_id::text,''),operation,version FROM inventory_business_system_drafts WHERE source_system_id=$1::uuid AND draft_status IN('editing','submitted','returned') ORDER BY updated_at DESC LIMIT 1`, formalID).Scan(&target.ID, &target.Kind, &target.DraftStatus, &target.TaskID, &target.Operation, &target.Version)
 		if err == nil {
 			return target, true, nil
 		}
@@ -1426,6 +1526,14 @@ func (s *Service) findImportUpdateTarget(ctx context.Context, organizationID, co
 
 func importTargetMutable(target importUpdateTarget) bool {
 	return target.Kind != "draft" || (target.TaskID == "" && target.DraftStatus != "submitted" && target.Operation != "delete")
+}
+
+func setImportTargetExpectedVersion(target importUpdateTarget, input *CreateInput) {
+	if target.Kind != "draft" || target.Version <= 0 {
+		return
+	}
+	version := target.Version
+	input.ExpectedVersion = &version
 }
 
 func businessSystemImportFields(definitions []customfield.Definition) []importmapping.Field {
@@ -1671,6 +1779,7 @@ func (s *Service) Import(ctx context.Context, principal auth.Principal, organiza
 				continue
 			}
 			if target.ID != "" {
+				setImportTargetExpectedVersion(target, &input)
 				_, err = s.Update(ctx, principal, target.ID, input, requestID, ipAddress)
 				operation = "update"
 			} else if duplicate {
@@ -1696,6 +1805,12 @@ func (s *Service) Import(ctx context.Context, principal auth.Principal, organiza
 			result.Errors = append(result.Errors, ImportError{Row: rowNumber, Code: "duplicate", Message: "系统编码已存在，未覆盖原记录"})
 		case errors.Is(err, ErrForbidden):
 			return ImportResult{}, ErrForbidden
+		case errors.Is(err, ErrVersionRequired):
+			result.FailureCount++
+			result.Errors = append(result.Errors, ImportError{Row: rowNumber, Code: "expected_version_required", Message: "工作版本缺少版本信息，请刷新后重试"})
+		case errors.Is(err, ErrEditConflict):
+			result.FailureCount++
+			result.Errors = append(result.Errors, ImportError{Row: rowNumber, Code: "working_version_conflict", Message: "工作版本已被其他人修改，请刷新后重试"})
 		case errors.Is(err, ErrNotFound):
 			result.FailureCount++
 			result.Errors = append(result.Errors, ImportError{Row: rowNumber, Code: "organization_not_found", Message: "所属组织不存在或已停用"})

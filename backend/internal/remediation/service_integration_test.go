@@ -90,6 +90,7 @@ func setup(t *testing.T) *fixture {
 	must(t, err)
 	return f
 }
+
 // findingVersion returns the current optimistic-lock token of a finding. Tests
 // that drive a status action have to send it, because the service now refuses
 // to write a finding whose row moved after the caller read it.
@@ -455,7 +456,9 @@ func TestAssetRetirementRetiresThenRestoresRemediationTask(t *testing.T) {
 	// Soft delete through the real asset service so the retirement runs inside
 	// the same transaction as the ledger delete.
 	assets := asset.NewService(f.pool)
-	must(t, assets.Delete(f.ctx, f.group, assetID, nil, "资产下线，核查关联漏洞", "asset-retire-delete", "127.0.0.1"))
+	var assetVersion int
+	must(t, f.pool.QueryRow(f.ctx, `SELECT version FROM assets WHERE id=$1::uuid`, assetID).Scan(&assetVersion))
+	must(t, assets.Delete(f.ctx, f.group, assetID, &assetVersion, "资产下线，核查关联漏洞", "asset-retire-delete", "127.0.0.1"))
 
 	var deletedAt any
 	must(t, f.pool.QueryRow(f.ctx, `SELECT deleted_at FROM assets WHERE id=$1::uuid`, assetID).Scan(&deletedAt))
@@ -556,15 +559,19 @@ func TestBusinessSystemRetirementRetiresAndRestoresTasks(t *testing.T) {
 	admin := f.group
 	admin.Roles = []string{auth.RoleGroupAdmin}
 	admin.Permissions = append(admin.Permissions, "system.manage")
-	if err := systems.Delete(f.ctx, admin, f.system, nil, "system-retire-delete", "127.0.0.1"); !errors.Is(err, businesssystem.ErrInUse) {
+	var systemVersion int
+	must(t, f.pool.QueryRow(f.ctx, `SELECT version FROM business_systems WHERE id=$1::uuid`, f.system).Scan(&systemVersion))
+	if err := systems.Delete(f.ctx, admin, f.system, &systemVersion, "system-retire-delete", "127.0.0.1"); !errors.Is(err, businesssystem.ErrInUse) {
 		t.Fatalf("system delete with a live linked asset = %v, want ErrInUse; a system with work in flight must be deleted from a system whose assets are already retired", err)
 	}
 	// Retire the linked asset first: the fixture's finding belongs to it, so the
 	// asset goes through the same soft delete production would use.
 	assets := asset.NewService(f.pool)
-	err = assets.Delete(f.ctx, f.group, assetID, nil, "系统下线前先退役资产", "system-retire-asset", "127.0.0.1")
+	var assetVersion int
+	must(t, f.pool.QueryRow(f.ctx, `SELECT version FROM assets WHERE id=$1::uuid`, assetID).Scan(&assetVersion))
+	err = assets.Delete(f.ctx, f.group, assetID, &assetVersion, "系统下线前先退役资产", "system-retire-asset", "127.0.0.1")
 	must(t, err)
-	if err := systems.Delete(f.ctx, admin, f.system, nil, "system-retire-delete", "127.0.0.1"); err != nil {
+	if err := systems.Delete(f.ctx, admin, f.system, &systemVersion, "system-retire-delete", "127.0.0.1"); err != nil {
 		t.Fatal(err)
 	}
 
@@ -755,7 +762,9 @@ func TestAssignableFindingsHideSoftDeletedAssets(t *testing.T) {
 	if !assignableHas(before.Items, f.findings[1]) {
 		t.Fatal("a live asset's finding is missing from the assignable list")
 	}
-	must(t, asset.NewService(f.pool).Delete(f.ctx, f.group, assetID, nil, "资产下线", "assignable-hide", "127.0.0.1"))
+	var assetVersion int
+	must(t, f.pool.QueryRow(f.ctx, `SELECT version FROM assets WHERE id=$1::uuid`, assetID).Scan(&assetVersion))
+	must(t, asset.NewService(f.pool).Delete(f.ctx, f.group, assetID, &assetVersion, "资产下线", "assignable-hide", "127.0.0.1"))
 	after, err := f.s.AssignableFindings(f.ctx, f.manager, f.order, page)
 	must(t, err)
 	if assignableHas(after.Items, f.findings[1]) {
@@ -826,7 +835,9 @@ func TestAcknowledgeRevivedBatchSettlesEachTaskIndependently(t *testing.T) {
 	admin := f.group
 	admin.Roles = []string{auth.RoleGroupAdmin}
 	admin.Permissions = append(admin.Permissions, "system.manage")
-	if err := systems.Delete(f.ctx, admin, f.system, nil, "整批恢复测试", "127.0.0.1"); err != nil {
+	var systemVersion int
+	must(t, f.pool.QueryRow(f.ctx, `SELECT version FROM business_systems WHERE id=$1::uuid`, f.system).Scan(&systemVersion))
+	if err := systems.Delete(f.ctx, admin, f.system, &systemVersion, "整批恢复测试", "127.0.0.1"); err != nil {
 		t.Fatal(err)
 	}
 	// Retirement is not revival: nothing enters the follow-up queue until the

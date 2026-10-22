@@ -97,23 +97,25 @@ type Asset struct {
 }
 
 type CreateInput struct {
-	Type              string              `json:"type"`
-	Value             string              `json:"value"`
-	Name              string              `json:"name"`
-	OrganizationID    string              `json:"organization_id"`
-	BusinessSystemID  string              `json:"business_system_id"`
-	Environment       string              `json:"environment"`
-	NetworkScope      string              `json:"network_scope"`
-	NetworkAreaID     string              `json:"network_area_id"`
-	Status            string              `json:"status"`
-	Importance        string              `json:"importance"`
-	OwnerUserID       string              `json:"owner_user_id"`
-	OwnerName         string              `json:"owner_name"`
-	Notes             string              `json:"notes"`
-	ExpiresAt         *time.Time          `json:"expires_at"`
-	CustomValues      []customfield.Value `json:"custom_values,omitempty"`
-	ExpectedUpdatedAt *time.Time          `json:"expected_updated_at,omitempty"`
-	ExpectedVersion   *int                `json:"expected_version,omitempty"`
+	// Restore-only token: empty ID and version 0 assert that no active working copy exists.
+	ExpectedWorkingVersionID string              `json:"-"`
+	Type                     string              `json:"type"`
+	Value                    string              `json:"value"`
+	Name                     string              `json:"name"`
+	OrganizationID           string              `json:"organization_id"`
+	BusinessSystemID         string              `json:"business_system_id"`
+	Environment              string              `json:"environment"`
+	NetworkScope             string              `json:"network_scope"`
+	NetworkAreaID            string              `json:"network_area_id"`
+	Status                   string              `json:"status"`
+	Importance               string              `json:"importance"`
+	OwnerUserID              string              `json:"owner_user_id"`
+	OwnerName                string              `json:"owner_name"`
+	Notes                    string              `json:"notes"`
+	ExpiresAt                *time.Time          `json:"expires_at"`
+	CustomValues             []customfield.Value `json:"custom_values,omitempty"`
+	ExpectedUpdatedAt        *time.Time          `json:"expected_updated_at,omitempty"`
+	ExpectedVersion          *int                `json:"expected_version,omitempty"`
 	// DirectChangeReason is required when a group administrator writes the
 	// formal ledger outside the inventory task. It is stored on the recheck task
 	// that is raised for the owning organization.
@@ -224,7 +226,7 @@ func (s *Service) List(ctx context.Context, principal auth.Principal) ([]Asset, 
 		       o.id::text, o.organization_code, o.organization_name,
 		       COALESCE(bs.id::text, ''), COALESCE(bs.system_code, ''), COALESCE(bs.system_name, ''),
 		       a.environment, a.network_scope, COALESCE(na.id::text, ''), COALESCE(na.area_name, ''),
-		       a.status, a.importance, a.source,
+		       a.status, a.version, a.importance, a.source,
 		       COALESCE(ao.owner_user_id::text, ''), COALESCE(owner_user.username, ''), COALESCE(owner_user.display_name, ''),
 		       COALESCE(ao.owner_name, ''), COALESCE(a.notes, ''), a.expires_at, a.created_at, a.updated_at
 		FROM assets a
@@ -252,7 +254,7 @@ func (s *Service) List(ctx context.Context, principal auth.Principal) ([]Asset, 
 			&item.OrganizationID, &item.OrganizationCode, &item.OrganizationName,
 			&item.BusinessSystemID, &item.BusinessSystemCode, &item.BusinessSystemName,
 			&item.Environment, &item.NetworkScope, &item.NetworkAreaID, &item.NetworkAreaName,
-			&item.Status, &item.Importance, &item.Source, &item.OwnerUserID, &item.OwnerUsername, &item.OwnerUserDisplayName,
+			&item.Status, &item.Version, &item.Importance, &item.Source, &item.OwnerUserID, &item.OwnerUsername, &item.OwnerUserDisplayName,
 			&item.OwnerName, &item.Notes, &item.ExpiresAt, &item.CreatedAt, &item.UpdatedAt); err != nil {
 			return nil, fmt.Errorf("scan asset: %w", err)
 		}
@@ -367,7 +369,7 @@ func (s *Service) SearchWithFilter(ctx context.Context, principal auth.Principal
 		       o.id::text, o.organization_code, o.organization_name,
 		       COALESCE(bs.id::text, ''), COALESCE(bs.system_code, ''), COALESCE(bs.system_name, ''),
 		       a.environment, a.network_scope, COALESCE(na.id::text, ''), COALESCE(na.area_name, ''),
-		       a.status, a.importance, a.source,
+		       a.status, a.version, a.importance, a.source,
 		       COALESCE(ao.owner_user_id::text, ''), COALESCE(owner_user.username, ''), COALESCE(owner_user.display_name, ''),
 		       COALESCE(ao.owner_name, ''), COALESCE(a.notes, ''), a.expires_at, a.created_at, a.updated_at,
 		       count(*) OVER ()
@@ -403,7 +405,7 @@ func (s *Service) SearchWithFilter(ctx context.Context, principal auth.Principal
 			&item.OrganizationID, &item.OrganizationCode, &item.OrganizationName,
 			&item.BusinessSystemID, &item.BusinessSystemCode, &item.BusinessSystemName,
 			&item.Environment, &item.NetworkScope, &item.NetworkAreaID, &item.NetworkAreaName,
-			&item.Status, &item.Importance, &item.Source, &item.OwnerUserID, &item.OwnerUsername, &item.OwnerUserDisplayName,
+			&item.Status, &item.Version, &item.Importance, &item.Source, &item.OwnerUserID, &item.OwnerUsername, &item.OwnerUserDisplayName,
 			&item.OwnerName, &item.Notes, &item.ExpiresAt, &item.CreatedAt, &item.UpdatedAt, &total); err != nil {
 			return pagination.Result[Asset]{}, fmt.Errorf("scan asset page: %w", err)
 		}
@@ -989,9 +991,9 @@ func createInTx(ctx context.Context, tx pgx.Tx, principal auth.Principal, input 
 		INSERT INTO assets (asset_type, asset_value, normalized_value, asset_name, environment, network_scope, network_area_id,
 		                    status, importance, source, notes, expires_at, created_by, updated_by, first_seen_at, last_seen_at)
 		VALUES ($1, $2, $3, NULLIF($4, ''), $5, $6, NULLIF($7, '')::uuid, $8, $9, $10, NULLIF($11, ''), $12, $13::uuid, $13::uuid, now(), now())
-		RETURNING id::text, created_at, updated_at
+		RETURNING id::text, version, created_at, updated_at
 	`, input.Type, input.Value, normalizedValue, input.Name, input.Environment, input.NetworkScope, input.NetworkAreaID,
-		input.Status, input.Importance, source, input.Notes, input.ExpiresAt, principal.UserID).Scan(&item.ID, &item.CreatedAt, &item.UpdatedAt)
+		input.Status, input.Importance, source, input.Notes, input.ExpiresAt, principal.UserID).Scan(&item.ID, &item.Version, &item.CreatedAt, &item.UpdatedAt)
 	if err != nil {
 		var pgErr *pgconn.PgError
 		if errors.As(err, &pgErr) && pgErr.Code == "23505" {
@@ -1052,6 +1054,12 @@ func (s *Service) Update(ctx context.Context, principal auth.Principal, assetID 
 		return Asset{}, err
 	}
 	if usesWorkingInventory(principal) {
+		if input.ExpectedVersion == nil || *input.ExpectedVersion <= 0 {
+			return Asset{}, ErrVersionRequired
+		}
+		if *input.ExpectedVersion != current.Version {
+			return Asset{}, ErrConflict
+		}
 		return s.createWorkingUpdate(ctx, principal, current, input, requestID, ipAddress)
 	}
 	normalizeInput(&input)
@@ -1061,6 +1069,9 @@ func (s *Service) Update(ctx context.Context, principal auth.Principal, assetID 
 	}
 	if err := validateDirectChangeReason(input.DirectChangeReason); err != nil {
 		return Asset{}, err
+	}
+	if input.ExpectedVersion == nil {
+		return Asset{}, ErrVersionRequired
 	}
 	if input.OrganizationID != current.OrganizationID && !principal.HasRole("group_admin") {
 		return Asset{}, ErrForbidden
@@ -1078,6 +1089,9 @@ func (s *Service) Update(ctx context.Context, principal auth.Principal, assetID 
 		return Asset{}, fmt.Errorf("begin asset update: %w", err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
+	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtext('netassets-remediation'))`); err != nil {
+		return Asset{}, fmt.Errorf("lock remediation work during asset update: %w", err)
+	}
 
 	var organizationCode, organizationName, organizationStatus string
 	if err := tx.QueryRow(ctx, `SELECT organization_code, organization_name, status FROM organizations WHERE id::text = $1 AND deleted_at IS NULL`, input.OrganizationID).
@@ -1088,6 +1102,15 @@ func (s *Service) Update(ctx context.Context, principal auth.Principal, assetID 
 	}
 	if organizationStatus != "enabled" {
 		return Asset{}, ErrInvalid
+	}
+	if input.OrganizationID != current.OrganizationID {
+		var activeFindings int
+		if err := tx.QueryRow(ctx, `SELECT count(*) FROM security_findings WHERE asset_id=$1::uuid AND status NOT IN ('resolved','fixed','false_positive','ignored','duplicate','risk_accepted')`, assetID).Scan(&activeFindings); err != nil {
+			return Asset{}, fmt.Errorf("check findings before asset organization transfer: %w", err)
+		}
+		if activeFindings > 0 {
+			return Asset{}, ErrConflict
+		}
 	}
 	networkAreaName, err := validateNetworkArea(ctx, tx, input.NetworkAreaID, input.OrganizationID, current.NetworkAreaID == input.NetworkAreaID)
 	if err != nil {
@@ -1117,10 +1140,10 @@ func (s *Service) Update(ctx context.Context, principal auth.Principal, assetID 
 	command, err := tx.Exec(ctx, `
 		UPDATE assets SET asset_type = $2, asset_value = $3, normalized_value = $4, asset_name = NULLIF($5, ''),
 		                  environment = $6, network_scope = $7, network_area_id = NULLIF($8, '')::uuid, status = $9, importance = $10,
-		                  notes = NULLIF($11, ''), expires_at = $12, updated_by = $13::uuid, updated_at = now()
-		WHERE id::text = $1 AND deleted_at IS NULL AND ($14::timestamptz IS NULL OR updated_at = $14::timestamptz)
+		                  notes = NULLIF($11, ''), expires_at = $12, version=version+1, updated_by = $13::uuid, updated_at = now()
+		WHERE id::text = $1 AND deleted_at IS NULL AND version=$14 AND ($15::timestamptz IS NULL OR updated_at = $15::timestamptz)
 	`, assetID, input.Type, input.Value, normalizedValue, input.Name, input.Environment, input.NetworkScope, input.NetworkAreaID,
-		input.Status, input.Importance, input.Notes, input.ExpiresAt, principal.UserID, input.ExpectedUpdatedAt)
+		input.Status, input.Importance, input.Notes, input.ExpiresAt, principal.UserID, *input.ExpectedVersion, input.ExpectedUpdatedAt)
 	if err != nil {
 		var pgErr *pgconn.PgError
 		if errors.As(err, &pgErr) && pgErr.Code == "23505" {
@@ -1129,10 +1152,26 @@ func (s *Service) Update(ctx context.Context, principal auth.Principal, assetID 
 		return Asset{}, fmt.Errorf("update asset: %w", err)
 	}
 	if command.RowsAffected() == 0 {
-		if input.ExpectedUpdatedAt != nil {
-			return Asset{}, ErrEditConflict
+		return Asset{}, ErrEditConflict
+	}
+	if current.Status != input.Status {
+		if input.Status == "archived" {
+			if _, err := remediationretire.Retire(ctx, tx, principal.UserID, remediationretire.AssetColumn,
+				"finding_id IN (SELECT id FROM security_findings WHERE asset_id = $1::uuid)", assetID,
+				"asset_retired", map[string]any{"asset_id": assetID, "reason": "关联资产已归档，整改任务待改派"}); err != nil {
+				return Asset{}, err
+			}
+		} else if current.Status == "archived" {
+			revivedTaskIDs, err := remediationretire.Revive(ctx, tx, remediationretire.AssetColumn,
+				"finding_id IN (SELECT id FROM security_findings WHERE asset_id = $1::uuid)", assetID)
+			if err != nil {
+				return Asset{}, err
+			}
+			if err := remediationretire.RecordEvents(ctx, tx, principal.UserID, "asset_restored", revivedTaskIDs,
+				map[string]any{"asset_id": assetID, "reason": "资产已恢复，整改任务待重新确认资产状态"}); err != nil {
+				return Asset{}, err
+			}
 		}
-		return Asset{}, ErrNotFound
 	}
 	if _, err := tx.Exec(ctx, `DELETE FROM asset_organizations WHERE asset_id::text = $1 AND is_primary`, assetID); err != nil {
 		return Asset{}, fmt.Errorf("clear primary asset organization: %w", err)
@@ -1234,10 +1273,19 @@ func (s *Service) Delete(ctx context.Context, principal auth.Principal, assetID 
 		return err
 	}
 	if usesWorkingInventory(principal) {
+		if expectedVersion == nil || *expectedVersion <= 0 {
+			return ErrVersionRequired
+		}
+		if *expectedVersion != current.Version {
+			return ErrConflict
+		}
 		return s.createWorkingDelete(ctx, principal, current, requestID, ipAddress)
 	}
 	if err := validateDirectChangeReason(directChangeReason); err != nil {
 		return err
+	}
+	if expectedVersion == nil {
+		return ErrVersionRequired
 	}
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
@@ -1252,14 +1300,14 @@ func (s *Service) Delete(ctx context.Context, principal auth.Principal, assetID 
 		return fmt.Errorf("lock remediation work during asset delete: %w", err)
 	}
 	command, err := tx.Exec(ctx, `
-		UPDATE assets SET deleted_at = now(), updated_at = now(), updated_by = $2::uuid
-		WHERE id::text = $1 AND deleted_at IS NULL
-	`, assetID, principal.UserID)
+		UPDATE assets SET deleted_at = now(), version=version+1, updated_at = now(), updated_by = $2::uuid
+		WHERE id::text = $1 AND deleted_at IS NULL AND version=$3
+	`, assetID, principal.UserID, *expectedVersion)
 	if err != nil {
 		return fmt.Errorf("delete asset: %w", err)
 	}
 	if command.RowsAffected() == 0 {
-		return ErrNotFound
+		return ErrEditConflict
 	}
 	// Retire the remediation work that hangs on this asset instead of cancelling
 	// it. The delivery history has to survive an audit, but the assignee must not
@@ -1462,7 +1510,7 @@ func queryAsset(ctx context.Context, querier interface {
 		       o.id::text, o.organization_code, o.organization_name,
 		       COALESCE(bs.id::text, ''), COALESCE(bs.system_code, ''), COALESCE(bs.system_name, ''),
 		       a.environment, a.network_scope, COALESCE(na.id::text, ''), COALESCE(na.area_name, ''),
-		       a.status, a.importance, a.source,
+		       a.status, a.version, a.importance, a.source,
 		       COALESCE(ao.owner_user_id::text, ''), COALESCE(owner_user.username, ''), COALESCE(owner_user.display_name, ''),
 		       COALESCE(ao.owner_name, ''), COALESCE(a.notes, ''), a.expires_at, a.created_at, a.updated_at
 		FROM assets a
@@ -1481,7 +1529,7 @@ func queryAsset(ctx context.Context, querier interface {
 		&item.OrganizationID, &item.OrganizationCode, &item.OrganizationName,
 		&item.BusinessSystemID, &item.BusinessSystemCode, &item.BusinessSystemName,
 		&item.Environment, &item.NetworkScope, &item.NetworkAreaID, &item.NetworkAreaName,
-		&item.Status, &item.Importance, &item.Source, &item.OwnerUserID, &item.OwnerUsername, &item.OwnerUserDisplayName,
+		&item.Status, &item.Version, &item.Importance, &item.Source, &item.OwnerUserID, &item.OwnerUsername, &item.OwnerUserDisplayName,
 		&item.OwnerName, &item.Notes, &item.ExpiresAt, &item.CreatedAt, &item.UpdatedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return Asset{}, ErrNotFound
@@ -1601,6 +1649,7 @@ func customFieldTemplateHint(definition customfield.Definition) string {
 
 type importUpdateTarget struct {
 	ID, Kind, DraftStatus, TaskID, Operation string
+	Version                                  int
 }
 
 func normalizeImportMode(principal auth.Principal, mode string) (string, error) {
@@ -1619,7 +1668,7 @@ func normalizeImportMode(principal auth.Principal, mode string) (string, error) 
 
 func (s *Service) findImportUpdateTarget(ctx context.Context, organizationID, assetType, normalizedValue string) (importUpdateTarget, bool, error) {
 	var target importUpdateTarget
-	err := s.pool.QueryRow(ctx, `SELECT id::text,'draft',draft_status,COALESCE(task_id::text,''),operation FROM inventory_asset_drafts WHERE organization_id=$1::uuid AND asset_type=$2 AND normalized_value=$3 AND draft_status IN`+inventorydraft.ActiveSQL+` ORDER BY updated_at DESC LIMIT 1`, organizationID, assetType, normalizedValue).Scan(&target.ID, &target.Kind, &target.DraftStatus, &target.TaskID, &target.Operation)
+	err := s.pool.QueryRow(ctx, `SELECT id::text,'draft',draft_status,COALESCE(task_id::text,''),operation,version FROM inventory_asset_drafts WHERE organization_id=$1::uuid AND asset_type=$2 AND normalized_value=$3 AND draft_status IN`+inventorydraft.ActiveSQL+` ORDER BY updated_at DESC LIMIT 1`, organizationID, assetType, normalizedValue).Scan(&target.ID, &target.Kind, &target.DraftStatus, &target.TaskID, &target.Operation, &target.Version)
 	if err == nil {
 		return target, true, nil
 	}
@@ -1629,7 +1678,7 @@ func (s *Service) findImportUpdateTarget(ctx context.Context, organizationID, as
 	var formalID string
 	err = s.pool.QueryRow(ctx, `SELECT a.id::text FROM assets a JOIN asset_organizations ao ON ao.asset_id=a.id AND ao.is_primary=true AND ao.relationship_type='owner' WHERE ao.organization_id=$1::uuid AND a.asset_type=$2 AND a.normalized_value=$3 AND a.deleted_at IS NULL LIMIT 1`, organizationID, assetType, normalizedValue).Scan(&formalID)
 	if err == nil {
-		err = s.pool.QueryRow(ctx, `SELECT id::text,'draft',draft_status,COALESCE(task_id::text,''),operation FROM inventory_asset_drafts WHERE source_asset_id=$1::uuid AND draft_status IN`+inventorydraft.ActiveSQL+` ORDER BY updated_at DESC LIMIT 1`, formalID).Scan(&target.ID, &target.Kind, &target.DraftStatus, &target.TaskID, &target.Operation)
+		err = s.pool.QueryRow(ctx, `SELECT id::text,'draft',draft_status,COALESCE(task_id::text,''),operation,version FROM inventory_asset_drafts WHERE source_asset_id=$1::uuid AND draft_status IN`+inventorydraft.ActiveSQL+` ORDER BY updated_at DESC LIMIT 1`, formalID).Scan(&target.ID, &target.Kind, &target.DraftStatus, &target.TaskID, &target.Operation, &target.Version)
 		if err == nil {
 			return target, true, nil
 		}
@@ -1648,6 +1697,14 @@ func (s *Service) findImportUpdateTarget(ctx context.Context, organizationID, as
 
 func importTargetMutable(target importUpdateTarget) bool {
 	return target.Kind != "draft" || (target.TaskID == "" && target.DraftStatus != "submitted" && target.Operation != "delete")
+}
+
+func setImportTargetExpectedVersion(target importUpdateTarget, input *CreateInput) {
+	if target.Kind != "draft" || target.Version <= 0 {
+		return
+	}
+	version := target.Version
+	input.ExpectedVersion = &version
 }
 
 func assetImportFields(definitions []customfield.Definition) []importmapping.Field {
@@ -1995,6 +2052,7 @@ func (s *Service) Import(ctx context.Context, principal auth.Principal, organiza
 				continue
 			}
 			if target.ID != "" {
+				setImportTargetExpectedVersion(target, &input)
 				input.DirectChangeReason = directChangeReason
 				imported, err = s.Update(ctx, principal, target.ID, input, requestID, ipAddress)
 				operation = "update"
@@ -2027,6 +2085,12 @@ func (s *Service) Import(ctx context.Context, principal auth.Principal, organiza
 			result.Errors = append(result.Errors, ImportError{Row: rowNumber, Code: "reference_not_found", Message: "所属组织或业务系统不存在"})
 		case errors.Is(err, ErrForbidden):
 			return ImportResult{}, ErrForbidden
+		case errors.Is(err, ErrVersionRequired):
+			result.FailureCount++
+			result.Errors = append(result.Errors, ImportError{Row: rowNumber, Code: "expected_version_required", Message: "工作版本缺少版本信息，请刷新后重试"})
+		case errors.Is(err, ErrEditConflict):
+			result.FailureCount++
+			result.Errors = append(result.Errors, ImportError{Row: rowNumber, Code: "working_version_conflict", Message: "工作版本已被其他人修改，请刷新后重试"})
 		case errors.Is(err, ErrInvalid):
 			result.FailureCount++
 			result.Errors = append(result.Errors, ImportError{Row: rowNumber, Code: "invalid", Message: "资产字段格式不正确"})

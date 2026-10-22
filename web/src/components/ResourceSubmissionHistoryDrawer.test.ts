@@ -91,6 +91,9 @@ describe('ResourceSubmissionHistoryDrawer', () => {
     })
     const confirm = vi.spyOn(ElMessageBox, 'confirm').mockResolvedValue({ action: 'confirm' } as never)
     const success = vi.spyOn(ElMessage, 'success').mockImplementation(() => ({ close: () => undefined }))
+    mocks.get.mockImplementation((url: string) => Promise.resolve({ data: url.endsWith('/restore-state')
+      ? { item: { working_version_id: 'working-1', expected_version: 7 } }
+      : { ...response, items: [{ ...response.items[0], status: 'approved', operation: 'update' }] } }))
     const wrapper = mountComponent('network_asset', true)
     await (wrapper.vm as unknown as { open: (id: string) => Promise<void> }).open('asset-1')
 
@@ -98,7 +101,8 @@ describe('ResourceSubmissionHistoryDrawer', () => {
       ...response.items[0], status: 'approved', operation: 'update',
     })
 
-    expect(mocks.post).toHaveBeenCalledWith('/inventory-tasks/resource-submissions/network_asset/asset-1/submission-1/restore')
+    expect(mocks.get).toHaveBeenCalledWith('/inventory-tasks/resource-submissions/network_asset/asset-1/restore-state')
+    expect(mocks.post).toHaveBeenCalledWith('/inventory-tasks/resource-submissions/network_asset/asset-1/submission-1/restore', { working_version_id: 'working-1', expected_version: 7 })
     expect(success).toHaveBeenCalledWith('已恢复为未上报工作版本，请在台账页面复核后选择纳入填报任务')
     expect(wrapper.emitted('restored')).toEqual([['working-1']])
     confirm.mockRestore()
@@ -128,6 +132,9 @@ describe('ResourceSubmissionHistoryDrawer', () => {
     mocks.post.mockRejectedValue(new Error('failed'))
     const confirm = vi.spyOn(ElMessageBox, 'confirm').mockResolvedValue({ action: 'confirm' } as never)
     const message = vi.spyOn(ElMessage, 'error').mockImplementation(() => ({ close: () => undefined }))
+    mocks.get.mockImplementation((url: string) => Promise.resolve({ data: url.endsWith('/restore-state')
+      ? { item: { working_version_id: 'working-1', expected_version: 7 } }
+      : { ...response, items: [{ ...response.items[0], status: 'approved', operation: 'update' }] } }))
     const wrapper = mountComponent('network_asset', true)
     await (wrapper.vm as unknown as { open: (id: string) => Promise<void> }).open('asset-1')
 
@@ -136,6 +143,56 @@ describe('ResourceSubmissionHistoryDrawer', () => {
     })
 
     expect(message).toHaveBeenCalledWith('恢复资源历史版本失败')
+    confirm.mockRestore()
+    message.mockRestore()
+  })
+
+  it('captures the absence of a working version and posts the zero-version token', async () => {
+    mocks.get.mockImplementation((url: string) => Promise.resolve({ data: url.endsWith('/restore-state')
+      ? { item: { working_version_id: '', expected_version: 0 } } : response }))
+    const confirm = vi.spyOn(ElMessageBox, 'confirm').mockResolvedValue({ action: 'confirm' } as never)
+    const success = vi.spyOn(ElMessage, 'success').mockImplementation(() => ({ close: () => undefined }))
+    const wrapper = mountComponent('business_system', true)
+    await (wrapper.vm as unknown as { open: (id: string) => Promise<void> }).open('system-1')
+    await (wrapper.vm as unknown as { restoreSubmission: (item: typeof response.items[number]) => Promise<void> }).restoreSubmission({ ...response.items[0], status: 'approved' })
+    expect(mocks.post).toHaveBeenCalledWith('/inventory-tasks/resource-submissions/business_system/system-1/submission-1/restore',
+      { working_version_id: '', expected_version: 0 })
+    confirm.mockRestore()
+    success.mockRestore()
+  })
+
+  it('does not retry or fetch a new token when the confirmed working copy conflicts', async () => {
+    mocks.get.mockImplementation((url: string) => Promise.resolve({ data: url.endsWith('/restore-state')
+      ? { item: { working_version_id: 'working-1', expected_version: 7 } } : response }))
+    mocks.post.mockRejectedValue({ response: { status: 409 } })
+    const confirm = vi.spyOn(ElMessageBox, 'confirm').mockImplementation(async () => {
+      expect(mocks.get).toHaveBeenLastCalledWith('/inventory-tasks/resource-submissions/network_asset/asset-1/restore-state')
+      return { action: 'confirm' } as never
+    })
+    const message = vi.spyOn(ElMessage, 'error').mockImplementation(() => ({ close: () => undefined }))
+    const wrapper = mountComponent('network_asset', true)
+    await (wrapper.vm as unknown as { open: (id: string) => Promise<void> }).open('asset-1')
+    await (wrapper.vm as unknown as { restoreSubmission: (item: typeof response.items[number]) => Promise<void> }).restoreSubmission({ ...response.items[0], status: 'approved' })
+    expect(mocks.post).toHaveBeenCalledTimes(1)
+    expect(mocks.get).toHaveBeenCalledTimes(2)
+    expect(wrapper.emitted('restored')).toBeUndefined()
+    expect(message).toHaveBeenCalled()
+    confirm.mockRestore()
+    message.mockRestore()
+  })
+
+  it('does not restore when state loading fails or confirmation is cancelled', async () => {
+    const confirm = vi.spyOn(ElMessageBox, 'confirm').mockRejectedValue('cancel')
+    const message = vi.spyOn(ElMessage, 'error').mockImplementation(() => ({ close: () => undefined }))
+    const wrapper = mountComponent('network_asset', true)
+    await (wrapper.vm as unknown as { open: (id: string) => Promise<void> }).open('asset-1')
+    mocks.get.mockRejectedValueOnce(new Error('state unavailable'))
+    await (wrapper.vm as unknown as { restoreSubmission: (item: typeof response.items[number]) => Promise<void> }).restoreSubmission({ ...response.items[0], status: 'approved' })
+    expect(confirm).not.toHaveBeenCalled()
+    mocks.get.mockResolvedValueOnce({ data: { item: { working_version_id: '', expected_version: 0 } } })
+    await (wrapper.vm as unknown as { restoreSubmission: (item: typeof response.items[number]) => Promise<void> }).restoreSubmission({ ...response.items[0], status: 'approved' })
+    expect(confirm).toHaveBeenCalledTimes(1)
+    expect(mocks.post).not.toHaveBeenCalled()
     confirm.mockRestore()
     message.mockRestore()
   })

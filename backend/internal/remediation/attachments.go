@@ -154,16 +154,26 @@ func (s *Service) Download(ctx context.Context, p auth.Principal, id, attachment
 	return Download{File: file, Disposition: mime.FormatMediaType("attachment", map[string]string{"filename": name}), Size: size}, nil
 }
 
-func (s *Service) RecordDownloadResult(ctx context.Context, p auth.Principal, id, file string, completed bool) error {
-	t, err := loadTask(ctx, s.pool, id)
-	if err != nil {
-		return err
+func (s *Service) RecordDownloadResult(ctx context.Context, p auth.Principal, id, file string, completed, executor bool) error {
+	if !validID(id) || !validID(file) {
+		return ErrNotFound
 	}
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback(ctx)
+	t, err := lockTask(ctx, tx, p, id, executor)
+	if err != nil {
+		return err
+	}
+	var exists bool
+	if err = tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM remediation_attachments WHERE id=$1::uuid AND task_id=$2::uuid)`, file, id).Scan(&exists); err != nil {
+		return dbError(err)
+	}
+	if !exists {
+		return ErrNotFound
+	}
 	if err = audit(ctx, tx, p, t.OrganizationID, file, "attachment.download", Object{"task_id": id, "completed": completed}); err != nil {
 		return err
 	}

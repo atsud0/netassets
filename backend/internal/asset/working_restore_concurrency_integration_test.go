@@ -89,6 +89,9 @@ func TestWorkingRestoreLocksVersionAndIncrementsIt(t *testing.T) {
 	input := validWorkingAssetInput(organizationID)
 	input.Value = "192.0.2.88"
 	input.Name = "恢复后的资产"
+	zeroVersion := 0
+	input.ExpectedVersion = &zeroVersion
+	input.ExpectedWorkingVersionID = ""
 
 	restored, err := service.RestorePublishedVersion(ctx, principal, publishedID, input, "req-asset-restore-create", "127.0.0.1")
 	if err != nil {
@@ -96,6 +99,20 @@ func TestWorkingRestoreLocksVersionAndIncrementsIt(t *testing.T) {
 	}
 	if restored.Version <= 0 || restored.LastEditedBy != userID {
 		t.Fatalf("restored working version = version %d last_edited_by %q, want a versioned draft owned by the actor", restored.Version, restored.LastEditedBy)
+	}
+	var formalVersion, sourceVersion int
+	if err := pool.QueryRow(ctx, `SELECT a.version,d.source_asset_version FROM assets a JOIN inventory_asset_drafts d ON d.id=$2::uuid WHERE a.id=$1::uuid`, publishedID, restored.ID).Scan(&formalVersion, &sourceVersion); err != nil {
+		t.Fatalf("load restored asset source version: %v", err)
+	}
+	if sourceVersion != formalVersion {
+		t.Fatalf("restored draft source version=%d, formal version=%d", sourceVersion, formalVersion)
+	}
+	var customValuesType string
+	if err := pool.QueryRow(ctx, `SELECT jsonb_typeof(custom_values) FROM inventory_asset_drafts WHERE id=$1::uuid`, restored.ID).Scan(&customValuesType); err != nil {
+		t.Fatalf("read empty working custom values JSON type: %v", err)
+	}
+	if customValuesType != "array" {
+		t.Fatalf("empty working custom values JSON type = %q, want array", customValuesType)
 	}
 
 	update := input
@@ -110,6 +127,8 @@ func TestWorkingRestoreLocksVersionAndIncrementsIt(t *testing.T) {
 
 	restoreInput := input
 	restoreInput.Name = "再次恢复的资产"
+	restoreInput.ExpectedVersion = &edited.Version
+	restoreInput.ExpectedWorkingVersionID = restored.ID
 	restoredAgain, err := service.RestorePublishedVersion(ctx, principal, publishedID, restoreInput, "req-asset-restore-replace", "127.0.0.1")
 	if err != nil {
 		t.Fatalf("restore over an existing working version: %v", err)

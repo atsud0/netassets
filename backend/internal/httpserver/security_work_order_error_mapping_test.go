@@ -98,11 +98,11 @@ func securityWorkOrderErrorFixtures() []securityWorkOrderFixture {
 			name:    "risk",
 			handler: riskWriter,
 			errors: map[string]error{
-				"forbidden":      securityworkorder.ErrForbidden,
-				"invalid":        securityworkorder.ErrInvalid,
-				"not_found":      securityworkorder.ErrNotFound,
-				"conflict":       securityworkorder.ErrConflict,
-				"invalid_state":  securityworkorder.ErrState,
+				"forbidden":     securityworkorder.ErrForbidden,
+				"invalid":       securityworkorder.ErrInvalid,
+				"not_found":     securityworkorder.ErrNotFound,
+				"conflict":      securityworkorder.ErrConflict,
+				"invalid_state": securityworkorder.ErrState,
 				// A risk decision is a read-modify-write like any other status
 				// action, so a missing or stale optimistic-lock token must be
 				// reported as such instead of leaking as a generic 400.

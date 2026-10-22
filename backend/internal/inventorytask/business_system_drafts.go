@@ -27,15 +27,16 @@ type BusinessSystemDraftInput struct {
 
 type BusinessSystemDraft struct {
 	businesssystem.BusinessSystem
-	TaskID         string     `json:"task_id"`
-	SourceSystemID string     `json:"source_system_id,omitempty"`
-	DraftStatus    string     `json:"draft_status"`
-	Operation      string     `json:"operation"`
-	Version        int        `json:"version"`
-	AssignedTo     string     `json:"assigned_to,omitempty"`
-	LastEditedBy   string     `json:"last_edited_by,omitempty"`
-	TakeoverReason string     `json:"takeover_reason,omitempty"`
-	TakenOverAt    *time.Time `json:"taken_over_at,omitempty"`
+	TaskID              string     `json:"task_id"`
+	SourceSystemID      string     `json:"source_system_id,omitempty"`
+	SourceSystemVersion int        `json:"-"`
+	DraftStatus         string     `json:"draft_status"`
+	Operation           string     `json:"operation"`
+	Version             int        `json:"version"`
+	AssignedTo          string     `json:"assigned_to,omitempty"`
+	LastEditedBy        string     `json:"last_edited_by,omitempty"`
+	TakeoverReason      string     `json:"takeover_reason,omitempty"`
+	TakenOverAt         *time.Time `json:"taken_over_at,omitempty"`
 
 	AssignedToName   string              `json:"assigned_to_name,omitempty"`
 	LastEditedByName string              `json:"last_edited_by_name,omitempty"`
@@ -186,9 +187,10 @@ func (s *Service) createBusinessSystemChangeDraft(ctx context.Context, principal
 		return BusinessSystemDraft{}, err
 	}
 	var current BusinessSystemDraftInput
+	var sourceSystemVersion int
 	var sourceOrganizationID string
 	err = tx.QueryRow(ctx, `
-		SELECT bs.system_code,bs.system_name,COALESCE(bs.short_name,''),bs.owner_organization_id::text,
+		SELECT bs.version,bs.system_code,bs.system_name,COALESCE(bs.short_name,''),bs.owner_organization_id::text,
 		       COALESCE(bs.owner_name,''),COALESCE(bs.owner_contact,''),bs.system_status,bs.system_level,
 		       COALESCE(bs.deployment_type,''),bs.internet_exposure,COALESCE(bs.description,''),
 		       profile.contains_personal_information,profile.contains_sensitive_personal_information,
@@ -198,7 +200,7 @@ func (s *Service) createBusinessSystemChangeDraft(ctx context.Context, principal
 		FROM business_systems bs
 		JOIN business_system_data_security_profiles profile ON profile.business_system_id=bs.id
 		WHERE bs.id::text=$1 AND bs.deleted_at IS NULL
-	`, sourceSystemID).Scan(&current.Code, &current.Name, &current.ShortName, &sourceOrganizationID,
+	`, sourceSystemID).Scan(&sourceSystemVersion, &current.Code, &current.Name, &current.ShortName, &sourceOrganizationID,
 		&current.OwnerName, &current.OwnerContact, &current.Status, &current.Level, &current.DeploymentType,
 		&current.InternetExposure, &current.Description, &current.ContainsPersonalInformation,
 		&current.ContainsSensitivePersonalInformation, &current.PersonalInformationRecordCount,
@@ -228,35 +230,23 @@ func (s *Service) createBusinessSystemChangeDraft(ctx context.Context, principal
 	var id string
 	err = tx.QueryRow(ctx, `
 		INSERT INTO inventory_business_system_drafts(
-			task_id,organization_id,operation,source_system_id,system_code,system_name,short_name,
+			task_id,organization_id,operation,source_system_id,source_system_version,system_code,system_name,short_name,
 			owner_name,owner_contact,system_status,system_level,deployment_type,internet_exposure,description,
 			contains_personal_information,contains_sensitive_personal_information,personal_information_record_count,
 			data_volume_over_100k,contains_important_data,contains_core_data,data_storage_location,security_notes,
 			custom_values,created_by,updated_by,assigned_to,last_edited_by
-		) VALUES($1::uuid,$2::uuid,$3,$4::uuid,$5,$6,NULLIF($7,''),NULLIF($8,''),NULLIF($9,''),$10,$11,
-			NULLIF($12,''),$13,NULLIF($14,''),$15,$16,$17,$18,$19,$20,NULLIF($21,''),NULLIF($22,''),$23::jsonb,$24::uuid,$24::uuid,$24::uuid,$24::uuid)
-		ON CONFLICT(organization_id,source_system_id) WHERE source_system_id IS NOT NULL AND draft_status IN ('editing','submitted','returned') DO UPDATE SET
-			operation=EXCLUDED.operation,system_code=EXCLUDED.system_code,system_name=EXCLUDED.system_name,
-			short_name=EXCLUDED.short_name,owner_name=EXCLUDED.owner_name,owner_contact=EXCLUDED.owner_contact,
-			system_status=EXCLUDED.system_status,system_level=EXCLUDED.system_level,deployment_type=EXCLUDED.deployment_type,
-			internet_exposure=EXCLUDED.internet_exposure,description=EXCLUDED.description,
-			contains_personal_information=EXCLUDED.contains_personal_information,
-			contains_sensitive_personal_information=EXCLUDED.contains_sensitive_personal_information,
-			personal_information_record_count=EXCLUDED.personal_information_record_count,
-			data_volume_over_100k=EXCLUDED.data_volume_over_100k,contains_important_data=EXCLUDED.contains_important_data,
-			contains_core_data=EXCLUDED.contains_core_data,data_storage_location=EXCLUDED.data_storage_location,
-			security_notes=EXCLUDED.security_notes,custom_values=EXCLUDED.custom_values,draft_status='editing',
-			updated_by=EXCLUDED.updated_by,updated_at=now()
-		WHERE inventory_business_system_drafts.draft_status IN ('editing','returned')
+		) VALUES($1::uuid,$2::uuid,$3,$4::uuid,NULLIF($5,0),$6,$7,NULLIF($8,''),NULLIF($9,''),$10,$11,$12,
+			NULLIF($13,''),$14,$15,$16,$17,$18,$19,$20,$21,NULLIF($22,''),NULLIF($23,''),$24::jsonb,$25::uuid,$25::uuid,$25::uuid,$25::uuid)
+		ON CONFLICT(organization_id,source_system_id) WHERE source_system_id IS NOT NULL AND draft_status IN ('editing','submitted','returned') DO NOTHING
 		RETURNING id::text
-	`, taskID, organizationID, operation, sourceSystemID, current.Code, current.Name, current.ShortName,
+	`, taskID, organizationID, operation, sourceSystemID, sourceSystemVersion, current.Code, current.Name, current.ShortName,
 		current.OwnerName, current.OwnerContact, current.Status, current.Level, current.DeploymentType,
 		current.InternetExposure, current.Description, current.ContainsPersonalInformation,
 		current.ContainsSensitivePersonalInformation, current.PersonalInformationRecordCount,
 		current.DataVolumeOver100K, current.ContainsImportantData, current.ContainsCoreData,
 		current.DataStorageLocation, current.SecurityNotes, rawValues, principal.UserID).Scan(&id)
 	if errors.Is(err, pgx.ErrNoRows) {
-		return BusinessSystemDraft{}, ErrState
+		return BusinessSystemDraft{}, ErrConflict
 	}
 	if err != nil {
 		return BusinessSystemDraft{}, mapBusinessSystemDraftDatabaseError(err)
@@ -410,6 +400,12 @@ func (s *Service) validateBusinessSystemDraftCustomValues(ctx context.Context, v
 	if _, _, err := customfield.ValidateValues(definitions, values); err != nil {
 		return nil, nil, ErrInvalid
 	}
+	// json.Marshal(nil) produces the JSON scalar null. Submission snapshots
+	// and working-version diffs expect custom_values to be an array and call
+	// jsonb_array_elements, so an empty form must be persisted as [] instead.
+	if values == nil {
+		values = []customfield.Value{}
+	}
 	raw, err := json.Marshal(values)
 	if err != nil {
 		return nil, nil, fmt.Errorf("encode business system draft custom values: %w", err)
@@ -431,7 +427,7 @@ func validateBusinessSystemDraftOrganization(ctx context.Context, q queryRower, 
 }
 
 const businessSystemDraftSelect = `
-	SELECT draft.id::text,draft.task_id::text,COALESCE(draft.source_system_id::text,''),draft.operation,draft.draft_status,draft.version,COALESCE(draft.assigned_to::text,''),COALESCE(draft.last_edited_by::text,''),COALESCE(draft.takeover_reason,''),draft.taken_over_at,
+	SELECT draft.id::text,draft.task_id::text,COALESCE(draft.source_system_id::text,''),COALESCE(draft.source_system_version,0),draft.operation,draft.draft_status,draft.version,COALESCE(draft.assigned_to::text,''),COALESCE(draft.last_edited_by::text,''),COALESCE(draft.takeover_reason,''),draft.taken_over_at,
 	       draft.system_code,draft.system_name,COALESCE(draft.short_name,''),organization.id::text,organization.organization_code,organization.organization_name,
 	       COALESCE(draft.owner_name,''),COALESCE(draft.owner_contact,''),draft.system_status,draft.system_level,COALESCE(draft.deployment_type,''),draft.internet_exposure,COALESCE(draft.description,''),
 	       draft.contains_personal_information,draft.contains_sensitive_personal_information,draft.personal_information_record_count,draft.data_volume_over_100k,
@@ -445,7 +441,7 @@ func loadBusinessSystemDraft(ctx context.Context, q queryRower, draftID string) 
 func scanBusinessSystemDraft(row rowScanner) (BusinessSystemDraft, error) {
 	var item BusinessSystemDraft
 	var raw []byte
-	err := row.Scan(&item.ID, &item.TaskID, &item.SourceSystemID, &item.Operation, &item.DraftStatus, &item.Version, &item.AssignedTo, &item.LastEditedBy, &item.TakeoverReason, &item.TakenOverAt,
+	err := row.Scan(&item.ID, &item.TaskID, &item.SourceSystemID, &item.SourceSystemVersion, &item.Operation, &item.DraftStatus, &item.Version, &item.AssignedTo, &item.LastEditedBy, &item.TakeoverReason, &item.TakenOverAt,
 		&item.Code, &item.Name, &item.ShortName, &item.OrganizationID, &item.OrganizationCode, &item.OrganizationName,
 		&item.OwnerName, &item.OwnerContact, &item.Status, &item.Level, &item.DeploymentType, &item.InternetExposure, &item.Description,
 		&item.ContainsPersonalInformation, &item.ContainsSensitivePersonalInformation, &item.PersonalInformationRecordCount, &item.DataVolumeOver100K,
@@ -536,12 +532,38 @@ func publishBusinessSystemDrafts(ctx context.Context, tx pgx.Tx, principal auth.
 			}
 			resourceID = item.SourceSystemID
 			action, summary = "business_system.update", "审核发布填报业务系统变更"
-			result, err := tx.Exec(ctx, `UPDATE business_systems SET system_code=$2,system_name=$3,short_name=NULLIF($4,''),owner_name=NULLIF($5,''),owner_contact=NULLIF($6,''),system_status=$7,system_level=$8,deployment_type=NULLIF($9,''),internet_exposure=$10,description=NULLIF($11,''),updated_by=$12::uuid,updated_at=now() WHERE id::text=$1 AND owner_organization_id::text=$13 AND deleted_at IS NULL`, item.SourceSystemID, item.Code, item.Name, item.ShortName, item.OwnerName, item.OwnerContact, item.Status, item.Level, item.DeploymentType, item.InternetExposure, item.Description, principal.UserID, organizationID)
+			var previousStatus string
+			if item.SourceSystemVersion == 0 {
+				return ErrConflict
+			}
+			if err := tx.QueryRow(ctx, `SELECT system_status FROM business_systems WHERE id=$1::uuid AND owner_organization_id=$2::uuid AND deleted_at IS NULL AND version=$3 FOR UPDATE`, item.SourceSystemID, organizationID, item.SourceSystemVersion).Scan(&previousStatus); errors.Is(err, pgx.ErrNoRows) {
+				return ErrConflict
+			} else if err != nil {
+				return fmt.Errorf("load published business system status: %w", err)
+			}
+			result, err := tx.Exec(ctx, `UPDATE business_systems SET system_code=$2,system_name=$3,short_name=NULLIF($4,''),owner_name=NULLIF($5,''),owner_contact=NULLIF($6,''),system_status=$7,status_before_archive=CASE WHEN $7='archived' THEN CASE WHEN system_status='archived' THEN status_before_archive ELSE system_status END ELSE NULL END,system_level=$8,deployment_type=NULLIF($9,''),internet_exposure=$10,description=NULLIF($11,''),updated_by=$12::uuid,updated_at=now(),version=version+1 WHERE id::text=$1 AND owner_organization_id::text=$13 AND deleted_at IS NULL AND version=$14`, item.SourceSystemID, item.Code, item.Name, item.ShortName, item.OwnerName, item.OwnerContact, item.Status, item.Level, item.DeploymentType, item.InternetExposure, item.Description, principal.UserID, organizationID, item.SourceSystemVersion)
 			if err != nil {
 				return mapBusinessSystemDraftDatabaseError(err)
 			}
 			if result.RowsAffected() == 0 {
-				return ErrNotFound
+				return ErrConflict
+			}
+			if previousStatus != item.Status {
+				if item.Status == "archived" {
+					if _, err := remediationretire.Retire(ctx, tx, principal.UserID, remediationretire.SystemColumn, "business_system_id = $1::uuid", resourceID,
+						"system_retired", map[string]any{"business_system_id": resourceID, "source": "inventory_task", "reason": "关联业务系统已归档，整改任务待改派"}); err != nil {
+						return err
+					}
+				} else if previousStatus == "archived" {
+					revivedTaskIDs, err := remediationretire.Revive(ctx, tx, remediationretire.SystemColumn, "business_system_id = $1::uuid", resourceID)
+					if err != nil {
+						return err
+					}
+					if err := remediationretire.RecordEvents(ctx, tx, principal.UserID, "system_restored", revivedTaskIDs,
+						map[string]any{"business_system_id": resourceID, "source": "inventory_task", "reason": "业务系统已恢复，整改任务待重新确认系统状态"}); err != nil {
+						return err
+					}
+				}
 			}
 		case "delete":
 			if item.SourceSystemID == "" {
@@ -558,12 +580,15 @@ func publishBusinessSystemDrafts(ctx context.Context, tx pgx.Tx, principal auth.
 			if linkedAssets > 0 {
 				return ErrResourceInUse
 			}
-			result, err := tx.Exec(ctx, `UPDATE business_systems SET deleted_at=now(),system_status='archived',updated_by=$2::uuid,updated_at=now() WHERE id::text=$1 AND owner_organization_id::text=$3 AND deleted_at IS NULL`, resourceID, principal.UserID, organizationID)
+			if item.SourceSystemVersion == 0 {
+				return ErrConflict
+			}
+			result, err := tx.Exec(ctx, `UPDATE business_systems SET deleted_at=now(),system_status='archived',status_before_archive=CASE WHEN system_status='archived' THEN status_before_archive ELSE system_status END,version=version+1,updated_by=$2::uuid,updated_at=now() WHERE id::text=$1 AND owner_organization_id::text=$3 AND deleted_at IS NULL AND version=$4`, resourceID, principal.UserID, organizationID, item.SourceSystemVersion)
 			if err != nil {
 				return fmt.Errorf("delete published business system: %w", err)
 			}
 			if result.RowsAffected() == 0 {
-				return ErrNotFound
+				return ErrConflict
 			}
 			retiredTaskIDs, err := remediationretire.Retire(ctx, tx, principal.UserID, remediationretire.SystemColumn, "business_system_id = $1::uuid", resourceID,
 				"system_retired", map[string]any{"business_system_id": resourceID, "source": "inventory_task", "reason": "关联业务系统已删除，整改任务待改派"})

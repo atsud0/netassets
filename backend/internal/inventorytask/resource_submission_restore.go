@@ -18,6 +18,70 @@ import (
 	"netassets/internal/customfield"
 )
 
+// ResourceSubmissionRestoreInput describes the working copy the operator agreed
+// to replace. Version 0 with an empty ID explicitly asserts there is no copy.
+// A pointer distinguishes that assertion from old clients sending no token.
+type ResourceSubmissionRestoreInput struct {
+	WorkingVersionID string `json:"working_version_id"`
+	ExpectedVersion  *int   `json:"expected_version"`
+}
+
+// ResourceSubmissionRestoreState must be read before asking for confirmation.
+// It shares the restore endpoint's authorization and never exposes drafts to HQ.
+func (s *Service) ResourceSubmissionRestoreState(ctx context.Context, principal auth.Principal, resourceType, resourceID string) (ResourceSubmissionRestoreInput, error) {
+	resourceType, resourceID = strings.TrimSpace(resourceType), strings.TrimSpace(resourceID)
+	if !validSubmissionDiffResourceType(resourceType) || !inventoryResourceUUIDPattern.MatchString(resourceID) {
+		return ResourceSubmissionRestoreInput{}, ErrInvalid
+	}
+	target, err := s.authorizeResourceRestore(ctx, principal, resourceType, resourceID)
+	if err != nil {
+		return ResourceSubmissionRestoreInput{}, err
+	}
+	table, sourceColumn := "inventory_asset_drafts", "source_asset_id"
+	if resourceType == "business_system" {
+		table, sourceColumn = "inventory_business_system_drafts", "source_system_id"
+	}
+	var id, status string
+	var taskID *string
+	version := 0
+	err = s.pool.QueryRow(ctx, `SELECT id::text, version, task_id::text, draft_status FROM `+table+`
+		WHERE `+sourceColumn+`=$1::uuid AND organization_id=$2::uuid
+		AND draft_status IN ('editing','returned','submitted')`, target.CanonicalID, target.OrganizationID).
+		Scan(&id, &version, &taskID, &status)
+	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+		return ResourceSubmissionRestoreInput{}, err
+	}
+	if taskID != nil || status == "submitted" {
+		return ResourceSubmissionRestoreInput{}, ErrConflict
+	}
+	return ResourceSubmissionRestoreInput{WorkingVersionID: id, ExpectedVersion: &version}, nil
+}
+
+func (s *Service) authorizeResourceRestore(ctx context.Context, principal auth.Principal, resourceType, resourceID string) (resourceSubmissionTarget, error) {
+	if principal.HasRole("group_admin") || !principal.HasPermission("inventory.manage") {
+		return resourceSubmissionTarget{}, ErrForbidden
+	}
+	permission := "asset.manage"
+	if resourceType == "business_system" {
+		permission = "system.manage"
+	}
+	if !principal.HasPermission(permission) {
+		return resourceSubmissionTarget{}, ErrForbidden
+	}
+	target, err := s.loadResourceSubmissionTarget(ctx, resourceType, resourceID)
+	if err != nil {
+		return resourceSubmissionTarget{}, err
+	}
+	allowed, err := access.CanOperateOrganization(ctx, s.pool, principal, target.OrganizationID, permission)
+	if err != nil {
+		return resourceSubmissionTarget{}, err
+	}
+	if !allowed {
+		return resourceSubmissionTarget{}, ErrForbidden
+	}
+	return target, nil
+}
+
 type ResourceSubmissionRestoreResult struct {
 	WorkingVersionID string   `json:"working_version_id"`
 	PublishedID      string   `json:"published_id"`
@@ -41,34 +105,21 @@ type resourceSubmissionRestoreSnapshot struct {
 // into an organization-side unreported working version. It deliberately does
 // not update the published group ledger; the restored version must be selected
 // into a task, submitted and approved again.
-func (s *Service) RestoreResourceSubmission(ctx context.Context, principal auth.Principal, resourceType, resourceID, submissionID, requestID, ipAddress string) (ResourceSubmissionRestoreResult, error) {
+func (s *Service) RestoreResourceSubmission(ctx context.Context, principal auth.Principal, resourceType, resourceID, submissionID string, expected ResourceSubmissionRestoreInput, requestID, ipAddress string) (ResourceSubmissionRestoreResult, error) {
 	resourceType = strings.TrimSpace(resourceType)
 	resourceID = strings.TrimSpace(resourceID)
 	submissionID = strings.TrimSpace(submissionID)
 	if !validSubmissionDiffResourceType(resourceType) || !inventoryResourceUUIDPattern.MatchString(resourceID) || !inventoryResourceUUIDPattern.MatchString(submissionID) {
 		return ResourceSubmissionRestoreResult{}, ErrInvalid
 	}
-	if principal.HasRole("group_admin") || !principal.HasPermission("inventory.manage") {
-		return ResourceSubmissionRestoreResult{}, ErrForbidden
-	}
-	permission := "asset.manage"
-	if resourceType == "business_system" {
-		permission = "system.manage"
-	}
-	if !principal.HasPermission(permission) {
-		return ResourceSubmissionRestoreResult{}, ErrForbidden
-	}
-
-	target, err := s.loadResourceSubmissionTarget(ctx, resourceType, resourceID)
+	target, err := s.authorizeResourceRestore(ctx, principal, resourceType, resourceID)
 	if err != nil {
 		return ResourceSubmissionRestoreResult{}, err
 	}
-	allowed, err := access.CanOperateOrganization(ctx, s.pool, principal, target.OrganizationID, permission)
-	if err != nil {
-		return ResourceSubmissionRestoreResult{}, err
-	}
-	if !allowed {
-		return ResourceSubmissionRestoreResult{}, ErrForbidden
+	if expected.ExpectedVersion == nil || *expected.ExpectedVersion < 0 ||
+		((*expected.ExpectedVersion == 0) != (expected.WorkingVersionID == "")) ||
+		(expected.WorkingVersionID != "" && !inventoryResourceUUIDPattern.MatchString(expected.WorkingVersionID)) {
+		return ResourceSubmissionRestoreResult{}, ErrInvalid
 	}
 
 	snapshot, err := s.loadResourceSubmissionRestoreSnapshot(ctx, resourceType, target, submissionID)
@@ -87,6 +138,8 @@ func (s *Service) RestoreResourceSubmission(ctx context.Context, principal auth.
 		if buildErr != nil {
 			return ResourceSubmissionRestoreResult{}, buildErr
 		}
+		input.ExpectedVersion = expected.ExpectedVersion
+		input.ExpectedWorkingVersionID = expected.WorkingVersionID
 		item, restoreErr := asset.NewService(s.pool).RestorePublishedVersion(ctx, principal, target.CanonicalID, input, requestID, ipAddress)
 		if restoreErr != nil {
 			return ResourceSubmissionRestoreResult{}, mapAssetRestoreError(restoreErr)
@@ -98,6 +151,8 @@ func (s *Service) RestoreResourceSubmission(ctx context.Context, principal auth.
 		if buildErr != nil {
 			return ResourceSubmissionRestoreResult{}, buildErr
 		}
+		input.ExpectedVersion = expected.ExpectedVersion
+		input.ExpectedWorkingVersionID = expected.WorkingVersionID
 		item, restoreErr := businesssystem.NewService(s.pool).RestorePublishedVersion(ctx, principal, target.CanonicalID, input, requestID, ipAddress)
 		if restoreErr != nil {
 			return ResourceSubmissionRestoreResult{}, mapBusinessSystemRestoreError(restoreErr)
@@ -377,7 +432,9 @@ func mapAssetRestoreError(err error) error {
 		return ErrForbidden
 	case errors.Is(err, asset.ErrNotFound):
 		return ErrNotFound
-	case errors.Is(err, asset.ErrTaskBound), errors.Is(err, asset.ErrConflict), errors.Is(err, asset.ErrEditConflict):
+	case errors.Is(err, asset.ErrEditConflict):
+		return ErrEditConflict
+	case errors.Is(err, asset.ErrTaskBound), errors.Is(err, asset.ErrConflict):
 		return ErrConflict
 	case errors.Is(err, asset.ErrInvalid):
 		return ErrInvalid
@@ -392,6 +449,8 @@ func mapBusinessSystemRestoreError(err error) error {
 		return ErrForbidden
 	case errors.Is(err, businesssystem.ErrNotFound):
 		return ErrNotFound
+	case errors.Is(err, businesssystem.ErrEditConflict):
+		return ErrEditConflict
 	case errors.Is(err, businesssystem.ErrConflict), errors.Is(err, businesssystem.ErrInUse):
 		return ErrConflict
 	case errors.Is(err, businesssystem.ErrInvalid):

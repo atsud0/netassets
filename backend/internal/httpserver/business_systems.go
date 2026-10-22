@@ -274,8 +274,10 @@ func registerBusinessSystemRoutes(api *gin.RouterGroup, requireAuth gin.HandlerF
 		}
 		result, err := service.SetArchivedBatch(c.Request.Context(), mustPrincipal(c), input, c.GetString("request_id"), c.ClientIP())
 		switch {
+		case errors.Is(err, businesssystem.ErrForbidden):
+			writeAPIError(c, http.StatusForbidden, "forbidden", "当前账号无权批量处理业务系统")
 		case errors.Is(err, businesssystem.ErrInvalid):
-			writeAPIError(c, http.StatusBadRequest, "invalid_batch", "单次请选择 1 至 200 个业务系统")
+			writeAPIError(c, http.StatusBadRequest, "invalid_batch", "请选择带有最新版本号的业务系统")
 		case err != nil:
 			logger.Error("batch change business system status", "error", err, "request_id", c.GetString("request_id"))
 			writeAPIError(c, http.StatusInternalServerError, "internal_error", "批量处理业务系统失败")
@@ -383,7 +385,7 @@ func registerBusinessSystemRoutes(api *gin.RouterGroup, requireAuth gin.HandlerF
 		item, err := service.Update(c.Request.Context(), mustPrincipal(c), c.Param("id"), input, c.GetString("request_id"), c.ClientIP())
 		switch {
 		case errors.Is(err, businesssystem.ErrVersionRequired):
-			writeAPIError(c, http.StatusBadRequest, "expected_version_required", "编辑业务系统工作版本需要提供 expected_version")
+			writeAPIError(c, http.StatusBadRequest, "expected_version_required", "编辑业务系统需要提供 expected_version")
 		case errors.Is(err, businesssystem.ErrEditConflict):
 			writeAPIError(c, http.StatusConflict, "working_version_conflict", "该业务系统工作版本已被其他人更新，请刷新后重试")
 		case errors.Is(err, businesssystem.ErrForbidden):
@@ -394,6 +396,8 @@ func registerBusinessSystemRoutes(api *gin.RouterGroup, requireAuth gin.HandlerF
 			writeAPIError(c, http.StatusBadRequest, "invalid_business_system", "请检查系统信息和数据安全属性")
 		case errors.Is(err, businesssystem.ErrNotFound):
 			writeAPIError(c, http.StatusNotFound, "business_system_not_found", "业务系统或所属组织不存在")
+		case errors.Is(err, businesssystem.ErrFormalVersionConflict):
+			writeAPIError(c, http.StatusConflict, "formal_version_conflict", "业务系统已被其他人修改，请刷新后重试")
 		case errors.Is(err, businesssystem.ErrConflict):
 			writeAPIError(c, http.StatusConflict, "system_code_exists", "系统编码已存在")
 		case errors.Is(err, businesssystem.ErrInUse):
@@ -407,11 +411,11 @@ func registerBusinessSystemRoutes(api *gin.RouterGroup, requireAuth gin.HandlerF
 	})
 
 	group.POST("/:id/archive", func(c *gin.Context) {
-		item, err := service.SetArchived(c.Request.Context(), mustPrincipal(c), c.Param("id"), true, c.GetString("request_id"), c.ClientIP())
+		item, err := service.SetArchived(c.Request.Context(), mustPrincipal(c), c.Param("id"), true, parseBusinessSystemExpectedVersion(c), c.GetString("request_id"), c.ClientIP())
 		handleBusinessSystemStatusResult(c, item, err, logger, "归档")
 	})
 	group.POST("/:id/restore", func(c *gin.Context) {
-		item, err := service.SetArchived(c.Request.Context(), mustPrincipal(c), c.Param("id"), false, c.GetString("request_id"), c.ClientIP())
+		item, err := service.SetArchived(c.Request.Context(), mustPrincipal(c), c.Param("id"), false, parseBusinessSystemExpectedVersion(c), c.GetString("request_id"), c.ClientIP())
 		handleBusinessSystemStatusResult(c, item, err, logger, "恢复")
 	})
 
@@ -419,9 +423,11 @@ func registerBusinessSystemRoutes(api *gin.RouterGroup, requireAuth gin.HandlerF
 		err := service.Delete(c.Request.Context(), mustPrincipal(c), c.Param("id"), parseBusinessSystemExpectedVersion(c), c.GetString("request_id"), c.ClientIP())
 		switch {
 		case errors.Is(err, businesssystem.ErrVersionRequired):
-			writeAPIError(c, http.StatusBadRequest, "expected_version_required", "删除业务系统工作版本需要提供 expected_version")
+			writeAPIError(c, http.StatusBadRequest, "expected_version_required", "删除业务系统需要提供 expected_version")
 		case errors.Is(err, businesssystem.ErrEditConflict):
 			writeAPIError(c, http.StatusConflict, "working_version_conflict", "该业务系统工作版本已被其他人更新，请刷新后重试")
+		case errors.Is(err, businesssystem.ErrFormalVersionConflict):
+			writeAPIError(c, http.StatusConflict, "formal_version_conflict", "业务系统已被其他人修改，请刷新后重试")
 		case errors.Is(err, businesssystem.ErrForbidden):
 			writeAPIError(c, http.StatusForbidden, "forbidden", "当前账号无权删除该业务系统")
 		case errors.Is(err, businesssystem.ErrInvalid):
@@ -446,8 +452,12 @@ func handleBusinessSystemStatusResult(c *gin.Context, item businesssystem.Busine
 		writeAPIError(c, http.StatusForbidden, "forbidden", "当前账号无权"+action+"该业务系统")
 	case errors.Is(err, businesssystem.ErrInvalid):
 		writeAPIError(c, http.StatusBadRequest, "invalid_business_system_id", "业务系统编号不正确")
+	case errors.Is(err, businesssystem.ErrVersionRequired):
+		writeAPIError(c, http.StatusBadRequest, "expected_version_required", "归档或恢复业务系统需要提供 expected_version")
 	case errors.Is(err, businesssystem.ErrNotFound):
 		writeAPIError(c, http.StatusNotFound, "business_system_not_found", "业务系统不存在")
+	case errors.Is(err, businesssystem.ErrFormalVersionConflict):
+		writeAPIError(c, http.StatusConflict, "formal_version_conflict", "业务系统已被其他人修改，请刷新后重试")
 	case err != nil:
 		logger.Error("change business system status", "error", err, "request_id", c.GetString("request_id"))
 		writeAPIError(c, http.StatusInternalServerError, "internal_error", action+"业务系统失败")

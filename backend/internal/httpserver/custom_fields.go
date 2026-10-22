@@ -74,6 +74,10 @@ func writeCustomFieldError(c *gin.Context, logger *slog.Logger, err error) {
 		writeAPIError(c, http.StatusBadRequest, "invalid_custom_field", "请检查字段编码、名称、类型、选项及排序")
 	case errors.Is(err, customfield.ErrConflict):
 		writeAPIError(c, http.StatusConflict, "field_key_exists", "该对象类型下字段编码已存在")
+	case errors.Is(err, customfield.ErrVersionRequired):
+		writeAPIError(c, http.StatusBadRequest, "expected_version_required", "保存资产或业务系统自定义字段需要提供 expected_version")
+	case errors.Is(err, customfield.ErrVersionConflict):
+		writeAPIError(c, http.StatusConflict, "formal_version_conflict", "业务系统已被其他人修改，请刷新后重试")
 	default:
 		logger.Error("custom field", "error", err, "request_id", c.GetString("request_id"))
 		writeAPIError(c, http.StatusInternalServerError, "internal_error", "处理自定义字段失败")

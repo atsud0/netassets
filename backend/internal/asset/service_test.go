@@ -371,6 +371,36 @@ func TestAssetBatchErrorForTaskBoundDraft(t *testing.T) {
 	}
 }
 
+func TestAssetBatchErrorPreservesConcurrencySemantics(t *testing.T) {
+	tests := []struct {
+		err  error
+		code string
+	}{
+		{ErrVersionRequired, "expected_version_required"},
+		{ErrEditConflict, "asset_edit_conflict"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.code, func(t *testing.T) {
+			code, _ := assetBatchError(tt.err)
+			if code != tt.code {
+				t.Fatalf("assetBatchError(%v) code = %q, want %q", tt.err, code, tt.code)
+			}
+		})
+	}
+}
+
+func TestSetImportTargetExpectedVersionOnlySetsDraftVersion(t *testing.T) {
+	input := CreateInput{}
+	setImportTargetExpectedVersion(importUpdateTarget{Kind: "formal", Version: 7}, &input)
+	if input.ExpectedVersion != nil {
+		t.Fatal("formal import target unexpectedly received a draft expected_version")
+	}
+	setImportTargetExpectedVersion(importUpdateTarget{Kind: "draft", Version: 12}, &input)
+	if input.ExpectedVersion == nil || *input.ExpectedVersion != 12 {
+		t.Fatalf("draft import target expected_version = %v, want 12", input.ExpectedVersion)
+	}
+}
+
 func TestParseImportExpiry(t *testing.T) {
 	tests := []struct {
 		name      string

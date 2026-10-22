@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/jackc/pgx/v5"
+
 	"netassets/internal/asset"
 	"netassets/internal/auth"
 )
@@ -49,7 +51,21 @@ type BatchAcceptResult struct {
 // the confirmed ones nor blocks the reviewer from retrying the rest. Re-running
 // the same batch is safe: candidates that already carry a working version are
 // reported as settled instead of creating a second unpublished draft.
+// BatchAcceptAfterCreate runs inside the transaction for one candidate after its
+// working version has been created and the candidate has been locked. The
+// candidate id is part of the callback because batch callers cannot capture a
+// route parameter the way the single-item handler can.
+type BatchAcceptAfterCreate func(context.Context, pgx.Tx, string, asset.Asset) error
+
 func (s *Service) BatchAccept(ctx context.Context, principal auth.Principal, in BatchAcceptInput, requestID, ip string) BatchAcceptResult {
+	return s.BatchAcceptWithAfterCreate(ctx, principal, in, requestID, ip, nil)
+}
+
+// BatchAcceptWithAfterCreate is the transaction-aware batch entry point. Each
+// candidate still gets an independent transaction, but callers can atomically
+// release facts that depend on the newly-created working version (for example
+// imported findings waiting behind the candidate).
+func (s *Service) BatchAcceptWithAfterCreate(ctx context.Context, principal auth.Principal, in BatchAcceptInput, requestID, ip string, afterCreate BatchAcceptAfterCreate) BatchAcceptResult {
 	result := BatchAcceptResult{Items: make([]BatchAcceptItemResult, 0, len(in.Items))}
 	seen := make(map[string]bool, len(in.Items))
 	for _, item := range in.Items {
@@ -67,7 +83,7 @@ func (s *Service) BatchAccept(ctx context.Context, principal auth.Principal, in 
 			result.Failed++
 			break
 		}
-		outcome := s.batchAcceptOne(ctx, principal, id, item.Input, requestID, ip)
+		outcome := s.batchAcceptOne(ctx, principal, id, item.Input, requestID, ip, afterCreate)
 		result.Items = append(result.Items, outcome)
 		switch {
 		case outcome.Succeeded:
@@ -81,9 +97,15 @@ func (s *Service) BatchAccept(ctx context.Context, principal auth.Principal, in 
 	return result
 }
 
-func (s *Service) batchAcceptOne(ctx context.Context, principal auth.Principal, id string, in AcceptInput, requestID, ip string) BatchAcceptItemResult {
+func (s *Service) batchAcceptOne(ctx context.Context, principal auth.Principal, id string, in AcceptInput, requestID, ip string, afterCreate BatchAcceptAfterCreate) BatchAcceptItemResult {
 	outcome := BatchAcceptItemResult{CandidateID: id}
-	created, err := s.Accept(ctx, principal, id, in, requestID, ip)
+	var singleAfterCreate AcceptAfterCreate
+	if afterCreate != nil {
+		singleAfterCreate = func(ctx context.Context, tx pgx.Tx, created asset.Asset) error {
+			return afterCreate(ctx, tx, id, created)
+		}
+	}
+	created, err := s.AcceptWithAfterCreate(ctx, principal, id, in, requestID, ip, singleAfterCreate)
 	switch {
 	case err == nil:
 		outcome.Succeeded = true

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"netassets/internal/auth"
@@ -61,6 +62,19 @@ func CanAccessOrganization(ctx context.Context, pool *pgxpool.Pool, principal au
 // the exact role that grants that permission. Checking these independently is not
 // sufficient: a user can hold different roles in different organizations.
 func CanOperateOrganization(ctx context.Context, pool *pgxpool.Pool, principal auth.Principal, organizationID, permission string) (bool, error) {
+	return canOperateOrganization(ctx, pool, principal, organizationID, permission)
+}
+
+// CanOperateOrganizationInTx keeps authorization reads on the mutation transaction.
+func CanOperateOrganizationInTx(ctx context.Context, tx pgx.Tx, principal auth.Principal, organizationID, permission string) (bool, error) {
+	return canOperateOrganization(ctx, tx, principal, organizationID, permission)
+}
+
+type organizationQuerier interface {
+	QueryRow(context.Context, string, ...any) pgx.Row
+}
+
+func canOperateOrganization(ctx context.Context, pool organizationQuerier, principal auth.Principal, organizationID, permission string) (bool, error) {
 	if principal.HasRole("group_admin") {
 		return true, nil
 	}

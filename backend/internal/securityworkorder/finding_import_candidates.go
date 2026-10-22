@@ -511,7 +511,7 @@ func scanFindingImportCandidate(row pgx.Row, withTotal bool) (FindingImportCandi
 }
 
 func (s *Service) GetFindingImportCandidate(ctx context.Context, principal auth.Principal, id string) (FindingImportCandidate, error) {
-	if !principal.CanManageSecurityFindings() {
+	if !principal.CanManageSecurityFindings() && !principal.HasPermission("asset.manage") {
 		return FindingImportCandidate{}, ErrForbidden
 	}
 	if !validUUID(strings.TrimSpace(id)) {
@@ -522,7 +522,19 @@ func (s *Service) GetFindingImportCandidate(ctx context.Context, principal auth.
 	if errors.Is(err, pgx.ErrNoRows) {
 		return FindingImportCandidate{}, ErrNotFound
 	}
-	return item, err
+	if err != nil {
+		return FindingImportCandidate{}, err
+	}
+	if !principal.CanManageSecurityFindings() {
+		allowed, err := s.canReleaseCandidateFindings(ctx, principal, item.AssetCandidateID)
+		if err != nil {
+			return FindingImportCandidate{}, err
+		}
+		if !allowed {
+			return FindingImportCandidate{}, ErrForbidden
+		}
+	}
+	return item, nil
 }
 
 func (s *Service) ListFindingImportScopeOptions(ctx context.Context, principal auth.Principal, candidateID string) ([]FindingImportScopeOption, error) {
@@ -644,11 +656,24 @@ func (s *Service) linkFindingToWorkingVersion(ctx context.Context, tx pgx.Tx, pr
 		SELECT d.organization_id::text
 		FROM inventory_asset_drafts d
 		JOIN organizations o ON o.id=d.organization_id AND o.status='enabled' AND o.deleted_at IS NULL
-		WHERE d.id=$1::uuid AND d.operation='create' AND d.draft_status IN ('editing','submitted','returned','published')
+		WHERE d.id=$1::uuid AND d.operation='create' AND d.draft_status IN ('editing','submitted','returned')
 		FOR UPDATE OF d`, input.PendingAssetDraftID).Scan(&organizationID); errors.Is(err, pgx.ErrNoRows) {
 		return FindingImportCandidate{}, ErrNotFound
 	} else if err != nil {
 		return FindingImportCandidate{}, fmt.Errorf("load finding import working version: %w", err)
+	}
+	if candidate.AssetCandidateID != input.AssetCandidateID {
+		return FindingImportCandidate{}, ErrConflict
+	}
+	var candidateOrganization string
+	if err := tx.QueryRow(ctx, `SELECT COALESCE(organization_id::text,'') FROM asset_candidates WHERE id=$1::uuid AND working_version_draft_id=$2::uuid FOR UPDATE`, input.AssetCandidateID, input.PendingAssetDraftID).Scan(&candidateOrganization); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return FindingImportCandidate{}, ErrConflict
+		}
+		return FindingImportCandidate{}, fmt.Errorf("load finding asset candidate: %w", err)
+	}
+	if candidateOrganization != organizationID {
+		return FindingImportCandidate{}, ErrConflict
 	}
 
 	var duplicateFindingID string
@@ -665,8 +690,9 @@ func (s *Service) linkFindingToWorkingVersion(ctx context.Context, tx pgx.Tx, pr
 	if errors.Is(err, pgx.ErrNoRows) {
 		findingInput := FindingInput{
 			Title: candidate.Title, Severity: candidate.Severity, Status: statusEvidence.Normalized,
-			AssigneeOrganizationID: organizationID, PendingAssetDraftID: input.PendingAssetDraftID,
-			VulnerabilityType: candidate.VulnerabilityType, Description: candidate.Description,
+			AssigneeOrganizationID: organizationID, TestBatchID: candidate.TestBatchID,
+			PendingAssetDraftID: input.PendingAssetDraftID,
+			VulnerabilityType:   candidate.VulnerabilityType, Description: candidate.Description,
 			Evidence: candidate.Evidence, RemediationAdvice: candidate.RemediationAdvice,
 			Source: "import", DiscoveredAt: candidate.DiscoveredAt,
 			ImportStatusRaw: statusEvidence.Raw, ImportStatusNormalized: statusEvidence.Normalized,
@@ -703,17 +729,8 @@ func (s *Service) linkFindingToWorkingVersion(ctx context.Context, tx pgx.Tx, pr
 }
 
 func (s *Service) LinkFindingImportCandidate(ctx context.Context, principal auth.Principal, id string, input FindingImportCandidateLinkInput, requestID, ipAddress string) (FindingImportCandidate, error) {
-	if !principal.CanManageSecurityFindings() {
-		// A subsidiary delegated the confirmation of its own asset candidates also
-		// needs to release the findings that arrived with them, otherwise it
-		// registers the asset and the vulnerabilities stay in the import queue.
-		allowed, accessErr := s.canReleaseCandidateFindings(ctx, principal, input.AssetCandidateID)
-		if accessErr != nil {
-			return FindingImportCandidate{}, accessErr
-		}
-		if !allowed {
-			return FindingImportCandidate{}, ErrForbidden
-		}
+	if !principal.CanManageSecurityFindings() && !principal.HasPermission("asset.manage") {
+		return FindingImportCandidate{}, ErrForbidden
 	}
 	id = strings.TrimSpace(id)
 	input.ScopeAssetID = strings.TrimSpace(input.ScopeAssetID)
@@ -727,19 +744,38 @@ func (s *Service) LinkFindingImportCandidate(ctx context.Context, principal auth
 		(input.PendingAssetDraftID != "" && (input.ScopeAssetID != "" || input.AssetID != "")) {
 		return FindingImportCandidate{}, ErrInvalid
 	}
-
+	for _, value := range []string{input.ScopeAssetID, input.AssetID, input.AssetCandidateID, input.PendingAssetDraftID} {
+		if value != "" && !validUUID(value) {
+			return FindingImportCandidate{}, ErrInvalid
+		}
+	}
+	// Authorization for a working-version release must be based on the
+	// candidate stored with the import row, not on an optional client field.
+	// Organization operators are allowed to omit asset_candidate_id because the
+	// import candidate is the source of truth; deriving it here also prevents a
+	// caller from choosing a candidate belonging to another organization.
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return FindingImportCandidate{}, fmt.Errorf("begin link finding import candidate: %w", err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
+	// Confirmation locks the discovery before its import rows. Use the same
+	// order here, so a manual release cannot deadlock against confirmation.
+	var lockedCandidateID, candidateOrganizationID string
+	if err := tx.QueryRow(ctx, `
+		SELECT ac.id::text, COALESCE(ac.organization_id::text,'')
+		FROM asset_candidates ac
+		JOIN security_finding_import_candidates c ON c.asset_candidate_id=ac.id
+		WHERE c.id=$1::uuid FOR UPDATE OF ac`, id).Scan(&lockedCandidateID, &candidateOrganizationID); err != nil && !errors.Is(err, pgx.ErrNoRows) {
+		return FindingImportCandidate{}, fmt.Errorf("lock finding asset candidate: %w", err)
+	}
 	var candidate FindingImportCandidate
 	if err := tx.QueryRow(ctx, `
-		SELECT finding_import_id::text, COALESCE(test_batch_id::text,''), title, severity, COALESCE(vulnerability_type,''),
+		SELECT finding_import_id::text, COALESCE(test_batch_id::text,''), COALESCE(asset_candidate_id::text,''), title, severity, COALESCE(vulnerability_type,''),
 		       description, COALESCE(evidence,''), COALESCE(remediation_advice,''), discovered_at, status,
 		       COALESCE(import_status_raw,''), COALESCE(import_status_normalized,''), COALESCE(import_status_mapping_reason,'')
 		FROM security_finding_import_candidates WHERE id=$1::uuid FOR UPDATE`, id).Scan(
-		&candidate.FindingImportID, &candidate.TestBatchID, &candidate.Title, &candidate.Severity,
+		&candidate.FindingImportID, &candidate.TestBatchID, &candidate.AssetCandidateID, &candidate.Title, &candidate.Severity,
 		&candidate.VulnerabilityType, &candidate.Description, &candidate.Evidence, &candidate.RemediationAdvice,
 		&candidate.DiscoveredAt, &candidate.Status, &candidate.ImportStatusRaw, &candidate.ImportStatusNormalized,
 		&candidate.ImportStatusMappingReason); errors.Is(err, pgx.ErrNoRows) {
@@ -747,8 +783,32 @@ func (s *Service) LinkFindingImportCandidate(ctx context.Context, principal auth
 	} else if err != nil {
 		return FindingImportCandidate{}, fmt.Errorf("lock finding import candidate: %w", err)
 	}
+	if candidate.AssetCandidateID != lockedCandidateID {
+		return FindingImportCandidate{}, ErrConflict
+	}
 	if candidate.Status != "pending" {
 		return FindingImportCandidate{}, ErrState
+	}
+	if input.PendingAssetDraftID != "" && input.AssetCandidateID == "" {
+		input.AssetCandidateID = candidate.AssetCandidateID
+	}
+	if input.AssetCandidateID == "" && input.PendingAssetDraftID != "" {
+		return FindingImportCandidate{}, ErrInvalid
+	}
+	if input.AssetCandidateID != "" && candidate.AssetCandidateID != input.AssetCandidateID {
+		return FindingImportCandidate{}, ErrConflict
+	}
+	if !principal.CanManageSecurityFindings() {
+		if candidate.AssetCandidateID == "" {
+			return FindingImportCandidate{}, ErrForbidden
+		}
+		allowed, accessErr := access.CanOperateOrganizationInTx(ctx, tx, principal, candidateOrganizationID, "asset.manage")
+		if accessErr != nil {
+			return FindingImportCandidate{}, accessErr
+		}
+		if !allowed {
+			return FindingImportCandidate{}, ErrForbidden
+		}
 	}
 
 	if input.PendingAssetDraftID != "" {
@@ -825,6 +885,18 @@ func (s *Service) LinkFindingImportCandidate(ctx context.Context, principal auth
 		return FindingImportCandidate{}, fmt.Errorf("load selected finding import asset: %w", err)
 	}
 
+	// Permission on the source discovery never grants access to an arbitrary
+	// target asset. Validate the resolved target organization before any write.
+	if !principal.CanManageSecurityFindings() {
+		allowed, err := access.CanOperateOrganizationInTx(ctx, tx, principal, scope.OrganizationID, "asset.manage")
+		if err != nil {
+			return FindingImportCandidate{}, err
+		}
+		if !allowed {
+			return FindingImportCandidate{}, ErrForbidden
+		}
+	}
+
 	var duplicateFindingID string
 	if candidate.TestBatchID != "" {
 		err = tx.QueryRow(ctx, `
@@ -854,21 +926,12 @@ func (s *Service) LinkFindingImportCandidate(ctx context.Context, principal auth
 			ImportStatusRaw: statusEvidence.Raw, ImportStatusNormalized: statusEvidence.Normalized,
 			ImportStatusMappingReason: statusEvidence.Reason,
 		}
-		findingID, _, err = s.createFindingInTx(ctx, tx, principal, findingInput, requestID, ipAddress)
+		var duplicate bool
+		findingID, duplicate, err = s.createImportedAssetFindingInTx(ctx, tx, principal, findingInput, requestID, ipAddress)
 		if err != nil {
-			// The pre-check above is advisory; a concurrent link for the same asset
-			// and title can win the race and make the unique index reject this
-			// insert. Re-read the surviving finding and record the row as a
-			// duplicate instead of failing the whole import item.
-			if !isFindingDuplicateViolation(err) {
-				return FindingImportCandidate{}, err
-			}
-			if lookupErr := tx.QueryRow(ctx, `
-				SELECT id::text FROM security_findings
-				WHERE test_batch_id::text=$1 AND asset_id::text=$2 AND lower(btrim(title))=lower(btrim($3))
-				ORDER BY created_at LIMIT 1`, candidate.TestBatchID, scope.AssetID, candidate.Title).Scan(&findingID); lookupErr != nil {
-				return FindingImportCandidate{}, fmt.Errorf("resolve concurrently created finding: %w", lookupErr)
-			}
+			return FindingImportCandidate{}, err
+		}
+		if duplicate {
 			status = "duplicate"
 		}
 	} else {
@@ -929,6 +992,15 @@ func (s *Service) LinkAcceptedAssetCandidateInTx(ctx context.Context, tx pgx.Tx,
 	} else if err != nil {
 		return fmt.Errorf("lock accepted asset candidate for finding link: %w", err)
 	}
+	if !principal.CanManageSecurityFindings() {
+		allowed, err := access.CanOperateOrganizationInTx(ctx, tx, principal, organizationID, "asset.manage")
+		if err != nil {
+			return err
+		}
+		if !allowed {
+			return ErrForbidden
+		}
+	}
 	if draftID != pendingAssetDraftID {
 		return ErrConflict
 	}
@@ -953,11 +1025,11 @@ func (s *Service) LinkAcceptedAssetCandidateInTx(ctx context.Context, tx pgx.Tx,
 	for _, id := range ids {
 		var candidate FindingImportCandidate
 		if err := tx.QueryRow(ctx, `
-			SELECT finding_import_id::text, COALESCE(test_batch_id::text,''), title, severity, COALESCE(vulnerability_type,''),
+			SELECT finding_import_id::text, COALESCE(test_batch_id::text,''), COALESCE(asset_candidate_id::text,''), title, severity, COALESCE(vulnerability_type,''),
 			       description, COALESCE(evidence,''), COALESCE(remediation_advice,''), discovered_at, status,
 			       COALESCE(import_status_raw,''), COALESCE(import_status_normalized,''), COALESCE(import_status_mapping_reason,'')
 			FROM security_finding_import_candidates WHERE id=$1::uuid FOR UPDATE`, id).Scan(
-			&candidate.FindingImportID, &candidate.TestBatchID, &candidate.Title, &candidate.Severity,
+			&candidate.FindingImportID, &candidate.TestBatchID, &candidate.AssetCandidateID, &candidate.Title, &candidate.Severity,
 			&candidate.VulnerabilityType, &candidate.Description, &candidate.Evidence, &candidate.RemediationAdvice,
 			&candidate.DiscoveredAt, &candidate.Status, &candidate.ImportStatusRaw, &candidate.ImportStatusNormalized,
 			&candidate.ImportStatusMappingReason); errors.Is(err, pgx.ErrNoRows) {
@@ -1134,6 +1206,38 @@ func (s *Service) candidateOrganization(ctx context.Context, assetCandidateID st
 		return "", fmt.Errorf("load asset candidate organization: %w", err)
 	}
 	return organizationID, nil
+}
+
+// createImportedAssetFindingInTx tolerates a duplicate that wins after the
+// advisory pre-check. PostgreSQL aborts a transaction on a unique violation:
+// the insert must use a savepoint before the surviving finding can be read.
+func (s *Service) createImportedAssetFindingInTx(ctx context.Context, tx pgx.Tx, principal auth.Principal, input FindingInput, requestID, ipAddress string) (string, bool, error) {
+	attempt, err := tx.Begin(ctx)
+	if err != nil {
+		return "", false, fmt.Errorf("begin imported finding savepoint: %w", err)
+	}
+	defer attempt.Rollback(ctx)
+	findingID, _, err := s.createFindingInTx(ctx, attempt, principal, input, requestID, ipAddress)
+	if err == nil {
+		if err := attempt.Commit(ctx); err != nil {
+			return "", false, fmt.Errorf("commit imported finding savepoint: %w", err)
+		}
+		return findingID, false, nil
+	}
+	if rollbackErr := attempt.Rollback(ctx); rollbackErr != nil {
+		return "", false, fmt.Errorf("rollback imported finding savepoint: %w", rollbackErr)
+	}
+	if !isFindingDuplicateViolation(err) {
+		return "", false, err
+	}
+	if err := tx.QueryRow(ctx, `
+		SELECT id::text FROM security_findings
+		WHERE test_batch_id IS NOT DISTINCT FROM NULLIF($1,'')::uuid
+		  AND asset_id=$2::uuid AND lower(btrim(title))=lower(btrim($3))
+		ORDER BY created_at LIMIT 1`, input.TestBatchID, input.AssetID, input.Title).Scan(&findingID); err != nil {
+		return "", false, fmt.Errorf("resolve concurrently created finding: %w", err)
+	}
+	return findingID, true, nil
 }
 
 // isFindingDuplicateViolation reports whether err is the unique violation raised

@@ -36,9 +36,19 @@ func (s *Service) RestorePublishedVersion(ctx context.Context, principal auth.Pr
 		return BusinessSystem{}, ErrForbidden
 	}
 
+	if input.ExpectedVersion == nil || *input.ExpectedVersion < 0 {
+		return BusinessSystem{}, ErrVersionRequired
+	}
+	if (*input.ExpectedVersion == 0) != (input.ExpectedWorkingVersionID == "") {
+		return BusinessSystem{}, ErrInvalid
+	}
+
 	working, err := s.getWorkingBySource(ctx, principal, current.ID)
 	switch {
 	case err == nil:
+		if input.ExpectedWorkingVersionID != working.ID || *input.ExpectedVersion != working.Version {
+			return BusinessSystem{}, ErrEditConflict
+		}
 		if working.TaskID != "" || working.DraftStatus == "submitted" {
 			return BusinessSystem{}, ErrConflict
 		}
@@ -46,6 +56,9 @@ func (s *Service) RestorePublishedVersion(ctx context.Context, principal auth.Pr
 	case !errors.Is(err, ErrNotFound):
 		return BusinessSystem{}, err
 	default:
+		if *input.ExpectedVersion != 0 {
+			return BusinessSystem{}, ErrEditConflict
+		}
 		return s.createRestoredWorking(ctx, principal, current.BusinessSystem, input, requestID, ipAddress)
 	}
 }
@@ -89,12 +102,14 @@ func (s *Service) restoreWorking(ctx context.Context, principal auth.Principal, 
 		return BusinessSystem{}, err
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
-	// The restore originates from an immutable submission snapshot, so the draft
-	// version is re-read and locked inside the transaction instead of being
-	// taken from a value resolved outside it.
+	// A lock serializes writers but cannot authorize overwriting edits made
+	// after the operator confirmed the restore. Compare the confirmed token.
 	baseVersion, err := lockWorkingVersion(ctx, tx, current.ID)
 	if err != nil {
 		return BusinessSystem{}, err
+	}
+	if input.ExpectedWorkingVersionID != current.ID || input.ExpectedVersion == nil || baseVersion != *input.ExpectedVersion {
+		return BusinessSystem{}, ErrEditConflict
 	}
 	result, err := tx.Exec(ctx, `
 		UPDATE inventory_business_system_drafts
@@ -178,18 +193,18 @@ func (s *Service) createRestoredWorking(ctx context.Context, principal auth.Prin
 	var id string
 	err = tx.QueryRow(ctx, `
 		INSERT INTO inventory_business_system_drafts(
-			task_id,organization_id,operation,source_system_id,system_code,system_name,
+			task_id,organization_id,operation,source_system_id,source_system_version,system_code,system_name,
 			short_name,owner_name,owner_contact,system_status,system_level,deployment_type,
 			internet_exposure,description,contains_personal_information,
 			contains_sensitive_personal_information,personal_information_record_count,
 			data_volume_over_100k,contains_important_data,contains_core_data,
 			data_storage_location,security_notes,custom_values,draft_status,created_by,updated_by,version,assigned_to,last_edited_by
 		) VALUES(
-			NULL,$1::uuid,'update',$2::uuid,$3,$4,NULLIF($5,''),NULLIF($6,''),NULLIF($7,''),
-			$8,$9,NULLIF($10,''),$11,NULLIF($12,''),$13,$14,$15,$16,$17,$18,
-			NULLIF($19,''),NULLIF($20,''),$21::jsonb,'editing',$22::uuid,$22::uuid,1,$22::uuid,$22::uuid
+			NULL,$1::uuid,'update',$2::uuid,$3,$4,$5,NULLIF($6,''),NULLIF($7,''),NULLIF($8,''),
+			$9,$10,NULLIF($11,''),$12,NULLIF($13,''),$14,$15,$16,$17,$18,$19,
+			NULLIF($20,''),NULLIF($21,''),$22::jsonb,'editing',$23::uuid,$23::uuid,1,$23::uuid,$23::uuid
 		) RETURNING id::text
-	`, input.OrganizationID, current.ID, input.Code, input.Name, input.ShortName,
+	`, input.OrganizationID, current.ID, current.Version, input.Code, input.Name, input.ShortName,
 		input.OwnerName, input.OwnerContact, input.Status, input.Level, input.DeploymentType,
 		input.InternetExposure, input.Description, input.ContainsPersonalInformation,
 		input.ContainsSensitivePersonalInformation, input.PersonalInformationRecordCount,
@@ -228,8 +243,8 @@ func mapWorkingNotFound(err error) error {
 }
 
 // lockWorkingVersion re-reads the working draft version inside the caller's
-// transaction and holds a row lock until commit, so a stale restore cannot
-// overwrite a concurrent edit.
+// transaction and holds a row lock until commit. The caller must also compare
+// this version against the operator-confirmed restore token.
 func lockWorkingVersion(ctx context.Context, tx pgx.Tx, id string) (int, error) {
 	var version int
 	err := tx.QueryRow(ctx, `SELECT version FROM inventory_business_system_drafts WHERE id::text=$1 FOR UPDATE`, id).Scan(&version)

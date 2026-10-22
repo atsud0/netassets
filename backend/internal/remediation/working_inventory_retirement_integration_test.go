@@ -35,8 +35,8 @@ func TestWorkingInventorySystemDeleteRetiresOpenRemediationTasks(t *testing.T) {
 	must(t, err)
 	orgID = f.org
 	_, err = f.pool.Exec(f.ctx, `
-		INSERT INTO inventory_business_system_drafts(task_id,organization_id,operation,source_system_id,system_code,system_name,system_status,system_level,contains_personal_information,contains_sensitive_personal_information,data_volume_over_100k,contains_important_data,contains_core_data,draft_status,created_by,updated_by,last_edited_by,version)
-		VALUES($1::uuid,$2::uuid,'delete',$3::uuid,$4,$5,'running','normal','unknown','unknown','unknown','unknown','unknown','submitted',$6::uuid,$6::uuid,$6::uuid,1)`,
+		INSERT INTO inventory_business_system_drafts(task_id,organization_id,operation,source_system_id,source_system_version,system_code,system_name,system_status,system_level,contains_personal_information,contains_sensitive_personal_information,data_volume_over_100k,contains_important_data,contains_core_data,draft_status,created_by,updated_by,last_edited_by,version)
+		VALUES($1::uuid,$2::uuid,'delete',$3::uuid,(SELECT version FROM business_systems WHERE id=$3::uuid),$4,$5,'running','normal','unknown','unknown','unknown','unknown','unknown','submitted',$6::uuid,$6::uuid,$6::uuid,1)`,
 		taskID, f.org, f.system, "RSYS_WD", "修复测试系统", f.group.UserID)
 	must(t, err)
 

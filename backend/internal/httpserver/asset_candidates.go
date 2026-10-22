@@ -99,7 +99,16 @@ func registerAssetCandidateRoutes(api *gin.RouterGroup, requireAuth gin.HandlerF
 			writeAPIError(c, http.StatusBadRequest, "invalid_request", "请检查批量确认请求内容")
 			return
 		}
-		result := service.BatchAccept(c.Request.Context(), mustPrincipal(c), input, c.GetString("request_id"), c.ClientIP())
+		var afterCreate assetcandidate.BatchAcceptAfterCreate
+		if findingService != nil {
+			// Keep each candidate's working-version creation, candidate settlement
+			// and imported-finding release in one transaction, just like the
+			// single-item confirmation route.
+			afterCreate = func(ctx context.Context, tx pgx.Tx, candidateID string, created asset.Asset) error {
+				return findingService.LinkAcceptedAssetCandidateInTx(ctx, tx, mustPrincipal(c), candidateID, created.ID, c.GetString("request_id"), c.ClientIP())
+			}
+		}
+		result := service.BatchAcceptWithAfterCreate(c.Request.Context(), mustPrincipal(c), input, c.GetString("request_id"), c.ClientIP(), afterCreate)
 		// A batch never fails as a whole: the response is 200 with per-row outcomes
 		// so the reviewer sees which rows still need attention.
 		c.JSON(http.StatusOK, gin.H{"result": result})
