@@ -254,7 +254,7 @@ NETASSETS_RESTORE_CONFIRM=YES make restore \
 
 ### Podman 开发与测试
 
-Go、Node.js 和浏览器运行统一使用 Podman，宿主机仅用于编辑代码。
+**容器是本项目测试、构建和应用运行的唯一入口。** 宿主机仅用于编辑代码、Git 和调用 `make`；不要在宿主机直接运行 Go、Node.js、测试、构建或应用服务器。开发运行使用 `make up`，停止使用 `make down`；后端/前端测试使用 `make test-backend`、`make test-frontend`，全量测试使用 `make test`，Playwright 使用 `make e2e` 或 `make e2e-roles`，镜像构建使用 `make build`。迁移等运行时操作也应通过 Makefile/Podman Compose 入口执行。
 
 ```bash
 make test-backend          # 全部后端单元测试 + 数据库集成测试
