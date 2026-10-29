@@ -13,6 +13,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"netassets/internal/auth"
+	"netassets/internal/contactphone"
 	"netassets/internal/pagination"
 	"netassets/internal/textlength"
 )
@@ -22,6 +23,7 @@ var (
 	ErrNotFound             = errors.New("not found")
 	ErrConflict             = errors.New("conflict")
 	ErrInvalid              = errors.New("invalid input")
+	ErrInvalidContact       = fmt.Errorf("%w: invalid contact phone", ErrInvalid)
 	ErrBlocked              = errors.New("operation blocked")
 	ErrConfirmationRequired = errors.New("confirmation required")
 	codePattern             = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_-]{1,63}$`)
@@ -197,17 +199,18 @@ func (s *Service) Search(ctx context.Context, principal auth.Principal, query pa
 }
 
 func (s *Service) Create(ctx context.Context, principal auth.Principal, input CreateInput, requestID, ipAddress string) (Organization, error) {
+	if !principal.HasRole("group_admin") && !principal.HasPermission("organization.create") {
+		return Organization{}, ErrForbidden
+	}
 	input.Code = strings.TrimSpace(input.Code)
 	input.Name = strings.TrimSpace(input.Name)
 	input.ShortName = strings.TrimSpace(input.ShortName)
 	input.ParentID = strings.TrimSpace(input.ParentID)
 	input.Type = strings.TrimSpace(input.Type)
 	input.Manager = strings.TrimSpace(input.Manager)
-	input.Contact = strings.TrimSpace(input.Contact)
-	input.Notes = strings.TrimSpace(input.Notes)
-	if !codePattern.MatchString(input.Code) || input.Name == "" || textlength.Count(input.Name) > 255 || !validUUID(input.ParentID) || !validNonGroupType(input.Type) ||
-		textlength.Count(input.ShortName) > 128 || textlength.Count(input.Manager) > 128 || textlength.Count(input.Contact) > 255 || textlength.Count(input.Notes) > 5000 {
-		return Organization{}, ErrInvalid
+	input.Contact = contactphone.Normalize(input.Contact)
+	if !validUUID(input.ParentID) {
+		return Organization{}, invalidField("上级组织：请选择有效的组织")
 	}
 	allowed, err := s.canOperateOrganization(ctx, principal, input.ParentID, "organization.create")
 	if err != nil {
@@ -215,6 +218,19 @@ func (s *Service) Create(ctx context.Context, principal auth.Principal, input Cr
 	}
 	if !allowed {
 		return Organization{}, ErrForbidden
+	}
+	if textlength.Count(input.Contact) > contactphone.MaxLength || !contactphone.IsValid(input.Contact) {
+		return Organization{}, ErrInvalidContact
+	}
+	input.Notes = strings.TrimSpace(input.Notes)
+	if !codePattern.MatchString(input.Code) {
+		return Organization{}, invalidField("组织编码：使用 2 至 64 位字母、数字、下划线或横线，首位为字母或数字")
+	}
+	if err := validateBasicInfo(input.Name, input.ShortName, input.Manager, input.Notes); err != nil {
+		return Organization{}, err
+	}
+	if !validNonGroupType(input.Type) {
+		return Organization{}, invalidField("组织类型：请选择子公司、部门或其他")
 	}
 
 	tx, err := s.pool.Begin(ctx)
@@ -230,7 +246,7 @@ func (s *Service) Create(ctx context.Context, principal auth.Principal, input Cr
 		return Organization{}, fmt.Errorf("load parent organization: %w", err)
 	}
 	if parentStatus != "enabled" {
-		return Organization{}, ErrInvalid
+		return Organization{}, invalidField("上级组织：已停用，请选择启用的组织")
 	}
 
 	var item Organization
@@ -267,15 +283,12 @@ func (s *Service) Create(ctx context.Context, principal auth.Principal, input Cr
 }
 
 func (s *Service) Update(ctx context.Context, principal auth.Principal, organizationID string, input UpdateInput, requestID, ipAddress string) (Organization, error) {
+	if !principal.HasRole("group_admin") && !principal.HasPermission("organization.update") {
+		return Organization{}, ErrForbidden
+	}
 	organizationID = strings.TrimSpace(organizationID)
-	input.Name = strings.TrimSpace(input.Name)
-	input.ShortName = strings.TrimSpace(input.ShortName)
-	input.Manager = strings.TrimSpace(input.Manager)
-	input.Contact = strings.TrimSpace(input.Contact)
-	input.Notes = strings.TrimSpace(input.Notes)
-	if !validUUID(organizationID) || input.Name == "" || textlength.Count(input.Name) > 255 || textlength.Count(input.ShortName) > 128 ||
-		textlength.Count(input.Manager) > 128 || textlength.Count(input.Contact) > 255 || textlength.Count(input.Notes) > 5000 {
-		return Organization{}, ErrInvalid
+	if !validUUID(organizationID) {
+		return Organization{}, invalidField("组织标识：请提供有效的组织编号")
 	}
 	allowed, err := s.canOperateOrganization(ctx, principal, organizationID, "organization.update")
 	if err != nil {
@@ -283,6 +296,17 @@ func (s *Service) Update(ctx context.Context, principal auth.Principal, organiza
 	}
 	if !allowed {
 		return Organization{}, ErrForbidden
+	}
+	input.Name = strings.TrimSpace(input.Name)
+	input.ShortName = strings.TrimSpace(input.ShortName)
+	input.Manager = strings.TrimSpace(input.Manager)
+	input.Contact = contactphone.Normalize(input.Contact)
+	if textlength.Count(input.Contact) > contactphone.MaxLength || !contactphone.IsValid(input.Contact) {
+		return Organization{}, ErrInvalidContact
+	}
+	input.Notes = strings.TrimSpace(input.Notes)
+	if err := validateBasicInfo(input.Name, input.ShortName, input.Manager, input.Notes); err != nil {
+		return Organization{}, err
 	}
 
 	tx, err := s.pool.Begin(ctx)
@@ -327,8 +351,9 @@ func (s *Service) GetImpact(ctx context.Context, principal auth.Principal, organ
 	if !principal.HasRole("group_admin") {
 		return Impact{}, ErrForbidden
 	}
-	if !validUUID(strings.TrimSpace(organizationID)) {
-		return Impact{}, ErrInvalid
+	organizationID = strings.TrimSpace(organizationID)
+	if !validUUID(organizationID) {
+		return Impact{}, invalidField("组织标识：请提供有效的组织编号")
 	}
 	return loadImpact(ctx, s.pool, organizationID)
 }
@@ -339,7 +364,7 @@ func (s *Service) Disable(ctx context.Context, principal auth.Principal, organiz
 	}
 	organizationID = strings.TrimSpace(organizationID)
 	if !validUUID(organizationID) {
-		return Impact{}, ErrInvalid
+		return Impact{}, invalidField("组织标识：请提供有效的组织编号")
 	}
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
@@ -385,7 +410,7 @@ func (s *Service) Enable(ctx context.Context, principal auth.Principal, organiza
 	}
 	organizationID = strings.TrimSpace(organizationID)
 	if !validUUID(organizationID) {
-		return ErrInvalid
+		return invalidField("组织标识：请提供有效的组织编号")
 	}
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
@@ -435,8 +460,17 @@ func (s *Service) UpdateStructure(ctx context.Context, principal auth.Principal,
 	organizationID = strings.TrimSpace(organizationID)
 	input.ParentID = strings.TrimSpace(input.ParentID)
 	input.Type = strings.TrimSpace(input.Type)
-	if !validUUID(organizationID) || !validUUID(input.ParentID) || !validNonGroupType(input.Type) || organizationID == input.ParentID {
-		return Organization{}, ErrInvalid
+	if !validUUID(organizationID) {
+		return Organization{}, invalidField("组织标识：请提供有效的组织编号")
+	}
+	if !validUUID(input.ParentID) {
+		return Organization{}, invalidField("上级组织：请选择有效的组织")
+	}
+	if !validNonGroupType(input.Type) {
+		return Organization{}, invalidField("组织类型：请选择子公司、部门或其他")
+	}
+	if organizationID == input.ParentID {
+		return Organization{}, invalidField("上级组织：不能选择组织自身")
 	}
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
@@ -502,7 +536,7 @@ func (s *Service) SoftDelete(ctx context.Context, principal auth.Principal, orga
 	}
 	organizationID = strings.TrimSpace(organizationID)
 	if !validUUID(organizationID) {
-		return Impact{}, ErrInvalid
+		return Impact{}, invalidField("组织标识：请提供有效的组织编号")
 	}
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {

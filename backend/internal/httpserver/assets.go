@@ -35,7 +35,7 @@ func registerAssetRoutes(api *gin.RouterGroup, requireAuth gin.HandlerFunc, serv
 	group.GET("", func(c *gin.Context) {
 		page, err := parsePageQuery(c)
 		if err != nil {
-			writeAPIError(c, http.StatusBadRequest, "invalid_query", "分页参数不正确，page_size 最大为 100")
+			writeAPIError(c, http.StatusBadRequest, "invalid_query", pageQueryErrorMessage(err))
 			return
 		}
 		result, err := service.SearchWithFilter(c.Request.Context(), mustPrincipal(c), asset.SearchFilter{
@@ -95,7 +95,7 @@ func registerAssetRoutes(api *gin.RouterGroup, requireAuth gin.HandlerFunc, serv
 				return
 			}
 			if errors.Is(err, asset.ErrInvalid) {
-				writeAPIError(c, http.StatusBadRequest, "invalid_selection", "选中资产参数不正确，单次最多导出 200 条")
+				writeAPIError(c, http.StatusBadRequest, "invalid_selection", assetInputErrorMessage(err, "选中资产参数不正确，单次最多导出 200 条"))
 				return
 			}
 			logger.Error("export assets csv", "error", err, "request_id", c.GetString("request_id"))
@@ -104,13 +104,17 @@ func registerAssetRoutes(api *gin.RouterGroup, requireAuth gin.HandlerFunc, serv
 		}
 
 		data, contentType, fileName, count, err := service.Export(c.Request.Context(), mustPrincipal(c), filter, format, c.GetString("request_id"), c.ClientIP())
+		if errors.Is(err, asset.ErrForbidden) {
+			writeAPIError(c, http.StatusForbidden, "forbidden", "当前账号无权导出网络资产")
+			return
+		}
 		if errors.Is(err, asset.ErrExportTooLarge) {
 			writeAPIError(c, http.StatusUnprocessableEntity, "synchronous_xlsx_limit_exceeded", "同步 XLSX 导出最多支持 5000 条数据，请改用 CSV 格式导出")
 			return
 		}
 		if errors.Is(err, asset.ErrInvalid) {
 			if len(selectedIDs) > 0 {
-				writeAPIError(c, http.StatusBadRequest, "invalid_selection", "选中资产参数不正确，单次最多导出 200 条")
+				writeAPIError(c, http.StatusBadRequest, "invalid_selection", assetInputErrorMessage(err, "选中资产参数不正确，单次最多导出 200 条"))
 			} else {
 				writeAPIError(c, http.StatusBadRequest, "invalid_format", "导出格式仅支持 csv 或 xlsx")
 			}
@@ -134,7 +138,7 @@ func registerAssetRoutes(api *gin.RouterGroup, requireAuth gin.HandlerFunc, serv
 	group.GET("/imports", func(c *gin.Context) {
 		page, err := parsePageQuery(c)
 		if err != nil {
-			writeAPIError(c, http.StatusBadRequest, "invalid_query", "分页参数不正确，page_size 最大为 100")
+			writeAPIError(c, http.StatusBadRequest, "invalid_query", pageQueryErrorMessage(err))
 			return
 		}
 		result, err := service.SearchImports(c.Request.Context(), mustPrincipal(c), page)
@@ -155,11 +159,7 @@ func registerAssetRoutes(api *gin.RouterGroup, requireAuth gin.HandlerFunc, serv
 		result, err := service.UpdateBatch(c.Request.Context(), mustPrincipal(c), input, c.GetString("request_id"), c.ClientIP())
 		switch {
 		case errors.Is(err, asset.ErrInvalid):
-			if strings.TrimSpace(input.DirectChangeReason) == "" {
-				writeAPIError(c, http.StatusBadRequest, "invalid_direct_change_reason", "请填写集团直接批量变更资产的原因")
-				return
-			}
-			writeAPIError(c, http.StatusBadRequest, "invalid_batch", "单次请选择 1 至 200 个资产，并指定有效状态或网络区域")
+			writeAPIError(c, http.StatusBadRequest, "invalid_batch", assetInputErrorMessage(err, "单次请选择 1 至 200 个资产，并指定有效状态或网络区域"))
 		case errors.Is(err, asset.ErrForbidden):
 			writeAPIError(c, http.StatusForbidden, "forbidden", "当前账号无权批量更新网络资产")
 		case err != nil:
@@ -173,13 +173,13 @@ func registerAssetRoutes(api *gin.RouterGroup, requireAuth gin.HandlerFunc, serv
 	group.GET("/owner-options", func(c *gin.Context) {
 		page, err := parsePageQuery(c)
 		if err != nil {
-			writeAPIError(c, http.StatusBadRequest, "invalid_query", "分页参数不正确，page_size 最大为 100")
+			writeAPIError(c, http.StatusBadRequest, "invalid_query", pageQueryErrorMessage(err))
 			return
 		}
 		result, err := service.SearchOwnerOptions(c.Request.Context(), mustPrincipal(c), strings.TrimSpace(c.Query("organization_id")), strings.TrimSpace(c.Query("q")), page)
 		switch {
 		case errors.Is(err, asset.ErrInvalid):
-			writeAPIError(c, http.StatusBadRequest, "invalid_organization", "请选择责任人所属组织")
+			writeAPIError(c, http.StatusBadRequest, "invalid_organization", assetInputErrorMessage(err, "请选择责任人所属组织"))
 		case errors.Is(err, asset.ErrForbidden):
 			writeAPIError(c, http.StatusForbidden, "forbidden", "当前账号无权查看该组织的责任人候选")
 		case err != nil:
@@ -243,7 +243,7 @@ func registerAssetRoutes(api *gin.RouterGroup, requireAuth gin.HandlerFunc, serv
 		case errors.Is(err, asset.ErrForbidden):
 			writeAPIError(c, http.StatusForbidden, "forbidden", "当前账号无权在该组织新增资产")
 		case errors.Is(err, asset.ErrInvalid):
-			writeAPIError(c, http.StatusBadRequest, "invalid_asset", "请检查资产类型、资产值和归属信息；集团管理员直接新增正式资产时必须填写变更原因")
+			writeAPIError(c, http.StatusBadRequest, "invalid_asset", assetInputErrorMessage(err, "请检查资产类型、资产值和归属信息；集团管理员直接新增正式资产时必须填写变更原因"))
 		case errors.Is(err, asset.ErrNotFound):
 			writeAPIError(c, http.StatusNotFound, "reference_not_found", "所属组织或业务系统不存在")
 		case errors.Is(err, asset.ErrConflict):
@@ -262,7 +262,7 @@ func registerAssetRoutes(api *gin.RouterGroup, requireAuth gin.HandlerFunc, serv
 	group.GET("/direct-change-rechecks", func(c *gin.Context) {
 		page, err := parsePageQuery(c)
 		if err != nil {
-			writeAPIError(c, http.StatusBadRequest, "invalid_query", "分页参数不正确，page_size 最大为 100")
+			writeAPIError(c, http.StatusBadRequest, "invalid_query", pageQueryErrorMessage(err))
 			return
 		}
 		result, err := service.SearchDirectChangeRecheckTasks(c.Request.Context(), mustPrincipal(c), asset.DirectChangeRecheckFilter{
@@ -312,7 +312,7 @@ func registerAssetRoutes(api *gin.RouterGroup, requireAuth gin.HandlerFunc, serv
 		case errors.Is(err, asset.ErrForbidden):
 			writeAPIError(c, http.StatusForbidden, "forbidden", "当前账号无权编辑该资产或变更其所属组织")
 		case errors.Is(err, asset.ErrInvalid):
-			writeAPIError(c, http.StatusBadRequest, "invalid_asset", "请检查资产类型、资产值、状态和归属信息；集团管理员直接修改正式资产时必须填写变更原因")
+			writeAPIError(c, http.StatusBadRequest, "invalid_asset", assetInputErrorMessage(err, "请检查资产类型、资产值、状态和归属信息；集团管理员直接修改正式资产时必须填写变更原因"))
 		case errors.Is(err, asset.ErrNotFound):
 			writeAPIError(c, http.StatusNotFound, "reference_not_found", "网络资产、所属组织或业务系统不存在")
 		case errors.Is(err, asset.ErrEditConflict):
@@ -340,7 +340,7 @@ func registerAssetRoutes(api *gin.RouterGroup, requireAuth gin.HandlerFunc, serv
 		case errors.Is(err, asset.ErrNotFound):
 			writeAPIError(c, http.StatusNotFound, "asset_not_found", "网络资产不存在")
 		case errors.Is(err, asset.ErrInvalid):
-			writeAPIError(c, http.StatusBadRequest, "invalid_asset_id", "资产编号不正确，或缺少集团直接变更原因（direct_change_reason）")
+			writeAPIError(c, http.StatusBadRequest, "invalid_asset_id", assetInputErrorMessage(err, "资产编号不正确，或缺少集团直接变更原因（direct_change_reason）"))
 		case err != nil:
 			logger.Error("delete asset", "error", err, "request_id", c.GetString("request_id"))
 			writeAPIError(c, http.StatusInternalServerError, "internal_error", "删除网络资产失败")
@@ -374,8 +374,12 @@ func registerAssetRoutes(api *gin.RouterGroup, requireAuth gin.HandlerFunc, serv
 		c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, maxAssetImportBytes)
 		organizationID := strings.TrimSpace(c.PostForm("organization_id"))
 		fileHeader, err := c.FormFile("file")
-		if err != nil || organizationID == "" {
-			writeAPIError(c, http.StatusBadRequest, "invalid_request", "请选择所属组织并上传 CSV 或 XLSX 文件")
+		if organizationID == "" {
+			writeAPIError(c, http.StatusBadRequest, "invalid_request", "所属组织：请选择导入数据所属组织")
+			return
+		}
+		if err != nil {
+			writeAPIError(c, http.StatusBadRequest, "invalid_request", "导入文件：请上传 CSV 或 XLSX 文件")
 			return
 		}
 		if fileHeader.Size > maxAssetImportBytes {
@@ -393,7 +397,7 @@ func registerAssetRoutes(api *gin.RouterGroup, requireAuth gin.HandlerFunc, serv
 		case errors.Is(err, asset.ErrForbidden):
 			writeAPIError(c, http.StatusForbidden, "forbidden", "当前账号无权分析该组织的网络资产导入文件")
 		case errors.Is(err, asset.ErrInvalid):
-			writeAPIError(c, http.StatusBadRequest, "invalid_import", "文件格式、列数或数据行数不符合要求（最多 200 列、5000 行）")
+			writeAPIError(c, http.StatusBadRequest, "invalid_import", assetInputErrorMessage(err, "文件格式、列数或数据行数不符合要求（最多 5000 行；列数上限为 200 与当前配置字段数的较大值）"))
 		case err != nil:
 			logger.Error("analyze asset import columns", "error", err, "request_id", c.GetString("request_id"))
 			writeAPIError(c, http.StatusInternalServerError, "internal_error", "分析网络资产导入文件失败")
@@ -411,8 +415,12 @@ func registerAssetRoutes(api *gin.RouterGroup, requireAuth gin.HandlerFunc, serv
 			return
 		}
 		fileHeader, err := c.FormFile("file")
-		if err != nil || organizationID == "" {
-			writeAPIError(c, http.StatusBadRequest, "invalid_request", "请选择所属组织并上传 CSV 或 XLSX 文件")
+		if organizationID == "" {
+			writeAPIError(c, http.StatusBadRequest, "invalid_request", "所属组织：请选择导入数据所属组织")
+			return
+		}
+		if err != nil {
+			writeAPIError(c, http.StatusBadRequest, "invalid_request", "导入文件：请上传 CSV 或 XLSX 文件")
 			return
 		}
 		if fileHeader.Size > maxAssetImportBytes {
@@ -430,7 +438,7 @@ func registerAssetRoutes(api *gin.RouterGroup, requireAuth gin.HandlerFunc, serv
 		case errors.Is(err, asset.ErrForbidden):
 			writeAPIError(c, http.StatusForbidden, "forbidden", "当前账号无权预检该组织的资产导入文件")
 		case errors.Is(err, asset.ErrInvalid):
-			writeAPIError(c, http.StatusBadRequest, "invalid_import", "文件格式、表头或数据行数不符合要求（最多 5000 行）")
+			writeAPIError(c, http.StatusBadRequest, "invalid_import", assetInputErrorMessage(err, "文件格式、表头或数据行数不符合要求（最多 5000 行）"))
 		case err != nil:
 			logger.Error("preview 网络资产 import", "error", err, "request_id", c.GetString("request_id"))
 			writeAPIError(c, http.StatusInternalServerError, "internal_error", "预检网络资产导入文件失败")
@@ -448,8 +456,12 @@ func registerAssetRoutes(api *gin.RouterGroup, requireAuth gin.HandlerFunc, serv
 			return
 		}
 		fileHeader, err := c.FormFile("file")
-		if err != nil || organizationID == "" {
-			writeAPIError(c, http.StatusBadRequest, "invalid_request", "请选择所属组织并上传 CSV 或 XLSX 文件")
+		if organizationID == "" {
+			writeAPIError(c, http.StatusBadRequest, "invalid_request", "所属组织：请选择导入数据所属组织")
+			return
+		}
+		if err != nil {
+			writeAPIError(c, http.StatusBadRequest, "invalid_request", "导入文件：请上传 CSV 或 XLSX 文件")
 			return
 		}
 		if fileHeader.Size > maxAssetImportBytes {
@@ -469,11 +481,11 @@ func registerAssetRoutes(api *gin.RouterGroup, requireAuth gin.HandlerFunc, serv
 		case errors.Is(err, asset.ErrForbidden):
 			writeAPIError(c, http.StatusForbidden, "forbidden", "当前账号无权向该组织导入资产")
 		case errors.Is(err, asset.ErrInvalid):
-			if directChangeReason == "" {
+			if directChangeReason == "" && mustPrincipal(c).HasRole("group_admin") {
 				writeAPIError(c, http.StatusBadRequest, "invalid_direct_change_reason", "请填写集团直接导入资产的原因")
 				return
 			}
-			writeAPIError(c, http.StatusBadRequest, "invalid_import", "文件格式、表头或数据行数不符合要求（最多 5000 行）")
+			writeAPIError(c, http.StatusBadRequest, "invalid_import", assetInputErrorMessage(err, "文件格式、表头或数据行数不符合要求（最多 5000 行）"))
 		case err != nil:
 			logger.Error("import assets", "error", err, "request_id", c.GetString("request_id"))
 			writeAPIError(c, http.StatusInternalServerError, "internal_error", "批量导入网络资产失败")
@@ -503,7 +515,7 @@ func writeDirectChangeRecheckError(c *gin.Context, logger *slog.Logger, action s
 	case errors.Is(err, asset.ErrForbidden):
 		writeAPIError(c, http.StatusForbidden, "forbidden", "当前账号无权查看或复核集团直接变更记录")
 	case errors.Is(err, asset.ErrInvalid):
-		writeAPIError(c, http.StatusBadRequest, "invalid_recheck", "复核状态或说明不正确；状态只允许 confirmed（认可）或 disputed（有异议）")
+		writeAPIError(c, http.StatusBadRequest, "invalid_recheck", assetInputErrorMessage(err, "复核状态或说明不正确；状态只允许 confirmed（认可）或 disputed（有异议）"))
 	case errors.Is(err, asset.ErrNotFound):
 		writeAPIError(c, http.StatusNotFound, "recheck_not_found", "复核记录不存在")
 	case errors.Is(err, asset.ErrConflict):

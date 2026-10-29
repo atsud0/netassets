@@ -30,7 +30,7 @@ func registerSecurityWorkOrderRoutes(api *gin.RouterGroup, requireAuth gin.Handl
 	findings.GET("/imports", func(c *gin.Context) {
 		page, err := parsePageQuery(c)
 		if err != nil {
-			writeAPIError(c, http.StatusBadRequest, "invalid_query", "分页参数不正确，page_size 最大为 100")
+			writeAPIError(c, http.StatusBadRequest, "invalid_query", pageQueryErrorMessage(err))
 			return
 		}
 		result, err := service.SearchFindingImports(c.Request.Context(), mustPrincipal(c), page)
@@ -57,14 +57,16 @@ func registerSecurityWorkOrderRoutes(api *gin.RouterGroup, requireAuth gin.Handl
 			return
 		}
 		defer file.Close()
-		result, err := service.ImportFindings(c.Request.Context(), mustPrincipal(c), c.PostForm("test_batch_id"), fileHeader.Filename, file, c.GetString("request_id"), c.ClientIP())
+		ctx, cancel := prepareFindingImport(c, logger)
+		defer cancel()
+		result, err := service.ImportFindings(ctx, mustPrincipal(c), c.PostForm("test_batch_id"), fileHeader.Filename, file, c.GetString("request_id"), c.ClientIP())
 		writeFindingImportResult(c, logger, result, err)
 	})
 
 	findings.GET("/import-candidates", func(c *gin.Context) {
 		page, err := parsePageQuery(c)
 		if err != nil {
-			writeAPIError(c, http.StatusBadRequest, "invalid_query", "分页参数不正确，page_size 最大为 100")
+			writeAPIError(c, http.StatusBadRequest, "invalid_query", pageQueryErrorMessage(err))
 			return
 		}
 		result, err := service.SearchFindingImportCandidates(c.Request.Context(), mustPrincipal(c), securityworkorder.FindingImportCandidateFilter{
@@ -78,7 +80,7 @@ func registerSecurityWorkOrderRoutes(api *gin.RouterGroup, requireAuth gin.Handl
 		c.JSON(http.StatusOK, result)
 	})
 	findings.GET("/import-candidates/:id/scope-assets", func(c *gin.Context) {
-		items, err := service.ListFindingImportScopeOptions(c.Request.Context(), mustPrincipal(c), c.Param("id"))
+		items, err := service.SearchFindingImportScopeOptions(c.Request.Context(), mustPrincipal(c), c.Param("id"), c.Query("keyword"))
 		if err != nil {
 			writeFindingImportCandidateError(c, logger, "list finding import candidate scope assets", err)
 			return
@@ -118,7 +120,7 @@ func registerSecurityWorkOrderRoutes(api *gin.RouterGroup, requireAuth gin.Handl
 		case errors.Is(err, securityworkorder.ErrForbidden):
 			writeAPIError(c, http.StatusForbidden, "forbidden", "当前账号无权查看该组织的安全发现汇总")
 		case errors.Is(err, securityworkorder.ErrInvalid):
-			writeAPIError(c, http.StatusBadRequest, "invalid_filter", "安全发现组织筛选条件不正确")
+			writeAPIError(c, http.StatusBadRequest, "invalid_filter", securityWorkOrderValidationMessage(err, "安全发现组织筛选条件不正确"))
 		case err != nil:
 			logger.Error("summarize security findings", "error", err, "request_id", c.GetString("request_id"))
 			writeAPIError(c, http.StatusInternalServerError, "internal_error", "读取安全发现汇总失败")
@@ -130,7 +132,7 @@ func registerSecurityWorkOrderRoutes(api *gin.RouterGroup, requireAuth gin.Handl
 	findings.GET("", func(c *gin.Context) {
 		page, err := parsePageQuery(c)
 		if err != nil {
-			writeAPIError(c, http.StatusBadRequest, "invalid_query", "分页参数不正确，page_size 最大为 100")
+			writeAPIError(c, http.StatusBadRequest, "invalid_query", pageQueryErrorMessage(err))
 			return
 		}
 		result, err := service.SearchFindings(c.Request.Context(), mustPrincipal(c), c.Query("organization_id"), c.Query("status"), c.Query("asset_link_state"), page)
@@ -138,7 +140,7 @@ func registerSecurityWorkOrderRoutes(api *gin.RouterGroup, requireAuth gin.Handl
 		case errors.Is(err, securityworkorder.ErrForbidden):
 			writeAPIError(c, http.StatusForbidden, "forbidden", "当前账号无权查看该组织的安全发现")
 		case errors.Is(err, securityworkorder.ErrInvalid):
-			writeAPIError(c, http.StatusBadRequest, "invalid_filter", "安全发现筛选条件不正确")
+			writeAPIError(c, http.StatusBadRequest, "invalid_filter", securityWorkOrderValidationMessage(err, "安全发现筛选条件不正确"))
 		case err != nil:
 			logger.Error("list security findings", "error", err, "request_id", c.GetString("request_id"))
 			writeAPIError(c, http.StatusInternalServerError, "internal_error", "读取安全发现失败")
@@ -214,7 +216,7 @@ func registerSecurityWorkOrderRoutes(api *gin.RouterGroup, requireAuth gin.Handl
 	orders.GET("", func(c *gin.Context) {
 		page, err := parsePageQuery(c)
 		if err != nil {
-			writeAPIError(c, http.StatusBadRequest, "invalid_query", "分页参数不正确，page_size 最大为 100")
+			writeAPIError(c, http.StatusBadRequest, "invalid_query", pageQueryErrorMessage(err))
 			return
 		}
 		overdue, valid := parseOptionalBoolQuery(c.Query("overdue"))
@@ -232,7 +234,7 @@ func registerSecurityWorkOrderRoutes(api *gin.RouterGroup, requireAuth gin.Handl
 		case errors.Is(err, securityworkorder.ErrForbidden):
 			writeAPIError(c, http.StatusForbidden, "forbidden", "当前账号无权查看该组织的安全工单")
 		case errors.Is(err, securityworkorder.ErrInvalid):
-			writeAPIError(c, http.StatusBadRequest, "invalid_filter", "安全工单筛选条件不正确")
+			writeAPIError(c, http.StatusBadRequest, "invalid_filter", securityWorkOrderValidationMessage(err, "安全工单筛选条件不正确"))
 		case err != nil:
 			logger.Error("list security work orders", "error", err, "request_id", c.GetString("request_id"))
 			writeAPIError(c, http.StatusInternalServerError, "internal_error", "读取安全工单失败")
@@ -247,7 +249,7 @@ func registerSecurityWorkOrderRoutes(api *gin.RouterGroup, requireAuth gin.Handl
 	orders.GET("/:id/findings", func(c *gin.Context) {
 		page, err := parsePageQuery(c)
 		if err != nil {
-			writeAPIError(c, http.StatusBadRequest, "invalid_query", "分页参数不正确，page_size 最大为 100")
+			writeAPIError(c, http.StatusBadRequest, "invalid_query", pageQueryErrorMessage(err))
 			return
 		}
 		result, err := service.SearchWorkOrderFindings(c.Request.Context(), mustPrincipal(c), c.Param("id"), page)
@@ -260,7 +262,7 @@ func registerSecurityWorkOrderRoutes(api *gin.RouterGroup, requireAuth gin.Handl
 	orders.GET("/:id/events", func(c *gin.Context) {
 		page, err := parsePageQuery(c)
 		if err != nil {
-			writeAPIError(c, http.StatusBadRequest, "invalid_query", "分页参数不正确，page_size 最大为 100")
+			writeAPIError(c, http.StatusBadRequest, "invalid_query", pageQueryErrorMessage(err))
 			return
 		}
 		result, err := service.SearchWorkOrderEvents(c.Request.Context(), mustPrincipal(c), c.Param("id"), page)
@@ -273,7 +275,7 @@ func registerSecurityWorkOrderRoutes(api *gin.RouterGroup, requireAuth gin.Handl
 	orders.GET("/:id/attachments", func(c *gin.Context) {
 		page, err := parsePageQuery(c)
 		if err != nil {
-			writeAPIError(c, http.StatusBadRequest, "invalid_query", "分页参数不正确，page_size 最大为 100")
+			writeAPIError(c, http.StatusBadRequest, "invalid_query", pageQueryErrorMessage(err))
 			return
 		}
 		result, err := service.SearchWorkOrderAttachments(c.Request.Context(), mustPrincipal(c), c.Param("id"), page)
@@ -385,12 +387,25 @@ func registerSecurityWorkOrderRoutes(api *gin.RouterGroup, requireAuth gin.Handl
 	})
 }
 
+func securityWorkOrderValidationMessage(err error, fallback string) string {
+	var validationError *securityworkorder.InputValidationError
+	if errors.As(err, &validationError) {
+		return validationError.Message
+	}
+	return fallback
+}
+
 func writeFindingResult(c *gin.Context, logger *slog.Logger, operation string, status int, item securityworkorder.Finding, err error) {
 	switch {
 	case errors.Is(err, securityworkorder.ErrForbidden):
 		writeAPIError(c, http.StatusForbidden, "forbidden", "当前账号无权查看、登记或修改该安全发现")
 	case errors.Is(err, securityworkorder.ErrInvalid):
-		writeAPIError(c, http.StatusBadRequest, "invalid_finding", "请检查责任组织、关联资产、严重等级和漏洞信息")
+		message := "请检查责任组织、关联资产、严重等级和漏洞信息"
+		var fieldErr *securityworkorder.InputValidationError
+		if errors.As(err, &fieldErr) {
+			message = fieldErr.Message
+		}
+		writeAPIError(c, http.StatusBadRequest, "invalid_finding", message)
 	case errors.Is(err, securityworkorder.ErrNotFound):
 		writeAPIError(c, http.StatusNotFound, "reference_not_found", "安全发现、责任组织、关联资产或业务系统不存在或不匹配")
 	case errors.Is(err, securityworkorder.ErrVersionRequired):
@@ -415,7 +430,12 @@ func writeFindingDuplicateResult(c *gin.Context, logger *slog.Logger, operation 
 	case errors.Is(err, securityworkorder.ErrForbidden):
 		writeAPIError(c, http.StatusForbidden, "forbidden", "当前账号无安全发现重复关联权限")
 	case errors.Is(err, securityworkorder.ErrInvalid):
-		writeAPIError(c, http.StatusBadRequest, "invalid_duplicate", "请填写有效的主漏洞编号和重复原因")
+		message := "请填写有效的主漏洞编号和重复原因"
+		var validationError *securityworkorder.InputValidationError
+		if errors.As(err, &validationError) {
+			message = validationError.Message
+		}
+		writeAPIError(c, http.StatusBadRequest, "invalid_duplicate", message)
 	case errors.Is(err, securityworkorder.ErrNotFound):
 		writeAPIError(c, http.StatusNotFound, "finding_not_found", "安全发现不存在或主漏洞不存在")
 	case errors.Is(err, securityworkorder.ErrVersionRequired):
@@ -437,7 +457,12 @@ func writeFindingRiskResult(c *gin.Context, logger *slog.Logger, operation strin
 	case errors.Is(err, securityworkorder.ErrForbidden):
 		writeAPIError(c, http.StatusForbidden, "forbidden", "当前账号无安全发现风险管理权限")
 	case errors.Is(err, securityworkorder.ErrInvalid):
-		writeAPIError(c, http.StatusBadRequest, "invalid_risk_acceptance", "请填写有效的风险接受原因、未来有效期或复核意见")
+		message := "请填写有效的风险接受原因、未来有效期或复核意见"
+		var fieldErr *securityworkorder.InputValidationError
+		if errors.As(err, &fieldErr) {
+			message = fieldErr.Message
+		}
+		writeAPIError(c, http.StatusBadRequest, "invalid_risk_acceptance", message)
 	case errors.Is(err, securityworkorder.ErrNotFound):
 		writeAPIError(c, http.StatusNotFound, "finding_not_found", "安全发现不存在或当前账号不可见")
 	case errors.Is(err, securityworkorder.ErrVersionRequired):
@@ -462,11 +487,18 @@ func writeFindingImportCandidateError(c *gin.Context, logger *slog.Logger, opera
 	case errors.Is(err, securityworkorder.ErrForbidden):
 		writeAPIError(c, http.StatusForbidden, "forbidden", "当前账号无漏洞导入待关联项处理权限")
 	case errors.Is(err, securityworkorder.ErrInvalid):
-		writeAPIError(c, http.StatusBadRequest, "invalid_candidate", "待关联项、筛选条件、授权资产或处理备注不正确")
+		message := "待关联项、筛选条件、授权资产或处理备注不正确"
+		var fieldErr *securityworkorder.InputValidationError
+		if errors.As(err, &fieldErr) {
+			message = fieldErr.Message
+		}
+		writeAPIError(c, http.StatusBadRequest, "invalid_candidate", message)
 	case errors.Is(err, securityworkorder.ErrNotFound):
 		writeAPIError(c, http.StatusNotFound, "candidate_not_found", "待关联漏洞或测试批次授权资产不存在")
 	case errors.Is(err, securityworkorder.ErrState):
 		writeAPIError(c, http.StatusConflict, "invalid_candidate_state", "该待关联漏洞已处理，请刷新列表")
+	case errors.Is(err, securityworkorder.ErrConflict):
+		writeAPIError(c, http.StatusConflict, "candidate_link_conflict", "待关联漏洞与目标资产或工作版本不匹配，请刷新后重新选择")
 	case err != nil:
 		logger.Error(operation, "error", err, "request_id", c.GetString("request_id"))
 		writeAPIError(c, http.StatusInternalServerError, "internal_error", "处理漏洞导入待关联项失败")
@@ -478,7 +510,7 @@ func writeFindingImportResult(c *gin.Context, logger *slog.Logger, result securi
 	case errors.Is(err, securityworkorder.ErrForbidden):
 		writeAPIError(c, http.StatusForbidden, "forbidden", "当前账号无安全发现导入权限")
 	case errors.Is(err, securityworkorder.ErrInvalid):
-		writeAPIError(c, http.StatusBadRequest, "invalid_finding_import", "请检查测试批次、文件格式、表头和数据行；最多支持 5000 行")
+		writeAPIError(c, http.StatusBadRequest, "invalid_finding_import", securityWorkOrderValidationMessage(err, "请检查测试批次、文件格式、表头和数据行；最多支持 5000 行"))
 	case errors.Is(err, securityworkorder.ErrNotFound):
 		writeAPIError(c, http.StatusNotFound, "test_batch_not_found", "安全测试批次不存在")
 	case errors.Is(err, securityworkorder.ErrState):
@@ -510,7 +542,12 @@ func writeWorkOrderResult(c *gin.Context, logger *slog.Logger, operation string,
 	case errors.Is(err, securityworkorder.ErrForbidden):
 		writeAPIError(c, http.StatusForbidden, "forbidden", "当前账号无权执行该安全工单操作")
 	case errors.Is(err, securityworkorder.ErrInvalid):
-		writeAPIError(c, http.StatusBadRequest, "invalid_work_order", "请检查责任组织、关联漏洞、整改期限和操作内容")
+		message := "请检查责任组织、关联漏洞、整改期限和操作内容"
+		var fieldErr *securityworkorder.InputValidationError
+		if errors.As(err, &fieldErr) {
+			message = fieldErr.Message
+		}
+		writeAPIError(c, http.StatusBadRequest, "invalid_work_order", message)
 	case errors.Is(err, securityworkorder.ErrNotFound):
 		writeAPIError(c, http.StatusNotFound, "not_found", "安全工单、责任组织或关联漏洞不存在或不匹配")
 	case errors.Is(err, securityworkorder.ErrState):
@@ -532,7 +569,12 @@ func writeAttachmentResult(c *gin.Context, logger *slog.Logger, operation string
 	case errors.Is(err, securityworkorder.ErrForbidden):
 		writeAPIError(c, http.StatusForbidden, "forbidden", "当前账号无权上传、下载或删除该工单附件")
 	case errors.Is(err, securityworkorder.ErrInvalid):
-		writeAPIError(c, http.StatusBadRequest, "invalid_attachment", "仅支持 PDF、图片、TXT、CSV、XLSX、DOCX、ZIP，且单个附件不超过 20MB")
+		message := "仅支持 PDF、图片、TXT、CSV、XLSX、DOCX、ZIP，且单个附件不超过 20MB"
+		var fieldErr *securityworkorder.InputValidationError
+		if errors.As(err, &fieldErr) {
+			message = fieldErr.Message
+		}
+		writeAPIError(c, http.StatusBadRequest, "invalid_attachment", message)
 	case errors.Is(err, securityworkorder.ErrNotFound):
 		writeAPIError(c, http.StatusNotFound, "not_found", "安全工单或附件不存在")
 	case err != nil:

@@ -22,8 +22,11 @@ func validateTakeover(principal auth.Principal, permission string, input DraftTa
 	if !principal.HasPermission("inventory.manage") || !principal.HasPermission(permission) || principal.HasRole("group_admin") || !principal.HasRole("organization_admin") {
 		return ErrForbidden
 	}
-	if input.ExpectedVersion <= 0 || strings.TrimSpace(input.Reason) == "" {
-		return ErrInvalid
+	if input.ExpectedVersion <= 0 {
+		return invalidInput("请提供有效的草稿版本 expected_version")
+	}
+	if strings.TrimSpace(input.Reason) == "" {
+		return invalidInput("请填写草稿接管原因")
 	}
 	return nil
 }

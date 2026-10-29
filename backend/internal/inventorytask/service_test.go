@@ -278,7 +278,7 @@ func TestBuildInventoryTaskExportXLSXAndRejectInvalidFormat(t *testing.T) {
 	if len(rows) != 2 || rows[0][0] != "任务名称" || rows[1][3] != "全部网络资产" || rows[1][11] != "SUB_A" || rows[1][13] != "未开始" {
 		t.Fatalf("unexpected XLSX rows: %#v", rows)
 	}
-	if _, _, _, err := buildExport(task, "xls"); err != ErrInvalid {
+	if _, _, _, err := buildExport(task, "xls"); !errors.Is(err, ErrInvalid) {
 		t.Fatalf("buildExport(xls) error = %v", err)
 	}
 }

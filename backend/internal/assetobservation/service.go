@@ -109,7 +109,7 @@ func observationPlans(target assetTarget) ([]observationPlan, error) {
 	case "url":
 		parsed, err := url.Parse(target.NormalizedValue)
 		if err != nil || parsed.Hostname() == "" {
-			return nil, ErrInvalid
+			return nil, &InputValidationError{Message: "资产 URL 格式不正确，无法采集外部信息"}
 		}
 		host = strings.ToLower(parsed.Hostname())
 		if parsed.Scheme == "https" {

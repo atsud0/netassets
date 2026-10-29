@@ -49,12 +49,17 @@ button, input { font: inherit; }
 .collapse-button { flex: 0 0 auto; margin-top: 8px; border: 1px solid rgba(255,255,255,.16); color: #b9cad9; background: transparent; border-radius: 9px; padding: 9px; cursor: pointer; }
 .collapse-button:hover { color: white; border-color: rgba(255,255,255,.32); }
 .main-shell { flex: 1; min-width: 0; min-height: 0; height: 100vh; display: flex; flex-direction: column; overflow: hidden; }
-.topbar { height: 72px; flex: 0 0 72px; padding: 0 30px; display: flex; align-items: center; justify-content: space-between; background: rgba(255,255,255,.94); border-bottom: 1px solid var(--line); }
-.topbar-context { display: flex; min-width: 0; align-items: center; gap: 16px; }
-.topbar-organization { min-width: 0; }
-.topbar-subtitle { margin-left: 10px; color: var(--muted); font-size: 13px; }
+.topbar { height: 72px; flex: 0 0 72px; padding: 0 30px; display: flex; align-items: center; justify-content: space-between; column-gap: 12px; background: rgba(255,255,255,.94); border-bottom: 1px solid var(--line); }
+.topbar-context { display: flex; flex: 1; min-width: 0; align-items: center; gap: 16px; }
+.topbar-organization { display: flex; align-items: center; min-width: 0; white-space: nowrap; overflow: hidden; }
+.topbar-organization strong { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.topbar-subtitle { flex-shrink: 0; margin-left: 10px; color: var(--muted); font-size: 13px; }
+/* A fixed flex basis prevents Element Plus' late-loaded width:100% rule from
+   stretching the switcher and squeezing the organization/breadcrumb to zero. */
+.work-organization-switcher.el-select { width: 210px; flex: 0 0 210px; min-width: 0; }
+.organization-select-popper.el-popper { max-width: calc(100vw - 24px); }
 .topbar-actions { display: flex; flex: 0 0 auto; align-items: center; gap: 10px; }
-.topbar-actions > .el-button { margin-left: 0; }
+.topbar-actions > .el-button, .topbar-actions > .el-button + .el-button { margin-left: 0; }
 .user-name-topbar-button { max-width: 180px; overflow: hidden; text-overflow: ellipsis; }
 .page-content { flex: 1; min-height: 0; overflow: auto; padding: 30px; }
 .page-heading { display: flex; align-items: flex-end; justify-content: space-between; gap: 24px; margin-bottom: 24px; }
@@ -76,7 +81,8 @@ button, input { font: inherit; }
 .metric-list li { padding: 14px 0; display: flex; justify-content: space-between; border-top: 1px solid #edf0f3; }
 .button-row { display: flex; gap: 10px; }
 .ledger-page-actions { flex: 0 0 auto; align-items: center; }
-.ledger-page-actions > .el-button { margin-left: 0; }
+.ledger-page-actions > .el-button,
+.ledger-page-actions > .el-button + .el-button { margin-left: 0; }
 .login-page { min-height: 100vh; display: grid; grid-template-columns: 1.25fr .75fr; background: #102a43; }
 .login-intro { padding: 10vh 9vw; color: white; display: flex; flex-direction: column; justify-content: center; background: radial-gradient(circle at 15% 20%, rgba(42,157,143,.36), transparent 30%), linear-gradient(135deg, #102a43 0%, #173f5f 100%); }
 .login-intro h1 { margin: 14px 0 20px; font-size: clamp(44px, 5vw, 72px); line-height: 1.08; letter-spacing: -2px; }
@@ -248,7 +254,14 @@ button, input { font: inherit; }
   .topbar { padding: 0 18px; }
   .topbar-context { gap: 10px; }
   .topbar-subtitle { display: none; }
-  .work-organization-switcher { width: 160px; }
+  .user-name-topbar-button { max-width: 120px; }
+  .work-organization-switcher.el-select { width: 160px; flex-basis: 160px; }
+}
+@media (max-width: 960px) {
+  .notification-topbar-label { display: none; }
+}
+@media (max-width: 760px) {
+  .work-organization-switcher.el-select { width: 105px; flex-basis: 105px; }
 }
 @media (max-width: 720px) {
   body { min-width: 0; }
@@ -325,7 +338,6 @@ button, input { font: inherit; }
   .batch-toolbar-actions { justify-content: flex-start; flex-wrap: wrap; }
 }
 
-.work-organization-switcher { width: 210px; }
 
 .working-version-diff { min-height: 240px; }
 .working-version-diff-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; padding-bottom: 14px; }

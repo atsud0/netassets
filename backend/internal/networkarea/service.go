@@ -14,7 +14,6 @@ import (
 	"netassets/internal/access"
 	"netassets/internal/auth"
 	"netassets/internal/pagination"
-	"netassets/internal/textlength"
 )
 
 var (
@@ -57,6 +56,9 @@ func (s *Service) List(ctx context.Context, principal auth.Principal, organizati
 		return nil, ErrForbidden
 	}
 	organizationID = strings.TrimSpace(organizationID)
+	if err := validateOrganizationID(organizationID, false); err != nil {
+		return nil, err
+	}
 	if organizationID != "" {
 		allowed, err := access.CanOperateOrganization(ctx, s.pool, principal, organizationID, "asset.manage")
 		if err != nil {
@@ -124,6 +126,9 @@ func (s *Service) Search(ctx context.Context, principal auth.Principal, organiza
 		return pagination.Result[NetworkArea]{}, ErrForbidden
 	}
 	organizationID = strings.TrimSpace(organizationID)
+	if err := validateOrganizationID(organizationID, false); err != nil {
+		return pagination.Result[NetworkArea]{}, err
+	}
 	if organizationID != "" {
 		allowed, err := access.CanOperateOrganization(ctx, s.pool, principal, organizationID, "asset.manage")
 		if err != nil {
@@ -201,8 +206,8 @@ func (s *Service) Create(ctx context.Context, principal auth.Principal, input In
 		return NetworkArea{}, ErrForbidden
 	}
 	normalize(&input)
-	if !valid(input) {
-		return NetworkArea{}, ErrInvalid
+	if err := validateOrganizationID(input.OrganizationID, true); err != nil {
+		return NetworkArea{}, err
 	}
 	allowed, err := access.CanOperateOrganization(ctx, s.pool, principal, input.OrganizationID, "asset.manage")
 	if err != nil {
@@ -210,6 +215,9 @@ func (s *Service) Create(ctx context.Context, principal auth.Principal, input In
 	}
 	if !allowed {
 		return NetworkArea{}, ErrForbidden
+	}
+	if err := validateFields(input); err != nil {
+		return NetworkArea{}, err
 	}
 	var organizationCode, organizationName, organizationStatus string
 	if err := s.pool.QueryRow(ctx, `SELECT organization_code, organization_name, status FROM organizations WHERE id::text = $1 AND deleted_at IS NULL`, input.OrganizationID).
@@ -219,7 +227,7 @@ func (s *Service) Create(ctx context.Context, principal auth.Principal, input In
 		return NetworkArea{}, fmt.Errorf("load network area organization: %w", err)
 	}
 	if organizationStatus != "enabled" {
-		return NetworkArea{}, ErrInvalid
+		return NetworkArea{}, invalidField("所属组织已停用，请选择启用的组织")
 	}
 
 	tx, err := s.pool.Begin(ctx)
@@ -260,10 +268,10 @@ func (s *Service) Update(ctx context.Context, principal auth.Principal, id strin
 	if !principal.HasPermission("asset.manage") {
 		return NetworkArea{}, ErrForbidden
 	}
-	id = strings.TrimSpace(id)
+	id = strings.ToLower(strings.TrimSpace(id))
 	normalize(&input)
-	if id == "" || !valid(input) {
-		return NetworkArea{}, ErrInvalid
+	if !networkAreaUUID.MatchString(id) {
+		return NetworkArea{}, invalidField("网络区域标识不正确")
 	}
 	var currentOrganizationID string
 	if err := s.pool.QueryRow(ctx, `SELECT organization_id::text FROM asset_network_areas WHERE id::text = $1`, id).Scan(&currentOrganizationID); errors.Is(err, pgx.ErrNoRows) {
@@ -278,8 +286,14 @@ func (s *Service) Update(ctx context.Context, principal auth.Principal, id strin
 	if !allowed {
 		return NetworkArea{}, ErrForbidden
 	}
-	if input.OrganizationID != "" && input.OrganizationID != currentOrganizationID {
-		return NetworkArea{}, ErrInvalid
+	if err := validateOrganizationID(input.OrganizationID, true); err != nil {
+		return NetworkArea{}, err
+	}
+	if input.OrganizationID != currentOrganizationID {
+		return NetworkArea{}, invalidField("所属组织不可直接变更")
+	}
+	if err := validateFields(input); err != nil {
+		return NetworkArea{}, err
 	}
 
 	tx, err := s.pool.Begin(ctx)
@@ -328,7 +342,7 @@ func (s *Service) Update(ctx context.Context, principal auth.Principal, id strin
 }
 
 func normalize(input *Input) {
-	input.OrganizationID = strings.TrimSpace(input.OrganizationID)
+	input.OrganizationID = strings.ToLower(strings.TrimSpace(input.OrganizationID))
 	input.Name = strings.TrimSpace(input.Name)
 	input.Code = strings.TrimSpace(input.Code)
 	input.Status = strings.ToLower(strings.TrimSpace(input.Status))
@@ -339,7 +353,5 @@ func normalize(input *Input) {
 }
 
 func valid(input Input) bool {
-	return input.OrganizationID != "" && input.Name != "" && textlength.Count(input.Name) <= 128 && textlength.Count(input.Code) <= 64 &&
-		textlength.Count(input.Notes) <= 5000 && input.SortOrder >= 0 && input.SortOrder <= 100000 &&
-		(input.Status == "enabled" || input.Status == "disabled")
+	return validateOrganizationID(input.OrganizationID, true) == nil && validateFields(input) == nil
 }

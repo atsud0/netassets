@@ -16,13 +16,15 @@ func registerNetworkAreaRoutes(api *gin.RouterGroup, requireAuth gin.HandlerFunc
 	group.GET("", func(c *gin.Context) {
 		page, err := parsePageQuery(c)
 		if err != nil {
-			writeAPIError(c, http.StatusBadRequest, "invalid_query", "分页参数不正确，page_size 最大为 100")
+			writeAPIError(c, http.StatusBadRequest, "invalid_query", pageQueryErrorMessage(err))
 			return
 		}
 		result, err := service.Search(c.Request.Context(), mustPrincipal(c), strings.TrimSpace(c.Query("organization_id")), page)
 		switch {
 		case errors.Is(err, networkarea.ErrForbidden):
 			writeAPIError(c, http.StatusForbidden, "forbidden", "当前账号无权查看该组织的网络区域")
+		case errors.Is(err, networkarea.ErrInvalid):
+			writeAPIError(c, http.StatusBadRequest, "invalid_network_area", networkAreaInputMessage(err, "网络区域筛选条件不正确"))
 		case err != nil:
 			logger.Error("list network areas", "error", err, "request_id", c.GetString("request_id"))
 			writeAPIError(c, http.StatusInternalServerError, "internal_error", "读取网络区域失败")
@@ -41,7 +43,7 @@ func registerNetworkAreaRoutes(api *gin.RouterGroup, requireAuth gin.HandlerFunc
 		case errors.Is(err, networkarea.ErrForbidden):
 			writeAPIError(c, http.StatusForbidden, "forbidden", "当前账号无权维护该组织的网络区域")
 		case errors.Is(err, networkarea.ErrInvalid):
-			writeAPIError(c, http.StatusBadRequest, "invalid_network_area", "请检查所属组织、名称、状态和排序")
+			writeAPIError(c, http.StatusBadRequest, "invalid_network_area", networkAreaInputMessage(err, "请检查所属组织、名称、状态和排序"))
 		case errors.Is(err, networkarea.ErrNotFound):
 			writeAPIError(c, http.StatusNotFound, "organization_not_found", "所属组织不存在")
 		case errors.Is(err, networkarea.ErrConflict):
@@ -64,7 +66,7 @@ func registerNetworkAreaRoutes(api *gin.RouterGroup, requireAuth gin.HandlerFunc
 		case errors.Is(err, networkarea.ErrForbidden):
 			writeAPIError(c, http.StatusForbidden, "forbidden", "当前账号无权维护该组织的网络区域")
 		case errors.Is(err, networkarea.ErrInvalid):
-			writeAPIError(c, http.StatusBadRequest, "invalid_network_area", "请检查网络区域信息；所属组织不可直接变更")
+			writeAPIError(c, http.StatusBadRequest, "invalid_network_area", networkAreaInputMessage(err, "请检查网络区域信息；所属组织不可直接变更"))
 		case errors.Is(err, networkarea.ErrNotFound):
 			writeAPIError(c, http.StatusNotFound, "network_area_not_found", "网络区域不存在")
 		case errors.Is(err, networkarea.ErrConflict):

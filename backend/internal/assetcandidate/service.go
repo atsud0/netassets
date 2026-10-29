@@ -15,6 +15,7 @@ import (
 	"netassets/internal/asset"
 	"netassets/internal/auth"
 	"netassets/internal/pagination"
+	"netassets/internal/textlength"
 )
 
 var (
@@ -123,7 +124,7 @@ func (s *Service) List(ctx context.Context, principal auth.Principal, status str
 	}
 	status = strings.TrimSpace(status)
 	if status != "" && !validStatus(status) {
-		return nil, ErrInvalid
+		return nil, invalidInput("请选择有效的待确认资产状态")
 	}
 	rows, err := s.pool.Query(ctx, candidateScopeCTE+`
         SELECT c.id::text, c.asset_type, c.asset_value, c.normalized_value,
@@ -166,7 +167,7 @@ func (s *Service) Search(ctx context.Context, principal auth.Principal, status s
 	}
 	status = strings.TrimSpace(status)
 	if status != "" && !validStatus(status) {
-		return pagination.Result[Candidate]{}, ErrInvalid
+		return pagination.Result[Candidate]{}, invalidInput("请选择有效的待确认资产状态")
 	}
 	rows, err := s.pool.Query(ctx, candidateScopeCTE+`
         SELECT c.id::text, c.asset_type, c.asset_value, c.normalized_value,
@@ -236,6 +237,9 @@ func (s *Service) Get(ctx context.Context, principal auth.Principal, id string) 
 }
 
 func (s *Service) listByID(ctx context.Context, id string) (Candidate, error) {
+	if !candidateUUIDPattern.MatchString(id) {
+		return Candidate{}, invalidInput("待确认资产标识：请提供有效的待确认资产编号")
+	}
 	var i Candidate
 	var raw []byte
 	err := s.pool.QueryRow(ctx, `
@@ -278,11 +282,31 @@ func (s *Service) Create(ctx context.Context, principal auth.Principal, in Creat
 		in.Source = "manual"
 	}
 	if in.Source != "manual" && in.Source != "api" && in.Source != "import" && in.Source != "finding_import" {
-		return Candidate{}, ErrInvalid
+		return Candidate{}, invalidInput("请选择有效的发现来源")
+	}
+	switch in.AssetType {
+	case "domain", "ip", "url", "service", "other":
+	default:
+		return Candidate{}, invalidInput("请选择有效的资产类型")
+	}
+	if in.AssetValue == "" {
+		return Candidate{}, invalidInput("资产值不能为空")
 	}
 	normalized, err := asset.NormalizeValue(in.AssetType, in.AssetValue)
-	if err != nil || (in.Source != "finding_import" && in.OrganizationID == "") || len(in.Name) > 255 || len(in.SourceReference) > 255 || len(in.Notes) > 5000 {
-		return Candidate{}, ErrInvalid
+	if err != nil {
+		return Candidate{}, invalidInput("资产值与所选资产类型不匹配，请检查资产值")
+	}
+	switch {
+	case in.Source != "finding_import" && in.OrganizationID == "":
+		return Candidate{}, invalidInput("请选择建议所属组织")
+	case in.OrganizationID != "" && !candidateUUIDPattern.MatchString(in.OrganizationID):
+		return Candidate{}, invalidInput("请选择有效的建议所属组织")
+	case textlength.Exceeds(in.Name, 255):
+		return Candidate{}, invalidInput("资产名称最多 255 字")
+	case textlength.Exceeds(in.SourceReference, 255):
+		return Candidate{}, invalidInput("来源参考最多 255 字")
+	case textlength.Exceeds(in.Notes, 5000):
+		return Candidate{}, invalidInput("备注最多 5000 字")
 	}
 	suggested := in.SuggestedData
 	if suggested == nil {
@@ -296,7 +320,7 @@ func (s *Service) Create(ctx context.Context, principal auth.Principal, in Creat
 	}
 	data, err := json.Marshal(suggested)
 	if err != nil {
-		return Candidate{}, ErrInvalid
+		return Candidate{}, invalidInput("请检查建议资产信息的格式")
 	}
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
@@ -311,7 +335,7 @@ func (s *Service) Create(ctx context.Context, principal auth.Principal, in Creat
 			return Candidate{}, err
 		}
 		if !enabled {
-			return Candidate{}, ErrInvalid
+			return Candidate{}, invalidInput("建议所属组织已停用，请重新选择")
 		}
 	}
 	var id string
@@ -365,7 +389,7 @@ func (s *Service) AcceptWithAfterCreate(ctx context.Context, principal auth.Prin
 		in.OrganizationID = candidate.OrganizationID
 	}
 	if strings.TrimSpace(in.OrganizationID) == "" {
-		return asset.Asset{}, ErrInvalid
+		return asset.Asset{}, invalidInput("请选择资产所属组织")
 	}
 	if in.Name == "" {
 		in.Name = candidate.Name
@@ -379,7 +403,9 @@ func (s *Service) AcceptWithAfterCreate(ctx context.Context, principal auth.Prin
 	if candidate.Source == "finding_import" {
 		source = "finding_import"
 	}
-	if source == "finding_import" {
+	if source == "finding_import" && in.Type == "ip" {
+		// A service keeps host:port as its identity; only an IP discovery
+		// collapses onto the address.
 		// The scan recorded an endpoint; the port is evidence about the host, not
 		// part of its identity. Normalising has already collapsed host:port onto
 		// the address, so the port is kept as a note for the owner to classify.
@@ -502,10 +528,13 @@ func (s *Service) AddFollowUp(ctx context.Context, p auth.Principal, id string, 
 		in.Action = "note"
 	}
 	if in.Action != "note" && in.Action != "reminder" && in.Action != "handoff_request" {
-		return FollowUp{}, ErrInvalid
+		return FollowUp{}, invalidInput("请选择有效的跟进类型")
 	}
-	if in.Comment == "" || len([]rune(in.Comment)) > 4000 {
-		return FollowUp{}, ErrInvalid
+	if in.Comment == "" {
+		return FollowUp{}, invalidInput("请填写跟进说明")
+	}
+	if textlength.Exceeds(in.Comment, 4000) {
+		return FollowUp{}, invalidInput("跟进说明最多 4000 字")
 	}
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
@@ -539,9 +568,6 @@ func (s *Service) Invalidate(ctx context.Context, p auth.Principal, id string, i
 	return s.review(ctx, p, id, "invalid", "", in.ReviewNote, rid, ip)
 }
 func (s *Service) MarkDuplicate(ctx context.Context, p auth.Principal, id string, in DuplicateInput, rid, ip string) error {
-	if strings.TrimSpace(in.MatchedAssetID) == "" {
-		return ErrInvalid
-	}
 	return s.review(ctx, p, id, "duplicate", in.MatchedAssetID, in.ReviewNote, rid, ip)
 }
 func (s *Service) review(ctx context.Context, p auth.Principal, id, status, matched, note, rid, ip string) error {
@@ -549,7 +575,16 @@ func (s *Service) review(ctx context.Context, p auth.Principal, id, status, matc
 		return err
 	}
 	if !validStatus(status) || status == "pending" {
-		return ErrInvalid
+		return invalidInput("处理状态：请选择有效的待确认资产处理结果")
+	}
+	matched = strings.TrimSpace(matched)
+	if status == "duplicate" {
+		if matched == "" {
+			return invalidInput("重复资产：请选择对应的正式资产")
+		}
+		if !candidateUUIDPattern.MatchString(matched) {
+			return invalidInput("重复资产标识：请选择有效的正式资产")
+		}
 	}
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
@@ -557,7 +592,7 @@ func (s *Service) review(ctx context.Context, p auth.Principal, id, status, matc
 	}
 	defer tx.Rollback(ctx)
 	var current, org string
-	err = tx.QueryRow(ctx, `SELECT status,organization_id::text FROM asset_candidates WHERE id=$1::uuid FOR UPDATE`, id).Scan(&current, &org)
+	err = tx.QueryRow(ctx, `SELECT status,COALESCE(organization_id::text,'') FROM asset_candidates WHERE id=$1::uuid FOR UPDATE`, id).Scan(&current, &org)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return ErrNotFound
 	}
@@ -623,6 +658,10 @@ func mapAssetError(err error) error {
 	case errors.Is(err, asset.ErrConflict):
 		return ErrConflict
 	case errors.Is(err, asset.ErrInvalid):
+		var fieldError *asset.InputValidationError
+		if errors.As(err, &fieldError) {
+			return invalidInput(fieldError.Message)
+		}
 		return ErrInvalid
 	}
 	return err

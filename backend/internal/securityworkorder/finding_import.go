@@ -15,11 +15,13 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/xuri/excelize/v2"
 
 	"netassets/internal/asset"
 	"netassets/internal/auth"
 	"netassets/internal/findingstatus"
+	"netassets/internal/notification"
 	"netassets/internal/pagination"
 	"netassets/internal/textlength"
 )
@@ -121,7 +123,7 @@ func (s *Service) ImportFindings(ctx context.Context, principal auth.Principal, 
 	}
 	testBatchID = strings.TrimSpace(testBatchID)
 	if testBatchID != "" && !validUUID(testBatchID) {
-		return FindingImportResult{}, ErrInvalid
+		return FindingImportResult{}, invalidField("测试批次编号格式不正确，请重新选择测试批次")
 	}
 	var batchCode, batchName, batchStatus string
 	if testBatchID != "" {
@@ -137,16 +139,39 @@ func (s *Service) ImportFindings(ctx context.Context, principal auth.Principal, 
 
 	rows, fileType, err := readFindingImportRows(fileName, reader)
 	if err != nil {
-		return FindingImportResult{}, ErrInvalid
+		var validation *InputValidationError
+		if errors.As(err, &validation) {
+			return FindingImportResult{}, validation
+		}
+		switch strings.ToLower(filepath.Ext(fileName)) {
+		case ".csv":
+			var parseError *csv.ParseError
+			if errors.As(err, &parseError) {
+				return FindingImportResult{}, invalidField(fmt.Sprintf("CSV 文件第 %d 行格式不正确，请检查引号和分隔符", parseError.Line))
+			}
+			return FindingImportResult{}, invalidField("无法读取 CSV 文件，请检查文件内容")
+		case ".xlsx":
+			return FindingImportResult{}, invalidField("无法读取 XLSX 文件，请确认工作簿有效且未加密")
+		case ".json":
+			return FindingImportResult{}, invalidField("JSON 文件格式不正确，请提供漏洞数组或包含 findings 数组的对象")
+		default:
+			return FindingImportResult{}, invalidField("导入文件仅支持 CSV、XLSX 或 JSON 格式")
+		}
 	}
 	rows = nonEmptyImportRows(rows)
-	if len(rows) < 2 || len(rows)-1 > MaxFindingImportRows {
-		return FindingImportResult{}, ErrInvalid
+	if len(rows) < 2 {
+		return FindingImportResult{}, invalidField("导入文件至少需要一行漏洞数据，不能仅包含表头或空行")
+	}
+	if len(rows)-1 > MaxFindingImportRows {
+		return FindingImportResult{}, invalidField(fmt.Sprintf("导入数据最多支持 %d 行", MaxFindingImportRows))
 	}
 	headers := mapFindingImportHeaders(rows[0])
-	for _, required := range []string{"asset_type", "asset_value", "title", "severity", "description"} {
-		if headers[required] < 0 {
-			return FindingImportResult{}, ErrInvalid
+	for _, required := range []struct{ key, label string }{
+		{"asset_type", "资产类型"}, {"asset_value", "资产值"}, {"title", "漏洞标题"},
+		{"severity", "严重等级"}, {"description", "漏洞描述"},
+	} {
+		if headers[required.key] < 0 {
+			return FindingImportResult{}, invalidField("导入文件缺少必填表头：" + required.label)
 		}
 	}
 
@@ -164,8 +189,36 @@ func (s *Service) ImportFindings(ctx context.Context, principal auth.Principal, 
 		FileName: filepath.Base(fileName), FileType: fileType, TotalCount: len(rows) - 1,
 		Errors: make([]FindingImportError, 0),
 	}
+	for attempt := 0; ; attempt++ {
+		imported, err := s.importFindingRows(ctx, principal, rows, headers, scopes, result, requestID, ipAddress)
+		var pgError *pgconn.PgError
+		// Overlapping files can acquire identity/candidate locks in different row
+		// orders (and finding triggers also use a remediation lock). PostgreSQL's
+		// deadlock victim has definitely rolled back, so replay only that whole-file
+		// transaction, at most twice. Never replay cancellation, connection failure
+		// or an ambiguous COMMIT, and never detach from the request context.
+		if err == nil || attempt >= 2 || ctx.Err() != nil || !errors.As(err, &pgError) || pgError.Code != "40P01" {
+			return imported, err
+		}
+	}
+}
+
+func (s *Service) importFindingRows(ctx context.Context, principal auth.Principal, rows [][]string, headers map[string]int, scopes []findingImportScope, result FindingImportResult, requestID, ipAddress string) (FindingImportResult, error) {
+	testBatchID := result.TestBatchID
+	// A file is one durability boundary: findings, notifications, candidates,
+	// audit and history must either all commit or all roll back. Row-level
+	// business errors still contribute to a partial result, not a partial write.
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return FindingImportResult{}, fmt.Errorf("begin finding import: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
 	pendingCandidates := make([]pendingFindingImportCandidate, 0)
+	notifications := newFindingImportNotifications()
 	for index, row := range rows[1:] {
+		if err := ctx.Err(); err != nil {
+			return FindingImportResult{}, fmt.Errorf("process finding import: %w", err)
+		}
 		rowNumber := index + 2
 		input, assetType, assetValue, rowErr := findingInputFromImportRow(row, headers, testBatchID)
 		if rowErr != nil {
@@ -194,17 +247,18 @@ func (s *Service) ImportFindings(ctx context.Context, principal auth.Principal, 
 		input.BusinessSystemID = scope.BusinessSystemID
 
 		var duplicate bool
+		// Match the expression/UUID types of the deduplication index. Casting
+		// the UUID columns to text forced a full finding-table scan for each row.
 		duplicateQuery := `SELECT EXISTS(SELECT 1 FROM security_findings
-			WHERE test_batch_id::text=$1 AND asset_id::text=$2 AND lower(btrim(title))=lower(btrim($3)))`
+			WHERE COALESCE(test_batch_id, '00000000-0000-0000-0000-000000000000'::uuid)
+			      = COALESCE(NULLIF($1, '')::uuid, '00000000-0000-0000-0000-000000000000'::uuid)
+			  AND asset_id=$2::uuid AND lower(btrim(title))=lower(btrim($3)))`
 		duplicateArgs := []any{testBatchID, scope.AssetID, input.Title}
 		duplicateMessage := "同一测试批次、资产和漏洞标题的安全发现已存在"
 		if testBatchID == "" {
-			duplicateQuery = `SELECT EXISTS(SELECT 1 FROM security_findings
-				WHERE test_batch_id IS NULL AND asset_id::text=$1 AND lower(btrim(title))=lower(btrim($2)))`
-			duplicateArgs = []any{scope.AssetID, input.Title}
 			duplicateMessage = "同一资产和漏洞标题的安全发现已存在"
 		}
-		if err := s.pool.QueryRow(ctx, duplicateQuery, duplicateArgs...).Scan(&duplicate); err != nil {
+		if err := tx.QueryRow(ctx, duplicateQuery, duplicateArgs...).Scan(&duplicate); err != nil {
 			return FindingImportResult{}, fmt.Errorf("check duplicate imported finding: %w", err)
 		}
 		if duplicate {
@@ -213,9 +267,11 @@ func (s *Service) ImportFindings(ctx context.Context, principal auth.Principal, 
 			continue
 		}
 
-		_, err = s.CreateFinding(ctx, principal, input, requestID, ipAddress)
+		var event notification.EventInput
+		event, err = s.createImportedFinding(ctx, tx, principal, input, requestID, ipAddress)
 		switch {
 		case err == nil:
+			notifications.add(event)
 			result.SuccessCount++
 		case errors.Is(err, ErrNotFound):
 			result.FailureCount++
@@ -236,24 +292,61 @@ func (s *Service) ImportFindings(ctx context.Context, principal auth.Principal, 
 	} else if result.FailureCount+result.DuplicateCount+result.PendingCount > 0 {
 		result.Status = "partial"
 	}
-	id, err := s.saveFindingImportResult(ctx, principal, result, pendingCandidates, requestID, ipAddress)
+	if err := notifications.flush(ctx, tx); err != nil {
+		return FindingImportResult{}, err
+	}
+	id, err := s.saveFindingImportResult(ctx, tx, principal, result, pendingCandidates, requestID, ipAddress)
 	if err != nil {
 		return FindingImportResult{}, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return FindingImportResult{}, fmt.Errorf("commit finding import: %w", err)
 	}
 	result.ID = id
 	return result, nil
 }
 
-func (s *Service) saveFindingImportResult(ctx context.Context, principal auth.Principal, result FindingImportResult, candidates []pendingFindingImportCandidate, requestID, ipAddress string) (string, error) {
+// A uniqueness race must roll back just this row, including its audit and
+// notification, before processing further rows. PostgreSQL otherwise leaves the
+// whole file transaction aborted after a constraint violation.
+func (s *Service) createImportedFinding(ctx context.Context, tx pgx.Tx, principal auth.Principal, input FindingInput, requestID, ipAddress string) (notification.EventInput, error) {
+	if err := prepareFindingCreateInput(principal, &input); err != nil {
+		return notification.EventInput{}, err
+	}
+	if err := validateFindingReferences(ctx, tx, input.AssigneeOrganizationID, input.AssetID, input.BusinessSystemID); err != nil {
+		return notification.EventInput{}, err
+	}
+	if input.TestBatchID != "" {
+		if err := validateFindingBatchScope(ctx, tx, input.TestBatchID, input.AssigneeOrganizationID, input.AssetID); err != nil {
+			return notification.EventInput{}, err
+		}
+	}
+	rowTx, err := tx.Begin(ctx)
+	if err != nil {
+		return notification.EventInput{}, fmt.Errorf("begin imported finding row: %w", err)
+	}
+	defer func() { _ = rowTx.Rollback(ctx) }()
+	var event notification.EventInput
+	if _, _, err := s.createFindingInTxWithEventWriter(ctx, rowTx, principal, input, requestID, ipAddress, func(input notification.EventInput) error {
+		event = input
+		return nil
+	}); err != nil {
+		if rollbackErr := rowTx.Rollback(ctx); rollbackErr != nil {
+			return notification.EventInput{}, fmt.Errorf("roll back imported finding row after %v: %w", err, rollbackErr)
+		}
+		return notification.EventInput{}, err
+	}
+	if err := rowTx.Commit(ctx); err != nil {
+		return notification.EventInput{}, fmt.Errorf("commit imported finding row: %w", err)
+	}
+	return event, nil
+}
+
+func (s *Service) saveFindingImportResult(ctx context.Context, tx pgx.Tx, principal auth.Principal, result FindingImportResult, candidates []pendingFindingImportCandidate, requestID, ipAddress string) (string, error) {
 	errorsJSON, err := json.Marshal(result.Errors)
 	if err != nil {
 		return "", fmt.Errorf("encode finding import errors: %w", err)
 	}
-	tx, err := s.pool.Begin(ctx)
-	if err != nil {
-		return "", fmt.Errorf("begin finding import result: %w", err)
-	}
-	defer func() { _ = tx.Rollback(ctx) }()
 	var id string
 	if err := tx.QueryRow(ctx, `
 		INSERT INTO security_finding_imports
@@ -274,9 +367,6 @@ func (s *Service) saveFindingImportResult(ctx context.Context, principal auth.Pr
 		NULLIF($11,'')::inet, NULLIF($12,''))`, principal.UserID, organizationID, id, result.TestBatchID,
 		result.FileName, result.TotalCount, result.SuccessCount, result.FailureCount, result.DuplicateCount, result.PendingCount, ipAddress, requestID); err != nil {
 		return "", fmt.Errorf("write finding import audit: %w", err)
-	}
-	if err := tx.Commit(ctx); err != nil {
-		return "", fmt.Errorf("commit finding import result: %w", err)
 	}
 	return id, nil
 }
@@ -351,12 +441,12 @@ func readFindingImportRows(fileName string, reader io.Reader) ([][]string, strin
 		defer file.Close()
 		sheets := file.GetSheetList()
 		if len(sheets) == 0 {
-			return nil, "", ErrInvalid
+			return nil, "", invalidField("XLSX 文件至少需要一个工作表")
 		}
 		rows, err := file.GetRows(sheets[0])
 		return rows, "xlsx", err
 	default:
-		return nil, "", ErrInvalid
+		return nil, "", invalidField("导入文件仅支持 CSV、XLSX 或 JSON 格式")
 	}
 }
 
@@ -481,7 +571,7 @@ func readFindingImportJSON(data []byte) ([][]string, string, error) {
 		}
 	}
 	if len(rows) < 2 {
-		return nil, "", ErrInvalid
+		return nil, "", invalidField("JSON 文件至少需要一条漏洞记录")
 	}
 	return rows, "json", nil
 }

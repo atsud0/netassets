@@ -63,12 +63,6 @@ func (s *Service) AddAttachment(ctx context.Context, principal auth.Principal, w
 	input.FileName = sanitizeOriginalFilename(input.FileName)
 	input.Description = strings.TrimSpace(input.Description)
 	ext := strings.ToLower(filepath.Ext(input.FileName))
-	if input.Reader == nil || input.FileName == "" || input.SizeBytes <= 0 || input.SizeBytes > MaxAttachmentSize || textlength.Count(input.Description) > 500 || !validAttachmentCategory(input.Category) {
-		return Attachment{}, ErrInvalid
-	}
-	if _, ok := allowedAttachmentExtensions[ext]; !ok {
-		return Attachment{}, ErrInvalid
-	}
 	if !principal.CanManageSecurityWorkOrders() {
 		allowed, scopeErr := access.CanOperateOrganization(ctx, s.pool, principal, item.AssigneeOrganizationID, auth.PermissionSecurityWorkOrderExecute)
 		if scopeErr != nil {
@@ -80,6 +74,25 @@ func (s *Service) AddAttachment(ctx context.Context, principal auth.Principal, w
 		if !allowed || input.Category != "remediation" || item.Status == "draft" || item.Status == "closed" || item.Status == "cancelled" {
 			return Attachment{}, ErrForbidden
 		}
+	}
+
+	if input.Reader == nil || input.FileName == "" || input.SizeBytes <= 0 {
+		return Attachment{}, invalidField("请选择有效的附件文件")
+	}
+	if textlength.Count(input.FileName) > 255 {
+		return Attachment{}, invalidField("附件文件名最多 255 字")
+	}
+	if input.SizeBytes > MaxAttachmentSize {
+		return Attachment{}, invalidField("单个附件不能超过 20MB")
+	}
+	if textlength.Count(input.Description) > 500 {
+		return Attachment{}, invalidField("附件说明最多 500 字")
+	}
+	if !validAttachmentCategory(input.Category) {
+		return Attachment{}, invalidField("请选择有效的附件类型")
+	}
+	if _, ok := allowedAttachmentExtensions[ext]; !ok {
+		return Attachment{}, invalidField("附件文件格式不支持，仅支持 PDF、图片、TXT、CSV、XLSX、DOCX、ZIP")
 	}
 
 	storedName, err := randomStoredName(ext)
@@ -108,8 +121,11 @@ func (s *Service) AddAttachment(ctx context.Context, principal auth.Principal, w
 	if err != nil {
 		return Attachment{}, fmt.Errorf("store attachment: %w", err)
 	}
-	if written != input.SizeBytes || written > MaxAttachmentSize {
-		return Attachment{}, ErrInvalid
+	if written > MaxAttachmentSize {
+		return Attachment{}, invalidField("单个附件不能超过 20MB")
+	}
+	if written != input.SizeBytes {
+		return Attachment{}, invalidField("附件内容不完整，请重新选择文件上传")
 	}
 	if _, err := tempFile.Seek(0, io.SeekStart); err != nil {
 		return Attachment{}, fmt.Errorf("inspect attachment: %w", err)
@@ -167,8 +183,11 @@ func (s *Service) AddAttachment(ctx context.Context, principal auth.Principal, w
 }
 
 func (s *Service) GetAttachment(ctx context.Context, principal auth.Principal, workOrderID, attachmentID string) (Attachment, error) {
-	if !validUUID(workOrderID) || !validUUID(attachmentID) {
-		return Attachment{}, ErrInvalid
+	if !validUUID(workOrderID) {
+		return Attachment{}, invalidField("安全工单标识不正确")
+	}
+	if !validUUID(attachmentID) {
+		return Attachment{}, invalidField("附件标识不正确")
 	}
 	if _, err := s.GetWorkOrder(ctx, principal, workOrderID); err != nil {
 		return Attachment{}, err
@@ -299,15 +318,6 @@ func sanitizeOriginalFilename(value string) string {
 		}
 		return r
 	}, value)
-	if len(value) > 255 {
-		ext := filepath.Ext(value)
-		base := strings.TrimSuffix(value, ext)
-		maxBase := 255 - len(ext)
-		if maxBase < 1 {
-			return ""
-		}
-		value = base[:maxBase] + ext
-	}
 	return value
 }
 

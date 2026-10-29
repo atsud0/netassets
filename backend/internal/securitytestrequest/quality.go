@@ -43,8 +43,11 @@ func (e *ScopeQualityError) Error() string {
 // QualityCheck previews the submit-time completeness rules for one request.
 // The same evaluation runs inside Submit, so the preview is authoritative.
 func (s *Service) QualityCheck(ctx context.Context, principal auth.Principal, id string) (ScopeQualityCheck, error) {
+	if _, isApplicant := applicantOrg(principal); !isApplicant && !canManage(principal) {
+		return ScopeQualityCheck{}, ErrForbidden
+	}
 	if !validUUID(id) {
-		return ScopeQualityCheck{}, ErrInvalid
+		return ScopeQualityCheck{}, invalidInput("申请标识格式不正确")
 	}
 	item, err := s.get(ctx, id)
 	if err != nil {

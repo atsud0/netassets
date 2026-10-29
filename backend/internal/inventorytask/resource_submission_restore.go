@@ -30,8 +30,11 @@ type ResourceSubmissionRestoreInput struct {
 // It shares the restore endpoint's authorization and never exposes drafts to HQ.
 func (s *Service) ResourceSubmissionRestoreState(ctx context.Context, principal auth.Principal, resourceType, resourceID string) (ResourceSubmissionRestoreInput, error) {
 	resourceType, resourceID = strings.TrimSpace(resourceType), strings.TrimSpace(resourceID)
-	if !validSubmissionDiffResourceType(resourceType) || !inventoryResourceUUIDPattern.MatchString(resourceID) {
-		return ResourceSubmissionRestoreInput{}, ErrInvalid
+	if !validSubmissionDiffResourceType(resourceType) {
+		return ResourceSubmissionRestoreInput{}, invalidInput("资源类型：请选择网络资产或业务系统")
+	}
+	if !inventoryResourceUUIDPattern.MatchString(resourceID) {
+		return ResourceSubmissionRestoreInput{}, invalidInput("资源标识：请提供有效的资源编号")
 	}
 	target, err := s.authorizeResourceRestore(ctx, principal, resourceType, resourceID)
 	if err != nil {
@@ -109,17 +112,27 @@ func (s *Service) RestoreResourceSubmission(ctx context.Context, principal auth.
 	resourceType = strings.TrimSpace(resourceType)
 	resourceID = strings.TrimSpace(resourceID)
 	submissionID = strings.TrimSpace(submissionID)
-	if !validSubmissionDiffResourceType(resourceType) || !inventoryResourceUUIDPattern.MatchString(resourceID) || !inventoryResourceUUIDPattern.MatchString(submissionID) {
-		return ResourceSubmissionRestoreResult{}, ErrInvalid
+	if !validSubmissionDiffResourceType(resourceType) {
+		return ResourceSubmissionRestoreResult{}, invalidInput("资源类型：请选择网络资产或业务系统")
+	}
+	if !inventoryResourceUUIDPattern.MatchString(resourceID) {
+		return ResourceSubmissionRestoreResult{}, invalidInput("资源标识：请提供有效的资源编号")
+	}
+	if !inventoryResourceUUIDPattern.MatchString(submissionID) {
+		return ResourceSubmissionRestoreResult{}, invalidInput("上报版本标识：请提供有效的上报版本编号")
 	}
 	target, err := s.authorizeResourceRestore(ctx, principal, resourceType, resourceID)
 	if err != nil {
 		return ResourceSubmissionRestoreResult{}, err
 	}
-	if expected.ExpectedVersion == nil || *expected.ExpectedVersion < 0 ||
-		((*expected.ExpectedVersion == 0) != (expected.WorkingVersionID == "")) ||
-		(expected.WorkingVersionID != "" && !inventoryResourceUUIDPattern.MatchString(expected.WorkingVersionID)) {
-		return ResourceSubmissionRestoreResult{}, ErrInvalid
+	if expected.ExpectedVersion == nil || *expected.ExpectedVersion < 0 {
+		return ResourceSubmissionRestoreResult{}, invalidInput("恢复版本：请提供大于或等于 0 的 expected_version")
+	}
+	if (*expected.ExpectedVersion == 0) != (expected.WorkingVersionID == "") {
+		return ResourceSubmissionRestoreResult{}, invalidInput("恢复版本：无工作版本时版本号必须为 0 且标识为空；已有工作版本时须同时提供其标识和正整数版本号")
+	}
+	if expected.WorkingVersionID != "" && !inventoryResourceUUIDPattern.MatchString(expected.WorkingVersionID) {
+		return ResourceSubmissionRestoreResult{}, invalidInput("工作版本标识：请提供有效的工作版本编号")
 	}
 
 	snapshot, err := s.loadResourceSubmissionRestoreSnapshot(ctx, resourceType, target, submissionID)
@@ -236,7 +249,7 @@ func (s *Service) buildRestoredAssetInput(ctx context.Context, principal auth.Pr
 	if rawExpiry := restoreString(snapshot, "expires_at"); rawExpiry != "" {
 		expiresAt, err := time.Parse(time.RFC3339, rawExpiry)
 		if err != nil {
-			return asset.CreateInput{}, nil, ErrInvalid
+			return asset.CreateInput{}, nil, invalidInput("历史资产到期时间格式不正确，无法自动恢复")
 		}
 		input.ExpiresAt = &expiresAt
 	}
@@ -273,7 +286,7 @@ func (s *Service) buildRestoredAssetInput(ctx context.Context, principal auth.Pr
 	input.CustomValues = customValues
 	warnings = append(warnings, customWarnings...)
 	if _, err := asset.PrepareCreateInput(&input); err != nil {
-		return asset.CreateInput{}, nil, ErrInvalid
+		return asset.CreateInput{}, nil, mapAssetRestoreError(err)
 	}
 	return input, warnings, nil
 }
@@ -302,7 +315,7 @@ func (s *Service) buildRestoredBusinessSystemInput(ctx context.Context, principa
 	if value, present := snapshot["personal_information_record_count"]; present && value != nil {
 		count, ok := restoreInt64(value)
 		if !ok {
-			return businesssystem.CreateInput{}, nil, ErrInvalid
+			return businesssystem.CreateInput{}, nil, invalidInput("历史个人信息记录数量格式不正确，无法自动恢复")
 		}
 		input.PersonalInformationRecordCount = &count
 	}
@@ -312,7 +325,7 @@ func (s *Service) buildRestoredBusinessSystemInput(ctx context.Context, principa
 	}
 	input.CustomValues = customValues
 	if err := businesssystem.PrepareCreateInput(&input); err != nil {
-		return businesssystem.CreateInput{}, nil, ErrInvalid
+		return businesssystem.CreateInput{}, nil, mapBusinessSystemRestoreError(err)
 	}
 	return input, warnings, nil
 }
@@ -437,6 +450,10 @@ func mapAssetRestoreError(err error) error {
 	case errors.Is(err, asset.ErrTaskBound), errors.Is(err, asset.ErrConflict):
 		return ErrConflict
 	case errors.Is(err, asset.ErrInvalid):
+		var validation *asset.InputValidationError
+		if errors.As(err, &validation) {
+			return invalidInput(validation.Message)
+		}
 		return ErrInvalid
 	default:
 		return err
@@ -453,7 +470,13 @@ func mapBusinessSystemRestoreError(err error) error {
 		return ErrEditConflict
 	case errors.Is(err, businesssystem.ErrConflict), errors.Is(err, businesssystem.ErrInUse):
 		return ErrConflict
+	case errors.Is(err, businesssystem.ErrInvalidOwnerContact):
+		return errors.Join(invalidInput("联系方式格式不正确，请填写手机号码、座机或分机号"), err)
 	case errors.Is(err, businesssystem.ErrInvalid):
+		var validation *businesssystem.InputValidationError
+		if errors.As(err, &validation) {
+			return invalidInput(validation.Message)
+		}
 		return ErrInvalid
 	default:
 		return err

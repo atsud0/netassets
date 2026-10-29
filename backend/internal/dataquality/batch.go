@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"netassets/internal/auth"
+	"netassets/internal/textlength"
 )
 
 const MaxIssueBatchItems = 200
@@ -72,15 +73,18 @@ func (s *Service) OperateIssuesBatch(ctx context.Context, principal auth.Princip
 }
 
 func normalizeBatchIssueInput(input BatchIssueInput) ([]string, string, string, string, error) {
-	if len(input.IDs) == 0 || len(input.IDs) > MaxIssueBatchItems {
-		return nil, "", "", "", ErrInvalid
+	if len(input.IDs) == 0 {
+		return nil, "", "", "", invalidIssue("请至少选择 1 个数据质量问题")
+	}
+	if len(input.IDs) > MaxIssueBatchItems {
+		return nil, "", "", "", invalidIssue("单次最多选择 200 个数据质量问题")
 	}
 	ids := make([]string, 0, len(input.IDs))
 	seen := make(map[string]struct{}, len(input.IDs))
 	for _, value := range input.IDs {
 		id := strings.TrimSpace(value)
 		if !scanUUIDPattern.MatchString(id) {
-			return nil, "", "", "", ErrInvalid
+			return nil, "", "", "", invalidIssue("数据质量问题标识格式不正确")
 		}
 		if _, exists := seen[id]; exists {
 			continue
@@ -89,24 +93,24 @@ func normalizeBatchIssueInput(input BatchIssueInput) ([]string, string, string, 
 		ids = append(ids, id)
 	}
 	if len(ids) == 0 {
-		return nil, "", "", "", ErrInvalid
+		return nil, "", "", "", invalidIssue("请至少选择 1 个数据质量问题")
 	}
 	action := strings.ToLower(strings.TrimSpace(input.Action))
 	if action != BatchIssueActionAssign && action != BatchIssueActionStart && action != BatchIssueActionSubmit {
-		return nil, "", "", "", ErrInvalid
+		return nil, "", "", "", invalidIssue("请选择有效的批量操作")
 	}
 	assigneeUserID := strings.TrimSpace(input.AssigneeUserID)
 	note := strings.TrimSpace(input.Note)
-	if len(note) > 5000 {
-		return nil, "", "", "", ErrInvalid
+	if textlength.Count(note) > 5000 {
+		return nil, "", "", "", invalidIssue("处理说明最多 5000 字")
 	}
 	if action == BatchIssueActionAssign || action == BatchIssueActionStart {
 		if !scanUUIDPattern.MatchString(assigneeUserID) {
-			return nil, "", "", "", ErrInvalid
+			return nil, "", "", "", invalidIssue("请选择有效的整改负责人")
 		}
 	}
 	if action == BatchIssueActionSubmit && note == "" {
-		return nil, "", "", "", ErrInvalid
+		return nil, "", "", "", invalidIssue("处理说明不能为空")
 	}
 	return ids, action, assigneeUserID, note, nil
 }
@@ -133,6 +137,10 @@ func batchIssueError(err error, action string) (string, string) {
 	case errors.Is(err, ErrInvalidTransition):
 		return "invalid_status_transition", "当前状态不允许" + actionLabel
 	case errors.Is(err, ErrInvalid):
+		var validation *IssueValidationError
+		if errors.As(err, &validation) {
+			return "invalid", validation.Message
+		}
 		return "invalid", "整改负责人或处理说明不符合要求"
 	default:
 		return "internal_error", actionLabel + "失败，请稍后重试"

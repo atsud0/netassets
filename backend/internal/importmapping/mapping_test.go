@@ -1,6 +1,50 @@
 package importmapping
 
-import "testing"
+import (
+	"errors"
+	"fmt"
+	"testing"
+)
+
+func TestConfiguredSchemaColumnLimit(t *testing.T) {
+	for _, fieldCount := range []int{3, 200, 204} {
+		t.Run(fmt.Sprint(fieldCount), func(t *testing.T) {
+			fields := make([]Field, fieldCount)
+			headers := make([]string, fieldCount)
+			mapping := make(Mapping, fieldCount)
+			for index := range fields {
+				key := fmt.Sprintf("custom:field_%d", index)
+				fields[index] = Field{Key: key, Required: true, Custom: true}
+				headers[index] = key
+				mapping[key] = index
+			}
+			analysis, err := Analyze([][]string{headers}, fields)
+			if err != nil || len(analysis.Columns) != fieldCount {
+				t.Fatalf("Analyze configured template: columns=%d error=%v", len(analysis.Columns), err)
+			}
+			for _, explicit := range []Mapping{nil, mapping} {
+				indexes, normalized, err := Resolve(headers, explicit, fields)
+				if err != nil || len(normalized) != fieldCount {
+					t.Fatalf("Resolve configured template: columns=%d error=%v", len(normalized), err)
+				}
+				for index, field := range fields {
+					if indexes[field.Key] != index || normalized[index] != field.Key {
+						t.Fatalf("lost configured field %s", field.Key)
+					}
+				}
+			}
+			limit := max(MaxColumns, fieldCount)
+			oversized := make([]string, limit+1)
+			copy(oversized, headers)
+			if _, err := Analyze([][]string{oversized}, fields); !errors.Is(err, ErrInvalid) {
+				t.Fatalf("Analyze oversized error=%v", err)
+			}
+			if _, _, err := Resolve(oversized, mapping, fields); !errors.Is(err, ErrInvalid) {
+				t.Fatalf("Resolve oversized error=%v", err)
+			}
+		})
+	}
+}
 
 func testFields() []Field {
 	return []Field{
@@ -49,7 +93,7 @@ func TestResolveRejectsInvalidMappings(t *testing.T) {
 		{"type": 0, "value": 1, "custom:unknown": 2},
 	}
 	for _, mapping := range tests {
-		if _, _, err := Resolve([]string{"a", "b", "c"}, mapping, testFields()); err != ErrInvalid {
+		if _, _, err := Resolve([]string{"a", "b", "c"}, mapping, testFields()); !errors.Is(err, ErrInvalid) {
 			t.Fatalf("Resolve(%#v) error = %v", mapping, err)
 		}
 	}

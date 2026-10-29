@@ -28,6 +28,9 @@ func Normalize(page, pageSize int) (Query, error) {
 	if page < 1 || pageSize < 1 || pageSize > MaxPageSize {
 		return Query{}, ErrInvalid
 	}
+	if page-1 > int(^uint(0)>>1)/pageSize {
+		return Query{}, ErrInvalid
+	}
 	return Query{Page: page, PageSize: pageSize}, nil
 }
 

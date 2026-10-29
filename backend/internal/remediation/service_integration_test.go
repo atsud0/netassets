@@ -62,7 +62,7 @@ func setup(t *testing.T) *fixture {
 	_, err = pool.Exec(ctx, `INSERT INTO user_roles(user_id,role_id,organization_id,data_scope) SELECT $1::uuid,id,$2::uuid,'organization' FROM roles WHERE role_key='organization_admin'`, managerID, f.org)
 	must(t, err)
 	f.manager = auth.Principal{UserID: managerID, Permissions: []string{"remediation.assign", "remediation.review", "remediation.people.manage", "vendor.manage", auth.PermissionSecurityWorkOrderView, auth.PermissionSecurityWorkOrderExecute}}
-	vendor, err := f.s.SaveVendor(ctx, f.group, "", f.org, "测试厂商_"+suffix, "项目联系人", "enabled")
+	vendor, err := f.s.SaveVendor(ctx, f.group, "", f.org, "测试厂商_"+suffix, "13800000018", "enabled")
 	must(t, err)
 	for i := 0; i < 3; i++ {
 		person, err := f.s.CreatePerson(ctx, f.manager, remediation.PersonInput{OrganizationID: f.org, SystemID: f.system, ParticipantType: "external", VendorID: vendor["id"].(string), Username: []string{"worker_", "other_", "third_"}[i] + suffix, DisplayName: "执行人员", Password: "Repair-Worker-Password-123", ValidUntil: time.Now().Add(7 * 24 * time.Hour)})

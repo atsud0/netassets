@@ -9,8 +9,8 @@ export async function clickRowAction(page: Page, row: Locator, name: string) {
   const panel = page.locator('.row-actions-panel:visible').filter({ has: page.getByRole('button', { name, exact: true }) }).last()
   await expect(panel).toBeVisible()
   await expect(panel.getByRole('button', { name, exact: true })).toBeVisible()
-  // Element Plus may rerender the teleported popover between the visibility
-  // assertion and Playwright's stability check. Re-resolve the action after
-  // the panel is open and force the native click to avoid a false timeout.
-  await panel.getByRole('button', { name, exact: true }).evaluate((element) => (element as HTMLElement).click())
+  // after-enter moves focus to the first available action. Wait for that
+  // transition before a real pointer click; do not bypass hit testing via JS.
+  await expect(panel.locator('button:not(:disabled), a[href]').first()).toBeFocused()
+  await panel.getByRole('button', { name, exact: true }).click()
 }

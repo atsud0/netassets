@@ -68,6 +68,20 @@ type EventInput struct {
 // sharing event type, organization and request batch key are aggregated so a
 // 200-item batch operation produces one notification instead of 200 messages.
 func WriteEvent(ctx context.Context, execer eventExecer, input EventInput) error {
+	return WriteCountedEvent(ctx, execer, input, 1)
+}
+
+// WriteCountedEvent records a pre-aggregated digest inside the caller's transaction.
+// A multi-item digest must not retain a link or label for just one resource.
+func WriteCountedEvent(ctx context.Context, execer eventExecer, input EventInput, count int) error {
+	if count < 1 {
+		return fmt.Errorf("invalid notification item count")
+	}
+	if count > 1 {
+		input.ResourceID = ""
+		input.ResourceLabel = ""
+	}
+
 	input.EventType = strings.TrimSpace(input.EventType)
 	input.Category = strings.TrimSpace(input.Category)
 	input.TargetOrganizationID = strings.TrimSpace(input.TargetOrganizationID)
@@ -96,17 +110,17 @@ func WriteEvent(ctx context.Context, execer eventExecer, input EventInput) error
 	_, err = execer.Exec(ctx, `
 		INSERT INTO notification_events (
 			event_type, category, target_organization_id, target_user_id, actor_user_id, required_permission,
-			resource_type, resource_id, resource_label, batch_key, level, details
-		) VALUES ($1, $2, $3::uuid, NULLIF($4, '')::uuid, $5::uuid, $6, $7, NULLIF($8, ''), $9, $10, $11, $12::jsonb)
+			resource_type, resource_id, resource_label, batch_key, level, details, item_count
+		) VALUES ($1, $2, $3::uuid, NULLIF($4, '')::uuid, $5::uuid, $6, $7, NULLIF($8, ''), $9, $10, $11, $12::jsonb, $13)
 		ON CONFLICT (event_type, target_organization_id, target_user_id, batch_key) DO UPDATE SET
-			item_count = notification_events.item_count + 1,
+			item_count = notification_events.item_count + EXCLUDED.item_count,
 			resource_id = NULL,
 			resource_label = '',
 			level = EXCLUDED.level,
 			details = notification_events.details || EXCLUDED.details,
 			updated_at = now()
 	`, input.EventType, input.Category, input.TargetOrganizationID, input.TargetUserID, input.ActorUserID, input.RequiredPermission,
-		input.ResourceType, input.ResourceID, input.ResourceLabel, input.BatchKey, input.Level, details)
+		input.ResourceType, input.ResourceID, input.ResourceLabel, input.BatchKey, input.Level, details, count)
 	if err != nil {
 		return fmt.Errorf("write notification event: %w", err)
 	}

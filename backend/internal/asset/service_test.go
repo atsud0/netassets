@@ -342,11 +342,11 @@ func TestNormalizeBatchUpdateInputSupportsStatusAndClearingNetworkArea(t *testin
 }
 
 func TestNormalizeBatchUpdateInputRejectsMissingOrInvalidChanges(t *testing.T) {
-	if _, _, _, err := normalizeBatchUpdateInput(BatchUpdateInput{IDs: []string{"asset-a"}}); err != ErrInvalid {
+	if _, _, _, err := normalizeBatchUpdateInput(BatchUpdateInput{IDs: []string{"asset-a"}}); !errors.Is(err, ErrInvalid) {
 		t.Fatalf("missing changes error = %v, want ErrInvalid", err)
 	}
 	status := "deleted"
-	if _, _, _, err := normalizeBatchUpdateInput(BatchUpdateInput{IDs: []string{"asset-a"}, Status: &status}); err != ErrInvalid {
+	if _, _, _, err := normalizeBatchUpdateInput(BatchUpdateInput{IDs: []string{"asset-a"}, Status: &status}); !errors.Is(err, ErrInvalid) {
 		t.Fatalf("invalid status error = %v, want ErrInvalid", err)
 	}
 }

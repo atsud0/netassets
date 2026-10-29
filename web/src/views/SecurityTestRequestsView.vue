@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import RowActions from '../components/RowActions.vue'
 import { computed, onMounted, reactive, ref } from 'vue'
-import { ElMessage, ElMessageBox, type FormInstance, type FormRules } from 'element-plus'
+import { ElMessage, ElMessageBox, type FormInstance, type FormItemRule, type FormRules } from 'element-plus'
 import axios from 'axios'
 import { useRoute } from 'vue-router'
 import { apiClient, getAPIErrorMessage } from '../api/client'
@@ -221,15 +221,20 @@ const systemPickerHint = (row: SystemPickerRow) => {
   return '待上报版本'
 }
 
+function requestTextRule(limit: number, message: string): FormItemRule {
+  return { validator: (_rule, value: string, callback) => callback(Array.from((value ?? '').trim()).length > limit ? new Error(message) : undefined), trigger: 'blur' }
+}
+
 const rules: FormRules = {
-  request_name: [{ required: true, message: '请输入申请名称', trigger: 'blur' }],
+  request_name: [{ required: true, whitespace: true, message: '请输入申请名称', trigger: 'blur' }, requestTextRule(255, '申请名称不能超过 255 个字符')],
   test_type: [{ required: true, message: '请选择测试类型', trigger: 'change' }],
   expected_launch_at: [{ required: true, message: '请选择期望上线时间', trigger: 'change' }],
   contact_user_id: [{ required: true, message: '请选择联系人', trigger: 'change' }],
-  background: [{ required: true, message: '请描述申请背景与测试诉求', trigger: 'blur' }],
+  background: [{ required: true, whitespace: true, message: '请描述申请背景与测试诉求', trigger: 'blur' }, requestTextRule(10000, '申请背景不能超过 10000 个字符')],
 }
 const approveRules: FormRules = {
-  authorization_note: [{ required: true, message: '请输入授权说明', trigger: 'blur' }],
+  authorization_note: [{ required: true, whitespace: true, message: '请输入授权说明', trigger: 'blur' }, requestTextRule(20000, '授权说明不能超过 20000 个字符')],
+  comment: [requestTextRule(2000, '审批意见不能超过 2000 个字符')],
   test_window_start_at: [{ required: true, message: '请选择最终测试开始时间', trigger: 'change' }],
   test_window_end_at: [{ required: true, message: '请选择最终测试结束时间', trigger: 'change' }],
 }
@@ -479,7 +484,7 @@ function removeScope(id: string) {
 }
 
 async function save() {
-  if (!formRef.value || !(await formRef.value.validate())) return
+  if (!formRef.value || !(await formRef.value.validate().catch(() => false))) return
   if (!selectedSystem.value) {
     ElMessage.warning('请选择申请上线的业务系统')
     return
@@ -628,7 +633,7 @@ async function runCancel(item: SecurityTestRequest) {
   try {
     const result = await ElMessageBox.prompt('请输入取消原因。', '取消申请', {
       confirmButtonText: '确认取消', cancelButtonText: '返回', type: 'warning',
-      inputValidator: value => Boolean(value?.trim()) || '取消原因不能为空',
+      inputValidator: value => !value?.trim() ? '取消原因不能为空' : Array.from(value.trim()).length <= 2000 || '取消原因不能超过 2000 个字符',
     })
     comment = result.value ?? ''
   } catch {
@@ -651,7 +656,7 @@ async function runReject(item: SecurityTestRequest) {
   try {
     const result = await ElMessageBox.prompt('请输入驳回原因，申请人修改后可重新提交。', '驳回申请', {
       confirmButtonText: '确认驳回', cancelButtonText: '返回', type: 'warning',
-      inputValidator: value => Boolean(value?.trim()) || '驳回原因不能为空',
+      inputValidator: value => !value?.trim() ? '驳回原因不能为空' : Array.from(value.trim()).length <= 2000 || '驳回原因不能超过 2000 个字符',
     })
     comment = result.value ?? ''
   } catch {
@@ -681,7 +686,7 @@ function openApprove(item: SecurityTestRequest) {
 }
 
 async function submitApprove() {
-  if (!approveFormRef.value || !(await approveFormRef.value.validate())) return
+  if (!approveFormRef.value || !(await approveFormRef.value.validate().catch(() => false))) return
   if (!approveForm.test_window_start_at || !approveForm.test_window_end_at ||
       approveForm.test_window_end_at <= approveForm.test_window_start_at) {
     ElMessage.warning('最终测试窗口的结束时间必须晚于开始时间')
@@ -715,7 +720,7 @@ async function runApproveLaunch(item: SecurityTestRequest) {
     const result = await ElMessageBox.prompt(
       `批准上线后将自动把申请范围内 ${item.scope_asset_count} 项资产的上报内容推送至集团台账审核流程。可补充上线说明（留空即可）。`,
       '批准上线',
-      { confirmButtonText: '批准上线', cancelButtonText: '返回', type: 'success' },
+      { confirmButtonText: '批准上线', cancelButtonText: '返回', type: 'success', inputValidator: value => Array.from((value ?? '').trim()).length <= 20000 || '上线说明不能超过 20000 个字符' },
     )
     comment = result.value ?? ''
   } catch {
@@ -841,7 +846,7 @@ function formatDate(value?: string) {
     <el-dialog v-model="dialogVisible" :title="editingID ? '编辑上线安全测试申请' : '新建上线安全测试申请'" width="960px" destroy-on-close>
       <el-form ref="formRef" :model="form" :rules="rules" label-width="120px">
         <div class="form-grid-two">
-          <el-form-item label="申请名称" prop="request_name"><el-input v-model="form.request_name" maxlength="255" placeholder="如：客户服务平台二期上线安全测试" /></el-form-item>
+          <el-form-item label="申请名称" prop="request_name"><el-input v-model="form.request_name" placeholder="如：客户服务平台二期上线安全测试" /></el-form-item>
           <el-form-item label="测试类型" prop="test_type"><el-select v-model="form.test_type" style="width:100%"><el-option v-for="(label, value) in typeLabels" :key="value" :label="label" :value="value" /></el-select></el-form-item>
           <el-form-item label="期望上线时间" prop="expected_launch_at"><el-date-picker v-model="form.expected_launch_at" type="date" placeholder="选择期望上线日期" style="width:100%" /></el-form-item>
           <el-form-item label="联系人" prop="contact_user_id">
@@ -868,7 +873,7 @@ function formatDate(value?: string) {
             <el-button v-else type="primary" plain data-testid="select-request-system" @click="openSystemPicker">选择业务系统</el-button>
           </div>
         </el-form-item>
-        <el-form-item label="申请背景" prop="background"><el-input v-model="form.background" type="textarea" :rows="3" maxlength="10000" show-word-limit placeholder="说明上线背景、系统用途、对外暴露情况和希望测试覆盖的重点" /></el-form-item>
+        <el-form-item label="申请背景" prop="background"><el-input v-model="form.background" type="textarea" :rows="3" placeholder="说明上线背景、系统用途、对外暴露情况和希望测试覆盖的重点" /></el-form-item>
         <el-form-item label="测试范围" required>
           <div class="scope-picker">
             <div class="scope-picker-actions">
@@ -962,8 +967,8 @@ function formatDate(value?: string) {
             <el-date-picker v-model="approveForm.test_window_end_at" type="datetime" placeholder="结束时间" />
           </div>
         </el-form-item>
-        <el-form-item label="授权说明" prop="authorization_note"><el-input v-model="approveForm.authorization_note" type="textarea" :rows="3" maxlength="20000" show-word-limit placeholder="说明授权人、授权依据、允许的测试方式与边界" /></el-form-item>
-        <el-form-item label="审批意见"><el-input v-model="approveForm.comment" type="textarea" :rows="2" maxlength="2000" placeholder="补充审批意见（可选）" /></el-form-item>
+        <el-form-item label="授权说明" prop="authorization_note"><el-input v-model="approveForm.authorization_note" type="textarea" :rows="3" placeholder="说明授权人、授权依据、允许的测试方式与边界" /></el-form-item>
+        <el-form-item label="审批意见" prop="comment"><el-input v-model="approveForm.comment" type="textarea" :rows="2" placeholder="补充审批意见（可选）" /></el-form-item>
       </el-form>
       <template #footer><el-button @click="approveVisible = false">返回</el-button><el-button type="primary" :loading="approveSubmitting" data-testid="confirm-approve-security-test-request" @click="submitApprove">确认通过</el-button></template>
     </el-dialog>

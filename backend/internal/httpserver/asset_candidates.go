@@ -20,7 +20,7 @@ func registerAssetCandidateRoutes(api *gin.RouterGroup, requireAuth gin.HandlerF
 	group.GET("", func(c *gin.Context) {
 		page, err := parsePageQuery(c)
 		if err != nil {
-			writeAPIError(c, http.StatusBadRequest, "invalid_query", "分页参数不正确，page_size 最大为 100")
+			writeAPIError(c, http.StatusBadRequest, "invalid_query", pageQueryErrorMessage(err))
 			return
 		}
 		result, err := service.Search(c.Request.Context(), mustPrincipal(c), strings.TrimSpace(c.Query("status")), page)
@@ -200,7 +200,12 @@ func writeAssetCandidateError(c *gin.Context, logger *slog.Logger, operation str
 	case errors.Is(err, assetcandidate.ErrForbidden):
 		writeAPIError(c, http.StatusForbidden, "forbidden", "仅集团管理员或已开通自助确认的组织可以处理该待确认资产")
 	case errors.Is(err, assetcandidate.ErrInvalid):
-		writeAPIError(c, http.StatusBadRequest, "invalid_asset_candidate", "请检查资产类型、资产值、所属组织和处理信息")
+		message := "请检查资产类型、资产值、所属组织和处理信息"
+		var fieldError *assetcandidate.InputValidationError
+		if errors.As(err, &fieldError) {
+			message = fieldError.Message
+		}
+		writeAPIError(c, http.StatusBadRequest, "invalid_asset_candidate", message)
 	case errors.Is(err, assetcandidate.ErrNotFound):
 		writeAPIError(c, http.StatusNotFound, "not_found", "待确认资产或关联正式资产不存在")
 	case errors.Is(err, assetcandidate.ErrConflict):

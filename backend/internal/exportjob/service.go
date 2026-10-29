@@ -186,7 +186,7 @@ func (s *Service) Create(ctx context.Context, principal auth.Principal, input Cr
 		format = "xlsx"
 	}
 	if format != "xlsx" {
-		return Item{}, ErrInvalid
+		return Item{}, invalidInput("导出格式仅支持 XLSX")
 	}
 	filter, permission, total, err := s.validateCreate(ctx, principal, resourceType, input.Filter)
 	if err != nil {
@@ -261,7 +261,7 @@ func (s *Service) validateCreate(ctx context.Context, principal auth.Principal, 
 		}
 		var filter AssetFilter
 		if err := decodeStrict(raw, &filter); err != nil {
-			return nil, "", 0, ErrInvalid
+			return nil, "", 0, invalidInput("网络资产导出筛选条件格式不正确")
 		}
 		filter.OrganizationID = strings.TrimSpace(filter.OrganizationID)
 		filter.Type = strings.TrimSpace(filter.Type)
@@ -279,7 +279,7 @@ func (s *Service) validateCreate(ctx context.Context, principal auth.Principal, 
 		}
 		var filter BusinessSystemFilter
 		if err := decodeStrict(raw, &filter); err != nil {
-			return nil, "", 0, ErrInvalid
+			return nil, "", 0, invalidInput("业务系统导出筛选条件格式不正确")
 		}
 		filter.OrganizationID = strings.TrimSpace(filter.OrganizationID)
 		filter.Status = strings.TrimSpace(filter.Status)
@@ -298,11 +298,14 @@ func (s *Service) validateCreate(ctx context.Context, principal auth.Principal, 
 		}
 		var filter InventoryTaskFilter
 		if err := decodeStrict(raw, &filter); err != nil {
-			return nil, "", 0, ErrInvalid
+			return nil, "", 0, invalidInput("填报任务导出筛选条件格式不正确")
 		}
 		filter.TaskID = strings.TrimSpace(filter.TaskID)
 		if filter.TaskID == "" {
-			return nil, "", 0, ErrInvalid
+			return nil, "", 0, invalidInput("请选择要导出的填报任务")
+		}
+		if !validID(filter.TaskID) {
+			return nil, "", 0, invalidInput("填报任务标识不正确")
 		}
 		count, err := s.inventoryTasks.ExportRowCount(ctx, principal, filter.TaskID)
 		if err != nil {
@@ -311,7 +314,7 @@ func (s *Service) validateCreate(ctx context.Context, principal auth.Principal, 
 		encoded, _ := json.Marshal(filter)
 		return encoded, "inventory.manage", count, nil
 	default:
-		return nil, "", 0, ErrInvalid
+		return nil, "", 0, invalidInput("请选择有效的导出资源类型")
 	}
 }
 
@@ -335,6 +338,18 @@ func mapResourceError(err error) error {
 	case errors.Is(err, asset.ErrForbidden), errors.Is(err, businesssystem.ErrForbidden), errors.Is(err, inventorytask.ErrForbidden):
 		return ErrForbidden
 	case errors.Is(err, asset.ErrInvalid), errors.Is(err, businesssystem.ErrInvalid), errors.Is(err, inventorytask.ErrInvalid):
+		var assetField *asset.InputValidationError
+		if errors.As(err, &assetField) {
+			return invalidInput(assetField.Message)
+		}
+		var systemField *businesssystem.InputValidationError
+		if errors.As(err, &systemField) {
+			return invalidInput(systemField.Message)
+		}
+		var taskField *inventorytask.InputValidationError
+		if errors.As(err, &taskField) {
+			return invalidInput(taskField.Message)
+		}
 		return ErrInvalid
 	case errors.Is(err, asset.ErrNotFound), errors.Is(err, businesssystem.ErrNotFound), errors.Is(err, inventorytask.ErrNotFound):
 		return ErrNotFound
@@ -347,10 +362,10 @@ func (s *Service) Search(ctx context.Context, principal auth.Principal, page pag
 	status = strings.TrimSpace(status)
 	resourceType = strings.TrimSpace(resourceType)
 	if status != "" && status != StatusQueued && status != StatusRunning && status != StatusCompleted && status != StatusFailed && status != StatusExpired {
-		return pagination.Result[Item]{}, ErrInvalid
+		return pagination.Result[Item]{}, invalidInput("请选择有效的导出任务状态")
 	}
 	if resourceType != "" && resourceType != ResourceAsset && resourceType != ResourceBusinessSystem && resourceType != ResourceInventoryTask {
-		return pagination.Result[Item]{}, ErrInvalid
+		return pagination.Result[Item]{}, invalidInput("请选择有效的导出资源类型")
 	}
 	rows, err := s.pool.Query(ctx, `
 		SELECT id::text,resource_type,format,filter_snapshot,status,total_rows,processed_rows,file_name,content_type,file_size,error_message,

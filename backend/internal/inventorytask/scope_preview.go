@@ -107,9 +107,5 @@ func normalizeScopePreviewInput(input *ScopePreviewInput) error {
 	}
 	input.OrganizationIDs = uniqueNonEmpty(input.OrganizationIDs)
 	input.RequiredFields = uniqueNonEmpty(input.RequiredFields)
-	if len(input.OrganizationIDs) == 0 || len(input.OrganizationIDs) > 1000 || len(input.RequiredFields) > 100 ||
-		!validAssetNetworkScope(input.AssetNetworkScope) || !validRequiredFields(input.RequiredFields) {
-		return ErrInvalid
-	}
-	return nil
+	return validateScopeSelections(input.OrganizationIDs, input.RequiredFields, input.AssetNetworkScope)
 }

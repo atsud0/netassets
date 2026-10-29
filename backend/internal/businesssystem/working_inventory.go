@@ -123,6 +123,10 @@ func (s *Service) validateWorkingValues(ctx context.Context, values []customfiel
 		return nil, err
 	}
 	if _, _, err = customfield.ValidateValues(defs, values); err != nil {
+		var validation *customfield.ValueValidationError
+		if errors.As(err, &validation) {
+			return nil, invalidInput(validation.Message)
+		}
 		return nil, ErrInvalid
 	}
 	return json.Marshal(values)
@@ -160,7 +164,7 @@ func (s *Service) createUnreported(ctx context.Context, p auth.Principal, in Cre
 		return BusinessSystem{}, err
 	}
 	if status != "enabled" {
-		return BusinessSystem{}, ErrInvalid
+		return BusinessSystem{}, invalidInput("所属组织：已停用，请选择启用的组织")
 	}
 	var duplicate bool
 	err = tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM business_systems WHERE system_code=$1 AND deleted_at IS NULL) OR EXISTS(SELECT 1 FROM inventory_business_system_drafts WHERE system_code=$1 AND draft_status IN('editing','submitted','returned'))`, in.Code).Scan(&duplicate)
@@ -197,8 +201,14 @@ func (s *Service) updateWorking(ctx context.Context, p auth.Principal, id string
 	if err != nil {
 		return BusinessSystem{}, err
 	}
-	if cur.TaskID != "" || cur.DraftStatus == "submitted" || cur.Operation == "delete" {
-		return BusinessSystem{}, ErrInvalid
+	if cur.TaskID != "" {
+		return BusinessSystem{}, invalidInput("工作版本已纳入填报任务，请在对应任务中编辑")
+	}
+	if cur.DraftStatus == "submitted" {
+		return BusinessSystem{}, invalidInput("工作版本已提交审核，当前不能编辑")
+	}
+	if cur.Operation == "delete" {
+		return BusinessSystem{}, invalidInput("工作版本为下线申请，当前不能编辑业务系统内容")
 	}
 	if cur.OrganizationID != in.OrganizationID {
 		return BusinessSystem{}, ErrForbidden
@@ -274,8 +284,11 @@ func (s *Service) deleteWorking(ctx context.Context, p auth.Principal, id string
 	if err != nil {
 		return err
 	}
-	if cur.TaskID != "" || cur.DraftStatus == "submitted" {
-		return ErrInvalid
+	if cur.TaskID != "" {
+		return invalidInput("工作版本已纳入填报任务，请在对应任务中处理删除")
+	}
+	if cur.DraftStatus == "submitted" {
+		return invalidInput("工作版本已提交审核，当前不能删除")
 	}
 	ok, err := access.CanOperateOrganization(ctx, s.pool, p, cur.OrganizationID, "system.manage")
 	if err != nil {

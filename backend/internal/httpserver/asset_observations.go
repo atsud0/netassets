@@ -31,11 +31,14 @@ func registerAssetObservationRoutes(api *gin.RouterGroup, requireAuth gin.Handle
 }
 
 func writeAssetObservationError(c *gin.Context, logger *slog.Logger, err error) {
+	var inputError *assetobservation.InputValidationError
 	switch {
 	case errors.Is(err, assetobservation.ErrForbidden):
 		writeAPIError(c, http.StatusForbidden, "forbidden", "当前账号无权查看或刷新该资产的外部信息")
 	case errors.Is(err, assetobservation.ErrNotFound):
 		writeAPIError(c, http.StatusNotFound, "asset_not_found", "网络资产不存在或尚未发布到正式台账")
+	case errors.As(err, &inputError):
+		writeAPIError(c, http.StatusBadRequest, "invalid_asset_id", inputError.Message)
 	case errors.Is(err, assetobservation.ErrInvalid):
 		writeAPIError(c, http.StatusBadRequest, "invalid_asset_id", "资产编号不正确")
 	case errors.Is(err, assetobservation.ErrUnsupported):

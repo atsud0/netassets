@@ -183,6 +183,10 @@ func (s *Service) validateWorkingValues(ctx context.Context, values []customfiel
 		return nil, err
 	}
 	if _, _, err = customfield.ValidateValues(defs, values); err != nil {
+		var validation *customfield.ValueValidationError
+		if errors.As(err, &validation) {
+			return nil, invalidInput(validation.Message)
+		}
 		return nil, ErrInvalid
 	}
 	return json.Marshal(values)
@@ -197,7 +201,7 @@ func (s *Service) createUnreportedWithSource(ctx context.Context, p auth.Princip
 		return Asset{}, ErrForbidden
 	}
 	if source != "manual" && source != "import" && source != "api" && source != "plugin" && source != "finding_import" {
-		return Asset{}, ErrInvalid
+		return Asset{}, invalidInput("资产来源：请选择有效的来源类型")
 	}
 	normalized, e := PrepareCreateInput(&in)
 	if e != nil {
@@ -265,7 +269,7 @@ func (s *Service) createUnreportedWithSource(ctx context.Context, p auth.Princip
 // as the party that fills in the missing details instead of the reviewer.
 func (s *Service) CreateWorkingVersion(ctx context.Context, p auth.Principal, in CreateInput, source, requestID, ip string, afterCreate func(pgx.Tx, Asset) error) (Asset, error) {
 	if source != "manual" && source != "import" && source != "api" && source != "plugin" && source != "finding_import" {
-		return Asset{}, ErrInvalid
+		return Asset{}, invalidInput("资产来源：请选择有效的来源类型")
 	}
 	if afterCreate == nil {
 		return s.createUnreportedWithSource(ctx, p, in, source, requestID, ip)
@@ -327,8 +331,14 @@ func (s *Service) updateWorking(ctx context.Context, p auth.Principal, id string
 	if e != nil {
 		return Asset{}, e
 	}
-	if cur.TaskID != "" || cur.DraftStatus == "submitted" || cur.Operation == "delete" {
-		return Asset{}, ErrInvalid
+	if cur.TaskID != "" {
+		return Asset{}, invalidInput("工作版本已纳入填报任务，请在对应任务中编辑")
+	}
+	if cur.DraftStatus == "submitted" {
+		return Asset{}, invalidInput("工作版本已提交审核，当前不能编辑")
+	}
+	if cur.Operation == "delete" {
+		return Asset{}, invalidInput("工作版本为下线申请，当前不能编辑资产内容")
 	}
 	if cur.OrganizationID != in.OrganizationID {
 		return Asset{}, ErrForbidden
@@ -427,8 +437,11 @@ func (s *Service) deleteWorking(ctx context.Context, p auth.Principal, id string
 	if e != nil {
 		return e
 	}
-	if cur.TaskID != "" || cur.DraftStatus == "submitted" {
-		return ErrInvalid
+	if cur.TaskID != "" {
+		return invalidInput("工作版本已纳入填报任务，请在对应任务中处理删除")
+	}
+	if cur.DraftStatus == "submitted" {
+		return invalidInput("工作版本已提交审核，当前不能删除")
 	}
 	ok, e := access.CanOperateOrganization(ctx, s.pool, p, cur.OrganizationID, "asset.manage")
 	if e != nil {
@@ -623,14 +636,14 @@ func validateUnreportedReferences(ctx context.Context, q interface {
 		return "", "", e
 	}
 	if st != "enabled" {
-		return "", "", ErrInvalid
+		return "", "", invalidInput("所属组织：已停用，请选择启用的组织")
 	}
 	if in.NetworkAreaID != "" {
 		var ok bool
 		if e := q.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM asset_network_areas WHERE id::text=$1 AND organization_id::text=$2 AND status='enabled')`, in.NetworkAreaID, in.OrganizationID).Scan(&ok); e != nil {
 			return "", "", e
 		} else if !ok {
-			return "", "", ErrInvalid
+			return "", "", invalidInput("网络区域：请选择所属组织内的启用网络区域")
 		}
 	}
 	if in.OwnerUserID != "" {
@@ -638,7 +651,7 @@ func validateUnreportedReferences(ctx context.Context, q interface {
 		if e := q.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM users u JOIN user_organizations uo ON uo.user_id=u.id WHERE u.id::text=$1 AND uo.organization_id::text=$2 AND u.status='enabled' AND u.deleted_at IS NULL)`, in.OwnerUserID, in.OrganizationID).Scan(&ok); e != nil {
 			return "", "", e
 		} else if !ok {
-			return "", "", ErrInvalid
+			return "", "", invalidInput("责任人账号：请选择所属组织内的启用账号")
 		}
 	}
 	bs, bsd := "", ""
@@ -654,7 +667,7 @@ func validateUnreportedReferences(ctx context.Context, q interface {
 			if e := q.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM business_systems WHERE id::text=$1 AND owner_organization_id::text=$2 AND deleted_at IS NULL)`, in.BusinessSystemID, in.OrganizationID).Scan(&ok); e != nil {
 				return "", "", e
 			} else if !ok {
-				return "", "", ErrInvalid
+				return "", "", invalidInput("业务系统：请选择所属组织内的有效业务系统或工作版本")
 			}
 			bs = in.BusinessSystemID
 		}

@@ -15,7 +15,7 @@ func registerRecycleBinRoutes(api *gin.RouterGroup, requireAuth gin.HandlerFunc,
 	group.GET("", func(c *gin.Context) {
 		page, err := parsePageQuery(c)
 		if err != nil {
-			writeAPIError(c, http.StatusBadRequest, "invalid_query", "分页参数不正确，page_size 最大为 100")
+			writeAPIError(c, http.StatusBadRequest, "invalid_query", pageQueryErrorMessage(err))
 			return
 		}
 		result, err := service.Search(c.Request.Context(), mustPrincipal(c), page, c.Query("resource_type"))
@@ -51,7 +51,12 @@ func handleRecycleBinRestoreError(c *gin.Context, err error, logger *slog.Logger
 	case errors.Is(err, recyclebin.ErrForbidden):
 		writeAPIError(c, http.StatusForbidden, "forbidden", "仅集团管理员可执行恢复操作")
 	case errors.Is(err, recyclebin.ErrInvalid):
-		writeAPIError(c, http.StatusBadRequest, "invalid_resource_id", resourceName+"编号不正确")
+		message := resourceName + "编号不正确"
+		var fieldErr *recyclebin.InputValidationError
+		if errors.As(err, &fieldErr) {
+			message = fieldErr.Message
+		}
+		writeAPIError(c, http.StatusBadRequest, "invalid_resource_id", message)
 	case errors.Is(err, recyclebin.ErrNotFound):
 		writeAPIError(c, http.StatusNotFound, "recycle_bin_item_not_found", resourceName+"不存在或已恢复")
 	case errors.Is(err, recyclebin.ErrConflict):

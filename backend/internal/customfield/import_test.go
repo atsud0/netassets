@@ -1,6 +1,7 @@
 package customfield
 
 import (
+	"errors"
 	"strings"
 	"testing"
 )
@@ -93,7 +94,7 @@ func TestValidateValuesRejectsInvalidPayloads(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if _, _, err := ValidateValues(definitions, tt.values); err != ErrInvalid {
+			if _, _, err := ValidateValues(definitions, tt.values); !errors.Is(err, ErrInvalid) {
 				t.Fatalf("ValidateValues() error = %v, want ErrInvalid", err)
 			}
 		})

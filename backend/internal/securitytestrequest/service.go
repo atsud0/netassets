@@ -162,11 +162,11 @@ func (s *Service) Search(ctx context.Context, principal auth.Principal, status, 
 	}
 	status = strings.TrimSpace(status)
 	if status != "" && !validStatus(status) {
-		return pagination.Result[Request]{}, ErrInvalid
+		return pagination.Result[Request]{}, invalidInput("请选择有效的申请状态")
 	}
 	keyword = strings.TrimSpace(keyword)
 	if len(keyword) > 128 {
-		return pagination.Result[Request]{}, ErrInvalid
+		return pagination.Result[Request]{}, invalidInput("搜索关键词不能超过 128 字节")
 	}
 	rows, err := s.pool.Query(ctx, requestColumns+`, count(*) OVER ()`+requestFrom+`
 		WHERE ($1::text = '' OR r.status = $1)
@@ -215,8 +215,11 @@ func (s *Service) Search(ctx context.Context, principal auth.Principal, status, 
 }
 
 func (s *Service) Get(ctx context.Context, principal auth.Principal, id string) (Request, error) {
+	if _, isApplicant := applicantOrg(principal); !isApplicant && !canManage(principal) {
+		return Request{}, ErrForbidden
+	}
 	if !validUUID(id) {
-		return Request{}, ErrInvalid
+		return Request{}, invalidInput("申请标识格式不正确")
 	}
 	item, err := s.get(ctx, id)
 	if err != nil {
@@ -239,8 +242,11 @@ func (s *Service) Get(ctx context.Context, principal auth.Principal, id string) 
 
 // SearchEvents returns the newest request workflow events first.
 func (s *Service) SearchEvents(ctx context.Context, principal auth.Principal, id string, query pagination.Query) (pagination.Result[RequestEvent], error) {
+	if _, isApplicant := applicantOrg(principal); !isApplicant && !canManage(principal) {
+		return pagination.Result[RequestEvent]{}, ErrForbidden
+	}
 	if !validUUID(id) {
-		return pagination.Result[RequestEvent]{}, ErrInvalid
+		return pagination.Result[RequestEvent]{}, invalidInput("申请标识格式不正确")
 	}
 	item, err := s.get(ctx, id)
 	if err != nil {
@@ -281,8 +287,8 @@ func (s *Service) Create(ctx context.Context, principal auth.Principal, input In
 		return Request{}, ErrForbidden
 	}
 	normalizeInput(&input)
-	if !validInput(input) {
-		return Request{}, ErrInvalid
+	if err := validateInput(input); err != nil {
+		return Request{}, err
 	}
 	code, err := newCode()
 	if err != nil {
@@ -336,11 +342,11 @@ func (s *Service) Update(ctx context.Context, principal auth.Principal, id strin
 		return Request{}, ErrForbidden
 	}
 	if !validUUID(id) {
-		return Request{}, ErrInvalid
+		return Request{}, invalidInput("申请标识格式不正确")
 	}
 	normalizeInput(&input)
-	if !validInput(input) {
-		return Request{}, ErrInvalid
+	if err := validateInput(input); err != nil {
+		return Request{}, err
 	}
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
@@ -405,7 +411,7 @@ func (s *Service) Submit(ctx context.Context, principal auth.Principal, id strin
 		return Request{}, ErrForbidden
 	}
 	if !validUUID(id) {
-		return Request{}, ErrInvalid
+		return Request{}, invalidInput("申请标识格式不正确")
 	}
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
@@ -427,7 +433,7 @@ func (s *Service) Submit(ctx context.Context, principal auth.Principal, id strin
 		return Request{}, err
 	}
 	if len(publishedIDs)+len(workingIDs) == 0 {
-		return Request{}, ErrInvalid
+		return Request{}, invalidInput("申请范围不能为空，请至少选择一项资产")
 	}
 	if err := replaceScope(ctx, tx, id, orgID, principal.UserID, publishedIDs, workingIDs); err != nil {
 		return Request{}, err
@@ -479,21 +485,19 @@ func (s *Service) Withdraw(ctx context.Context, principal auth.Principal, id str
 // group security can cancel before testing starts. A testing request is only
 // cancellable while its converted batch has not been started.
 func (s *Service) Cancel(ctx context.Context, principal auth.Principal, id string, input TransitionInput, requestID, ipAddress string) (Request, error) {
-	input.Comment = strings.TrimSpace(input.Comment)
-	if textlength.Count(input.Comment) > 2000 {
-		return Request{}, ErrInvalid
-	}
-	if orgID, isApplicant := applicantOrg(principal); isApplicant {
-		if input.Comment == "" {
-			return Request{}, ErrInvalid
-		}
-		return s.applicantTransition(ctx, principal, id, orgID, []string{"draft", "rejected"}, "cancelled", "cancel", input.Comment, requestID, ipAddress, nil)
-	}
-	if !canManage(principal) {
+	orgID, isApplicant := applicantOrg(principal)
+	if !isApplicant && !canManage(principal) {
 		return Request{}, ErrForbidden
 	}
-	if input.Comment == "" {
-		return Request{}, ErrInvalid
+	if !validUUID(id) {
+		return Request{}, invalidInput("申请标识格式不正确")
+	}
+	input.Comment = strings.TrimSpace(input.Comment)
+	if input.Comment == "" || textlength.Count(input.Comment) > 2000 {
+		return Request{}, invalidInput("取消原因不能为空且不能超过 2000 个字符")
+	}
+	if isApplicant {
+		return s.applicantTransition(ctx, principal, id, orgID, []string{"draft", "rejected"}, "cancelled", "cancel", input.Comment, requestID, ipAddress, nil)
 	}
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
@@ -538,8 +542,11 @@ func (s *Service) Reject(ctx context.Context, principal auth.Principal, id strin
 		return Request{}, ErrForbidden
 	}
 	input.Comment = strings.TrimSpace(input.Comment)
-	if input.Comment == "" || textlength.Count(input.Comment) > 2000 || !validUUID(id) {
-		return Request{}, ErrInvalid
+	if !validUUID(id) {
+		return Request{}, invalidInput("申请标识格式不正确")
+	}
+	if input.Comment == "" || textlength.Count(input.Comment) > 2000 {
+		return Request{}, invalidInput("驳回原因不能为空且不能超过 2000 个字符")
 	}
 	return s.managerTransition(ctx, principal, id, []string{"submitted"}, "rejected", "reject", input.Comment, requestID, ipAddress, `
 		reviewed_by=$3::uuid, reviewed_at=now(), review_comment=$4`)
@@ -553,12 +560,15 @@ func (s *Service) Approve(ctx context.Context, principal auth.Principal, id stri
 		return Request{}, ErrForbidden
 	}
 	if !validUUID(id) {
-		return Request{}, ErrInvalid
+		return Request{}, invalidInput("申请标识格式不正确")
 	}
 	input.Comment = strings.TrimSpace(input.Comment)
 	input.AuthorizationNote = strings.TrimSpace(input.AuthorizationNote)
-	if input.AuthorizationNote == "" || textlength.Count(input.AuthorizationNote) > 20000 || textlength.Count(input.Comment) > 2000 {
-		return Request{}, ErrInvalid
+	if input.AuthorizationNote == "" || textlength.Count(input.AuthorizationNote) > 20000 {
+		return Request{}, invalidInput("授权说明不能为空且不能超过 20000 个字符")
+	}
+	if textlength.Count(input.Comment) > 2000 {
+		return Request{}, invalidInput("审批意见不能超过 2000 个字符")
 	}
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
@@ -580,15 +590,15 @@ func (s *Service) Approve(ctx context.Context, principal auth.Principal, id stri
 		endAt = input.TestWindowEndAt
 	}
 	if startAt == nil || endAt == nil || !endAt.After(*startAt) {
-		return Request{}, ErrInvalid
+		return Request{}, invalidInput("请填写测试起止时间，且结束时间必须晚于开始时间")
 	}
 	batchCode, err := newBatchCode()
 	if err != nil {
 		return Request{}, err
 	}
 	batchName := item.RequestName + "（" + item.Code + "）"
-	if len(batchName) > 255 {
-		batchName = batchName[:255]
+	if textlength.Count(batchName) > 255 {
+		batchName = string([]rune(batchName)[:255])
 	}
 	var batchID string
 	err = tx.QueryRow(ctx, `
@@ -653,7 +663,7 @@ func (s *Service) Approve(ctx context.Context, principal auth.Principal, id stri
 
 func (s *Service) applicantTransition(ctx context.Context, principal auth.Principal, id, orgID string, fromStatuses []string, toStatus, action, comment, requestID, ipAddress string, details map[string]any) (Request, error) {
 	if !validUUID(id) {
-		return Request{}, ErrInvalid
+		return Request{}, invalidInput("申请标识格式不正确")
 	}
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
@@ -942,28 +952,7 @@ func normalizeInput(input *Input) {
 }
 
 func validInput(input Input) bool {
-	published, draft := strings.TrimSpace(input.BusinessSystemID), strings.TrimSpace(input.BusinessSystemDraftID)
-	if (published == "") == (draft == "") {
-		return false
-	}
-	if input.RequestName == "" || textlength.Count(input.RequestName) > 255 || input.Background == "" || textlength.Count(input.Background) > 10000 ||
-		!validTestType(input.TestType) || input.ExpectedLaunchAt.IsZero() || !validUUID(input.ContactUserID) ||
-		(published != "" && !validUUID(published)) || (draft != "" && !validUUID(draft)) {
-		return false
-	}
-	if input.TestWindowStartAt != nil && input.TestWindowEndAt != nil && !input.TestWindowEndAt.After(*input.TestWindowStartAt) {
-		return false
-	}
-	total := len(input.WorkingAssetIDs) + len(input.PublishedAssetIDs)
-	if total < 1 || total > maxScopeAssets {
-		return false
-	}
-	for _, id := range append(input.WorkingAssetIDs, input.PublishedAssetIDs...) {
-		if !validUUID(id) {
-			return false
-		}
-	}
-	return true
+	return validateInput(input) == nil
 }
 
 func validTestType(value string) bool {

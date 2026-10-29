@@ -39,6 +39,21 @@ async function api<T>(page: Page, path: string, requestID: string, method = 'GET
   }, { path, requestID, method, body }) as Promise<{ status: number; body: T }>
 }
 
+// The asset page exposes search through its native form, not a q deep link.
+// Keep extended columns enabled while changing the actual server-side filter.
+async function searchAsset(page: Page, value: string) {
+  await page.getByPlaceholder('搜索资产值、名称、系统或负责人').fill(value)
+  const loaded = page.waitForResponse(response => {
+    const url = new URL(response.url())
+    return response.request().method() === 'GET' && url.pathname === '/api/v1/assets' && url.searchParams.get('q') === value
+  })
+  await page.getByRole('button', { name: '查询', exact: true }).click()
+  expect((await loaded).status()).toBe(200)
+  const row = page.locator('.el-table__row').filter({ hasText: value }).first()
+  await expect(row).toBeVisible()
+  return row
+}
+
 test('已到期的网络资产在列表和详情中都显示已到期', async ({ page }) => {
   test.skip(!adminPassword, 'E2E_PASSWORD/BOOTSTRAP_ADMIN_PASSWORD 未配置')
   test.setTimeout(180_000)
@@ -73,26 +88,25 @@ test('已到期的网络资产在列表和详情中都显示已到期', async ({
     expect(created.status, `创建 ${name} 失败: ${JSON.stringify(created.body)}`).toBe(201)
   }
 
-  await page.goto(`/assets?q=${encodeURIComponent(expiredValue)}`)
+  await page.goto('/assets')
   await page.waitForLoadState('networkidle')
   // 有效期 sits in the "更多字段" column set; the reported screenshot shows it
   // because that is the view the user had open.
   await page.getByRole('button', { name: '更多字段', exact: true }).click()
-  const expiredRow = page.locator('.el-table__row').filter({ hasText: expiredValue }).first()
+  const expiredRow = await searchAsset(page, expiredValue)
   await expect(expiredRow, '列表中找不到刚创建的已过期资产').toBeVisible()
   // The reported symptom, asserted on the rendered text.
   await expect(expiredRow).toContainText('已到期')
   await expect(expiredRow, '已过期资产不得显示为即将到期').not.toContainText('即将到期')
   await expect(expiredRow.locator('.el-tag--danger'), '已过期资产必须用危险色标签').toContainText('已到期')
 
-  await page.goto(`/assets?q=${encodeURIComponent(soonValue)}`)
-  await page.waitForLoadState('networkidle')
-  const soonRow = page.locator('.el-table__row').filter({ hasText: soonValue }).first()
+  const soonRow = await searchAsset(page, soonValue)
   await expect(soonRow).toBeVisible()
   await expect(soonRow, '尚未到期的资产仍应显示即将到期').toContainText('即将到期')
   await expect(soonRow, '尚未到期的资产不得显示为已到期').not.toContainText('已到期')
 
   // The detail drawer shares the same label, and it is a separate render path.
+  await searchAsset(page, expiredValue)
   await page.getByRole('button', { name: `已过期资产_${stamp}`, exact: true }).click()
   const detail = page.locator('.el-drawer:visible')
   await expect(detail).toBeVisible()

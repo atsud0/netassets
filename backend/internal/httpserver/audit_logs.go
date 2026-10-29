@@ -28,12 +28,12 @@ func registerAuditLogRoutes(api *gin.RouterGroup, requireAuth gin.HandlerFunc, s
 	group.GET("", func(c *gin.Context) {
 		page, err := parsePositiveInt(c.Query("page"), auditlog.DefaultPage)
 		if err != nil {
-			writeAPIError(c, http.StatusBadRequest, "invalid_filter", "分页参数不正确")
+			writeAPIError(c, http.StatusBadRequest, "invalid_filter", "页码须为大于 0 的整数")
 			return
 		}
 		pageSize, err := parsePositiveInt(c.Query("page_size"), auditlog.DefaultPageSize)
 		if err != nil {
-			writeAPIError(c, http.StatusBadRequest, "invalid_filter", "分页参数不正确")
+			writeAPIError(c, http.StatusBadRequest, "invalid_filter", "每页条数须为 1 至 100 的整数")
 			return
 		}
 		startAt, err := auditlog.ParseTime(c.Query("start_at"), false)
@@ -62,7 +62,12 @@ func registerAuditLogRoutes(api *gin.RouterGroup, requireAuth gin.HandlerFunc, s
 		case errors.Is(err, auditlog.ErrForbidden):
 			writeAPIError(c, http.StatusForbidden, "forbidden", "仅集团管理员可以查看审计日志")
 		case errors.Is(err, auditlog.ErrInvalid):
-			writeAPIError(c, http.StatusBadRequest, "invalid_filter", "审计日志筛选条件不正确")
+			message := "审计日志筛选条件不正确"
+			var inputError *auditlog.InputValidationError
+			if errors.As(err, &inputError) {
+				message = inputError.Message
+			}
+			writeAPIError(c, http.StatusBadRequest, "invalid_filter", message)
 		case err != nil:
 			logger.Error("list audit logs", "error", err, "request_id", c.GetString("request_id"))
 			writeAPIError(c, http.StatusInternalServerError, "internal_error", "读取审计日志失败")

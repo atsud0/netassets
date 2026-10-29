@@ -21,13 +21,25 @@ type AttachmentInput struct {
 }
 
 func (s *Service) Upload(ctx context.Context, p auth.Principal, id string, in AttachmentInput, executor bool) (Object, error) {
-	if !validID(id) || in.Reader == nil || in.Version < 1 || !contains([]string{"internal", "participants"}, in.Visibility) {
-		return nil, ErrInvalid
+	if !validID(id) {
+		return nil, invalidField("整改任务标识不正确")
+	}
+	if in.Reader == nil {
+		return nil, invalidField("请选择有效的附件文件")
+	}
+	if in.Version < 1 {
+		return nil, invalidField("任务版本号须为大于 0 的整数，请刷新任务后重新上传")
+	}
+	if !contains([]string{"internal", "participants"}, in.Visibility) {
+		return nil, invalidField("附件可见范围：请选择内部或参与人员")
 	}
 	name := filepath.Base(strings.ReplaceAll(in.Name, "\\", "/"))
 	ext := strings.ToLower(filepath.Ext(name))
-	if !textOK(name, 255, true) || !contains([]string{".png", ".jpg", ".jpeg", ".pdf", ".txt", ".log", ".csv", ".zip", ".xlsx", ".docx"}, ext) {
-		return nil, ErrInvalid
+	if !textOK(name, 255, true) {
+		return nil, invalidField("附件文件名：请输入 1 至 255 字")
+	}
+	if !contains([]string{".png", ".jpg", ".jpeg", ".pdf", ".txt", ".log", ".csv", ".zip", ".xlsx", ".docx"}, ext) {
+		return nil, invalidField("附件格式仅支持 PNG、JPG、JPEG、PDF、TXT、LOG、CSV、ZIP、XLSX、DOCX")
 	}
 	t, err := loadTask(ctx, s.pool, id)
 	if err != nil {
@@ -50,8 +62,11 @@ func (s *Service) Upload(ctx context.Context, p auth.Principal, id string, in At
 	if err != nil {
 		return nil, err
 	}
-	if size <= 0 || size > MaxAttachmentSize {
-		return nil, ErrInvalid
+	if size <= 0 {
+		return nil, invalidField("附件内容不能为空")
+	}
+	if size > MaxAttachmentSize {
+		return nil, invalidField("单个附件不能超过 20MB")
 	}
 	if _, err = file.Seek(0, 0); err != nil {
 		return nil, err
@@ -60,11 +75,11 @@ func (s *Service) Upload(ctx context.Context, p auth.Principal, id string, in At
 	n, _ := file.Read(head[:])
 	kind := http.DetectContentType(head[:n])
 	if (ext == ".png" && kind != "image/png") || ((ext == ".jpg" || ext == ".jpeg") && kind != "image/jpeg") || (ext == ".pdf" && kind != "application/pdf") {
-		return nil, ErrInvalid
+		return nil, invalidField("附件内容与文件扩展名不一致，请选择正确的文件")
 	}
 	// HTML/script is never accepted as a text proof or rendered inline.
 	if strings.Contains(kind, "html") || strings.Contains(kind, "javascript") {
-		return nil, ErrInvalid
+		return nil, invalidField("附件不能包含 HTML 或 JavaScript 内容")
 	}
 	tx, err := s.begin(ctx)
 	if err != nil {

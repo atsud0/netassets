@@ -247,7 +247,7 @@ func TestEightFindingsInternalAndTwoVendorsPartialReview(t *testing.T) {
 	suffix := time.Now().Format("150405000000000")
 	internal, err := f.s.CreatePerson(f.ctx, f.manager, remediation.PersonInput{OrganizationID: f.org, SystemID: f.system, ParticipantType: "internal", Username: "internal_" + suffix, DisplayName: "内部开发", Password: "Internal-Repair-2026", ValidUntil: f.due.Add(24 * time.Hour)})
 	must(t, err)
-	vendor, err := f.s.SaveVendor(f.ctx, f.group, "", f.org, "第二厂商_"+suffix, "负责人", "enabled")
+	vendor, err := f.s.SaveVendor(f.ctx, f.group, "", f.org, "第二厂商_"+suffix, "13800000018", "enabled")
 	must(t, err)
 	external, err := f.s.CreatePerson(f.ctx, f.manager, remediation.PersonInput{OrganizationID: f.org, SystemID: f.system, ParticipantType: "external", VendorID: vendor["id"].(string), Username: "vendor2_" + suffix, DisplayName: "第二厂商开发", Password: "Vendor-Repair-2026", ValidUntil: f.due.Add(24 * time.Hour)})
 	must(t, err)
@@ -569,7 +569,7 @@ func TestCancellationAndCrossOrganizationSharedIdentity(t *testing.T) {
 	second := setup(t)
 	var username, vendorName string
 	must(t, f.pool.QueryRow(f.ctx, `SELECT u.username,v.name FROM remediation_grants g JOIN users u ON u.id=g.user_id JOIN vendors v ON v.id=g.vendor_id WHERE g.id=$1::uuid`, f.grant).Scan(&username, &vendorName))
-	vendor, err := second.s.SaveVendor(second.ctx, second.group, "", second.org, vendorName, "另一组织联系人", "enabled")
+	vendor, err := second.s.SaveVendor(second.ctx, second.group, "", second.org, vendorName, "13800000018", "enabled")
 	must(t, err)
 	invitation, err := second.s.Invite(second.ctx, second.manager, remediation.PersonInput{OrganizationID: second.org, SystemID: second.system, VendorID: vendor["id"].(string), ParticipantType: "external", Username: username, DisplayName: "执行人员", ValidUntil: time.Now().Add(7 * 24 * time.Hour)})
 	must(t, err)

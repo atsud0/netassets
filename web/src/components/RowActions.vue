@@ -13,6 +13,7 @@ function actionCount(nodes: VNode[] = []): number {
     return total + (Array.isArray(node.children) ? actionCount(node.children as VNode[]) : 0)
   }, 0)
 }
+const activated = ref(false)
 const visible = ref(false)
 const trigger = ref<{ $el: HTMLButtonElement }>()
 const panel = ref<HTMLElement>()
@@ -24,6 +25,8 @@ function close(restore = true) {
   visible.value = false
   if (restore) nextTick(() => trigger.value?.$el.focus())
 }
+// Capture before a valid action sets its loading/disabled state. Checking in
+// bubble phase mistakes that newly-disabled button for an unavailable action.
 function onAction(event: MouseEvent) {
   const target = (event.target as HTMLElement).closest('button, a[href]')
   if (target && !target.hasAttribute('disabled')) close(false)
@@ -32,8 +35,9 @@ function onAction(event: MouseEvent) {
 
 <template>
   <slot v-if="direct || actionCount($slots.default?.()) <= 1" />
-  <el-popover v-else v-model:visible="visible" trigger="click" placement="bottom-end" :width="180" popper-class="row-actions-popover" @after-enter="focusAction">
+  <el-button v-else-if="!activated" ref="trigger" link type="primary" :aria-label="label" :aria-expanded="false" aria-haspopup="dialog" @click="activated = true; visible = true">操作<el-icon class="el-icon--right"><ArrowDown /></el-icon></el-button>
+  <el-popover v-else v-model:visible="visible" trigger="click" placement="bottom-end" :width="180" :persistent="false" popper-class="row-actions-popover" @after-enter="focusAction">
     <template #reference><el-button ref="trigger" link type="primary" :aria-label="label" :aria-expanded="visible" aria-haspopup="dialog" @keydown.esc.stop="close()">操作<el-icon class="el-icon--right"><ArrowDown /></el-icon></el-button></template>
-    <div ref="panel" class="row-actions-panel" role="dialog" :aria-label="label" @keydown.esc.stop="close()" @click="onAction"><slot /></div>
+    <div ref="panel" class="row-actions-panel" role="dialog" :aria-label="label" @keydown.esc.stop="close()" @click.capture="onAction"><slot /></div>
   </el-popover>
 </template>

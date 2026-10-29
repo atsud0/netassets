@@ -1,12 +1,14 @@
 <script setup lang="ts">
 import RowActions from '../components/RowActions.vue'
 import { computed, nextTick, onMounted, reactive, ref, watch } from 'vue'
-import type { FormInstance, FormRules } from 'element-plus'
+import type { FormInstance, FormItemRule, FormRules } from 'element-plus'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { useRoute } from 'vue-router'
 import { apiClient, getAPIErrorMessage } from '../api/client'
+import { loadOptions } from '../api/remediation'
 import { useAuthStore } from '../stores/auth'
 import SavedFilterViews from '../components/SavedFilterViews.vue'
+import { validateFindingImportIgnoreReason } from '../utils/finding-import-review'
 import {
   FINDING_STATUS_CONFIRMED,
   FINDING_STATUS_PENDING,
@@ -128,6 +130,8 @@ const organizationFilter = ref('')
 const statusFilter = ref('')
 const assetLinkStateFilter = ref('')
 const overdueOnly = ref(false)
+// Statistics describe the loaded result, not an unapplied checkbox change.
+const loadedOverdueOnly = ref(false)
 const savedFilterViews = ref<InstanceType<typeof SavedFilterViews>>()
 
 const findingDialogVisible = ref(false)
@@ -245,6 +249,7 @@ function reloadWorkOrdersAfterViewChange() {
 }
 
 const enabledOrganizations = computed(() => organizations.value.filter(item => item.status === 'enabled' && item.type !== 'group'))
+const organizationSelectOptions = computed(() => enabledOrganizations.value.map(item => ({ label: item.name, value: item.id })))
 const scopedAssets = computed(() => assets.value.filter(item => item.organization_id === findingForm.assignee_organization_id && item.status !== 'archived' && (!findingForm.test_batch_id || findingBatchScopeAssetIDs.value.includes(item.id))))
 const scopedSystems = computed(() => systems.value.filter(item => item.organization_id === findingForm.assignee_organization_id && item.status !== 'archived'))
 const usableTestBatches = computed(() => testBatches.value.filter(item => ['authorized', 'in_progress', 'completed'].includes(item.status)))
@@ -252,21 +257,38 @@ const orderFindings = computed(() => findingOptions.value.filter(item => item.as
 const currentPage = computed(() => activeTab.value === 'orders' ? orderPage.value : activeTab.value === 'findings' ? findingPage.value : candidatePage.value)
 const currentTotal = computed(() => activeTab.value === 'orders' ? orderTotal.value : activeTab.value === 'findings' ? findingTotal.value : candidateTotal.value)
 const activeOrderCount = computed(() => workOrders.value.filter(item => !['closed', 'cancelled'].includes(item.status)).length)
-const overdueCount = computed(() => workOrders.value.filter(item => item.overdue).length)
+const overdueCount = computed(() => loadedOverdueOnly.value ? orderTotal.value : workOrders.value.filter(item => item.overdue).length)
 const pendingVerificationCount = computed(() => workOrders.value.filter(item => item.status === 'pending_verification').length)
 
+// Match the backend's trimmed Unicode code-point limits, not UTF-16 maxlength.
+function securityTextRule(limit: number, label: string, requiredMessage?: string): FormItemRule {
+  return {
+    required: Boolean(requiredMessage), trigger: 'blur',
+    validator: (_rule, value: unknown, callback) => {
+      const text = String(value ?? '').trim()
+      if (requiredMessage && !text) return callback(new Error(requiredMessage))
+      if (Array.from(text).length > limit) return callback(new Error(`${label}最多 ${limit} 字`))
+      callback()
+    },
+  }
+}
+
 const findingRules: FormRules = {
-  title: [{ required: true, message: '请输入漏洞标题', trigger: 'blur' }],
+  title: [securityTextRule(255, '漏洞标题', '请输入漏洞标题')],
+  vulnerability_type: [securityTextRule(128, '漏洞类型')],
+  evidence: [securityTextRule(30000, '漏洞证据')],
+  remediation_advice: [securityTextRule(20000, '修复建议')],
   severity: [{ required: true, message: '请选择严重等级', trigger: 'change' }],
   assignee_organization_id: [{ required: true, message: '请选择责任组织', trigger: 'change' }],
-  description: [{ required: true, message: '请输入漏洞描述', trigger: 'blur' }],
+  description: [securityTextRule(20000, '漏洞描述', '请输入漏洞描述')],
   discovered_at: [{ required: true, message: '请选择发现时间', trigger: 'change' }],
 }
 const workOrderRules: FormRules = {
-  title: [{ required: true, message: '请输入工单标题', trigger: 'blur' }],
+  title: [securityTextRule(255, '工单标题', '请输入工单标题')],
+  description: [securityTextRule(10000, '工单说明')],
   assignee_organization_id: [{ required: true, message: '请选择责任组织', trigger: 'change' }],
   finding_ids: [{ required: true, type: 'array', min: 1, message: '请选择至少一项安全发现', trigger: 'change' }],
-  remediation_requirement: [{ required: true, message: '请输入整改要求', trigger: 'blur' }],
+  remediation_requirement: [securityTextRule(20000, '整改要求', '请输入整改要求')],
   due_at: [{ required: true, message: '请选择整改期限', trigger: 'change' }],
 }
 
@@ -316,7 +338,9 @@ onMounted(async () => {
   } else {
     await savedFilterViews.value?.loadViews()
   }
-  await Promise.all([loadSupportingData(), loadFindingOptions()])
+  // Editing selectors can span many pages; the filtered list and deep-linked
+  // details do not depend on them and must become usable independently.
+  const supportingData = Promise.all([loadSupportingData(), loadFindingOptions()])
   await loadActiveList()
   const workOrderID = typeof route.query.work_order_id === 'string' ? route.query.work_order_id : ''
   const findingID = typeof route.query.finding_id === 'string' ? route.query.finding_id : ''
@@ -326,6 +350,7 @@ onMounted(async () => {
     await loadActiveList()
     await openFindingDetail({ id: findingID } as Finding)
   }
+  await supportingData
 })
 
 async function loadSupportingData() {
@@ -333,17 +358,17 @@ async function loadSupportingData() {
     const listParams = { page: 1, page_size: 100 }
     const emptyResponse = { data: { items: [], total: 0, page: 1, page_size: 20 } }
     const referencePrefix = auth.hasGroupSecurityRole ? '/security-reference' : ''
-    const [orgResponse, assetResponse, systemResponse, batchResponse, importResponse] = await Promise.all([
-      apiClient.get<ListResponse<Organization>>(`${referencePrefix}/organizations`, { params: listParams }),
-      apiClient.get<ListResponse<Asset>>(`${referencePrefix}/assets`, { params: listParams }),
-      apiClient.get<ListResponse<BusinessSystem>>(`${referencePrefix}/business-systems`, { params: listParams }),
-      auth.canManageSecurityTests ? apiClient.get<ListResponse<SecurityTestBatch>>('/security-test-batches', { params: listParams }) : Promise.resolve(emptyResponse),
+    const [organizationOptions, assetOptions, systemOptions, batchOptions, importResponse] = await Promise.all([
+      loadOptions<Organization>(`${referencePrefix}/organizations`),
+      loadOptions<Asset>(`${referencePrefix}/assets`),
+      loadOptions<BusinessSystem>(`${referencePrefix}/business-systems`),
+      auth.canManageSecurityTests ? loadOptions<SecurityTestBatch>('/security-test-batches') : Promise.resolve([]),
       auth.canManageSecurityFindings ? apiClient.get<ListResponse<FindingImportResult>>('/security-findings/imports', { params: listParams }) : Promise.resolve(emptyResponse),
     ])
-    organizations.value = orgResponse.data.items
-    assets.value = assetResponse.data.items
-    systems.value = systemResponse.data.items
-    testBatches.value = batchResponse.data.items
+    organizations.value = organizationOptions
+    assets.value = assetOptions
+    systems.value = systemOptions
+    testBatches.value = batchOptions
     findingImports.value = importResponse.data.items
   } catch (error) {
     ElMessage.error(getAPIErrorMessage(error, '读取安全工单基础数据失败'))
@@ -405,6 +430,7 @@ async function loadActiveList() {
     if (isOrders) {
       workOrders.value = response.data.items as WorkOrder[]
       orderTotal.value = response.data.total
+      loadedOverdueOnly.value = params.overdue === true
     } else {
       findings.value = response.data.items as Finding[]
       findingTotal.value = response.data.total
@@ -511,7 +537,7 @@ function openEditFinding(item: Finding) {
 }
 
 async function saveFinding() {
-  if (!findingFormRef.value || !(await findingFormRef.value.validate())) return
+  if (!findingFormRef.value || !(await findingFormRef.value.validate().catch(() => false))) return
   if (!findingForm.asset_id && !findingForm.business_system_id) {
     ElMessage.warning('请至少关联一项网络资产或业务系统')
     return
@@ -574,8 +600,9 @@ async function submitFindingImport() {
     const response = await apiClient.post<ItemResponse<FindingImportResult>>('/security-findings/import', formData, { headers: { 'Content-Type': 'multipart/form-data' }, timeout: 120_000 })
     importResult.value = response.data.item
     ElMessage.success(`导入完成：成功 ${response.data.item.success_count} 条，待关联 ${response.data.item.pending_count} 条，失败 ${response.data.item.failure_count} 条，重复 ${response.data.item.duplicate_count} 条`)
+    // Keep the user's current dialog choice: they may close it as soon as
+    // the result is shown while the supporting lists are still refreshing.
     await refreshAfterMutation()
-    importDialogVisible.value = true
   } catch (error) {
     ElMessage.error(getAPIErrorMessage(error, '批量导入安全发现失败'))
   } finally {
@@ -619,6 +646,8 @@ async function submitRiskAction() {
   if (!item) return
   if (riskMode.value === 'accept' && !riskForm.reason.trim()) return ElMessage.warning('请填写风险接受原因')
   if (riskMode.value === 'review' && !riskForm.comment.trim()) return ElMessage.warning('请填写复核意见')
+  const note = (riskMode.value === 'accept' ? riskForm.reason : riskForm.comment).trim()
+  if (Array.from(note).length > 5000) return ElMessage.warning(`${riskMode.value === 'accept' ? '风险接受原因' : '复核意见'}最多 5000 字`)
   const acceptedUntil = new Date(riskForm.accepted_until)
   if (Number.isNaN(acceptedUntil.getTime()) || acceptedUntil <= new Date()) return ElMessage.warning('风险有效期必须晚于当前时间')
   riskSubmitting.value = true
@@ -627,8 +656,8 @@ async function submitRiskAction() {
     // Carry the row version the dialog was opened from so a concurrent edit is
     // reported instead of silently overwritten.
     const payload = riskMode.value === 'accept'
-      ? { reason: riskForm.reason, accepted_until: acceptedUntil.toISOString(), expected_updated_at: item.updated_at }
-      : { comment: riskForm.comment, accepted_until: acceptedUntil.toISOString(), expected_updated_at: item.updated_at }
+      ? { reason: note, accepted_until: acceptedUntil.toISOString(), expected_updated_at: item.updated_at }
+      : { comment: note, accepted_until: acceptedUntil.toISOString(), expected_updated_at: item.updated_at }
     const response = await apiClient.post<ItemResponse<Finding>>(`/security-findings/${item.id}/${endpoint}`, payload)
     selectedFinding.value = response.data.item
     riskDialogVisible.value = false
@@ -666,7 +695,7 @@ function openCreateWorkOrder(finding?: Finding) {
 }
 
 async function saveWorkOrder() {
-  if (!workOrderFormRef.value || !(await workOrderFormRef.value.validate())) return
+  if (!workOrderFormRef.value || !(await workOrderFormRef.value.validate().catch(() => false))) return
   submitting.value = true
   try {
     const response = await apiClient.post<{ item: WorkOrder }>('/security-work-orders', {
@@ -779,9 +808,31 @@ function openAction(item: WorkOrder, mode: ActionMode) {
   actionDialogVisible.value = true
 }
 
+function actionValidationMessage() {
+  const fields: Array<{ value: string; label: string; limit: number; required?: boolean }> = []
+  if (actionMode.value === 'progress') fields.push({ value: actionForm.progress, label: '整改进度', limit: 5000, required: true })
+  if (actionMode.value === 'submit') fields.push({ value: actionForm.remediation_result, label: '整改结果', limit: 10000, required: true })
+  if (actionMode.value === 'return') fields.push(
+    { value: actionForm.return_reason, label: '退回原因', limit: 2000, required: true },
+    { value: actionForm.verification_result, label: '复测记录', limit: 10000 },
+  )
+  if (actionMode.value === 'close') fields.push({ value: actionForm.verification_result, label: '复测结论', limit: 10000, required: true })
+  if (['issue', 'accept', 'progress', 'submit', 'cancel'].includes(actionMode.value)) fields.push({
+    value: actionForm.comment, label: actionMode.value === 'cancel' ? '取消原因' : '处理说明', limit: 2000, required: actionMode.value === 'cancel',
+  })
+  for (const field of fields) {
+    const text = field.value.trim()
+    if (field.required && !text) return `${field.label}不能为空`
+    if (Array.from(text).length > field.limit) return `${field.label}最多 ${field.limit} 字`
+  }
+  return ''
+}
+
 async function submitAction() {
   const item = actionOrder.value
   if (!item) return
+  const message = actionValidationMessage()
+  if (message) return ElMessage.warning(message)
   let endpoint = ''
   let payload: Record<string, string> = {}
   if (actionMode.value === 'issue') { endpoint = 'issue'; payload = { comment: actionForm.comment } }
@@ -827,10 +878,12 @@ function onAttachmentSelected(event: Event) {
 
 async function uploadAttachment() {
   if (!selectedOrder.value || !selectedAttachmentFile.value) return ElMessage.warning('请先选择附件')
+  const description = attachmentForm.description.trim()
+  if (Array.from(description).length > 500) return ElMessage.warning('附件说明最多 500 字')
   const data = new FormData()
   data.append('file', selectedAttachmentFile.value)
   data.append('category', auth.canManageSecurityWorkOrders ? attachmentForm.category : 'remediation')
-  data.append('description', attachmentForm.description)
+  data.append('description', description)
   attachmentUploading.value = true
   try {
     await apiClient.post(`/security-work-orders/${selectedOrder.value.id}/attachments`, data, { headers: { 'Content-Type': 'multipart/form-data' } })
@@ -887,21 +940,37 @@ function formatFileSize(value: number) {
   return `${(value / 1024 / 1024).toFixed(1)} MB`
 }
 
+const candidateScopeLoading = ref(false)
+let candidateScopeRequest = 0
+
+async function searchCandidateScopeOptions(keyword = '') {
+  const item = selectedCandidate.value
+  if (!item || !candidateDialogVisible.value) return
+  const request = ++candidateScopeRequest
+  candidateScopeLoading.value = true
+  try {
+    const response = await apiClient.get<ListResponse<FindingImportScopeOption>>(`/security-findings/import-candidates/${item.id}/scope-assets`, { params: { keyword: keyword.trim() } })
+    if (request !== candidateScopeRequest || selectedCandidate.value?.id !== item.id || !candidateDialogVisible.value) return
+    candidateScopeOptions.value = response.data.items
+    // Never silently substitute the first unrelated target after a query.
+    if (!candidateScopeOptions.value.some(option => option.id === selectedCandidateScopeAssetID.value)) selectedCandidateScopeAssetID.value = ''
+  } catch (error) {
+    if (request !== candidateScopeRequest || selectedCandidate.value?.id !== item.id || !candidateDialogVisible.value) return
+    candidateScopeOptions.value = []
+    selectedCandidateScopeAssetID.value = ''
+    ElMessage.error(getAPIErrorMessage(error, '读取可关联资产失败'))
+  } finally {
+    if (request === candidateScopeRequest) candidateScopeLoading.value = false
+  }
+}
+
 async function openFindingImportCandidate(item: FindingImportCandidate) {
   selectedCandidate.value = item
   selectedCandidateScopeAssetID.value = (item.test_batch_id ? item.suggested_scope_asset_id : item.suggested_asset_id) ?? ''
+  candidateScopeOptions.value = []
   candidateReviewNote.value = ''
   candidateDialogVisible.value = true
-  try {
-    const response = await apiClient.get<ListResponse<FindingImportScopeOption>>(`/security-findings/import-candidates/${item.id}/scope-assets`)
-    candidateScopeOptions.value = response.data.items
-    if (!candidateScopeOptions.value.some(option => option.id === selectedCandidateScopeAssetID.value)) {
-      selectedCandidateScopeAssetID.value = candidateScopeOptions.value[0]?.id ?? ''
-    }
-  } catch (error) {
-    candidateScopeOptions.value = []
-    ElMessage.error(getAPIErrorMessage(error, '读取可关联资产失败'))
-  }
+  await searchCandidateScopeOptions()
 }
 
 async function submitFindingImportCandidate() {
@@ -909,11 +978,13 @@ async function submitFindingImportCandidate() {
     ElMessage.warning('请选择要关联的资产')
     return
   }
+  const note = candidateReviewNote.value.trim()
+  if (Array.from(note).length > 2000) return ElMessage.warning('关联备注最多 2000 字')
   candidateSubmitting.value = true
   try {
     const response = await apiClient.post<ItemResponse<FindingImportCandidate>>(`/security-findings/import-candidates/${selectedCandidate.value.id}/link`, {
       ...(selectedCandidate.value.test_batch_id ? { scope_asset_id: selectedCandidateScopeAssetID.value } : { asset_id: selectedCandidateScopeAssetID.value }),
-      review_note: candidateReviewNote.value,
+      review_note: note,
     })
     const item = response.data.item
     ElMessage.success(item.status === 'duplicate' ? `已关联，漏洞与 ${item.imported_finding_code || '现有安全发现'} 重复` : `已生成安全发现 ${item.imported_finding_code}`)
@@ -930,7 +1001,8 @@ async function ignoreFindingImportCandidate(item: FindingImportCandidate) {
   try {
     const result = await ElMessageBox.prompt(`忽略后不会生成安全发现：${item.title}`, '忽略待关联漏洞', {
       confirmButtonText: '确认忽略', cancelButtonText: '取消', inputType: 'textarea',
-      inputPlaceholder: '请填写忽略原因', inputValidator: value => Boolean(value?.trim()) || '请填写忽略原因',
+      inputPlaceholder: '请填写忽略原因，最多 2000 字',
+      inputValidator: validateFindingImportIgnoreReason,
     })
     await apiClient.post(`/security-findings/import-candidates/${item.id}/ignore`, { review_note: result.value.trim() })
     ElMessage.success('已忽略该漏洞导入项')
@@ -1058,9 +1130,7 @@ async function onTabChange() {
         <el-button @click="resetFilters">重置</el-button>
       </div>
       <div v-else class="filter-bar">
-        <el-select v-if="auth.hasGroupSecurityRole" v-model="organizationFilter" clearable filterable placeholder="全部责任组织" style="width: 220px">
-          <el-option v-for="item in enabledOrganizations" :key="item.id" :label="item.name" :value="item.id" />
-        </el-select>
+        <el-select-v2 v-if="auth.hasGroupSecurityRole" v-model="organizationFilter" class="el-select" :options="organizationSelectOptions" clearable filterable placeholder="全部责任组织" style="width: 220px" />
         <el-select v-model="statusFilter" clearable placeholder="全部状态" style="width: 170px">
           <template v-if="activeTab === 'orders'">
             <el-option v-for="(label, value) in orderStatusLabels" :key="value" :label="label" :value="value" />
@@ -1079,9 +1149,9 @@ async function onTabChange() {
       <SavedFilterViews v-show="activeTab === 'orders'" ref="savedFilterViews" page-key="security_work_orders" :current-filters="currentWorkOrderFilters" class="work-order-saved-views" @apply="applySavedWorkOrderFilters" @changed="reloadWorkOrdersAfterViewChange" />
       <div v-show="activeTab === 'orders'" class="filter-stat-list work-order-stat-list">
         <div class="filter-stat"><span>符合筛选工单</span><strong>{{ orderTotal }}</strong></div>
-        <div class="filter-stat"><span>处理中</span><strong>{{ activeOrderCount }}</strong></div>
-        <div class="filter-stat"><span>待复测</span><strong>{{ pendingVerificationCount }}</strong></div>
-        <div class="filter-stat danger"><span>逾期</span><strong>{{ overdueCount }}</strong></div>
+        <div class="filter-stat"><span>本页处理中</span><strong>{{ activeOrderCount }}</strong></div>
+        <div class="filter-stat"><span>本页待复测</span><strong>{{ pendingVerificationCount }}</strong></div>
+        <div class="filter-stat danger"><span>{{ loadedOverdueOnly ? '逾期总数' : '本页逾期' }}</span><strong>{{ overdueCount }}</strong></div>
       </div>
 
       <el-table v-if="activeTab === 'orders'" :data="workOrders" row-key="id" empty-text="暂无安全整改工单">
@@ -1220,8 +1290,8 @@ async function onTabChange() {
       <el-alert v-if="riskMode === 'accept'" type="warning" :closable="false" show-icon title="风险接受不会删除漏洞，仅在明确业务理由和有效期限内暂停整改；到期后系统将标记为待复核。" />
       <el-alert v-else-if="selectedFinding?.risk_acceptance_expired" type="error" :closable="false" show-icon title="当前风险接受已到期，完成复核时必须设置新的未来有效期。" />
       <el-form label-position="top" class="risk-form">
-        <el-form-item v-if="riskMode === 'accept'" label="风险接受原因（必填）"><el-input v-model="riskForm.reason" type="textarea" :rows="5" maxlength="5000" show-word-limit placeholder="说明暂不整改的业务原因、补偿措施和责任判断" /></el-form-item>
-        <el-form-item v-else label="复核意见（必填）"><el-input v-model="riskForm.comment" type="textarea" :rows="5" maxlength="5000" show-word-limit placeholder="记录本次复核结论、现有补偿措施及继续接受风险的理由" /></el-form-item>
+        <el-form-item v-if="riskMode === 'accept'" label="风险接受原因（必填）"><el-input v-model="riskForm.reason" type="textarea" :rows="5" placeholder="说明暂不整改的业务原因、补偿措施和责任判断" /><small class="form-help">{{ Array.from(riskForm.reason.trim()).length }} / 5000 字</small></el-form-item>
+        <el-form-item v-else label="复核意见（必填）"><el-input v-model="riskForm.comment" type="textarea" :rows="5" placeholder="记录本次复核结论、现有补偿措施及继续接受风险的理由" /><small class="form-help">{{ Array.from(riskForm.comment.trim()).length }} / 5000 字</small></el-form-item>
         <el-form-item label="风险有效期至（必填）"><el-date-picker v-model="riskForm.accepted_until" type="datetime" style="width:100%" /></el-form-item>
       </el-form>
       <template #footer><el-button @click="riskDialogVisible = false">取消</el-button><el-button type="warning" :loading="riskSubmitting" @click="submitRiskAction">确认{{ riskActionLabels[riskMode] }}</el-button></template>
@@ -1230,19 +1300,19 @@ async function onTabChange() {
     <el-dialog v-model="findingDialogVisible" :title="editingFindingID ? '编辑安全发现' : '登记安全发现'" width="760px" destroy-on-close>
       <el-form ref="findingFormRef" :model="findingForm" :rules="findingRules" label-position="top">
         <div class="form-grid two-columns">
-          <el-form-item label="漏洞标题" prop="title"><el-input v-model="findingForm.title" maxlength="255" show-word-limit /></el-form-item>
+          <el-form-item label="漏洞标题" prop="title"><el-input v-model="findingForm.title" /></el-form-item>
           <el-form-item label="严重等级" prop="severity"><el-select v-model="findingForm.severity" style="width:100%"><el-option v-for="(label, value) in severityLabels" :key="value" :label="label" :value="value" /></el-select></el-form-item>
           <el-form-item label="测试批次"><el-select v-model="findingForm.test_batch_id" clearable filterable style="width:100%" placeholder="可选；选择后资产限于授权范围"><el-option v-for="item in usableTestBatches" :key="item.id" :label="`${item.name}（${item.code}）`" :value="item.id" /></el-select></el-form-item>
-          <el-form-item label="责任组织" prop="assignee_organization_id"><el-select v-model="findingForm.assignee_organization_id" filterable style="width:100%" :disabled="Boolean(findingForm.test_batch_id)"><el-option v-for="item in enabledOrganizations" :key="item.id" :label="item.name" :value="item.id" /></el-select></el-form-item>
-          <el-form-item label="漏洞类型"><el-input v-model="findingForm.vulnerability_type" placeholder="例如：越权访问、SQL 注入" /></el-form-item>
+          <el-form-item label="责任组织" prop="assignee_organization_id"><el-select-v2 v-model="findingForm.assignee_organization_id" class="el-select" :options="organizationSelectOptions" filterable style="width:100%" :disabled="Boolean(findingForm.test_batch_id)" /></el-form-item>
+          <el-form-item label="漏洞类型" prop="vulnerability_type"><el-input v-model="findingForm.vulnerability_type" placeholder="例如：越权访问、SQL 注入" /></el-form-item>
           <el-form-item label="关联网络资产"><el-select v-model="findingForm.asset_id" clearable filterable style="width:100%" placeholder="URL、IP、域名等"><el-option v-for="item in scopedAssets" :key="item.id" :label="`${item.name || item.value}（${item.value}）`" :value="item.id" /></el-select></el-form-item>
           <el-form-item label="关联业务系统"><el-select v-model="findingForm.business_system_id" clearable filterable style="width:100%" placeholder="可与网络资产同时选择"><el-option v-for="item in scopedSystems" :key="item.id" :label="`${item.name}（${item.code}）`" :value="item.id" /></el-select></el-form-item>
           <el-form-item label="发现时间" prop="discovered_at"><el-date-picker v-model="findingForm.discovered_at" type="datetime" style="width:100%" /></el-form-item>
           <el-form-item v-if="editingFindingID" label="发现状态"><el-select v-model="findingForm.status" style="width:100%" :disabled="findingForm.status === FINDING_STATUS_RISK_ACCEPTED"><el-option v-for="(label, value) in findingStatusLabels" :key="value" :label="label" :value="value" :disabled="value === FINDING_STATUS_RISK_ACCEPTED" /></el-select><small v-if="findingForm.status === FINDING_STATUS_RISK_ACCEPTED" class="form-help">风险接受状态请通过详情中的风险操作维护</small></el-form-item>
         </div>
         <el-form-item label="漏洞描述" prop="description"><el-input v-model="findingForm.description" type="textarea" :rows="4" placeholder="描述漏洞位置、触发条件和影响" /></el-form-item>
-        <el-form-item label="验证证据"><el-input v-model="findingForm.evidence" type="textarea" :rows="3" placeholder="请脱敏填写请求路径、响应现象或证据位置，不要录入明文口令" /></el-form-item>
-        <el-form-item label="整改建议"><el-input v-model="findingForm.remediation_advice" type="textarea" :rows="3" /></el-form-item>
+        <el-form-item label="验证证据" prop="evidence"><el-input v-model="findingForm.evidence" type="textarea" :rows="3" placeholder="请脱敏填写请求路径、响应现象或证据位置，不要录入明文口令" /></el-form-item>
+        <el-form-item label="整改建议" prop="remediation_advice"><el-input v-model="findingForm.remediation_advice" type="textarea" :rows="3" /></el-form-item>
       </el-form>
       <template #footer><el-button @click="findingDialogVisible = false">取消</el-button><el-button type="primary" :loading="submitting" @click="saveFinding">保存</el-button></template>
     </el-dialog>
@@ -1293,13 +1363,13 @@ async function onTabChange() {
         </el-descriptions>
         <el-form label-position="top" class="candidate-link-form">
           <el-form-item label="关联资产（必选）">
-            <el-select v-model="selectedCandidateScopeAssetID" filterable style="width:100%" :placeholder="selectedCandidate.test_batch_id ? '请选择当前批次授权资产' : '请选择全局资产台账中的资产'">
+            <el-select v-model="selectedCandidateScopeAssetID" filterable remote :remote-method="searchCandidateScopeOptions" :loading="candidateScopeLoading" style="width:100%" :placeholder="selectedCandidate.test_batch_id ? '输入资产值、名称或组织搜索当前批次授权资产' : '输入资产值、名称或组织搜索全局台账资产'">
               <el-option v-for="item in candidateScopeOptions" :key="item.id" :value="item.id" :label="`${item.asset_value} · ${item.organization_name}${item.business_system_name ? ` · ${item.business_system_name}` : ''}`">
                 <div class="candidate-option"><span><el-tag v-if="item.suggested" size="small" type="warning">系统建议</el-tag>{{ item.asset_value }}</span><small>{{ item.organization_name }}{{ item.business_system_name ? ` · ${item.business_system_name}` : '' }}</small></div>
               </el-option>
             </el-select>
           </el-form-item>
-          <el-form-item label="关联备注"><el-input v-model="candidateReviewNote" type="textarea" :rows="3" maxlength="2000" show-word-limit placeholder="可记录扫描器标识与台账资产的对应依据" /></el-form-item>
+          <el-form-item label="关联备注"><el-input v-model="candidateReviewNote" type="textarea" :rows="3" placeholder="可记录扫描器标识与台账资产的对应依据" /><small class="form-help">{{ Array.from(candidateReviewNote.trim()).length }} / 2000 字</small></el-form-item>
         </el-form>
       </template>
       <template #footer><el-button @click="candidateDialogVisible = false">取消</el-button><el-button type="primary" :loading="candidateSubmitting" @click="submitFindingImportCandidate">确认关联并生成安全发现</el-button></template>
@@ -1308,14 +1378,14 @@ async function onTabChange() {
     <el-dialog v-model="workOrderDialogVisible" title="新建安全整改工单" width="760px" destroy-on-close>
       <el-form ref="workOrderFormRef" :model="workOrderForm" :rules="workOrderRules" label-position="top">
         <div class="form-grid two-columns">
-          <el-form-item label="工单标题" prop="title"><el-input v-model="workOrderForm.title" maxlength="255" /></el-form-item>
-          <el-form-item label="责任组织" prop="assignee_organization_id"><el-select v-model="workOrderForm.assignee_organization_id" filterable style="width:100%"><el-option v-for="item in enabledOrganizations" :key="item.id" :label="item.name" :value="item.id" /></el-select></el-form-item>
+          <el-form-item label="工单标题" prop="title"><el-input v-model="workOrderForm.title" /></el-form-item>
+          <el-form-item label="责任组织" prop="assignee_organization_id"><el-select-v2 v-model="workOrderForm.assignee_organization_id" class="el-select" :options="organizationSelectOptions" filterable style="width:100%" /></el-form-item>
           <el-form-item label="整改期限" prop="due_at"><el-date-picker v-model="workOrderForm.due_at" type="datetime" style="width:100%" /></el-form-item>
           <el-form-item label="执行方式"><el-radio-group v-model="workOrderForm.execution_mode"><el-radio value="organization">组织统一整改</el-radio><el-radio value="individual">组织派给具体人员</el-radio></el-radio-group></el-form-item>
           <el-form-item label="下发方式"><el-switch v-model="workOrderForm.issue_immediately" active-text="保存后立即下发" inactive-text="先保存草稿" /></el-form-item>
         </div>
         <el-form-item label="关联安全发现" prop="finding_ids"><el-select v-model="workOrderForm.finding_ids" multiple filterable collapse-tags style="width:100%" placeholder="仅显示该组织待处理的发现"><el-option v-for="item in orderFindings" :key="item.id" :label="`[${severityLabels[item.severity]}] ${item.code} ${item.title} · ${findingTarget(item)}`" :value="item.id" /></el-select></el-form-item>
-        <el-form-item label="背景说明"><el-input v-model="workOrderForm.description" type="textarea" :rows="3" /></el-form-item>
+        <el-form-item label="背景说明" prop="description"><el-input v-model="workOrderForm.description" type="textarea" :rows="3" /></el-form-item>
         <el-form-item label="整改要求" prop="remediation_requirement"><el-input v-model="workOrderForm.remediation_requirement" type="textarea" :rows="4" placeholder="明确整改要求、验证口径和提交材料" /></el-form-item>
       </el-form>
       <template #footer><el-button @click="workOrderDialogVisible = false">取消</el-button><el-button type="primary" :loading="submitting" @click="saveWorkOrder">{{ workOrderForm.issue_immediately ? '创建并下发' : '保存草稿' }}</el-button></template>
@@ -1342,7 +1412,7 @@ async function onTabChange() {
               <el-option v-for="(label, value) in attachmentCategoryLabels" :key="value" :label="label" :value="value" />
             </el-select>
             <input ref="attachmentFileInput" type="file" accept=".pdf,.png,.jpg,.jpeg,.txt,.csv,.xlsx,.docx,.zip" @change="onAttachmentSelected">
-            <el-input v-model="attachmentForm.description" size="small" maxlength="500" placeholder="附件说明（可选）" />
+            <el-input v-model="attachmentForm.description" size="small" placeholder="附件说明（可选）" />
             <el-button type="primary" size="small" :loading="attachmentUploading" @click="uploadAttachment">上传附件</el-button>
           </div>
           <el-table :data="orderAttachments" size="small" empty-text="暂无附件">

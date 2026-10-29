@@ -204,7 +204,8 @@ test('子单位申请上线安全测试，集团审批通过后自动上报待�
   await expect(page.getByText(/必填项校验通过/)).toBeVisible()
   await page.getByRole('button', { name: '知道了' }).click()
   await page.keyboard.press('Escape')
-  await page.locator('tr', { hasText: requestName }).getByTestId('submit-security-test-request').click()
+  await page.locator('tr', { hasText: requestName }).getByRole('button', { name: /^操作：/ }).click()
+  await page.locator('.row-actions-popover:visible').getByTestId('submit-security-test-request').click()
   await page.getByRole('button', { name: '确认提交' }).click()
   await expect(page.locator('tr', { hasText: requestName }).getByText('待审核')).toBeVisible()
 
@@ -249,7 +250,8 @@ test('子单位申请上线安全测试，集团审批通过后自动上报待�
 
   await page.goto('/security-test-requests')
   await expect(page.locator('tr', { hasText: requestName }).getByText('待审核')).toBeVisible()
-  await page.locator('tr', { hasText: requestName }).getByTestId('approve-security-test-request').click()
+  await page.locator('tr', { hasText: requestName }).getByRole('button', { name: /^操作：/ }).click()
+  await page.locator('.row-actions-popover:visible').getByTestId('approve-security-test-request').click()
   await page.getByPlaceholder('说明授权人、授权依据、允许的测试方式与边界').fill('经集团安全委员会授权，允许在约定窗口内开展渗透测试。')
   await page.getByTestId('confirm-approve-security-test-request').click()
   await expect(page.locator('tr', { hasText: requestName }).getByText('测试中')).toBeVisible()
@@ -270,7 +272,8 @@ test('子单位申请上线安全测试，集团审批通过后自动上报待�
 
   await page.goto('/security-test-requests')
   await expect(page.locator('tr', { hasText: requestName }).getByText('待上线审批')).toBeVisible()
-  await page.locator('tr', { hasText: requestName }).getByTestId('approve-security-test-launch').click()
+  await page.locator('tr', { hasText: requestName }).getByRole('button', { name: /^操作：/ }).click()
+  await page.locator('.row-actions-popover:visible').getByTestId('approve-security-test-launch').click()
   await page.locator('.el-message-box').getByRole('button', { name: '批准上线' }).click()
   await expect(page.locator('tr', { hasText: requestName }).getByText('已关闭')).toBeVisible()
 

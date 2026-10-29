@@ -50,7 +50,7 @@ async function createOrganization(context: BrowserContext, parentID: string, cod
       short_name: name,
       type,
       manager: 'E2E',
-      contact: 'e2e@example.invalid',
+      contact: '13800000018',
       notes: '子公司组织管理权限回归',
     },
   }), 201, `新增组织 ${name}`) as { item: Organization }
@@ -119,7 +119,7 @@ test('子公司管理员可维护授权组织树并新增下级组织，但不�
 
     const updatedName = `子公司管理范围_已更新_${suffix}`
     await expectStatus(await adminContext.request.patch(`/api/v1/organizations/${managed.id}`, {
-      data: { name: updatedName, short_name: '子公司自维护', manager: '子公司管理员', contact: 'child-admin@example.invalid', notes: '由子公司管理员维护' },
+      data: { name: updatedName, short_name: '子公司自维护', manager: '子公司管理员', contact: '13800000018', notes: '由子公司管理员维护' },
     }), 200, '子公司管理员编辑本组织基本信息')
 
     const child = await createOrganization(adminContext, managed.id, `ORG_OFFICE_${suffix}`, `下级办事处_${suffix}`, 'department')
@@ -154,12 +154,15 @@ test('子公司管理员可维护授权组织树并新增下级组织，但不�
     const page = await adminContext.newPage()
     await page.goto('/organizations')
     await expect(page.getByRole('heading', { name: '组织架构', exact: true })).toBeVisible()
+    await page.getByRole('textbox', { name: '搜索组织', exact: true }).fill(managed.code)
     const managedRow = page.locator('.organization-tree-panel .el-table__body-wrapper tbody tr').filter({ hasText: updatedName }).first()
     await expect(managedRow).toBeVisible()
-    await expect(managedRow.getByRole('button', { name: '编辑信息', exact: true })).toBeVisible()
-    await expect(managedRow.getByRole('button', { name: '新增下级组织', exact: true })).toBeVisible()
+    await managedRow.getByRole('button', { name: /^操作：/ }).click()
+    const actions = page.locator('.row-actions-panel:visible')
+    await expect(actions.getByRole('button', { name: '编辑信息', exact: true })).toBeVisible()
+    await expect(actions.getByRole('button', { name: '新增下级组织', exact: true })).toBeVisible()
     await expect(page.getByText(outside.name, { exact: true })).toHaveCount(0)
-    await managedRow.getByRole('button', { name: '编辑信息', exact: true }).click()
+    await actions.getByRole('button', { name: '编辑信息', exact: true }).click()
     await expect(page.getByRole('dialog', { name: '编辑子公司基本信息', exact: true })).toBeVisible()
     await expect(page.getByText('组织编码、上级组织和组织类型由集团管理员维护。', { exact: false })).toBeVisible()
   } finally {

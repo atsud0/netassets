@@ -415,17 +415,24 @@ func (s *Service) SearchFindingImportCandidates(ctx context.Context, principal a
 	filter.Status = strings.TrimSpace(filter.Status)
 	filter.AssetType = strings.TrimSpace(filter.AssetType)
 	filter.Keyword = strings.TrimSpace(filter.Keyword)
-	if (filter.TestBatchID != "" && !validUUID(filter.TestBatchID)) ||
-		(filter.Status != "" && !validFindingImportCandidateStatus(filter.Status)) ||
-		(filter.AssetType != "" && normalizeFindingAssetType(filter.AssetType) == "") || len(filter.Keyword) > 200 {
-		return pagination.Result[FindingImportCandidate]{}, ErrInvalid
+	if filter.TestBatchID != "" && !validUUID(filter.TestBatchID) {
+		return pagination.Result[FindingImportCandidate]{}, invalidField("安全测试批次标识不正确")
+	}
+	if filter.Status != "" && !validFindingImportCandidateStatus(filter.Status) {
+		return pagination.Result[FindingImportCandidate]{}, invalidField("请选择有效的导入候选状态")
+	}
+	if filter.AssetType != "" && normalizeFindingAssetType(filter.AssetType) == "" {
+		return pagination.Result[FindingImportCandidate]{}, invalidField("请选择有效的资产类型")
+	}
+	if textlength.Count(filter.Keyword) > 200 {
+		return pagination.Result[FindingImportCandidate]{}, invalidField("搜索关键词最多 200 字")
 	}
 	rows, err := s.pool.Query(ctx, findingImportCandidateSelect+`
 		WHERE ($1::text='' OR c.test_batch_id::text=$1)
 		  AND ($2::text='' OR c.status=$2)
 		  AND ($3::text='' OR c.asset_type=$3)
 		  AND ($4::text='' OR c.asset_value ILIKE '%' || $4 || '%' OR c.title ILIKE '%' || $4 || '%')
-		ORDER BY CASE WHEN c.status='pending' THEN 0 ELSE 1 END, c.created_at DESC
+		ORDER BY CASE WHEN c.status='pending' THEN 0 ELSE 1 END, c.created_at DESC, c.id DESC
 		LIMIT $5 OFFSET $6`, filter.TestBatchID, filter.Status, filter.AssetType, filter.Keyword, filter.Page.PageSize, filter.Page.Offset())
 	if err != nil {
 		return pagination.Result[FindingImportCandidate]{}, fmt.Errorf("search finding import candidates: %w", err)
@@ -515,7 +522,7 @@ func (s *Service) GetFindingImportCandidate(ctx context.Context, principal auth.
 		return FindingImportCandidate{}, ErrForbidden
 	}
 	if !validUUID(strings.TrimSpace(id)) {
-		return FindingImportCandidate{}, ErrInvalid
+		return FindingImportCandidate{}, invalidField("导入候选标识不正确")
 	}
 	selectOne := strings.Replace(findingImportCandidateSelect, ", count(*) OVER ()", "", 1)
 	item, _, err := scanFindingImportCandidate(s.pool.QueryRow(ctx, selectOne+` WHERE c.id=$1::uuid`, id), false)
@@ -538,12 +545,19 @@ func (s *Service) GetFindingImportCandidate(ctx context.Context, principal auth.
 }
 
 func (s *Service) ListFindingImportScopeOptions(ctx context.Context, principal auth.Principal, candidateID string) ([]FindingImportScopeOption, error) {
+	return s.SearchFindingImportScopeOptions(ctx, principal, candidateID, "")
+}
+
+// Search remains bounded for both authorized batch scopes and the global ledger.
+// Filtering belongs in SQL, before LIMIT: local filtering cannot reach later rows.
+func (s *Service) SearchFindingImportScopeOptions(ctx context.Context, principal auth.Principal, candidateID, keyword string) ([]FindingImportScopeOption, error) {
 	if !principal.CanManageSecurityFindings() {
 		return nil, ErrForbidden
 	}
 	candidateID = strings.TrimSpace(candidateID)
+	keyword = strings.TrimSpace(keyword)
 	if !validUUID(candidateID) {
-		return nil, ErrInvalid
+		return nil, invalidField("导入候选标识不正确")
 	}
 	var batchID string
 	if err := s.pool.QueryRow(ctx, `SELECT COALESCE(test_batch_id::text,'') FROM security_finding_import_candidates WHERE id=$1::uuid`, candidateID).Scan(&batchID); errors.Is(err, pgx.ErrNoRows) {
@@ -567,8 +581,9 @@ func (s *Service) ListFindingImportScopeOptions(ctx context.Context, principal a
 			JOIN organizations o ON o.id=scope.organization_id AND o.status='enabled' AND o.deleted_at IS NULL
 			JOIN asset_organizations ao ON ao.asset_id=a.id AND ao.organization_id=scope.organization_id
 			WHERE c.id=$1::uuid
+ AND ($2='' OR strpos(lower(concat_ws(' ',scope.asset_value_snapshot,scope.asset_name_snapshot,scope.organization_code_snapshot,scope.organization_name_snapshot,scope.business_system_name_snapshot)),lower($2))>0)
 			ORDER BY scope.id=c.suggested_scope_asset_id DESC, scope.organization_name_snapshot,
-			         scope.asset_type_snapshot, scope.asset_value_snapshot`, candidateID)
+			         scope.asset_type_snapshot, scope.asset_value_snapshot, scope.id LIMIT 200`, candidateID, keyword)
 	} else {
 		rows, err = s.pool.Query(ctx, `
 			SELECT a.id::text, a.id::text, a.asset_type, a.asset_value,
@@ -598,9 +613,10 @@ func (s *Service) ListFindingImportScopeOptions(ctx context.Context, principal a
 				LIMIT 1
 			) system ON true
 			WHERE c.id=$1::uuid
+ AND ($2='' OR strpos(lower(concat_ws(' ',a.asset_value,a.asset_name,owner.organization_code,owner.organization_name,system.business_system_name)),lower($2))>0)
 			ORDER BY (a.asset_type=c.asset_type AND a.normalized_value=c.normalized_value) DESC,
-			         owner.organization_name, a.asset_type, a.asset_value
-			LIMIT 200`, candidateID)
+			         owner.organization_name, a.asset_type, a.asset_value, a.id
+			LIMIT 200`, candidateID, keyword)
 	}
 	if err != nil {
 		return nil, fmt.Errorf("list finding import asset options: %w", err)
@@ -738,15 +754,30 @@ func (s *Service) LinkFindingImportCandidate(ctx context.Context, principal auth
 	input.ReviewNote = strings.TrimSpace(input.ReviewNote)
 	input.AssetCandidateID = strings.TrimSpace(input.AssetCandidateID)
 	input.PendingAssetDraftID = strings.TrimSpace(input.PendingAssetDraftID)
-	if !validUUID(id) || textlength.Count(input.ReviewNote) > 2000 ||
-		(input.ScopeAssetID == "" && input.AssetID == "" && input.PendingAssetDraftID == "") ||
-		(input.ScopeAssetID != "" && input.AssetID != "") ||
-		(input.PendingAssetDraftID != "" && (input.ScopeAssetID != "" || input.AssetID != "")) {
-		return FindingImportCandidate{}, ErrInvalid
+	if !validUUID(id) {
+		return FindingImportCandidate{}, invalidField("待关联漏洞标识不正确")
 	}
-	for _, value := range []string{input.ScopeAssetID, input.AssetID, input.AssetCandidateID, input.PendingAssetDraftID} {
-		if value != "" && !validUUID(value) {
-			return FindingImportCandidate{}, ErrInvalid
+	if textlength.Count(input.ReviewNote) > 2000 {
+		return FindingImportCandidate{}, invalidField("关联备注最多 2000 字")
+	}
+	targetCount := 0
+	for _, value := range []string{input.ScopeAssetID, input.AssetID, input.PendingAssetDraftID} {
+		if value != "" {
+			targetCount++
+		}
+	}
+	if targetCount == 0 {
+		return FindingImportCandidate{}, invalidField("请选择要关联的资产或工作版本")
+	}
+	if targetCount != 1 {
+		return FindingImportCandidate{}, invalidField("关联资产与工作版本只能选择一项")
+	}
+	for _, field := range []struct{ value, label string }{
+		{input.ScopeAssetID, "授权资产"}, {input.AssetID, "关联资产"},
+		{input.AssetCandidateID, "资产线索"}, {input.PendingAssetDraftID, "工作版本"},
+	} {
+		if field.value != "" && !validUUID(field.value) {
+			return FindingImportCandidate{}, invalidField(field.label + "标识不正确")
 		}
 	}
 	// Authorization for a working-version release must be based on the
@@ -793,7 +824,7 @@ func (s *Service) LinkFindingImportCandidate(ctx context.Context, principal auth
 		input.AssetCandidateID = candidate.AssetCandidateID
 	}
 	if input.AssetCandidateID == "" && input.PendingAssetDraftID != "" {
-		return FindingImportCandidate{}, ErrInvalid
+		return FindingImportCandidate{}, invalidField("关联资产工作版本时须指定对应的待确认资产")
 	}
 	if input.AssetCandidateID != "" && candidate.AssetCandidateID != input.AssetCandidateID {
 		return FindingImportCandidate{}, ErrConflict
@@ -829,7 +860,7 @@ func (s *Service) LinkFindingImportCandidate(ctx context.Context, principal auth
 	selectedID := input.ScopeAssetID
 	if candidate.TestBatchID == "" {
 		if input.AssetID == "" {
-			return FindingImportCandidate{}, ErrInvalid
+			return FindingImportCandidate{}, invalidField("请选择要关联的正式资产")
 		}
 		selectedID = input.AssetID
 	}
@@ -838,7 +869,10 @@ func (s *Service) LinkFindingImportCandidate(ctx context.Context, principal auth
 		// The id comes straight from the request body. A malformed value must be
 		// rejected as invalid input, not surfaced as a database cast error that
 		// the caller sees as a 500.
-		return FindingImportCandidate{}, ErrInvalid
+		if candidate.TestBatchID != "" {
+			return FindingImportCandidate{}, invalidField("测试范围资产标识不正确")
+		}
+		return FindingImportCandidate{}, invalidField("正式资产标识不正确")
 	}
 	if candidate.TestBatchID != "" {
 		err = tx.QueryRow(ctx, `
@@ -981,8 +1015,11 @@ func (s *Service) LinkAcceptedAssetCandidateInTx(ctx context.Context, tx pgx.Tx,
 	}
 	assetCandidateID = strings.TrimSpace(assetCandidateID)
 	pendingAssetDraftID = strings.TrimSpace(pendingAssetDraftID)
-	if !validUUID(assetCandidateID) || !validUUID(pendingAssetDraftID) {
-		return ErrInvalid
+	if !validUUID(assetCandidateID) {
+		return invalidField("待确认资产标识不正确")
+	}
+	if !validUUID(pendingAssetDraftID) {
+		return invalidField("资产工作版本标识不正确")
 	}
 	var organizationID, draftID string
 	if err := tx.QueryRow(ctx, `
@@ -1053,8 +1090,14 @@ func (s *Service) IgnoreFindingImportCandidate(ctx context.Context, principal au
 	}
 	id = strings.TrimSpace(id)
 	input.ReviewNote = strings.TrimSpace(input.ReviewNote)
-	if !validUUID(id) || input.ReviewNote == "" || textlength.Count(input.ReviewNote) > 2000 {
-		return FindingImportCandidate{}, ErrInvalid
+	if !validUUID(id) {
+		return FindingImportCandidate{}, invalidField("待关联漏洞标识不正确")
+	}
+	if input.ReviewNote == "" {
+		return FindingImportCandidate{}, invalidField("忽略原因不能为空")
+	}
+	if textlength.Count(input.ReviewNote) > 2000 {
+		return FindingImportCandidate{}, invalidField("忽略原因最多 2000 字")
 	}
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
@@ -1106,7 +1149,7 @@ func (s *Service) RetryAcceptedAssetCandidate(ctx context.Context, principal aut
 	result := FindingImportLinkResult{}
 	assetCandidateID, assetID = strings.TrimSpace(assetCandidateID), strings.TrimSpace(assetID)
 	if !validUUID(assetCandidateID) {
-		return result, ErrInvalid
+		return result, invalidField("待确认资产标识不正确")
 	}
 	// Headquarters releases findings with security_finding.manage. A subsidiary
 	// that has been delegated the confirmation of its own asset candidates must be
@@ -1138,7 +1181,7 @@ func (s *Service) RetryAcceptedAssetCandidate(ctx context.Context, principal aut
 		return result, fmt.Errorf("load asset candidate for finding link: %w", err)
 	}
 	if draftID == "" && !validUUID(assetID) {
-		return result, ErrInvalid
+		return result, invalidField("待确认资产尚未关联有效的正式资产或工作版本")
 	}
 	rows, err := s.pool.Query(ctx, `SELECT id::text FROM security_finding_import_candidates WHERE asset_candidate_id=$1::uuid AND status='pending' ORDER BY source_row_number,created_at`, assetCandidateID)
 	if err != nil {

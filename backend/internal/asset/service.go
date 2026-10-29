@@ -282,7 +282,10 @@ func (s *Service) SearchOwnerOptions(ctx context.Context, principal auth.Princip
 	}
 	organizationID = strings.TrimSpace(organizationID)
 	if organizationID == "" {
-		return pagination.Result[OwnerOption]{}, ErrInvalid
+		return pagination.Result[OwnerOption]{}, invalidInput("请选择责任人所属组织")
+	}
+	if !assetUUIDPattern.MatchString(organizationID) {
+		return pagination.Result[OwnerOption]{}, invalidInput("责任人所属组织标识不正确，请重新选择组织")
 	}
 	allowed, err := access.CanOperateOrganization(ctx, s.pool, principal, organizationID, "asset.manage")
 	if err != nil {
@@ -463,7 +466,7 @@ func (s *Service) SearchWithFilter(ctx context.Context, principal auth.Principal
 func (s *Service) Export(ctx context.Context, principal auth.Principal, filter ExportFilter, format, requestID, ipAddress string) ([]byte, string, string, int, error) {
 	selectedIDs, err := normalizeSelectedExportIDs(filter.SelectedIDs)
 	if err != nil {
-		return nil, "", "", 0, ErrInvalid
+		return nil, "", "", 0, err
 	}
 	filter.SelectedIDs = selectedIDs
 	page := pagination.Query{Page: 1, PageSize: pagination.MaxPageSize}
@@ -538,7 +541,7 @@ func (s *Service) Export(ctx context.Context, principal auth.Principal, filter E
 func (s *Service) StreamCSVExport(ctx context.Context, principal auth.Principal, filter ExportFilter, output io.Writer, ready exportfile.ReadyFunc, requestID, ipAddress string) (int, error) {
 	selectedIDs, err := normalizeSelectedExportIDs(filter.SelectedIDs)
 	if err != nil {
-		return 0, ErrInvalid
+		return 0, err
 	}
 	filter.SelectedIDs = selectedIDs
 	customService := customfield.NewService(s.pool)
@@ -627,7 +630,7 @@ func (s *Service) StreamCSVExport(ctx context.Context, principal auth.Principal,
 func (s *Service) ExportRowCount(ctx context.Context, principal auth.Principal, filter ExportFilter) (int, error) {
 	selectedIDs, err := normalizeSelectedExportIDs(filter.SelectedIDs)
 	if err != nil {
-		return 0, ErrInvalid
+		return 0, err
 	}
 	filter.SelectedIDs = selectedIDs
 	result, err := s.SearchWithFilter(ctx, principal, SearchFilter{
@@ -648,7 +651,7 @@ func (s *Service) ExportRowCount(ctx context.Context, principal auth.Principal, 
 func (s *Service) WriteXLSXExport(ctx context.Context, principal auth.Principal, filter ExportFilter, outputPath string, progress exportfile.ProgressFunc) (exportfile.Metadata, error) {
 	selectedIDs, err := normalizeSelectedExportIDs(filter.SelectedIDs)
 	if err != nil {
-		return exportfile.Metadata{}, ErrInvalid
+		return exportfile.Metadata{}, err
 	}
 	filter.SelectedIDs = selectedIDs
 	customService := customfield.NewService(s.pool)
@@ -770,10 +773,10 @@ func normalizeSelectedExportIDs(ids []string) ([]string, error) {
 	}
 	result := make([]string, 0, len(ids))
 	seen := make(map[string]struct{}, len(ids))
-	for _, rawID := range ids {
+	for index, rawID := range ids {
 		id := strings.TrimSpace(rawID)
 		if !assetUUIDPattern.MatchString(id) {
-			return nil, ErrInvalid
+			return nil, invalidInput(fmt.Sprintf("选中资产：第 %d 项标识不正确", index+1))
 		}
 		if _, exists := seen[id]; exists {
 			continue
@@ -781,7 +784,7 @@ func normalizeSelectedExportIDs(ids []string) ([]string, error) {
 		seen[id] = struct{}{}
 		result = append(result, id)
 		if len(result) > MaxSelectedExportRows {
-			return nil, ErrInvalid
+			return nil, invalidInput(fmt.Sprintf("选中资产：单次最多导出 %d 条", MaxSelectedExportRows))
 		}
 	}
 	return result, nil
@@ -861,9 +864,12 @@ func formatExportTime(value time.Time) string {
 // the caller because drafts are scoped by their task assignment.
 func PrepareCreateInput(input *CreateInput) (string, error) {
 	normalizeInput(input)
+	if err := validateCreateFields(*input); err != nil {
+		return "", err
+	}
 	normalizedValue, err := normalizeValue(input.Type, input.Value)
-	if err != nil || !validInput(*input) {
-		return "", ErrInvalid
+	if err != nil {
+		return "", invalidInput("资产值与所选资产类型不匹配，请检查资产值")
 	}
 	return normalizedValue, nil
 }
@@ -894,9 +900,9 @@ func (s *Service) create(ctx context.Context, principal auth.Principal, input Cr
 	if err := validateDirectChangeReason(input.DirectChangeReason); err != nil {
 		return Asset{}, err
 	}
-	normalizedValue, err := normalizeValue(input.Type, input.Value)
-	if err != nil || !validInput(input) {
-		return Asset{}, ErrInvalid
+	normalizedValue, err := PrepareCreateInput(&input)
+	if err != nil {
+		return Asset{}, err
 	}
 	allowed, err := access.CanOperateOrganization(ctx, s.pool, principal, input.OrganizationID, "asset.manage")
 	if err != nil {
@@ -947,7 +953,7 @@ func createInTx(ctx context.Context, tx pgx.Tx, principal auth.Principal, input 
 		return Asset{}, fmt.Errorf("load asset organization: %w", err)
 	}
 	if organizationStatus != "enabled" {
-		return Asset{}, ErrInvalid
+		return Asset{}, invalidInput("所属组织：已停用，请选择启用的组织")
 	}
 	networkAreaName, err := validateNetworkArea(ctx, tx, input.NetworkAreaID, input.OrganizationID, false)
 	if err != nil {
@@ -968,7 +974,7 @@ func createInTx(ctx context.Context, tx pgx.Tx, principal auth.Principal, input 
 			return Asset{}, fmt.Errorf("load asset business system: %w", err)
 		}
 		if systemOrganizationID != input.OrganizationID {
-			return Asset{}, ErrInvalid
+			return Asset{}, invalidInput("业务系统：须属于所选组织")
 		}
 	}
 
@@ -1063,9 +1069,9 @@ func (s *Service) Update(ctx context.Context, principal auth.Principal, assetID 
 		return s.createWorkingUpdate(ctx, principal, current, input, requestID, ipAddress)
 	}
 	normalizeInput(&input)
-	normalizedValue, err := normalizeValue(input.Type, input.Value)
-	if err != nil || !validInput(input) {
-		return Asset{}, ErrInvalid
+	normalizedValue, err := PrepareCreateInput(&input)
+	if err != nil {
+		return Asset{}, err
 	}
 	if err := validateDirectChangeReason(input.DirectChangeReason); err != nil {
 		return Asset{}, err
@@ -1101,7 +1107,7 @@ func (s *Service) Update(ctx context.Context, principal auth.Principal, assetID 
 		return Asset{}, fmt.Errorf("load update organization: %w", err)
 	}
 	if organizationStatus != "enabled" {
-		return Asset{}, ErrInvalid
+		return Asset{}, invalidInput("所属组织：已停用，请选择启用的组织")
 	}
 	if input.OrganizationID != current.OrganizationID {
 		var activeFindings int
@@ -1133,7 +1139,7 @@ func (s *Service) Update(ctx context.Context, principal auth.Principal, assetID 
 			return Asset{}, fmt.Errorf("load update business system: %w", err)
 		}
 		if systemOrganizationID != input.OrganizationID {
-			return Asset{}, ErrInvalid
+			return Asset{}, invalidInput("业务系统：须属于所选组织")
 		}
 	}
 
@@ -1471,8 +1477,11 @@ func validateNetworkArea(ctx context.Context, tx pgx.Tx, networkAreaID, organiza
 	if err != nil {
 		return "", fmt.Errorf("load asset network area: %w", err)
 	}
-	if areaOrganizationID != organizationID || (status != "enabled" && !allowDisabled) {
-		return "", ErrInvalid
+	if areaOrganizationID != organizationID {
+		return "", invalidInput("网络区域：须属于所选组织")
+	}
+	if status != "enabled" && !allowDisabled {
+		return "", invalidInput("网络区域：已停用，请选择启用的网络区域")
 	}
 	return areaName, nil
 }
@@ -1493,7 +1502,7 @@ func validateOwnerUser(ctx context.Context, tx pgx.Tx, ownerUserID, organization
 		  AND u.deleted_at IS NULL
 	`, ownerUserID, organizationID).Scan(&username, &displayName)
 	if errors.Is(err, pgx.ErrNoRows) {
-		return "", "", ErrInvalid
+		return "", "", invalidInput("责任人账号：请选择所属组织内的启用账号")
 	}
 	if err != nil {
 		return "", "", fmt.Errorf("validate asset owner user: %w", err)
@@ -1658,10 +1667,10 @@ func normalizeImportMode(principal auth.Principal, mode string) (string, error) 
 		mode = ImportModeSkipDuplicates
 	}
 	if mode != ImportModeSkipDuplicates && mode != ImportModeUpdateWorking {
-		return "", ErrInvalid
+		return "", invalidInput("导入模式：请选择跳过重复项或更新工作版本")
 	}
 	if mode == ImportModeUpdateWorking && !usesWorkingInventory(principal) {
-		return "", ErrInvalid
+		return "", invalidInput("导入模式：当前账号不能使用更新工作版本模式")
 	}
 	return mode, nil
 }
@@ -1743,6 +1752,9 @@ func (s *Service) AnalyzeImportColumns(ctx context.Context, principal auth.Princ
 		return ImportColumnAnalysis{}, ErrForbidden
 	}
 	organizationID = strings.TrimSpace(organizationID)
+	if !assetUUIDPattern.MatchString(organizationID) {
+		return ImportColumnAnalysis{}, invalidInput("导入组织：请选择有效的所属组织")
+	}
 	allowed, err := access.CanOperateOrganization(ctx, s.pool, principal, organizationID, "asset.manage")
 	if err != nil {
 		return ImportColumnAnalysis{}, err
@@ -1751,8 +1763,11 @@ func (s *Service) AnalyzeImportColumns(ctx context.Context, principal auth.Princ
 		return ImportColumnAnalysis{}, ErrForbidden
 	}
 	rows, _, err := readImportRows(fileName, reader)
-	if err != nil || len(rows) == 0 || len(rows)-1 > MaxImportRows {
-		return ImportColumnAnalysis{}, ErrInvalid
+	if err != nil {
+		return ImportColumnAnalysis{}, err
+	}
+	if err := validateImportRows(rows, 1); err != nil {
+		return ImportColumnAnalysis{}, err
 	}
 	definitions, err := customfield.NewService(s.pool).ActiveDefinitionsForOrganization(ctx, principal, "asset", organizationID)
 	if err != nil {
@@ -1760,7 +1775,7 @@ func (s *Service) AnalyzeImportColumns(ctx context.Context, principal auth.Princ
 	}
 	analysis, err := importmapping.Analyze(dropAssetTemplateExampleRows(rows, definitions), assetImportFields(definitions))
 	if err != nil {
-		return ImportColumnAnalysis{}, ErrInvalid
+		return ImportColumnAnalysis{}, invalidImportMapping(err)
 	}
 	return analysis, nil
 }
@@ -1771,6 +1786,9 @@ func (s *Service) PreviewImport(ctx context.Context, principal auth.Principal, o
 		return ImportResult{}, ErrForbidden
 	}
 	organizationID = strings.TrimSpace(organizationID)
+	if !assetUUIDPattern.MatchString(organizationID) {
+		return ImportResult{}, invalidInput("导入组织：请选择有效的所属组织")
+	}
 	allowed, err := access.CanOperateOrganization(ctx, s.pool, principal, organizationID, "asset.manage")
 	if err != nil {
 		return ImportResult{}, err
@@ -1787,8 +1805,11 @@ func (s *Service) PreviewImport(ctx context.Context, principal auth.Principal, o
 		return ImportResult{}, err
 	}
 	rows, fileType, err := readImportRows(fileName, reader)
-	if err != nil || len(rows) < 2 || len(rows)-1 > MaxImportRows {
-		return ImportResult{}, ErrInvalid
+	if err != nil {
+		return ImportResult{}, err
+	}
+	if err := validateImportRows(rows, 2); err != nil {
+		return ImportResult{}, err
 	}
 	customService := customfield.NewService(s.pool)
 	definitions, err := customService.ActiveDefinitionsForOrganization(ctx, principal, "asset", organizationID)
@@ -1797,7 +1818,7 @@ func (s *Service) PreviewImport(ctx context.Context, principal auth.Principal, o
 	}
 	headers, mappedHeaders, err := resolveAssetImportHeaders(rows[0], mapping, definitions)
 	if err != nil {
-		return ImportResult{}, ErrInvalid
+		return ImportResult{}, invalidImportMapping(err)
 	}
 
 	result := ImportResult{FileName: filepath.Base(fileName), FileType: fileType, ImportMode: mode, Errors: make([]ImportError, 0), TotalCount: countAssetImportDataRows(rows, headers)}
@@ -1933,6 +1954,9 @@ func (s *Service) Import(ctx context.Context, principal auth.Principal, organiza
 		return ImportResult{}, ErrForbidden
 	}
 	organizationID = strings.TrimSpace(organizationID)
+	if !assetUUIDPattern.MatchString(organizationID) {
+		return ImportResult{}, invalidInput("导入组织：请选择有效的所属组织")
+	}
 	allowed, err := access.CanOperateOrganization(ctx, s.pool, principal, organizationID, "asset.manage")
 	if err != nil {
 		return ImportResult{}, err
@@ -1951,10 +1975,10 @@ func (s *Service) Import(ctx context.Context, principal auth.Principal, organiza
 	}
 	rows, fileType, err := readImportRows(fileName, reader)
 	if err != nil {
-		return ImportResult{}, ErrInvalid
+		return ImportResult{}, err
 	}
-	if len(rows) < 2 || len(rows)-1 > MaxImportRows {
-		return ImportResult{}, ErrInvalid
+	if err := validateImportRows(rows, 2); err != nil {
+		return ImportResult{}, err
 	}
 	customService := customfield.NewService(s.pool)
 	definitions, err := customService.ActiveDefinitionsForOrganization(ctx, principal, "asset", organizationID)
@@ -1963,7 +1987,7 @@ func (s *Service) Import(ctx context.Context, principal auth.Principal, organiza
 	}
 	headers, mappedHeaders, err := resolveAssetImportHeaders(rows[0], mapping, definitions)
 	if err != nil {
-		return ImportResult{}, ErrInvalid
+		return ImportResult{}, invalidImportMapping(err)
 	}
 
 	result := ImportResult{FileName: filepath.Base(fileName), FileType: fileType, ImportMode: mode, Errors: make([]ImportError, 0), TotalCount: countAssetImportDataRows(rows, headers)}
@@ -2311,10 +2335,7 @@ func normalizeInput(input *CreateInput) {
 	input.Notes = strings.TrimSpace(input.Notes)
 }
 func validInput(input CreateInput) bool {
-	return input.OrganizationID != "" && oneOf(input.Type, "domain", "ip", "url", "service", "other") && input.Value != "" &&
-		oneOf(input.Environment, "production", "staging", "testing", "development", "office", "other") &&
-		oneOf(input.NetworkScope, "public", "private", "unknown") && oneOf(input.Status, "active", "pending", "disabled", "archived") &&
-		oneOf(input.Importance, "normal", "important", "core")
+	return validateCreateFields(input) == nil
 }
 
 // NormalizeValue converts an asset value to its canonical form using the same rules as the network asset ledger.
@@ -2400,21 +2421,27 @@ func readImportRows(fileName string, reader io.Reader) ([][]string, string, erro
 		csvReader.FieldsPerRecord = -1
 		csvReader.TrimLeadingSpace = true
 		rows, err := csvReader.ReadAll()
-		return rows, "csv", err
+		if err != nil {
+			return nil, "", invalidInput("导入文件：CSV 内容无法解析，请检查分隔符和引号")
+		}
+		return rows, "csv", nil
 	case ".xlsx":
 		file, err := excelize.OpenReader(reader)
 		if err != nil {
-			return nil, "", err
+			return nil, "", invalidInput("导入文件：无法打开 XLSX，请检查文件是否损坏或加密")
 		}
 		defer file.Close()
 		sheets := file.GetSheetList()
 		if len(sheets) == 0 {
-			return nil, "", ErrInvalid
+			return nil, "", invalidInput("导入文件：XLSX 至少需要一个工作表")
 		}
 		rows, err := file.GetRows(sheets[0])
-		return rows, "xlsx", err
+		if err != nil {
+			return nil, "", invalidInput("导入文件：无法读取 XLSX 的第一个工作表")
+		}
+		return rows, "xlsx", nil
 	default:
-		return nil, "", ErrInvalid
+		return nil, "", invalidInput("导入文件格式：仅支持 CSV 或 XLSX")
 	}
 }
 func mapHeaders(row []string) map[string]int {

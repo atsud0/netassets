@@ -282,7 +282,7 @@ func (s *Service) UpdateBusinessSystemDraft(ctx context.Context, principal auth.
 	}
 	input.OrganizationID = organizationID
 	if input.ExpectedVersion == nil || *input.ExpectedVersion <= 0 {
-		return BusinessSystemDraft{}, ErrInvalid
+		return BusinessSystemDraft{}, invalidInput("草稿版本无效，请刷新后重试")
 	}
 	if err := businesssystem.PrepareCreateInput(&input.CreateInput); err != nil {
 		return BusinessSystemDraft{}, mapBusinessSystemDraftError(err)
@@ -346,7 +346,7 @@ func (s *Service) DeleteBusinessSystemDraft(ctx context.Context, principal auth.
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 	if expectedVersion <= 0 {
-		return ErrInvalid
+		return invalidInput("草稿版本无效，请刷新后重试")
 	}
 	if _, err := s.loadDraftAssignment(ctx, tx, principal, taskID, organizationID, true, "business_systems"); err != nil {
 		return err
@@ -398,7 +398,7 @@ func (s *Service) validateBusinessSystemDraftCustomValues(ctx context.Context, v
 		return nil, nil, fmt.Errorf("load business system custom fields: %w", err)
 	}
 	if _, _, err := customfield.ValidateValues(definitions, values); err != nil {
-		return nil, nil, ErrInvalid
+		return nil, nil, mapDraftCustomValueError(err)
 	}
 	// json.Marshal(nil) produces the JSON scalar null. Submission snapshots
 	// and working-version diffs expect custom_values to be an array and call
@@ -421,7 +421,7 @@ func validateBusinessSystemDraftOrganization(ctx context.Context, q queryRower, 
 		return fmt.Errorf("load business system draft organization: %w", err)
 	}
 	if status != "enabled" {
-		return ErrInvalid
+		return invalidInput("所属组织已停用，请联系管理员")
 	}
 	return nil
 }
@@ -468,7 +468,14 @@ func writeBusinessSystemDraftAudit(ctx context.Context, tx pgx.Tx, principal aut
 }
 
 func mapBusinessSystemDraftError(err error) error {
+	var validation *businesssystem.InputValidationError
+	if errors.As(err, &validation) {
+		return invalidInput(validation.Message)
+	}
 	switch {
+	case errors.Is(err, businesssystem.ErrInvalidOwnerContact):
+		// Keep the field identity while retaining the draft validation category.
+		return errors.Join(ErrInvalid, err)
 	case errors.Is(err, businesssystem.ErrInvalid), errors.Is(err, customfield.ErrInvalid):
 		return ErrInvalid
 	case errors.Is(err, businesssystem.ErrConflict):
@@ -519,6 +526,11 @@ func publishBusinessSystemDrafts(ctx context.Context, tx pgx.Tx, principal auth.
 		return fmt.Errorf("lock remediation work during business system draft publication: %w", err)
 	}
 	for _, item := range items {
+		if item.Operation != "delete" {
+			if err := businesssystem.ValidateOptionalTextFields(businesssystem.CreateInput{ShortName: item.ShortName, OwnerName: item.OwnerName, DeploymentType: item.DeploymentType}); err != nil {
+				return mapBusinessSystemDraftError(err)
+			}
+		}
 		resourceID := item.ID
 		action, summary := "business_system.create", "审核发布填报业务系统"
 		switch item.Operation {
@@ -528,7 +540,7 @@ func publishBusinessSystemDrafts(ctx context.Context, tx pgx.Tx, principal auth.
 			}
 		case "update":
 			if item.SourceSystemID == "" {
-				return ErrInvalid
+				return invalidInput("业务系统变更草稿缺少来源正式业务系统，无法审核发布")
 			}
 			resourceID = item.SourceSystemID
 			action, summary = "business_system.update", "审核发布填报业务系统变更"
@@ -541,7 +553,7 @@ func publishBusinessSystemDrafts(ctx context.Context, tx pgx.Tx, principal auth.
 			} else if err != nil {
 				return fmt.Errorf("load published business system status: %w", err)
 			}
-			result, err := tx.Exec(ctx, `UPDATE business_systems SET system_code=$2,system_name=$3,short_name=NULLIF($4,''),owner_name=NULLIF($5,''),owner_contact=NULLIF($6,''),system_status=$7,status_before_archive=CASE WHEN $7='archived' THEN CASE WHEN system_status='archived' THEN status_before_archive ELSE system_status END ELSE NULL END,system_level=$8,deployment_type=NULLIF($9,''),internet_exposure=$10,description=NULLIF($11,''),updated_by=$12::uuid,updated_at=now(),version=version+1 WHERE id::text=$1 AND owner_organization_id::text=$13 AND deleted_at IS NULL AND version=$14`, item.SourceSystemID, item.Code, item.Name, item.ShortName, item.OwnerName, item.OwnerContact, item.Status, item.Level, item.DeploymentType, item.InternetExposure, item.Description, principal.UserID, organizationID, item.SourceSystemVersion)
+			result, err := tx.Exec(ctx, `UPDATE business_systems SET system_code=$2,system_name=$3,short_name=NULLIF($4,''),owner_name=NULLIF($5,''),owner_contact=NULLIF($6,''),system_status=$7::text,status_before_archive=CASE WHEN $7::text='archived' THEN CASE WHEN system_status='archived' THEN status_before_archive ELSE system_status END ELSE NULL END,system_level=$8,deployment_type=NULLIF($9,''),internet_exposure=$10,description=NULLIF($11,''),updated_by=$12::uuid,updated_at=now(),version=version+1 WHERE id::text=$1 AND owner_organization_id::text=$13 AND deleted_at IS NULL AND version=$14`, item.SourceSystemID, item.Code, item.Name, item.ShortName, item.OwnerName, item.OwnerContact, item.Status, item.Level, item.DeploymentType, item.InternetExposure, item.Description, principal.UserID, organizationID, item.SourceSystemVersion)
 			if err != nil {
 				return mapBusinessSystemDraftDatabaseError(err)
 			}
@@ -567,7 +579,7 @@ func publishBusinessSystemDrafts(ctx context.Context, tx pgx.Tx, principal auth.
 			}
 		case "delete":
 			if item.SourceSystemID == "" {
-				return ErrInvalid
+				return invalidInput("业务系统删除草稿缺少来源正式业务系统，无法审核发布")
 			}
 			resourceID = item.SourceSystemID
 			action, summary = "business_system.delete", "审核发布填报业务系统删除"
@@ -605,7 +617,7 @@ func publishBusinessSystemDrafts(ctx context.Context, tx pgx.Tx, principal auth.
 				}
 			}
 		default:
-			return ErrInvalid
+			return invalidInput("业务系统草稿操作类型不正确，无法审核发布")
 		}
 		if item.Operation != "delete" {
 			if _, err := tx.Exec(ctx, `INSERT INTO business_system_data_security_profiles(business_system_id,contains_personal_information,contains_sensitive_personal_information,personal_information_record_count,data_volume_over_100k,contains_important_data,contains_core_data,data_storage_location,reported_by,notes) VALUES($1::uuid,$2,$3,$4,$5,$6,$7,NULLIF($8,''),$9::uuid,NULLIF($10,'')) ON CONFLICT(business_system_id) DO UPDATE SET contains_personal_information=EXCLUDED.contains_personal_information,contains_sensitive_personal_information=EXCLUDED.contains_sensitive_personal_information,personal_information_record_count=EXCLUDED.personal_information_record_count,data_volume_over_100k=EXCLUDED.data_volume_over_100k,contains_important_data=EXCLUDED.contains_important_data,contains_core_data=EXCLUDED.contains_core_data,data_storage_location=EXCLUDED.data_storage_location,reported_by=EXCLUDED.reported_by,notes=EXCLUDED.notes,updated_at=now()`, resourceID, item.ContainsPersonalInformation, item.ContainsSensitivePersonalInformation, item.PersonalInformationRecordCount, item.DataVolumeOver100K, item.ContainsImportantData, item.ContainsCoreData, item.DataStorageLocation, principal.UserID, item.SecurityNotes); err != nil {

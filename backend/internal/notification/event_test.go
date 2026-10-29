@@ -2,6 +2,7 @@ package notification
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -57,14 +58,14 @@ func TestWriteEventUsesDurableBatchAggregation(t *testing.T) {
 	}
 	for _, fragment := range []string{
 		"ON CONFLICT (event_type, target_organization_id, target_user_id, batch_key)",
-		"item_count = notification_events.item_count + 1",
+		"item_count = notification_events.item_count + EXCLUDED.item_count",
 		"resource_id = NULL",
 	} {
 		if !strings.Contains(execer.query, fragment) {
 			t.Fatalf("event SQL does not contain %q", fragment)
 		}
 	}
-	if got, want := len(execer.args), 12; got != want {
+	if got, want := len(execer.args), 13; got != want {
 		t.Fatalf("event SQL argument count = %d, want %d", got, want)
 	}
 	if got := execer.args[3]; got != "44444444-4444-4444-4444-444444444444" {
@@ -75,5 +76,33 @@ func TestWriteEventUsesDurableBatchAggregation(t *testing.T) {
 	}
 	if got := execer.args[10]; got != "info" {
 		t.Fatalf("default level argument = %v, want info", got)
+	}
+}
+
+func TestWriteCountedEventPreservesCountAndClearsSingleResource(t *testing.T) {
+	for _, count := range []int{0, -1, 1, 5000} {
+		t.Run(fmt.Sprint(count), func(t *testing.T) {
+			execer := &recordingEventExecer{}
+			input := EventInput{EventType: EventFindingCreatedOnAsset, Category: CategoryFindingReceived, TargetOrganizationID: "11111111-1111-1111-1111-111111111111", ActorUserID: "22222222-2222-2222-2222-222222222222", RequiredPermission: "asset.manage", ResourceType: "security_finding", ResourceID: "single-resource", ResourceLabel: "single-label", BatchKey: "digest"}
+			err := WriteCountedEvent(context.Background(), execer, input, count)
+			if count < 1 {
+				if err == nil || execer.query != "" {
+					t.Fatal("invalid count must fail without SQL")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if execer.args[12] != count {
+				t.Fatalf("item count arg = %v", execer.args[12])
+			}
+			if count == 1 && (execer.args[7] != "single-resource" || execer.args[8] != "single-label") {
+				t.Fatal("single item lost resource link")
+			}
+			if count > 1 && (execer.args[7] != "" || execer.args[8] != "") {
+				t.Fatal("multi-item digest retained single resource link")
+			}
+		})
 	}
 }

@@ -61,8 +61,14 @@ type resourceSubmissionRow struct {
 func (s *Service) ResourceSubmissionHistory(ctx context.Context, principal auth.Principal, resourceType, resourceID string, page pagination.Query) (pagination.Result[ResourceSubmissionHistoryItem], error) {
 	resourceType = strings.TrimSpace(resourceType)
 	resourceID = strings.TrimSpace(resourceID)
-	if !validSubmissionDiffResourceType(resourceType) || !inventoryResourceUUIDPattern.MatchString(resourceID) {
-		return pagination.Result[ResourceSubmissionHistoryItem]{}, ErrInvalid
+	if !validSubmissionDiffResourceType(resourceType) {
+		return pagination.Result[ResourceSubmissionHistoryItem]{}, invalidInput("资源类型：请选择网络资产或业务系统")
+	}
+	if !inventoryResourceUUIDPattern.MatchString(resourceID) {
+		if resourceType == "business_system" {
+			return pagination.Result[ResourceSubmissionHistoryItem]{}, invalidInput("业务系统标识不正确")
+		}
+		return pagination.Result[ResourceSubmissionHistoryItem]{}, invalidInput("网络资产标识不正确")
 	}
 
 	permission := "asset.manage"

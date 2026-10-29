@@ -12,6 +12,7 @@ import (
 
 	"netassets/internal/auth"
 	"netassets/internal/pagination"
+	"netassets/internal/textlength"
 )
 
 type ReviewCommentInput struct {
@@ -186,7 +187,7 @@ func insertReviewComments(ctx context.Context, tx pgx.Tx, principal auth.Princip
 			return fmt.Errorf("create inventory review comment: %w", err)
 		}
 		if result.RowsAffected() == 0 {
-			return ErrInvalid
+			return invalidInput("逐条审核意见：所选资源不在当前提交快照中，请刷新后重新选择")
 		}
 	}
 	return nil
@@ -194,7 +195,7 @@ func insertReviewComments(ctx context.Context, tx pgx.Tx, principal auth.Princip
 
 func normalizeReviewComments(comments []ReviewCommentInput) ([]ReviewCommentInput, error) {
 	if len(comments) > 100 {
-		return nil, ErrInvalid
+		return nil, invalidInput("逐条审核意见最多填写 100 条")
 	}
 	normalized := make([]ReviewCommentInput, 0, len(comments))
 	seen := make(map[string]struct{}, len(comments))
@@ -202,13 +203,21 @@ func normalizeReviewComments(comments []ReviewCommentInput) ([]ReviewCommentInpu
 		item.ResourceType = strings.TrimSpace(item.ResourceType)
 		item.ResourceID = strings.TrimSpace(item.ResourceID)
 		item.Comment = strings.TrimSpace(item.Comment)
-		if (item.ResourceType != "business_system" && item.ResourceType != "network_asset") ||
-			item.ResourceID == "" || item.Comment == "" || len(item.Comment) > 2000 {
-			return nil, ErrInvalid
+		if item.ResourceType != "business_system" && item.ResourceType != "network_asset" {
+			return nil, invalidInput("请选择有效的审核意见对象类型")
+		}
+		if item.ResourceID == "" {
+			return nil, invalidInput("请选择审核意见对应的资源")
+		}
+		if item.Comment == "" {
+			return nil, invalidInput("逐条审核意见不能为空")
+		}
+		if textlength.Count(item.Comment) > 2000 {
+			return nil, invalidInput("逐条审核意见最多 2000 字")
 		}
 		key := item.ResourceType + ":" + item.ResourceID
 		if _, exists := seen[key]; exists {
-			return nil, ErrInvalid
+			return nil, invalidInput("同一资源不能重复填写审核意见")
 		}
 		seen[key] = struct{}{}
 		normalized = append(normalized, item)

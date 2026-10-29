@@ -39,7 +39,13 @@ const secretDialogVisible = ref(false)
 const createdToken = ref('')
 const createdItem = ref<APITokenItem>()
 const createForm = reactive({ name: '', expires_in_days: 90 })
-const canCreate = computed(() => createForm.name.trim().length > 0 && createForm.name.trim().length <= 100)
+const createError = computed(() => {
+  if (!createForm.name.trim()) return 'API Token 名称不能为空'
+  if (Array.from(createForm.name.trim()).length > 100) return 'API Token 名称最多 100 字'
+  if (!Number.isInteger(createForm.expires_in_days) || createForm.expires_in_days < 1 || createForm.expires_in_days > 365) return 'API Token 有效期应为 1 至 365 天'
+  return ''
+})
+const canCreate = computed(() => !createError.value)
 
 function formatDateTime(value?: string) {
   if (!value) return '从未使用'
@@ -75,7 +81,7 @@ function openCreateDialog() {
 
 async function createToken() {
   if (!canCreate.value) {
-    ElMessage.warning('请输入不超过 100 个字符的 Token 名称')
+    ElMessage.warning(createError.value)
     return
   }
   creating.value = true
@@ -179,7 +185,7 @@ defineExpose({ loadTokens, createForm, createToken, createdToken, secretDialogVi
 
     <el-dialog v-model="createDialogVisible" title="创建 API Token" width="480px">
       <el-form label-position="top" @submit.prevent="createToken">
-        <el-form-item label="名称" required><el-input v-model="createForm.name" maxlength="100" show-word-limit placeholder="如：资产同步脚本" /></el-form-item>
+        <el-form-item label="名称" required><el-input v-model="createForm.name" placeholder="如：资产同步脚本" /></el-form-item>
         <el-form-item label="有效期" required>
           <el-select v-model="createForm.expires_in_days" style="width: 100%">
             <el-option label="30 天" :value="30" />
@@ -188,6 +194,7 @@ defineExpose({ loadTokens, createForm, createToken, createdToken, secretDialogVi
             <el-option label="365 天" :value="365" />
           </el-select>
         </el-form-item>
+        <el-alert v-if="createError" type="error" :closable="false" :title="createError" />
         <el-alert type="info" :closable="false" show-icon title="权限说明" description="Token 使用创建时的当前工作组织，并继承您当时及后续有效的角色权限；撤销任职、停用账号或撤销 Token 后会立即失效。" />
       </el-form>
       <template #footer><el-button @click="createDialogVisible = false">取消</el-button><el-button type="primary" :loading="creating" :disabled="!canCreate" @click="createToken">创建</el-button></template>

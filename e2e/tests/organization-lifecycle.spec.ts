@@ -166,6 +166,8 @@ test('集团管理员可管理组织完整生命周期、影响检查和树形�
   const headers = (await table.locator('.el-table__header-wrapper').first().locator('th .cell').allTextContents()).map((item) => item.trim())
   expect(headers).toEqual(expect.arrayContaining(['组织', '类型', '状态', '操作']))
   expect(headers).not.toContain('上级组织')
+  // Search the restored child; its full ancestor path remains visible across pagination.
+  await page.getByRole('textbox', { name: '搜索组织', exact: true }).fill(child.code)
   const parentRow = table.locator('.el-table__body-wrapper tbody tr').filter({ hasText: parent.name }).first()
   const childRow = table.locator('.el-table__body-wrapper tbody tr').filter({ hasText: child.name }).first()
   await expect(parentRow).toBeVisible()

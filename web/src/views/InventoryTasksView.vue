@@ -1,10 +1,12 @@
 <script setup lang="ts">
+import { inventoryTaskStatus } from '../utils/inventory-task-status'
 import RowActions from '../components/RowActions.vue'
 import { computed, onMounted, reactive, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { ElMessage, ElMessageBox, type FormInstance, type FormRules } from 'element-plus'
+import { ElMessage, ElMessageBox, type FormInstance, type FormItemRule, type FormRules } from 'element-plus'
 import { apiClient, getAPIErrorMessage, getDownloadAPIError } from '../api/client'
 import { createExportJob } from '../api/export-jobs'
+import { loadOptions } from '../api/remediation'
 import { useAuthStore } from '../stores/auth'
 
 interface Organization {
@@ -246,8 +248,14 @@ const form = reactive({
   require_review: true,
   allow_late_submission: false,
 })
+// Match PostgreSQL and backend Unicode code-point limits. Native maxlength
+// counts UTF-16 units and silently truncates otherwise valid emoji input.
+function taskTextRule(limit: number, message: string): FormItemRule {
+  return { validator: (_rule, value: string, callback) => callback(Array.from((value ?? '').trim()).length > limit ? new Error(message) : undefined), trigger: 'blur' }
+}
 const rules: FormRules = {
-  name: [{ required: true, message: '请输入任务名称', trigger: 'blur' }],
+  name: [{ required: true, whitespace: true, message: '请输入任务名称', trigger: 'blur' }, taskTextRule(255, '任务名称最多 255 字')],
+  description: [taskTextRule(5000, '任务说明最多 5000 字')],
   start_at: [{ required: true, message: '请选择开始时间', trigger: 'change' }],
   deadline_at: [{ required: true, message: '请选择截止时间', trigger: 'change' }],
   organization_ids: [{ type: 'array', required: true, min: 1, message: '请选择至少一个填报组织', trigger: 'change' }],
@@ -256,10 +264,10 @@ const rules: FormRules = {
 const eligibleOrganizations = computed(() => organizations.value.filter((item) => item.status === 'enabled' && item.type !== 'group'))
 const scopePreviewHasResourceType = computed(() => form.required_fields.some((field) => ['business_systems', 'data_security', 'network_assets'].includes(field)))
 const scopePreviewReady = computed(() => form.organization_ids.length > 0 && scopePreviewHasResourceType.value)
-const activeCount = computed(() => tasks.value.filter((item) => item.status === 'active').length)
+const activeCount = computed(() => tasks.value.filter((item) => inventoryTaskStatus(item) === 'active').length)
 const draftCount = computed(() => tasks.value.filter((item) => item.status === 'draft').length)
 const overdueCount = computed(() => tasks.value.filter((item) => item.status === 'active' && new Date(item.deadline_at).getTime() < Date.now()).length)
-const taskStatusLabels: Record<string, string> = { draft: '草稿', active: '进行中', closed: '已关闭', completed: '已完成', archived: '已归档' }
+const taskStatusLabels: Record<string, string> = { draft: '草稿', scheduled: '未开始', overdue: '已过期', active: '进行中', closed: '已关闭', completed: '已完成', archived: '已归档' }
 const progressStatusLabels: Record<string, string> = {
   not_started: '未开始', in_progress: '填报中', submitted: '待审核', returned: '已退回', approved: '已通过', overdue: '已逾期',
 }
@@ -299,10 +307,7 @@ async function loadOrganizations() {
     return
   }
   try {
-    const response = await apiClient.get<ListResponse<Organization>>('/organizations', {
-      params: { page: 1, page_size: 100 },
-    })
-    organizations.value = response.data.items
+    organizations.value = await loadOptions<Organization>('/organizations')
   } catch (error) {
     ElMessage.error(getAPIErrorMessage(error, '读取可填报组织失败'))
   }
@@ -509,7 +514,7 @@ watch(
 )
 
 async function createTask() {
-  if (!formRef.value || !(await formRef.value.validate())) return
+  if (!formRef.value || !(await formRef.value.validate().catch(() => false))) return
   if (!form.required_fields.some((field) => ['business_systems', 'data_security', 'network_assets'].includes(field))) {
     ElMessage.warning('请至少选择业务系统、数据安全属性或网络资产中的一项填报内容')
     return
@@ -636,6 +641,10 @@ async function submitProgress() {
   if (!selectedTask.value || !selectedProgress.value) return
   if (!qualityCheck.value?.passed) {
     ElMessage.warning('请先修正质量检查中的错误项并重新检查')
+    return
+  }
+  if (Array.from(submissionForm.note.trim()).length > 5000) {
+    ElMessage.warning('提交说明最多 5000 字')
     return
   }
   const key = operationKey(selectedTask.value, selectedProgress.value)
@@ -890,11 +899,19 @@ async function returnProgress() {
     ElMessage.warning('请填写退回原因')
     return
   }
+  if (Array.from(returnForm.reason.trim()).length > 2000) {
+    ElMessage.warning('退回原因最多 2000 字')
+    return
+  }
   const comments = Object.entries(returnCommentDrafts).flatMap(([key, value]) => {
     const resource = returnResourceIndex[key]
     const comment = value.trim()
     return resource && comment ? [{ resource_type: resource.resource_type, resource_id: resource.resource_id, comment }] : []
   })
+  if (comments.some(item => Array.from(item.comment).length > 2000)) {
+    ElMessage.warning('逐条审核意见最多 2000 字')
+    return
+  }
   if (comments.length > 100) {
     ElMessage.warning('单次最多填写 100 条逐条审核意见')
     return
@@ -1016,7 +1033,10 @@ onMounted(async () => {
         <div class="inventory-guide-actions">
           <span>填报任务以系统中当前的业务系统和网络资产为准。请先维护数据，再回到本页面提交。</span>
           <el-button size="small" @click="router.push('/systems')">维护日常业务系统台账</el-button>
-          <el-button size="small" @click="router.push('/inventory-tasks')">从具体任务进入上报内容</el-button>
+          <el-dropdown :disabled="tasks.length === 0" @command="openTaskDetail">
+            <el-button size="small" :disabled="tasks.length === 0">从具体任务进入上报内容</el-button>
+            <template #dropdown><el-dropdown-menu><el-dropdown-item v-for="task in tasks" :key="task.id" :command="task">{{ task.name }}</el-dropdown-item></el-dropdown-menu></template>
+          </el-dropdown>
         </div>
       </template>
     </el-alert>
@@ -1033,7 +1053,7 @@ onMounted(async () => {
         <el-table-column label="任务名称" min-width="220">
           <template #default="scope"><el-button link type="primary" class="table-link" @click="openTaskDetail(scope.row)">{{ scope.row.name }}</el-button></template>
         </el-table-column>
-        <el-table-column label="状态" width="105"><template #default="scope"><el-tag :type="taskStatusTag(scope.row.status)" effect="plain">{{ taskStatusLabels[scope.row.status] || scope.row.status }}</el-tag></template></el-table-column>
+        <el-table-column label="状态" width="105"><template #default="scope"><el-tag :type="taskStatusTag(inventoryTaskStatus(scope.row))" effect="plain">{{ taskStatusLabels[inventoryTaskStatus(scope.row)] || scope.row.status }}</el-tag></template></el-table-column>
         <el-table-column label="开始时间" min-width="155"><template #default="scope">{{ formatDate(scope.row.start_at) }}</template></el-table-column>
         <el-table-column label="截止时间" min-width="155"><template #default="scope">{{ formatDate(scope.row.deadline_at) }}</template></el-table-column>
         <el-table-column label="提交进度" width="205">
@@ -1082,7 +1102,7 @@ onMounted(async () => {
             <h2>{{ detailTask.name }}</h2>
             <p>{{ formatDate(detailTask.start_at) }} 至 {{ formatDate(detailTask.deadline_at) }}</p>
           </div>
-          <el-tag :type="taskStatusTag(detailTask.status)" effect="plain">{{ taskStatusLabels[detailTask.status] || detailTask.status }}</el-tag>
+          <el-tag :type="taskStatusTag(inventoryTaskStatus(detailTask))" effect="plain">{{ taskStatusLabels[inventoryTaskStatus(detailTask)] || detailTask.status }}</el-tag>
         </div>
         <div class="detail-grid inventory-task-detail-grid">
           <div><span>目标组织</span><strong>{{ detailTask.target_count }} 家</strong></div>
@@ -1244,7 +1264,7 @@ onMounted(async () => {
       <el-alert title="任务创建后将关联到所选组织；网络资产核查范围会同步作用于质量检查、提交数量和快照。" type="info" :closable="false" show-icon />
       <el-form ref="formRef" :model="form" :rules="rules" label-position="top" class="dialog-form-with-alert">
         <div class="form-grid two-columns">
-          <el-form-item label="任务名称" prop="name" class="full-span"><el-input v-model="form.name" maxlength="255" placeholder="如：2026 年第三季度网络资产填报" /></el-form-item>
+          <el-form-item label="任务名称" prop="name" class="full-span"><el-input v-model="form.name" placeholder="如：2026 年第三季度网络资产填报" /></el-form-item>
           <el-form-item label="开始时间" prop="start_at"><el-date-picker v-model="form.start_at" type="datetime" placeholder="选择开始时间" style="width:100%" /></el-form-item>
           <el-form-item label="截止时间" prop="deadline_at"><el-date-picker v-model="form.deadline_at" type="datetime" placeholder="选择截止时间" style="width:100%" /></el-form-item>
           <el-form-item label="任务状态"><el-select v-model="form.status" style="width:100%"><el-option label="立即下发" value="active" /><el-option label="保存草稿" value="draft" /></el-select></el-form-item>
@@ -1283,7 +1303,7 @@ onMounted(async () => {
               </template>
             </div>
           </el-form-item>
-          <el-form-item label="任务说明" class="full-span"><el-input v-model="form.description" type="textarea" :rows="3" maxlength="5000" show-word-limit placeholder="填写本次填报范围、口径和注意事项" /></el-form-item>
+          <el-form-item label="任务说明" prop="description" class="full-span"><el-input v-model="form.description" type="textarea" :rows="3" placeholder="填写本次填报范围、口径和注意事项（最多 5000 字）" /></el-form-item>
           <el-form-item label="需要集团审核"><el-switch v-model="form.require_review" /></el-form-item>
           <el-form-item label="允许逾期提交"><el-switch v-model="form.allow_late_submission" /></el-form-item>
         </div>
@@ -1314,7 +1334,7 @@ onMounted(async () => {
       <el-form label-position="top">
         <el-form-item label="任务"><el-input :model-value="selectedTask?.name" disabled /></el-form-item>
         <el-form-item label="填报组织"><el-input :model-value="selectedProgress?.organization_name" disabled /></el-form-item>
-        <el-form-item label="填报说明"><el-input v-model="submissionForm.note" type="textarea" :rows="4" maxlength="5000" show-word-limit placeholder="可填写数据范围、统计口径或需要集团关注的事项" /></el-form-item>
+        <el-form-item label="填报说明"><el-input v-model="submissionForm.note" type="textarea" :rows="4" placeholder="可填写数据范围、统计口径或需要集团关注的事项（最多 5000 字）" /></el-form-item>
       </el-form>
       <template #footer><el-button @click="submissionDialogVisible = false">取消</el-button><el-button type="primary" :loading="actionLoading !== ''" :disabled="qualityLoading || !qualityCheck?.passed" @click="submitProgress">确认提交</el-button></template>
     </el-dialog>
@@ -1322,7 +1342,7 @@ onMounted(async () => {
     <el-dialog v-model="returnDialogVisible" title="退回填报结果" width="920px" destroy-on-close>
       <el-form label-position="top">
         <el-form-item label="填报组织"><el-input :model-value="selectedProgress?.organization_name" disabled /></el-form-item>
-        <el-form-item label="整体退回原因" required><el-input v-model="returnForm.reason" type="textarea" :rows="3" maxlength="2000" show-word-limit placeholder="请明确说明本次退回的总体原因" /></el-form-item>
+        <el-form-item label="整体退回原因" required><el-input v-model="returnForm.reason" type="textarea" :rows="3" placeholder="请明确说明本次退回的总体原因（最多 2000 字）" /></el-form-item>
       </el-form>
       <el-divider content-position="left">逐条审核意见（可选）</el-divider>
       <el-alert title="可以针对本次提交中的具体业务系统或网络资产填写意见；子公司将在任务中查看这些意见。单次最多 100 条。" type="info" :closable="false" show-icon />
@@ -1335,7 +1355,7 @@ onMounted(async () => {
           <el-table-column label="类型" width="95"><template #default="scope">{{ reviewResourceTypeLabel(scope.row.resource_type) }}</template></el-table-column>
           <el-table-column label="变更性质" width="112"><template #default="scope"><el-tag :type="inventoryOperationTagType(scope.row.operation)" effect="plain" size="small">{{ inventoryOperationLabel(scope.row.operation) }}</el-tag></template></el-table-column>
           <el-table-column label="对象" min-width="230"><template #default="scope"><div class="organization-name-cell"><strong>{{ scope.row.resource_name }}</strong><span>{{ scope.row.resource_key }}</span></div></template></el-table-column>
-          <el-table-column label="审核意见" min-width="390"><template #default="scope"><el-input v-model="returnCommentDrafts[reviewResourceKey(scope.row)]" maxlength="2000" placeholder="针对该条数据填写整改要求（可选）" /></template></el-table-column>
+          <el-table-column label="审核意见" min-width="390"><template #default="scope"><el-input v-model="returnCommentDrafts[reviewResourceKey(scope.row)]" placeholder="针对该条数据填写整改要求（可选）" /></template></el-table-column>
         </el-table>
         <div v-if="returnResourceTotal > 0" class="table-pagination dialog-pagination">
           <el-pagination background small layout="total, sizes, prev, pager, next" :total="returnResourceTotal" :current-page="returnResourcePage" :page-size="returnResourcePageSize" :page-sizes="[20, 50, 100]" @current-change="handleReturnResourcePageChange" @size-change="handleReturnResourcePageSizeChange" />
@@ -1386,6 +1406,9 @@ onMounted(async () => {
 .dialog-pagination { overflow-x:auto; padding-bottom:2px; }
 .inventory-task-detail-drawer { min-width:0; }
 .inventory-task-detail-grid { grid-template-columns:repeat(3, minmax(0, 1fr)); }
+/* Action buttons stay compact, but explanatory text must not inherit the
+   global action-column nowrap rule (88px otherwise clips deadline/review notes). */
+.task-organization-table :deep(.table-action-column .table-secondary) { white-space:normal; overflow-wrap:anywhere; }
 .task-organization-pagination { flex-direction:row !important; }
 .submission-progress { display:flex; align-items:center; gap:8px; white-space:nowrap; color:var(--muted); }
 .submission-progress span { display:inline-flex; align-items:baseline; gap:4px; }

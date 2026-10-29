@@ -1,6 +1,8 @@
 package httpserver
 
 import (
+	"errors"
+	"fmt"
 	"strconv"
 	"strings"
 
@@ -14,13 +16,30 @@ import (
 func parsePageQuery(c *gin.Context) (pagination.Query, error) {
 	page, err := optionalPositiveInt(c.Query("page"))
 	if err != nil {
-		return pagination.Query{}, err
+		return pagination.Query{}, &pageQueryValidationError{message: "页码（page）：须为大于 0 的整数，且不能超过系统支持的范围"}
 	}
 	pageSize, err := optionalPositiveInt(c.Query("page_size"))
-	if err != nil {
-		return pagination.Query{}, err
+	if err != nil || pageSize > pagination.MaxPageSize {
+		return pagination.Query{}, &pageQueryValidationError{message: fmt.Sprintf("每页条数（page_size）：须为 1 至 %d 的整数", pagination.MaxPageSize)}
 	}
-	return pagination.Normalize(page, pageSize)
+	query, err := pagination.Normalize(page, pageSize)
+	if err != nil {
+		return pagination.Query{}, &pageQueryValidationError{message: "页码（page）：超出系统支持的范围，请减小页码"}
+	}
+	return query, nil
+}
+
+type pageQueryValidationError struct{ message string }
+
+func (err *pageQueryValidationError) Error() string { return err.message }
+func (err *pageQueryValidationError) Unwrap() error { return pagination.ErrInvalid }
+
+func pageQueryErrorMessage(err error) string {
+	var validation *pageQueryValidationError
+	if errors.As(err, &validation) {
+		return validation.message
+	}
+	return "分页参数不正确"
 }
 
 func optionalPositiveInt(value string) (int, error) {

@@ -238,7 +238,7 @@ func NormalizeFilter(filter Filter) (Filter, error) {
 		filter.PageSize = DefaultPageSize
 	}
 	if filter.PageSize < 1 || filter.PageSize > MaxPageSize {
-		return Filter{}, ErrInvalid
+		return Filter{}, invalidInput(fmt.Sprintf("每页条数须为 1 至 %d 的整数", MaxPageSize))
 	}
 	filter.Action = strings.TrimSpace(filter.Action)
 	filter.ResourceType = strings.TrimSpace(filter.ResourceType)
@@ -247,20 +247,20 @@ func NormalizeFilter(filter Filter) (Filter, error) {
 	filter.OrganizationID = strings.TrimSpace(filter.OrganizationID)
 	filter.Keyword = strings.TrimSpace(filter.Keyword)
 	if filter.Result != "" && filter.Result != "success" && filter.Result != "failure" {
-		return Filter{}, ErrInvalid
+		return Filter{}, invalidInput("操作结果仅支持成功（success）或失败（failure）")
 	}
 	if filter.UserID != "" {
 		if _, err := parseUUID(filter.UserID); err != nil {
-			return Filter{}, ErrInvalid
+			return Filter{}, invalidInput("操作人标识不正确")
 		}
 	}
 	if filter.OrganizationID != "" {
 		if _, err := parseUUID(filter.OrganizationID); err != nil {
-			return Filter{}, ErrInvalid
+			return Filter{}, invalidInput("组织标识不正确")
 		}
 	}
 	if filter.StartAt != nil && filter.EndAt != nil && !filter.EndAt.After(*filter.StartAt) {
-		return Filter{}, ErrInvalid
+		return Filter{}, invalidInput("结束时间须晚于开始时间")
 	}
 	return filter, nil
 }

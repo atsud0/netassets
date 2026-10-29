@@ -210,11 +210,11 @@ async function logout() {
       <header class="topbar">
         <div class="topbar-context"><el-button class="mobile-nav-toggle" text aria-label="切换导航" :aria-expanded="mobileOpen" @click="mobileOpen = !mobileOpen"><el-icon><Close v-if="mobileOpen" /><Menu v-else /></el-icon></el-button>
           <div class="topbar-organization">
-            <strong>{{ organizationName }}</strong>
+            <strong :title="organizationName">{{ organizationName }}</strong>
             <span class="topbar-subtitle">／ {{ pageName }}</span>
           </div>
-          <el-select v-if="availableOrganizations.length > 1" v-model="activeOrganizationID" size="small" :loading="switchingOrganization" class="work-organization-switcher" aria-label="当前工作组织">
-            <el-option v-for="organization in availableOrganizations" :key="organization.id" :value="organization.id" :label="organization.name" />
+          <el-select v-if="availableOrganizations.length > 1" v-model="activeOrganizationID" size="small" :loading="switchingOrganization" class="work-organization-switcher" fit-input-width popper-class="organization-select-popper" aria-label="当前工作组织">
+            <el-option v-for="organization in availableOrganizations" :key="organization.id" :value="organization.id" :label="organization.name" :title="organization.name" />
           </el-select>
         </div>
         <div class="topbar-actions">

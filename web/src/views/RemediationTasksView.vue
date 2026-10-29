@@ -49,6 +49,7 @@ function applyView() {
 const revivedSelection = ref<RepairTask[]>([])
 const acknowledging = ref(false)
 const reviveAckReason = ref('')
+const reviveAckReasonError = computed(() => Array.from(reviveAckReason.value.trim()).length > 2000 ? '确认说明最多 2000 字' : '')
 function revivedSelectable(row: RepairTask) {
   return Boolean(row.revived && !row.revived_ack_at && row.can_assign)
 }
@@ -60,6 +61,8 @@ function showRevivedOnly() { status.value = 'all'; special.value = ''; blockReas
 async function acknowledgeSelected() {
   const ids = revivedSelection.value.map(r => r.id)
   if (!ids.length) return
+  if (ids.length > 200) return ElMessage.warning('待确认任务最多选择 200 条')
+  if (reviveAckReasonError.value) return ElMessage.warning(reviveAckReasonError.value)
   try {
     const reason = reviveAckReason.value.trim() || '已知悉资产/系统恢复，重新纳入当前工作'
     const key = `revive-ack-${new Date().toISOString().slice(0,19).replace(/[T:]/g,'')}-${ids.length}`
@@ -73,7 +76,7 @@ async function acknowledgeSelected() {
     revivedSelection.value = []
     await load()
   } catch (e: unknown) {
-    ElMessage.error(e instanceof Error ? e.message : '批量确认失败')
+    ElMessage.error(getAPIErrorMessage(e, '批量确认恢复跟进失败'))
   }
 }
 function resetFilters() { revivedOnly.value = false; revivedSelection.value = []; reviveAckReason.value = ''; blockReason.value = ''; status.value=executor.value?'active':'all';systemID.value='';severity.value='';special.value='';keyword.value='';overdue.value=false;page.value=1;void load() }
@@ -227,16 +230,15 @@ onMounted(async () => {
         <el-alert v-if="blockReason" type="info" :closable="false" class="reassign-filtered">已按“{{ executionBlockReasons[blockReason]?.text || blockReason }}”筛选 <el-button link type="primary" @click="blockReason = ''; page = 1; load()">查看全部原因</el-button></el-alert>
         <div v-if="stats?.revived" class="reassign-revived"><el-button text type="warning" @click="showRevivedOnly()">{{ stats.revived }} 项任务因资产/系统恢复而重新回到当前工作，请确认是否继续</el-button></div>
       </section>
-      <div v-if="revivedSelection.length && !executor" class="selection-bar"><span>已选择 {{ revivedSelection.length }} 项恢复待确认任务</span><el-button type="primary" :loading="acknowledging" @click="acknowledgeSelected">批量确认恢复跟进</el-button><small>确认表示已知悉这些任务重新回到当前工作；确认后可逐项改派、取消或继续执行</small><el-input v-model="reviveAckReason" placeholder="确认说明（可选，将记入任务时间线）" maxlength="200" style="width:280px" /></div>
+      <div v-if="revivedSelection.length && !executor" class="selection-bar"><span>已选择 {{ revivedSelection.length }} 项恢复待确认任务</span><el-button type="primary" :loading="acknowledging" @click="acknowledgeSelected">批量确认恢复跟进</el-button><small>确认表示已知悉这些任务重新回到当前工作；确认后可逐项改派、取消或继续执行</small><el-input v-model="reviveAckReason" placeholder="确认说明（可选，将记入任务时间线）" style="width:280px" /><small v-if="reviveAckReasonError" role="alert">{{ reviveAckReasonError }}</small></div>
       <el-table v-loading="loading" :data="rows" :class="{ 'compact-table':compact }" @selection-change="onSelectionChange">
         <template #empty><el-empty description="当前筛选下没有修复任务" :image-size="64"><el-button @click="resetFilters">清除筛选</el-button><el-button v-if="auth.hasPermission('remediation.assign')" type="primary" @click="advanced=true">选择工单安排修复</el-button></el-empty></template>
         <el-table-column type="selection" width="42" :selectable="(row:RepairTask)=>revivedSelectable(row)||(row.status==='pending_org_review'&&auth.hasPermission('remediation.review'))||(row.status==='pending_security_review'&&auth.canManageSecurityWorkOrders)" />
         <el-table-column label="任务 / 漏洞" min-width="210"><template #default="{row}"><el-button link type="primary" @click="open(row.id)">{{ row.title }}</el-button><div class="muted">{{ row.task_no }} <el-tag v-if="row.return_reason" type="warning" size="small">退回修复</el-tag></div></template></el-table-column>
         <el-table-column label="业务归属" min-width="145"><template #default="{row}">{{ row.system_name }}<div class="muted">{{ row.organization_name }}</div></template></el-table-column>
-        <el-table-column label="不可执行原因 / 处理建议" min-width="190"><template #default="{row}"><template v-if="row.execution_blocked_reason"><span>{{ blockText(row.execution_blocked_reason) }}</span><div class="muted">{{ blockAction(row.execution_blocked_reason) }}</div></template><span v-else class="muted">—</span></template></el-table-column>
         <el-table-column label="负责人" min-width="115"><template #default="{row}">{{ row.assignee_name }}<div class="muted" :title="row.vendor_name">{{ row.vendor_name || '内部人员' }}</div></template></el-table-column>
         <el-table-column label="等级" width="75"><template #default="{row}"><el-tag :type="severityType(row.severity)" size="small">{{ severityLabels[row.severity] }}</el-tag></template></el-table-column>
-        <el-table-column label="当前状态" min-width="135"><template #default="{row}"><el-tag size="small">{{ row.completion_reason==='risk_accepted'&&!row.risk_acceptance_current?'风险接受已失效':outcomes[row.completion_reason]||taskStatuses[row.status] }}</el-tag><div><el-tag v-if="row.material_needs_review" type="warning" size="small">材料待复核</el-tag><el-tag v-if="row.blocked_reason" type="warning" size="small">有阻塞</el-tag><el-tag v-if="row.execution_blocked_reason" :type="row.execution_blocked_reason==='system_unavailable'?'warning':'danger'" size="small">{{ executionBlockReasons[row.execution_blocked_reason]?.text || row.execution_blocked_reason }}</el-tag><el-tag v-if="row.revived && !row.revived_ack_at" type="warning" size="small">恢复待确认</el-tag></div></template></el-table-column>
+        <el-table-column label="当前状态" min-width="160"><template #default="{row}"><el-tag size="small">{{ row.completion_reason==='risk_accepted'&&!row.risk_acceptance_current?'风险接受已失效':outcomes[row.completion_reason]||taskStatuses[row.status] }}</el-tag><div><el-tag v-if="row.material_needs_review" type="warning" size="small">材料待复核</el-tag><el-tag v-if="row.blocked_reason" type="warning" size="small">有阻塞</el-tag><el-tag v-if="row.revived && !row.revived_ack_at" type="warning" size="small">恢复待确认</el-tag></div><template v-if="row.execution_blocked_reason"><div class="task-block-reason">{{ blockText(row.execution_blocked_reason) }}</div><div class="muted task-block-advice">{{ blockAction(row.execution_blocked_reason) }}</div></template></template></el-table-column>
         <el-table-column label="截止 / 优先级" min-width="135"><template #default="{row}"><span :class="{'overdue-text':row.overdue}">{{ dateText(row.due_at) }}</span><div v-if="row.overdue" class="overdue-text">已逾期</div></template></el-table-column>
         <el-table-column label="下一步" width="100" fixed="right"><template #default="{row}"><el-button link type="primary" @click="open(row.id)">{{ taskAction(row) }}</el-button></template></el-table-column>
       </el-table>
@@ -258,6 +260,9 @@ onMounted(async () => {
 </template>
 
 <style scoped>
+.task-block-reason { white-space:normal;overflow-wrap:anywhere; }
+.repair-list-panel :deep(.el-table .muted.task-block-advice) { white-space:normal;overflow:visible;text-overflow:clip;overflow-wrap:anywhere; }
+.task-block-reason { color:var(--el-color-danger);font-size:12px;line-height:1.7; }
 .repair-page { display:grid;gap:20px; }.repair-page .page-heading { margin-bottom:0; }.muted { color:var(--muted);font-size:12px;line-height:1.7; }.filters,.summary { display:flex;gap:12px;align-items:center;flex-wrap:wrap; }.summary { margin:16px 0;padding:12px;background:var(--el-fill-color-light);border-radius:8px;font-size:13px; }.repair-list-panel { padding:0;overflow:hidden;min-width:0; }
 .quick-views { display:flex;gap:24px;padding:0 20px;border-bottom:1px solid var(--line);overflow-x:auto; }.quick-views button { border:0;background:none;color:var(--muted);padding:17px 0;white-space:nowrap;cursor:pointer;font-size:13px;border-bottom:2px solid transparent; }.quick-views button.active { color:var(--cyan);border-bottom-color:var(--cyan); }
 .repair-toolbar { display:flex;gap:8px;padding:16px 20px;align-items:center;flex-wrap:wrap; }.repair-toolbar>.el-input { width:260px; }.repair-toolbar>.el-select { width:120px; }.repair-toolbar .el-button { margin:0; }.toolbar-spacer { flex:1; }.advanced-filters { padding:16px 20px;border-top:1px solid var(--line);background:#f8fafc; }.advanced-filters .el-select { max-width:100%; }.repair-list-panel>.summary { margin:0 20px 16px; }

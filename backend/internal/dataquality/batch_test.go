@@ -30,6 +30,7 @@ func TestNormalizeBatchIssueInput(t *testing.T) {
 		{name: "missing assignee", input: BatchIssueInput{IDs: []string{batchIssueID1}, Action: "start"}, wantErr: true},
 		{name: "invalid assignee", input: BatchIssueInput{IDs: []string{batchIssueID1}, Action: "assign", AssigneeUserID: "invalid"}, wantErr: true},
 		{name: "missing submit note", input: BatchIssueInput{IDs: []string{batchIssueID1}, Action: "submit", Note: "  "}, wantErr: true},
+		{name: "maximum Chinese note", input: BatchIssueInput{IDs: []string{batchIssueID1}, Action: "assign", AssigneeUserID: batchUserID, Note: strings.Repeat("字", 5000)}, wantIDs: 1, wantAction: BatchIssueActionAssign, wantNote: strings.Repeat("字", 5000)},
 		{name: "note too long", input: BatchIssueInput{IDs: []string{batchIssueID1}, Action: "submit", Note: strings.Repeat("字", 5001)}, wantErr: true},
 	}
 	for _, tt := range tests {
@@ -48,6 +49,27 @@ func TestNormalizeBatchIssueInput(t *testing.T) {
 				t.Fatalf("got ids=%v action=%q note=%q", ids, action, note)
 			}
 		})
+	}
+}
+
+func TestNormalizeBatchIssueNoteCharacterBoundaries(t *testing.T) {
+	for _, sample := range []struct{ name, character string }{
+		{"Chinese", "批"}, {"ASCII", "B"}, {"non-BMP", "𠮷"},
+	} {
+		for _, action := range []string{BatchIssueActionAssign, BatchIssueActionStart, BatchIssueActionSubmit} {
+			t.Run(sample.name+"/"+action, func(t *testing.T) {
+				note := strings.Repeat(sample.character, 5000)
+				input := BatchIssueInput{IDs: []string{batchIssueID1}, Action: action, AssigneeUserID: batchUserID, Note: " \n" + note + "\t "}
+				_, gotAction, _, gotNote, err := normalizeBatchIssueInput(input)
+				if err != nil || gotAction != action || gotNote != note {
+					t.Fatalf("5000 characters with surrounding whitespace: action=%q, note matches=%v, err=%v", gotAction, gotNote == note, err)
+				}
+				input.Note = note + sample.character
+				if _, _, _, _, err := normalizeBatchIssueInput(input); !errors.Is(err, ErrInvalid) {
+					t.Fatalf("5001 characters: error=%v, want ErrInvalid", err)
+				}
+			})
+		}
 	}
 }
 

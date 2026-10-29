@@ -102,7 +102,7 @@ test('集团管理员、安全运营、子公司管理员和填报员权限边�
         short_name: '角色回归子公司',
         type: 'subsidiary',
         manager: 'E2E',
-        contact: 'e2e@example.invalid',
+        contact: '13800000018',
         notes: '全角色权限边界自动化回归数据',
       },
     })

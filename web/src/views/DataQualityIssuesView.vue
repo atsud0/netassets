@@ -1,7 +1,8 @@
 <script setup lang="ts">
 import RowActions from '../components/RowActions.vue'
+import { loadOptions } from '../api/remediation'
 import { computed, onMounted, reactive, ref } from 'vue'
-import { ElMessage, ElMessageBox, type TableInstance } from 'element-plus'
+import { ElMessage, ElMessageBox, type FormInstance, type FormRules, type TableInstance } from 'element-plus'
 import { useRouter } from 'vue-router'
 import { apiClient, getAPIErrorMessage } from '../api/client'
 import { useAuthStore } from '../stores/auth'
@@ -27,6 +28,7 @@ interface BatchOperationResult { total_count: number; success_count: number; fai
 const auth = useAuthStore()
 const router = useRouter()
 const loading = ref(false)
+const scanning = ref(false)
 const acting = ref(false)
 const items = ref<QualityIssue[]>([])
 const issueTableRef = ref<TableInstance>()
@@ -55,6 +57,20 @@ const bulkLoading = ref(false)
 const bulkActionVisible = ref(false)
 const bulkActionType = ref<'assign' | 'start' | 'submit'>('assign')
 const bulkForm = reactive({ assignee_user_id: '', note: '' })
+const actionFormRef = ref<FormInstance>()
+const bulkFormRef = ref<FormInstance>()
+function issueActionRules(action: string, bulk = false): FormRules {
+  const noteLabel = action === 'exempt' ? '豁免原因' : bulk && action === 'submit' ? '批量整改说明' : '处理说明'
+  return {
+    assignee_user_id: [{ required: ['assign', 'start'].includes(action), message: '请选择整改负责人', trigger: 'change' }],
+    note: [
+      { required: ['submit', 'return', 'exempt'].includes(action), whitespace: true, message: `请填写${noteLabel}`, trigger: 'blur' },
+      { validator: (_rule, value: string, callback) => callback(Array.from((value ?? '').trim()).length > 5000 ? new Error(`${noteLabel}最多 5000 字`) : undefined), trigger: 'blur' },
+    ],
+  }
+}
+const actionRules = computed(() => issueActionRules(actionType.value))
+const bulkRules = computed(() => issueActionRules(bulkActionType.value, true))
 const bulkAssignees = ref<UserItem[]>([])
 const bulkAssigneeLoading = ref(false)
 const bulkResultVisible = ref(false)
@@ -100,13 +116,28 @@ function resourcePath(item: QualityIssue) { return item.resource_type === 'asset
 
 async function loadReferenceData() {
   const requests: Promise<unknown>[] = [
-    apiClient.get<ListResponse<Organization>>('/organizations', { params: { page: 1, page_size: 100 } }).then((response) => { organizations.value = response.data.items }),
+    loadOptions<Organization>('/organizations').then((items) => { organizations.value = items }),
   ]
   if (auth.hasPermission('user.manage')) {
     requests.push(apiClient.get<ListResponse<UserItem>>('/users', { params: { page: 1, page_size: 100 } }).then((response) => { filterUsers.value = response.data.items }))
   }
   const results = await Promise.allSettled(requests)
   if (results.every((item) => item.status === 'rejected')) ElMessage.warning('部分筛选数据读取失败，但不影响查看质量问题')
+}
+
+async function runScan() {
+  if (scanning.value) return
+  scanning.value = true
+  try {
+    const { data } = await apiClient.get<{ result: { summary: { total_issue_count: number } } }>('/data-quality-rules/scan', {
+      timeout: 110_000,
+      params: { organization_id: filters.organization_id || undefined, resource_type: filters.resource_type || undefined, severity: filters.severity || undefined },
+    })
+    ElMessage.success(`质量巡检完成，共发现 ${data.result.summary.total_issue_count} 项问题`)
+    await loadIssues()
+  } catch (error) {
+    ElMessage.error(getAPIErrorMessage(error, '执行质量巡检失败'))
+  } finally { scanning.value = false }
 }
 
 async function loadIssues() {
@@ -206,14 +237,7 @@ async function openAction(type: typeof actionType.value, item: QualityIssue) {
 async function submitAction() {
   const item = actionIssue.value
   if (!item) return
-  if (['submit', 'return', 'exempt'].includes(actionType.value) && !actionForm.note.trim()) {
-    ElMessage.warning(actionType.value === 'exempt' ? '请填写豁免原因' : '请填写处理说明')
-    return
-  }
-  if (['assign', 'start'].includes(actionType.value) && !actionForm.assignee_user_id) {
-    ElMessage.warning('请选择整改负责人')
-    return
-  }
+  if (!actionFormRef.value || !(await actionFormRef.value.validate().catch(() => false))) return
   acting.value = true
   try {
     const endpoint = `/data-quality-issues/${item.id}`
@@ -288,14 +312,7 @@ async function openBulkAction(type: typeof bulkActionType.value) {
 }
 
 async function submitBulkAction() {
-  if ((bulkActionType.value === 'assign' || bulkActionType.value === 'start') && !bulkForm.assignee_user_id) {
-    ElMessage.warning('请选择整改负责人')
-    return
-  }
-  if (bulkActionType.value === 'submit' && !bulkForm.note.trim()) {
-    ElMessage.warning('请填写批量整改说明')
-    return
-  }
+  if (!bulkFormRef.value || !(await bulkFormRef.value.validate().catch(() => false))) return
   const targets = [...selectedIssues.value]
   try {
     await ElMessageBox.confirm(`确认对选中的 ${targets.length} 个数据质量问题执行“${bulkActionTitle.value}”吗？系统将逐项校验组织权限和当前状态。`, '批量操作确认', {
@@ -387,7 +404,7 @@ onMounted(async () => {
 <template>
   <section class="page-stack">
     <div class="page-heading"><h1>质量整改</h1>
-      <el-button v-if="isGroupAdmin" type="primary" @click="router.push('/data-governance')">执行质量巡检</el-button>
+      <el-button v-if="isGroupAdmin" type="primary" :loading="scanning" @click="runScan">执行质量巡检</el-button>
     </div>
 
     <div class="quality-workflow-content">
@@ -462,14 +479,14 @@ onMounted(async () => {
 
     <el-dialog v-model="bulkActionVisible" :title="bulkActionTitle" width="600px" destroy-on-close>
       <el-alert :title="`本次将处理 ${selectedIssues.length} 个问题，服务端会逐项校验并允许部分成功`" type="info" :closable="false" show-icon />
-      <el-form label-width="110px" class="quality-batch-form">
-        <el-form-item v-if="['assign','start'].includes(bulkActionType)" label="整改负责人" required>
+      <el-form ref="bulkFormRef" :model="bulkForm" :rules="bulkRules" label-width="110px" class="quality-batch-form">
+        <el-form-item v-if="['assign','start'].includes(bulkActionType)" label="整改负责人" prop="assignee_user_id">
           <div class="assignee-field">
             <el-select v-model="bulkForm.assignee_user_id" :loading="bulkAssigneeLoading" filterable clearable placeholder="请选择责任组织的有效任职用户" style="width:100%"><el-option v-for="user in bulkAssignees" :key="user.id" :label="`${user.display_name}（${user.username}）`" :value="user.id" /></el-select>
             <small v-if="!bulkAssigneeLoading && bulkAssignees.length === 0">该责任组织暂无可用用户，请先由有权限的管理员补充用户任职。</small>
           </div>
         </el-form-item>
-        <el-form-item label="处理说明" :required="bulkActionType === 'submit'"><el-input v-model="bulkForm.note" type="textarea" :rows="4" maxlength="5000" show-word-limit :placeholder="bulkActionType === 'submit' ? '请填写本批问题的整改说明' : '可选，记录本次批量操作说明'" /></el-form-item>
+        <el-form-item label="处理说明" prop="note"><el-input v-model="bulkForm.note" type="textarea" :rows="4" :placeholder="bulkActionType === 'submit' ? '请填写本批问题的整改说明' : '可选，记录本次批量操作说明'" /></el-form-item>
       </el-form>
       <template #footer><el-button @click="bulkActionVisible=false">取消</el-button><el-button type="primary" :loading="bulkLoading" @click="submitBulkAction">确认执行</el-button></template>
     </el-dialog>
@@ -487,15 +504,15 @@ onMounted(async () => {
     </el-dialog>
 
     <el-dialog v-model="actionVisible" :title="actionTitle" width="560px" destroy-on-close>
-      <el-form label-width="100px">
-        <el-form-item v-if="['assign','start'].includes(actionType)" label="整改负责人" required>
+      <el-form ref="actionFormRef" :model="actionForm" :rules="actionRules" label-width="100px">
+        <el-form-item v-if="['assign','start'].includes(actionType)" label="整改负责人" prop="assignee_user_id">
           <div class="assignee-field">
             <el-select v-model="actionForm.assignee_user_id" :loading="assigneeLoading" filterable clearable placeholder="请选择该责任组织的有效任职用户" style="width:100%"><el-option v-for="user in issueAssignees" :key="user.id" :label="`${user.display_name}（${user.username}）`" :value="user.id" /></el-select>
             <small v-if="!assigneeLoading && issueAssignees.length === 0">该责任组织暂无可用用户，请先由有权限的管理员补充用户任职。</small>
           </div>
         </el-form-item>
         <el-form-item v-if="actionType === 'exempt'" label="豁免有效期"><el-date-picker v-model="actionForm.expires_at" type="datetime" placeholder="留空表示长期有效" style="width:100%" /></el-form-item>
-        <el-form-item :label="actionType === 'exempt' ? '豁免原因' : '处理说明'" :required="['submit','return','exempt'].includes(actionType)"><el-input v-model="actionForm.note" type="textarea" :rows="4" maxlength="5000" show-word-limit /></el-form-item>
+        <el-form-item :label="actionType === 'exempt' ? '豁免原因' : '处理说明'" prop="note"><el-input v-model="actionForm.note" type="textarea" :rows="4" /></el-form-item>
       </el-form>
       <template #footer><el-button @click="actionVisible=false">取消</el-button><el-button :type="actionButtonType" :loading="acting" @click="submitAction">确认{{ actionTitle }}</el-button></template>
     </el-dialog>

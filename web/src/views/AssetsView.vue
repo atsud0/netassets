@@ -5,6 +5,7 @@ import { useRoute, useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox, type FormInstance, type FormRules, type UploadFile, type UploadFiles } from 'element-plus'
 import { apiClient, getAPIErrorMessage, getDownloadAPIError } from '../api/client'
 import { createExportJob } from '../api/export-jobs'
+import { loadOptions } from '../api/remediation'
 import { useAuthStore } from '../stores/auth'
 import SavedFilterViews from '../components/SavedFilterViews.vue'
 import AssetExternalObservations from '../components/AssetExternalObservations.vue'
@@ -157,6 +158,7 @@ const form = reactive({
 })
 const networkAreaForm = reactive({ organization_id: '', name: '', code: '', status: 'enabled', sort_order: 0, notes: '' })
 const importForm = reactive<{ organization_id: string; import_mode: 'skip_duplicates' | 'update_working'; direct_change_reason: string }>({ organization_id: '', import_mode: 'skip_duplicates', direct_change_reason: '' })
+const importReasonError = computed(() => auth.isGroupAdmin && Array.from(importForm.direct_change_reason.trim()).length > 1000 ? '直接变更原因最多 1000 字' : '')
 
 // 集团管理员直写正式台账会绕过填报复核流程，后端强制要求变更原因。这里集中判定
 // 「本次操作是否直接写正式台账」，只有真正直写时才向用户索要原因，避免把填报
@@ -388,14 +390,14 @@ async function loadAssets() {
 
 async function load(applyDefaultView = false) {
   try {
-    const [organizationResponse, systemResponse, areaResponse] = await Promise.all([
-      apiClient.get<ListResponse<Organization>>('/organizations', { params: { page_size: 100 } }),
-      apiClient.get<ListResponse<BusinessSystem>>('/business-systems', { params: { page_size: 100 } }),
-      apiClient.get<ListResponse<NetworkArea>>('/network-areas', { params: { page_size: 100 } }),
+    const [organizationOptions, systemOptions, areaOptions] = await Promise.all([
+      loadOptions<Organization>('/organizations'),
+      loadOptions<BusinessSystem>('/business-systems'),
+      loadOptions<NetworkArea>('/network-areas'),
     ])
-    organizations.value = organizationResponse.data.items
-    systems.value = systemResponse.data.items
-    networkAreas.value = areaResponse.data.items
+    organizations.value = organizationOptions
+    systems.value = systemOptions
+    networkAreas.value = areaOptions
     try {
       const customResponse = await apiClient.get<ListResponse<CustomField>>('/custom-fields/fillable', { params: { resource_type: 'asset', page_size: 100 } })
       customFields.value = customResponse.data.items
@@ -871,9 +873,10 @@ function handleImportMappingChange() {
 async function runImport(preview = false) {
   if (!importForm.organization_id) return ElMessage.warning('请选择所属组织')
   if (!importFile.value) return ElMessage.warning('请选择 CSV 或 XLSX 文件')
+  if (!preview && auth.isGroupAdmin && !importForm.direct_change_reason.trim()) return ElMessage.warning('导入正式台账属于集团直接变更，请填写变更原因')
+  if (!preview && importReasonError.value) return ElMessage.warning(importReasonError.value)
   if (!importFields.value.length && !await analyzeImportColumns()) return
   if (importMappingError.value) return ElMessage.warning(importMappingError.value)
-  if (!preview && auth.isGroupAdmin && !importForm.direct_change_reason.trim()) return ElMessage.warning('导入正式台账属于集团直接变更，请填写变更原因')
   if (!preview && (importResultMode.value !== 'preview' || !importResult.value?.success_count)) {
     return ElMessage.warning('请先完成预检，并确认至少有一行可以导入')
   }
@@ -986,7 +989,17 @@ function openEditNetworkArea(item: NetworkArea) {
   areaFormVisible.value = true
 }
 async function submitNetworkArea() {
-  if (!networkAreaForm.organization_id || !networkAreaForm.name.trim()) return ElMessage.warning('请选择所属组织并填写网络区域名称')
+  if (!networkAreaForm.organization_id) return ElMessage.warning('请选择所属组织')
+  if (!networkAreaForm.name.trim()) return ElMessage.warning('请输入网络区域名称')
+  for (const [value, limit, label] of [
+    [networkAreaForm.name, 128, '网络区域名称'],
+    [networkAreaForm.code, 64, '标识 / 地址范围'],
+    [networkAreaForm.notes, 5000, '说明'],
+  ] as const) {
+    if (Array.from(value.trim()).length > limit) return ElMessage.warning(`${label}最多 ${limit} 字`)
+  }
+  if (!Number.isInteger(networkAreaForm.sort_order) || networkAreaForm.sort_order < 0 || networkAreaForm.sort_order > 100000) return ElMessage.warning('排序须为 0 至 100000 的整数')
+  if (!['enabled', 'disabled'].includes(networkAreaForm.status)) return ElMessage.warning('请选择有效的状态')
   areaSubmitting.value = true
   try {
     if (editingNetworkAreaID.value) {
@@ -1181,8 +1194,8 @@ onMounted(() => {
         <el-select v-model="statusFilter" clearable placeholder="全部状态" @change="resetAndLoadAssets" @clear="resetAndLoadAssets">
           <el-option v-for="(label, value) in statusLabels" :key="value" :label="label" :value="value" />
         </el-select>
-        <el-select v-if="auth.isGroupAdmin" v-model="organizationFilter" clearable filterable placeholder="全部组织" @change="resetAndLoadAssets" @clear="resetAndLoadAssets">
-          <el-option v-for="item in enabledOrganizations" :key="item.id" :label="item.name" :value="item.id" />
+        <el-select v-if="auth.isGroupAdmin" v-model="organizationFilter" clearable filterable placeholder="全部组织" fit-input-width popper-class="organization-select-popper" placement="bottom-start" :fallback-placements="['bottom-start']" @change="resetAndLoadAssets" @clear="resetAndLoadAssets">
+          <el-option v-for="item in enabledOrganizations" :key="item.id" :label="item.name" :title="item.name" :value="item.id" />
         </el-select>
         <el-button @click="resetAndLoadAssets">查询</el-button>
         <el-button text :aria-pressed="extendedColumns" @click="extendedColumns=!extendedColumns">{{ extendedColumns?'精简字段':'更多字段' }}</el-button><span class="asset-filter-count">共 {{ total }} 条</span>
@@ -1196,14 +1209,14 @@ onMounted(() => {
         <el-tag type="warning" effect="plain">待提交</el-tag>
       </div>
       <el-table :data="draftAssets" row-key="id" empty-text="尚未选择需要上报的网络资产">
-        <el-table-column label="资产 / 访问标识" min-width="240"><template #default="scope"><el-button link type="primary" class="table-link" @click="openEditDialog(scope.row)">{{ scope.row.name || '未命名资产' }}</el-button><span class="list-secondary mono-text">{{ scope.row.value }}</span></template></el-table-column>
+        <el-table-column label="资产 / 访问标识" min-width="220"><template #default="scope"><el-button link type="primary" class="table-link" @click="openEditDialog(scope.row)">{{ scope.row.name || '未命名资产' }}</el-button><span class="list-secondary mono-text">{{ scope.row.value }}</span></template></el-table-column>
 
         <el-table-column label="类型" width="95"><template #default="scope">{{ typeLabel(scope.row.type) }}</template></el-table-column>
-        <el-table-column prop="business_system_name" label="业务系统" min-width="150"><template #default="scope">{{ scope.row.business_system_name || '未绑定' }}</template></el-table-column>
-        <el-table-column label="暴露范围" width="105"><template #default="scope">{{ scopeLabel(scope.row.network_scope) }}</template></el-table-column>
+        <el-table-column prop="business_system_name" label="业务系统" min-width="140"><template #default="scope">{{ scope.row.business_system_name || '未绑定' }}</template></el-table-column>
+        <el-table-column v-if="extendedColumns" label="暴露范围" width="105"><template #default="scope">{{ scopeLabel(scope.row.network_scope) }}</template></el-table-column>
         <el-table-column label="变更类型" width="90"><template #default="scope"><el-tag :type="scope.row.operation === 'delete' ? 'danger' : scope.row.operation === 'update' ? 'warning' : 'success'" effect="plain">{{ draftOperationLabels[scope.row.operation || 'create'] }}</el-tag></template></el-table-column>
         <el-table-column label="上报状态" width="105"><template #default="scope"><el-tag type="warning" effect="plain">{{ draftStatusLabels[scope.row.draft_status || 'editing'] || scope.row.draft_status }}</el-tag></template></el-table-column>
-        <el-table-column label="填报归属" min-width="180"><template #default="scope"><span v-if="!scope.row.assigned_to" class="list-secondary">尚未分配填报人</span><template v-else><span>{{ scope.row.assigned_to }}</span><span v-if="draftTakeoverSummary(scope.row)" class="list-secondary">{{ draftTakeoverSummary(scope.row) }}</span><span v-else-if="draftLastEditedHint(scope.row)" class="list-secondary">{{ draftLastEditedHint(scope.row) }}</span></template></template></el-table-column>
+        <el-table-column label="填报归属" min-width="165"><template #default="scope"><span v-if="!scope.row.assigned_to" class="list-secondary">尚未分配填报人</span><template v-else><span>{{ scope.row.assigned_to }}</span><span v-if="draftTakeoverSummary(scope.row)" class="list-secondary">{{ draftTakeoverSummary(scope.row) }}</span><span v-else-if="draftLastEditedHint(scope.row)" class="list-secondary">{{ draftLastEditedHint(scope.row) }}</span></template></template></el-table-column>
         <el-table-column label="操作" width="120" fixed="right" align="right" header-align="right" class-name="table-action-column"><template #default="scope"><RowActions :label="`操作：${scope.row.name || scope.row.title || scope.row.code || scope.row.display_name || scope.row.id}`"><el-button link type="primary" @click="openWorkingVersionDiff(scope.row)">查看变更</el-button><el-button v-if="scope.row.operation !== 'delete'" link type="primary" :disabled="scope.row.draft_status === 'submitted'" @click="openEditDialog(scope.row)">编辑</el-button><el-button v-if="canTakeOverDraft(scope.row)" link type="warning" :disabled="scope.row.draft_status === 'submitted'" @click="takeoverDraft(scope.row)">接管</el-button><el-button link type="danger" :disabled="scope.row.draft_status === 'submitted'" @click="removeDraft(scope.row)">取消上报</el-button></RowActions></template></el-table-column>
       </el-table>
       <div v-if="draftTotal > 0" class="table-pagination">
@@ -1339,11 +1352,11 @@ onMounted(() => {
     <el-dialog v-model="areaFormVisible" :title="editingNetworkAreaID ? '编辑网络区域' : '新增网络区域'" width="620px" destroy-on-close>
       <el-form label-position="top"><div class="form-grid two-columns">
         <el-form-item label="所属组织" required><el-select v-model="networkAreaForm.organization_id" :disabled="Boolean(editingNetworkAreaID)" filterable style="width:100%"><el-option v-for="item in enabledOrganizations" :key="item.id" :label="item.name" :value="item.id" /></el-select></el-form-item>
-        <el-form-item label="网络区域名称" required><el-input v-model="networkAreaForm.name" maxlength="128" placeholder="如：上海办事处、生产云 VPC" /></el-form-item>
-        <el-form-item label="标识 / 地址范围"><el-input v-model="networkAreaForm.code" maxlength="64" placeholder="如：SH-OFFICE、10.20.0.0/16" /></el-form-item>
+        <el-form-item label="网络区域名称" required><el-input v-model="networkAreaForm.name" placeholder="如：上海办事处、生产云 VPC" /></el-form-item>
+        <el-form-item label="标识 / 地址范围"><el-input v-model="networkAreaForm.code" placeholder="如：SH-OFFICE、10.20.0.0/16" /></el-form-item>
         <el-form-item label="状态"><el-select v-model="networkAreaForm.status" style="width:100%"><el-option label="启用" value="enabled" /><el-option label="停用" value="disabled" /></el-select></el-form-item>
         <el-form-item label="排序" class="full-span"><el-input-number v-model="networkAreaForm.sort_order" :min="0" :max="100000" /></el-form-item>
-        <el-form-item label="说明" class="full-span"><el-input v-model="networkAreaForm.notes" type="textarea" :rows="3" maxlength="5000" placeholder="可说明地点、VPC、网段或管理要求" /></el-form-item>
+        <el-form-item label="说明" class="full-span"><el-input v-model="networkAreaForm.notes" type="textarea" :rows="3" placeholder="可说明地点、VPC、网段或管理要求" /></el-form-item>
       </div></el-form>
       <template #footer><el-button @click="areaFormVisible = false">取消</el-button><el-button type="primary" :loading="areaSubmitting" @click="submitNetworkArea">保存</el-button></template>
     </el-dialog>
@@ -1359,8 +1372,8 @@ onMounted(() => {
             <p class="muted-text">覆盖模式不会直接修改集团正式台账：已上报资产会生成更新工作版本，已有可编辑工作版本会被文件内容更新；已纳入任务、已提交或待下线版本不可覆盖，导入后仍需通过填报任务提交上报。</p>
           </div>
         </el-form-item>
-        <el-form-item v-if="auth.isGroupAdmin" label="直改原因" required>
-          <el-input v-model="importForm.direct_change_reason" type="textarea" :rows="2" maxlength="1000" show-word-limit placeholder="例如：集团资产清查中确认的存量服务器" @input="resetImportPreview" />
+        <el-form-item v-if="auth.isGroupAdmin" label="直改原因" required :error="importReasonError">
+          <el-input v-model="importForm.direct_change_reason" type="textarea" :rows="2" placeholder="例如：集团资产清查中确认的存量服务器" @input="resetImportPreview" />
           <p class="muted-text">导入成功项直接进入集团正式台账，会在每个资产所属组织生成一条待复核记录；集团管理员不能自行确认该变更。</p>
         </el-form-item>
         <el-form-item label="CSV / XLSX 文件" required><el-upload drag :auto-upload="false" :limit="1" accept=".csv,.xlsx" :on-change="handleFileChange" :on-remove="handleFileRemove"><div class="el-upload__text">拖入文件，或<em>点击选择</em></div><template #tip><div class="el-upload__tip">文件不超过 10 MB；业务系统使用同组织内的系统编码匹配；责任人账号按所属组织内的启用用户名匹配；有效期格式错误会在预检中逐行提示。</div></template></el-upload></el-form-item>

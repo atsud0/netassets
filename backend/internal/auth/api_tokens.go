@@ -55,11 +55,14 @@ type CreateAPITokenResult struct {
 
 func NormalizeAPITokenInput(input CreateAPITokenInput) (CreateAPITokenInput, error) {
 	input.Name = strings.TrimSpace(input.Name)
-	if input.Name == "" || utf8.RuneCountInString(input.Name) > 100 {
-		return CreateAPITokenInput{}, ErrInvalid
+	if input.Name == "" {
+		return CreateAPITokenInput{}, &FieldError{Message: "API Token 名称不能为空"}
+	}
+	if utf8.RuneCountInString(input.Name) > 100 {
+		return CreateAPITokenInput{}, &FieldError{Message: "API Token 名称最多 100 字"}
 	}
 	if input.ExpiresInDays < 1 || input.ExpiresInDays > maxAPITokenExpiryDays {
-		return CreateAPITokenInput{}, ErrInvalid
+		return CreateAPITokenInput{}, &FieldError{Message: "API Token 有效期应为 1 至 365 天"}
 	}
 	return input, nil
 }

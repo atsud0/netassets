@@ -13,6 +13,13 @@ func Open(ctx context.Context, databaseURL string) (*pgxpool.Pool, error) {
 	if err != nil {
 		return nil, fmt.Errorf("parse database URL: %w", err)
 	}
+	// This pool serves short, latency-sensitive OLTP requests. Complex permission
+	// CTEs can trigger seconds of LLVM compilation even for a handful of rows.
+	// Use a connection-local startup default, never ALTER DATABASE/ROLE/SYSTEM;
+	// deployments with analytical workloads may explicitly opt in via ?jit=on.
+	if _, explicit := config.ConnConfig.RuntimeParams["jit"]; !explicit {
+		config.ConnConfig.RuntimeParams["jit"] = "off"
+	}
 	config.MaxConns = 20
 	config.MinConns = 2
 	config.MaxConnLifetime = time.Hour

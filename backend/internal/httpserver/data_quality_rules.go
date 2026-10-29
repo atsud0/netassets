@@ -1,6 +1,7 @@
 package httpserver
 
 import (
+	"context"
 	"errors"
 	"log/slog"
 	"net/http"
@@ -12,12 +13,18 @@ import (
 func registerDataQualityRuleRoutes(api *gin.RouterGroup, requireAuth gin.HandlerFunc, svc *dataquality.Service, logger *slog.Logger) {
 	g := api.Group("/data-quality-rules", requireAuth)
 	g.GET("/scan", func(c *gin.Context) {
-		result, err := svc.Scan(c.Request.Context(), mustPrincipal(c), dataquality.ScanFilter{
+		ctx, cancel := prepareDataQualityScan(c, logger)
+		defer cancel()
+		result, err := svc.Scan(ctx, mustPrincipal(c), dataquality.ScanFilter{
 			OrganizationID: c.Query("organization_id"),
 			ResourceType:   c.Query("resource_type"),
 			Severity:       c.Query("severity"),
 		}, c.GetString("request_id"), c.ClientIP())
 		if err != nil {
+			if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+				writeAPIError(c, http.StatusGatewayTimeout, "scan_timeout", "质量巡检执行超过 100 秒，请缩小组织或检查对象范围后重试")
+				return
+			}
 			writeDataQualityRuleError(c, logger, err)
 			return
 		}
@@ -26,7 +33,7 @@ func registerDataQualityRuleRoutes(api *gin.RouterGroup, requireAuth gin.Handler
 	g.GET("", func(c *gin.Context) {
 		page, err := parsePageQuery(c)
 		if err != nil {
-			writeAPIError(c, http.StatusBadRequest, "invalid_query", "分页参数不正确，page_size 最大为 100")
+			writeAPIError(c, http.StatusBadRequest, "invalid_query", pageQueryErrorMessage(err))
 			return
 		}
 		result, err := svc.Search(c.Request.Context(), mustPrincipal(c), page)
@@ -67,7 +74,7 @@ func registerDataQualityRuleRoutes(api *gin.RouterGroup, requireAuth gin.Handler
 	issues.GET("", func(c *gin.Context) {
 		page, err := parsePageQuery(c)
 		if err != nil {
-			writeAPIError(c, http.StatusBadRequest, "invalid_query", "分页参数不正确，page_size 最大为 100")
+			writeAPIError(c, http.StatusBadRequest, "invalid_query", pageQueryErrorMessage(err))
 			return
 		}
 		result, summary, err := svc.SearchIssues(c.Request.Context(), mustPrincipal(c), dataquality.IssueFilter{
@@ -89,7 +96,12 @@ func registerDataQualityRuleRoutes(api *gin.RouterGroup, requireAuth gin.Handler
 		result, err := svc.OperateIssuesBatch(c.Request.Context(), mustPrincipal(c), input, c.GetString("request_id"), c.ClientIP())
 		switch {
 		case errors.Is(err, dataquality.ErrInvalid):
-			writeAPIError(c, http.StatusBadRequest, "invalid_batch", "单次请选择 1 至 200 个问题，并检查批量动作、整改负责人和处理说明")
+			message := "单次请选择 1 至 200 个问题，并检查批量动作、整改负责人和处理说明"
+			var validation *dataquality.IssueValidationError
+			if errors.As(err, &validation) {
+				message = validation.Message
+			}
+			writeAPIError(c, http.StatusBadRequest, "invalid_batch", message)
 		case err != nil:
 			writeDataQualityIssueError(c, logger, err)
 		default:
@@ -100,7 +112,7 @@ func registerDataQualityRuleRoutes(api *gin.RouterGroup, requireAuth gin.Handler
 	issues.GET("/:id/assignees", func(c *gin.Context) {
 		page, err := parsePageQuery(c)
 		if err != nil {
-			writeAPIError(c, http.StatusBadRequest, "invalid_query", "分页参数不正确，page_size 最大为 100")
+			writeAPIError(c, http.StatusBadRequest, "invalid_query", pageQueryErrorMessage(err))
 			return
 		}
 		result, err := svc.SearchIssueAssignees(c.Request.Context(), mustPrincipal(c), c.Param("id"), page)
@@ -113,7 +125,7 @@ func registerDataQualityRuleRoutes(api *gin.RouterGroup, requireAuth gin.Handler
 	issues.GET("/:id/events", func(c *gin.Context) {
 		page, err := parsePageQuery(c)
 		if err != nil {
-			writeAPIError(c, http.StatusBadRequest, "invalid_query", "分页参数不正确，page_size 最大为 100")
+			writeAPIError(c, http.StatusBadRequest, "invalid_query", pageQueryErrorMessage(err))
 			return
 		}
 		result, err := svc.SearchIssueEvents(c.Request.Context(), mustPrincipal(c), c.Param("id"), page)
@@ -192,7 +204,7 @@ func registerDataQualityRuleRoutes(api *gin.RouterGroup, requireAuth gin.Handler
 	batches.GET("", func(c *gin.Context) {
 		page, err := parsePageQuery(c)
 		if err != nil {
-			writeAPIError(c, http.StatusBadRequest, "invalid_query", "分页参数不正确，page_size 最大为 100")
+			writeAPIError(c, http.StatusBadRequest, "invalid_query", pageQueryErrorMessage(err))
 			return
 		}
 		result, err := svc.SearchScanBatches(c.Request.Context(), mustPrincipal(c), page)
@@ -215,7 +227,12 @@ func writeDataQualityRuleError(c *gin.Context, logger *slog.Logger, err error) {
 	case errors.Is(err, dataquality.ErrInvalidTransition):
 		writeAPIError(c, http.StatusConflict, "invalid_status_transition", "当前数据质量问题状态不允许执行此操作")
 	case errors.Is(err, dataquality.ErrInvalid):
-		writeAPIError(c, http.StatusBadRequest, "invalid_data_quality_request", "请检查规则、筛选条件或问题处理内容")
+		message := "请检查规则、筛选条件或问题处理内容"
+		var validation *dataquality.RuleValidationError
+		if errors.As(err, &validation) {
+			message = validation.Message
+		}
+		writeAPIError(c, http.StatusBadRequest, "invalid_data_quality_request", message)
 	default:
 		logger.Error("data quality rule", "error", err, "request_id", c.GetString("request_id"))
 		writeAPIError(c, http.StatusInternalServerError, "internal_error", "处理数据质量规则失败")
@@ -231,7 +248,12 @@ func writeDataQualityIssueError(c *gin.Context, logger *slog.Logger, err error) 
 	case errors.Is(err, dataquality.ErrInvalidTransition):
 		writeAPIError(c, http.StatusConflict, "invalid_status_transition", "当前数据质量问题状态不允许执行此操作")
 	case errors.Is(err, dataquality.ErrInvalid):
-		writeAPIError(c, http.StatusBadRequest, "invalid_data_quality_issue_request", "请检查问题筛选条件、整改负责人或处理说明")
+		message := "请检查问题筛选条件、整改负责人或处理说明"
+		var validation *dataquality.IssueValidationError
+		if errors.As(err, &validation) {
+			message = validation.Message
+		}
+		writeAPIError(c, http.StatusBadRequest, "invalid_data_quality_issue_request", message)
 	default:
 		logger.Error("data quality issue", "error", err, "request_id", c.GetString("request_id"))
 		writeAPIError(c, http.StatusInternalServerError, "internal_error", "处理数据质量问题失败")

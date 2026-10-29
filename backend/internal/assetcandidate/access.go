@@ -80,7 +80,7 @@ func normalizePolicyTypes(in []string) ([]string, error) {
 			continue
 		}
 		if !validPolicyAssetType(t) {
-			return nil, ErrInvalid
+			return nil, invalidInput("自助确认策略的资产类型仅支持 IP、域名、URL 和主机名")
 		}
 		if seen[t] {
 			continue
@@ -134,7 +134,10 @@ func (s *Service) SetSelfServicePolicy(ctx context.Context, principal auth.Princ
 	}
 	in.OrganizationID = strings.TrimSpace(in.OrganizationID)
 	if in.OrganizationID == "" {
-		return SelfServicePolicy{}, ErrInvalid
+		return SelfServicePolicy{}, invalidInput("请选择自助确认策略所属组织")
+	}
+	if !candidateUUIDPattern.MatchString(in.OrganizationID) {
+		return SelfServicePolicy{}, invalidInput("自助确认策略的组织标识格式不正确")
 	}
 	types, err := normalizePolicyTypes(in.AllowedAssetTypes)
 	if err != nil {

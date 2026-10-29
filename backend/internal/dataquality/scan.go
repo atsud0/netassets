@@ -84,10 +84,14 @@ func (s *Service) scan(ctx context.Context, actorUserID string, filter ScanFilte
 	filter.OrganizationID = strings.TrimSpace(filter.OrganizationID)
 	filter.ResourceType = strings.TrimSpace(filter.ResourceType)
 	filter.Severity = strings.TrimSpace(filter.Severity)
-	if (filter.OrganizationID != "" && !scanUUIDPattern.MatchString(filter.OrganizationID)) ||
-		(filter.ResourceType != "" && filter.ResourceType != "asset" && filter.ResourceType != "business_system") ||
-		(filter.Severity != "" && filter.Severity != "error" && filter.Severity != "warning") {
-		return ScanResult{}, ErrInvalid
+	if filter.OrganizationID != "" && !scanUUIDPattern.MatchString(filter.OrganizationID) {
+		return ScanResult{}, invalidRule("检测组织：请选择有效的组织")
+	}
+	if filter.ResourceType != "" && filter.ResourceType != "asset" && filter.ResourceType != "business_system" {
+		return ScanResult{}, invalidRule("检查对象：请选择网络资产或业务系统")
+	}
+	if filter.Severity != "" && filter.Severity != "error" && filter.Severity != "warning" {
+		return ScanResult{}, invalidRule("问题级别：请选择错误或警告")
 	}
 	if filter.OrganizationID != "" {
 		var exists bool
@@ -95,7 +99,7 @@ func (s *Service) scan(ctx context.Context, actorUserID string, filter ScanFilte
 			return ScanResult{}, fmt.Errorf("validate scan organization: %w", err)
 		}
 		if !exists {
-			return ScanResult{}, ErrInvalid
+			return ScanResult{}, invalidRule("检测组织：组织不存在或已停用，请重新选择")
 		}
 	}
 	if trigger.Type == "" {
@@ -105,6 +109,19 @@ func (s *Service) scan(ctx context.Context, actorUserID string, filter ScanFilte
 		(trigger.Type == scanTriggerManual && trigger.ScheduledFor != "") ||
 		(trigger.Type == scanTriggerScheduled && trigger.ScheduledFor == "") {
 		return ScanResult{}, ErrInvalid
+	}
+	if trigger.Type == scanTriggerScheduled {
+		// A restart must not refresh external observations (potentially minutes of
+		// network I/O under the backup write gate) for an already completed day.
+		// This is only a fast path: keep the advisory lock and completion check
+		// below because another instance may finish while we refresh.
+		var completed bool
+		if err := s.pool.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM data_quality_scan_batches WHERE trigger_type='scheduled' AND scheduled_for=$1::date)`, trigger.ScheduledFor).Scan(&completed); err != nil {
+			return ScanResult{}, fmt.Errorf("check completed scheduled data quality scan before refresh: %w", err)
+		}
+		if completed {
+			return ScanResult{}, errScheduledScanCompleted
+		}
 	}
 	externalRefresh, err := s.refreshExternalObservations(ctx, filter, trigger)
 	if err != nil {
@@ -174,42 +191,14 @@ func (s *Service) scan(ctx context.Context, actorUserID string, filter ScanFilte
 		if err != nil {
 			return ScanResult{}, fmt.Errorf("scan data quality rule %s (%s): %w", rule.ID, rule.RuleName, err)
 		}
-		for _, issue := range issues {
-			var issueID string
-			err := tx.QueryRow(ctx, `
-				INSERT INTO data_quality_issues(
-					rule_id,resource_type,resource_id,resource_name,organization_id,organization_code,organization_name,
-					rule_name,target_field,severity,status,first_detected_batch_id,last_detected_batch_id,updated_by
-				) VALUES($1::uuid,$2,$3::uuid,$4,$5::uuid,$6,$7,$8,$9,$10,'pending',$11::uuid,$11::uuid,$12::uuid)
-				ON CONFLICT(rule_id,resource_type,resource_id,organization_id) DO UPDATE SET
-					resource_name=EXCLUDED.resource_name,organization_code=EXCLUDED.organization_code,
-					organization_name=EXCLUDED.organization_name,rule_name=EXCLUDED.rule_name,
-					target_field=EXCLUDED.target_field,severity=EXCLUDED.severity,
-					last_detected_batch_id=EXCLUDED.last_detected_batch_id,last_detected_at=now(),
-					occurrence_count=data_quality_issues.occurrence_count+1,
-					status=CASE
-						WHEN data_quality_issues.status='closed' THEN 'pending'
-						WHEN data_quality_issues.status='exempted' AND data_quality_issues.exemption_expires_at IS NOT NULL AND data_quality_issues.exemption_expires_at<=now() THEN 'pending'
-						ELSE data_quality_issues.status END,
-					resolution_type=CASE
-						WHEN data_quality_issues.status='closed' OR (data_quality_issues.status='exempted' AND data_quality_issues.exemption_expires_at IS NOT NULL AND data_quality_issues.exemption_expires_at<=now()) THEN NULL
-						ELSE data_quality_issues.resolution_type END,
-					closed_at=CASE WHEN data_quality_issues.status='closed' THEN NULL ELSE data_quality_issues.closed_at END,
-					updated_by=EXCLUDED.updated_by,updated_at=now()
-				RETURNING id::text
-			`, rule.ID, issue.ResourceType, issue.ResourceID, issue.ResourceName, issue.OrganizationID, issue.OrganizationCode, issue.OrganizationName, rule.RuleName, rule.TargetField, rule.Severity, result.BatchID, actorID).Scan(&issueID)
-			if err != nil {
-				return ScanResult{}, fmt.Errorf("persist data quality issue: %w", err)
-			}
-			if _, err := tx.Exec(ctx, `INSERT INTO data_quality_scan_batch_issues(batch_id,issue_id) VALUES($1::uuid,$2::uuid) ON CONFLICT DO NOTHING`, result.BatchID, issueID); err != nil {
-				return ScanResult{}, fmt.Errorf("link data quality scan issue: %w", err)
-			}
-			result.Summary.TotalIssueCount++
-			if rule.Severity == "error" {
-				result.Summary.ErrorCount++
-			} else {
-				result.Summary.WarningCount++
-			}
+		if err := persistScanIssues(ctx, tx, rule, issues, result.BatchID, actorID); err != nil {
+			return ScanResult{}, err
+		}
+		result.Summary.TotalIssueCount += int64(len(issues))
+		if rule.Severity == "error" {
+			result.Summary.ErrorCount += int64(len(issues))
+		} else {
+			result.Summary.WarningCount += int64(len(issues))
 		}
 	}
 
@@ -316,6 +305,54 @@ func scanRulesWith(ctx context.Context, q interface {
 		items = append(items, item)
 	}
 	return items, rows.Err()
+}
+
+func persistScanIssues(ctx context.Context, tx pgx.Tx, rule Rule, issues []ScanIssue, batchID string, actorID any) error {
+	const chunkSize = 500
+	for offset := 0; offset < len(issues); offset += chunkSize {
+		chunk := issues[offset:min(offset+chunkSize, len(issues))]
+		resourceIDs := make([]string, len(chunk))
+		resourceNames := make([]string, len(chunk))
+		organizationIDs := make([]string, len(chunk))
+		organizationCodes := make([]string, len(chunk))
+		organizationNames := make([]string, len(chunk))
+		for index, issue := range chunk {
+			resourceIDs[index] = issue.ResourceID
+			resourceNames[index] = issue.ResourceName
+			organizationIDs[index] = issue.OrganizationID
+			organizationCodes[index] = issue.OrganizationCode
+			organizationNames[index] = issue.OrganizationName
+		}
+		if _, err := tx.Exec(ctx, `
+			WITH persisted AS (
+				INSERT INTO data_quality_issues(
+					rule_id,resource_type,resource_id,resource_name,organization_id,organization_code,organization_name,
+					rule_name,target_field,severity,status,first_detected_batch_id,last_detected_batch_id,updated_by
+				)
+				SELECT $1::uuid,$2,resource_id::uuid,resource_name,organization_id::uuid,organization_code,organization_name,
+				       $8,$9,$10,'pending',$11::uuid,$11::uuid,$12::uuid
+				FROM unnest($3::text[],$4::text[],$5::text[],$6::text[],$7::text[])
+				     AS source(resource_id,resource_name,organization_id,organization_code,organization_name)
+				WHERE true
+				ON CONFLICT(rule_id,resource_type,resource_id,organization_id) DO UPDATE SET
+					resource_name=EXCLUDED.resource_name,organization_code=EXCLUDED.organization_code,
+					organization_name=EXCLUDED.organization_name,rule_name=EXCLUDED.rule_name,
+					target_field=EXCLUDED.target_field,severity=EXCLUDED.severity,
+					last_detected_batch_id=EXCLUDED.last_detected_batch_id,last_detected_at=now(),
+					occurrence_count=data_quality_issues.occurrence_count+1,
+					status=CASE WHEN data_quality_issues.status='closed' THEN 'pending' ELSE data_quality_issues.status END,
+					resolution_type=CASE WHEN data_quality_issues.status='closed' THEN NULL ELSE data_quality_issues.resolution_type END,
+					closed_at=CASE WHEN data_quality_issues.status='closed' THEN NULL ELSE data_quality_issues.closed_at END,
+					updated_by=EXCLUDED.updated_by,updated_at=now()
+				RETURNING id
+			)
+			INSERT INTO data_quality_scan_batch_issues(batch_id,issue_id)
+			SELECT $11::uuid,id FROM persisted ON CONFLICT DO NOTHING
+		`, rule.ID, rule.ResourceType, resourceIDs, resourceNames, organizationIDs, organizationCodes, organizationNames, rule.RuleName, rule.TargetField, rule.Severity, batchID, actorID); err != nil {
+			return fmt.Errorf("persist and link data quality issues: %w", err)
+		}
+	}
+	return nil
 }
 
 func listRuleIssues(ctx context.Context, q interface {

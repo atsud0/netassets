@@ -1,7 +1,9 @@
 <script setup lang="ts">
+import { contactPhoneRule } from '../utils/contact-phone'
 import RowActions from '../components/RowActions.vue'
-import { computed, h, onMounted, reactive, ref } from 'vue'
-import { ElMessage, ElMessageBox, type FormInstance, type FormRules } from 'element-plus'
+import { computed, h, onMounted, reactive, ref, watch } from 'vue'
+import { indexOrganizationTree, visibleOrganizationRows } from '../utils/organization-tree'
+import { ElMessage, ElMessageBox, type FormInstance, type FormRules, type FormItemRule } from 'element-plus'
 import { apiClient, getAPIErrorMessage } from '../api/client'
 import { useAuthStore } from '../stores/auth'
 
@@ -34,6 +36,26 @@ const editDialogVisible = ref(false)
 const structureDialogVisible = ref(false)
 const organizations = ref<Organization[]>([])
 const total = ref(0)
+const organizationQuery = ref('')
+const currentPage = ref(1)
+const pageSize = ref(50)
+const collapsedIDs = ref(new Set<string>())
+const treeIndex = computed(() => indexOrganizationTree(organizations.value))
+const visibleRows = computed(() => visibleOrganizationRows(treeIndex.value, organizationQuery.value, collapsedIDs.value))
+const pageRows = computed(() => visibleRows.value.slice((currentPage.value - 1) * pageSize.value, currentPage.value * pageSize.value))
+watch([organizationQuery, pageSize], () => { currentPage.value = 1 })
+watch(() => visibleRows.value.length, (length) => {
+  currentPage.value = Math.min(currentPage.value, Math.max(1, Math.ceil(length / pageSize.value)))
+})
+function toggleOrganization(id: string) {
+  const next = new Set(collapsedIDs.value)
+  if (next.has(id)) next.delete(id)
+  else next.add(id)
+  collapsedIDs.value = next
+}
+function collapseAllOrganizations() {
+  collapsedIDs.value = new Set(treeIndex.value.filter(entry => entry.row.treeHasChildren).map(entry => entry.row.id))
+}
 const editingOrganization = ref<Organization | null>(null)
 const formRef = ref<FormInstance>()
 const groupFormRef = ref<FormInstance>()
@@ -45,15 +67,31 @@ const editForm = reactive({ name: '', short_name: '', manager: '', contact: '', 
 const structureForm = reactive({ parent_id: '', type: 'subsidiary' as Exclude<OrganizationType, 'group'> })
 
 const typeLabels: Record<OrganizationType, string> = { group: '集团', subsidiary: '子公司', department: '部门', other: '其他' }
-const groupRules: FormRules = { name: [{ required: true, message: '请输入集团名称', trigger: 'blur' }] }
-const editRules: FormRules = { name: [{ required: true, message: '请输入组织名称', trigger: 'blur' }] }
+function organizationTextRule(limit: number, message: string): FormItemRule {
+  return { validator: (_rule, value: string, callback) => callback(Array.from((value ?? '').trim()).length > limit ? new Error(message) : undefined), trigger: 'blur' }
+}
+const organizationInfoRules: FormRules = {
+  contact: [contactPhoneRule],
+  short_name: [organizationTextRule(128, '组织简称最多 128 字')],
+  manager: [organizationTextRule(128, '负责人最多 128 字')],
+  notes: [organizationTextRule(5000, '备注最多 5000 字')],
+}
+const groupRules: FormRules = {
+  ...organizationInfoRules,
+  name: [{ required: true, whitespace: true, message: '请输入集团名称', trigger: 'blur' }, organizationTextRule(255, '集团名称最多 255 字')],
+}
+const editRules: FormRules = {
+  ...organizationInfoRules,
+  name: [{ required: true, whitespace: true, message: '请输入组织名称', trigger: 'blur' }, organizationTextRule(255, '组织名称最多 255 字')],
+}
 const rules: FormRules = {
+  ...organizationInfoRules,
   parent_id: [{ required: true, message: '请选择上级组织', trigger: 'change' }],
   code: [
     { required: true, message: '请输入组织编码', trigger: 'blur' },
     { pattern: /^[A-Za-z0-9][A-Za-z0-9_-]{1,63}$/, message: '使用 2-64 位字母、数字、下划线或横线', trigger: 'blur' },
   ],
-  name: [{ required: true, message: '请输入组织名称', trigger: 'blur' }],
+  name: [{ required: true, whitespace: true, message: '请输入组织名称', trigger: 'blur' }, organizationTextRule(255, '组织名称最多 255 字')],
   type: [{ required: true, message: '请选择组织类型', trigger: 'change' }],
 }
 const structureRules: FormRules = {
@@ -74,7 +112,9 @@ const canManageOrganizations = computed(() => flatOrganizations.value.some((item
 const structureParentOptions = computed(() => {
   const current = editingOrganization.value
   if (!current) return []
-  const excluded = new Set([current.id, ...collectDescendantIDs(current)])
+  // Table rows intentionally omit children; structure validation still uses the full authorized tree.
+  const original = flatOrganizations.value.find(item => item.id === current.id) ?? current
+  const excluded = new Set([current.id, ...collectDescendantIDs(original)])
   return enabledParents.value.filter((item) => !excluded.has(item.id))
 })
 const editEntityLabel = computed(() => editingOrganization.value?.type === 'subsidiary' ? '子公司' : editingOrganization.value?.type === 'department' ? '部门' : '组织')
@@ -116,28 +156,28 @@ function openStructureDialog(item: Organization) {
   structureDialogVisible.value = true
 }
 async function submit() {
-  if (!formRef.value || !await formRef.value.validate()) return
+  if (!formRef.value || !await formRef.value.validate().catch(() => false)) return
   submitting.value = true
   try { await apiClient.post('/organizations', form); ElMessage.success('组织机构已新增'); createDialogVisible.value = false; await loadOrganizations() }
   catch (error) { ElMessage.error(getAPIErrorMessage(error, '新增组织失败')) }
   finally { submitting.value = false }
 }
 async function submitGroupInfo() {
-  if (!groupFormRef.value || !editingOrganization.value || !await groupFormRef.value.validate()) return
+  if (!groupFormRef.value || !editingOrganization.value || !await groupFormRef.value.validate().catch(() => false)) return
   groupSubmitting.value = true
   try { await apiClient.patch(`/organizations/${editingOrganization.value.id}`, groupForm); ElMessage.success('集团基本信息已更新'); groupDialogVisible.value = false; await loadOrganizations() }
   catch (error) { ElMessage.error(getAPIErrorMessage(error, '保存集团信息失败')) }
   finally { groupSubmitting.value = false }
 }
 async function submitOrganizationInfo() {
-  if (!editFormRef.value || !editingOrganization.value || !await editFormRef.value.validate()) return
+  if (!editFormRef.value || !editingOrganization.value || !await editFormRef.value.validate().catch(() => false)) return
   editSubmitting.value = true
   try { await apiClient.patch(`/organizations/${editingOrganization.value.id}`, editForm); ElMessage.success(`${editEntityLabel.value}基本信息已更新`); editDialogVisible.value = false; await loadOrganizations() }
   catch (error) { ElMessage.error(getAPIErrorMessage(error, '保存组织信息失败')) }
   finally { editSubmitting.value = false }
 }
 async function submitStructure() {
-  if (!structureFormRef.value || !editingOrganization.value || !await structureFormRef.value.validate()) return
+  if (!structureFormRef.value || !editingOrganization.value || !await structureFormRef.value.validate().catch(() => false)) return
   structureSubmitting.value = true
   try { await apiClient.patch(`/organizations/${editingOrganization.value.id}/structure`, structureForm); ElMessage.success('组织层级与类型已调整，所属子树已整体迁移'); structureDialogVisible.value = false; await loadOrganizations() }
   catch (error) { ElMessage.error(getAPIErrorMessage(error, '调整组织结构失败')) }
@@ -212,9 +252,18 @@ onMounted(loadOrganizations)
     </div>
 
     <div class="panel data-table-panel organization-tree-panel" v-loading="loading">
-      <div class="panel-title-row"><div><h2>集团组织树</h2><p>展开节点查看完整上下级关系；迁移组织时，其全部下级节点会随组织一起移动。</p></div></div>
-      <el-table :data="organizations" row-key="id" default-expand-all :tree-props="{ children: 'children' }" empty-text="暂无组织机构">
-        <el-table-column label="组织" min-width="250"><template #default="scope"><div class="organization-name-cell"><strong>{{ scope.row.name }}</strong><span v-if="scope.row.short_name">{{ scope.row.short_name }}</span></div></template></el-table-column>
+      <div class="panel-title-row"><div><h2>集团组织树</h2><p>组织按层级分页展示，可搜索名称、编码或简称定位完整路径；迁移组织时，其全部下级节点会随组织一起移动。</p></div></div>
+      <div class="organization-tree-toolbar">
+        <el-input v-model="organizationQuery" aria-label="搜索组织" placeholder="搜索组织名称、编码或简称" clearable />
+        <el-button :disabled="!!organizationQuery.trim()" @click="collapsedIDs = new Set()">展开全部</el-button>
+        <el-button :disabled="!!organizationQuery.trim()" @click="collapseAllOrganizations">收起全部</el-button>
+      </div>
+      <el-table :data="pageRows" row-key="id" empty-text="暂无匹配的组织机构">
+        <el-table-column label="组织" min-width="250"><template #default="scope"><div class="organization-tree-node" :style="{ paddingLeft: `${Math.min(scope.row.treeDepth, 6) * 16}px` }">
+          <button v-if="scope.row.treeHasChildren" class="organization-tree-toggle" :aria-label="`${scope.row.treeExpanded ? '收起' : '展开'}：${scope.row.name}`" :aria-expanded="scope.row.treeExpanded" :disabled="!!organizationQuery.trim()" @click="toggleOrganization(scope.row.id)">{{ scope.row.treeExpanded ? '▾' : '▸' }}</button>
+          <span v-else class="organization-tree-spacer" aria-hidden="true"></span>
+          <div class="organization-name-cell"><strong :title="scope.row.name">{{ scope.row.name }}</strong><span v-if="scope.row.short_name" :title="scope.row.short_name">{{ scope.row.short_name }}</span><span v-if="scope.row.treePath.length" class="organization-tree-path" :title="scope.row.treePath.join(' / ')">{{ scope.row.treePath.join(' / ') }}</span></div>
+        </div></template></el-table-column>
 
         <el-table-column label="类型" width="100"><template #default="scope"><el-tag effect="plain">{{ typeLabels[scope.row.type as OrganizationType] }}</el-tag></template></el-table-column>
         <el-table-column label="负责人 / 联系方式" min-width="180"><template #default="scope"><div class="organization-contact-cell"><span>{{ scope.row.manager || '未填写负责人' }}</span><small>{{ scope.row.contact || '未填写联系方式' }}</small></div></template></el-table-column>
@@ -235,13 +284,14 @@ onMounted(loadOrganizations)
           </div>
         </RowActions></template></el-table-column>
       </el-table>
+      <el-pagination v-model:current-page="currentPage" v-model:page-size="pageSize" :total="visibleRows.length" :page-sizes="[25, 50, 100]" layout="total, sizes, prev, pager, next, jumper" />
     </div>
 
     <el-dialog v-model="groupDialogVisible" title="编辑集团基本信息" width="620px" destroy-on-close @closed="editingOrganization = null">
       <el-form ref="groupFormRef" :model="groupForm" :rules="groupRules" label-position="top"><div class="form-grid two-columns">
-        <el-form-item label="集团名称" prop="name"><el-input v-model="groupForm.name" maxlength="255" placeholder="请输入集团完整名称" /></el-form-item><el-form-item label="集团简称"><el-input v-model="groupForm.short_name" maxlength="128" /></el-form-item>
-        <el-form-item label="集团负责人"><el-input v-model="groupForm.manager" maxlength="128" /></el-form-item><el-form-item label="联系方式"><el-input v-model="groupForm.contact" maxlength="255" /></el-form-item>
-        <el-form-item label="集团说明" class="full-span"><el-input v-model="groupForm.notes" type="textarea" :rows="3" maxlength="5000" show-word-limit /></el-form-item>
+        <el-form-item label="集团名称" prop="name"><el-input v-model="groupForm.name" placeholder="请输入集团完整名称" /></el-form-item><el-form-item label="集团简称" prop="short_name"><el-input v-model="groupForm.short_name" /></el-form-item>
+        <el-form-item label="集团负责人" prop="manager"><el-input v-model="groupForm.manager" /></el-form-item><el-form-item label="联系方式" prop="contact"><el-input v-model="groupForm.contact" maxlength="64" /></el-form-item>
+        <el-form-item label="集团说明" prop="notes" class="full-span"><el-input v-model="groupForm.notes" type="textarea" :rows="3" /></el-form-item>
       </div></el-form><template #footer><el-button @click="groupDialogVisible = false">取消</el-button><el-button type="primary" :loading="groupSubmitting" @click="submitGroupInfo">保存集团信息</el-button></template>
     </el-dialog>
 
@@ -249,9 +299,9 @@ onMounted(loadOrganizations)
       <el-alert :title="auth.isGroupAdmin ? '组织编码不随基本信息修改；上级组织和组织类型请使用“调整结构”。' : '可维护组织名称、简称、负责人、联系方式和备注；组织编码、上级组织和组织类型由集团管理员维护。'" type="info" :closable="false" show-icon />
       <div v-if="editingOrganization" class="organization-system-field"><span>组织编码（系统字段）</span><code>{{ editingOrganization.code }}</code></div>
       <el-form ref="editFormRef" :model="editForm" :rules="editRules" label-position="top" class="dialog-form-with-alert"><div class="form-grid two-columns">
-        <el-form-item label="组织名称" prop="name"><el-input v-model="editForm.name" maxlength="255" /></el-form-item><el-form-item label="组织简称"><el-input v-model="editForm.short_name" maxlength="128" /></el-form-item>
-        <el-form-item label="负责人"><el-input v-model="editForm.manager" maxlength="128" /></el-form-item><el-form-item label="联系方式"><el-input v-model="editForm.contact" maxlength="255" /></el-form-item>
-        <el-form-item label="备注" class="full-span"><el-input v-model="editForm.notes" type="textarea" :rows="3" maxlength="5000" show-word-limit /></el-form-item>
+        <el-form-item label="组织名称" prop="name"><el-input v-model="editForm.name" /></el-form-item><el-form-item label="组织简称" prop="short_name"><el-input v-model="editForm.short_name" /></el-form-item>
+        <el-form-item label="负责人" prop="manager"><el-input v-model="editForm.manager" /></el-form-item><el-form-item label="联系方式" prop="contact"><el-input v-model="editForm.contact" maxlength="64" /></el-form-item>
+        <el-form-item label="备注" prop="notes" class="full-span"><el-input v-model="editForm.notes" type="textarea" :rows="3" /></el-form-item>
       </div></el-form><template #footer><el-button @click="editDialogVisible = false">取消</el-button><el-button type="primary" :loading="editSubmitting" @click="submitOrganizationInfo">保存基本信息</el-button></template>
     </el-dialog>
 
@@ -268,15 +318,26 @@ onMounted(loadOrganizations)
       <el-form ref="formRef" :model="form" :rules="rules" label-position="top"><div class="form-grid two-columns">
         <el-form-item label="上级组织" prop="parent_id"><el-select v-model="form.parent_id" filterable style="width:100%" placeholder="请选择"><el-option v-for="item in enabledParents" :key="item.id" :label="parentOptionLabel(item)" :value="item.id" /></el-select></el-form-item>
         <el-form-item label="组织类型" prop="type"><el-select v-model="form.type" style="width:100%"><el-option label="子公司" value="subsidiary" /><el-option label="部门" value="department" /><el-option label="其他" value="other" /></el-select></el-form-item>
-        <el-form-item label="组织编码" prop="code"><el-input v-model="form.code" maxlength="64" placeholder="如：SUBSIDIARY_01" /><div class="muted-text">系统字段，用于接口关联和数据去重；组织列表不显示。</div></el-form-item><el-form-item label="组织名称" prop="name"><el-input v-model="form.name" maxlength="255" placeholder="请输入完整名称" /></el-form-item>
-        <el-form-item label="组织简称"><el-input v-model="form.short_name" maxlength="128" /></el-form-item><el-form-item label="负责人"><el-input v-model="form.manager" maxlength="128" /></el-form-item>
-        <el-form-item label="联系方式" class="full-span"><el-input v-model="form.contact" maxlength="255" /></el-form-item><el-form-item label="备注" class="full-span"><el-input v-model="form.notes" type="textarea" :rows="3" maxlength="5000" show-word-limit /></el-form-item>
+        <el-form-item label="组织编码" prop="code"><el-input v-model="form.code" maxlength="64" placeholder="如：SUBSIDIARY_01" /><div class="muted-text">系统字段，用于接口关联和数据去重；组织列表不显示。</div></el-form-item><el-form-item label="组织名称" prop="name"><el-input v-model="form.name" placeholder="请输入完整名称" /></el-form-item>
+        <el-form-item label="组织简称" prop="short_name"><el-input v-model="form.short_name" /></el-form-item><el-form-item label="负责人" prop="manager"><el-input v-model="form.manager" /></el-form-item>
+        <el-form-item label="联系方式" prop="contact" class="full-span"><el-input v-model="form.contact" maxlength="64" /></el-form-item><el-form-item label="备注" prop="notes" class="full-span"><el-input v-model="form.notes" type="textarea" :rows="3" /></el-form-item>
       </div></el-form><template #footer><el-button @click="createDialogVisible = false">取消</el-button><el-button type="primary" :loading="submitting" @click="submit">确认新增</el-button></template>
     </el-dialog>
   </section>
 </template>
 
 <style scoped>
+.organization-tree-toolbar { display:flex; gap:12px; flex-wrap:wrap; margin-bottom:16px; }
+.organization-tree-toolbar :deep(.el-input) { width:320px; max-width:100%; }
+.organization-tree-node { display:flex; align-items:flex-start; min-width:0; }
+.organization-tree-toggle,.organization-tree-spacer { flex:0 0 24px; width:24px; height:24px; }
+.organization-tree-toggle { border:0; background:transparent; color:var(--el-text-color-primary); cursor:pointer; font-size:16px; }
+.organization-tree-toggle:focus-visible { outline:2px solid var(--el-color-primary); outline-offset:-2px; }
+.organization-tree-toggle:disabled { cursor:default; }
+.organization-tree-path { font-size:12px; }
+.organization-tree-panel :deep(.el-pagination) { margin-top:16px; flex-wrap:wrap; row-gap:8px; }
+.organization-name-cell { min-width: 0; overflow: hidden; }
+.organization-name-cell strong, .organization-name-cell span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .group-overview { display:flex; align-items:center; justify-content:space-between; gap:24px; margin-bottom:16px; }
 .group-overview h2 { margin:4px 0 6px; }.group-overview p { margin:0; color:var(--text-muted); }
 .group-overview-actions { display:flex; align-items:center; gap:12px; flex-wrap:wrap; }.panel-kicker { color:var(--brand); font-size:12px; font-weight:700; letter-spacing:.08em; }

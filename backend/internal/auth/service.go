@@ -16,7 +16,6 @@ import (
 	"golang.org/x/crypto/bcrypt"
 
 	"netassets/internal/pagination"
-	"netassets/internal/textlength"
 )
 
 const (
@@ -236,12 +235,9 @@ func (s *Service) Authenticate(ctx context.Context, token string) (Principal, er
 // UpdateProfile allows a signed-in user to maintain only their own basic contact
 // information. Authorization assignments deliberately remain in the user-management domain.
 func (s *Service) UpdateProfile(ctx context.Context, principal Principal, input ProfileInput, requestID, ipAddress string) (Principal, error) {
-	input.DisplayName = strings.TrimSpace(input.DisplayName)
-	input.Email = strings.TrimSpace(input.Email)
-	input.MobilePhone = strings.TrimSpace(input.MobilePhone)
-	input.OfficePhone = strings.TrimSpace(input.OfficePhone)
-	if input.DisplayName == "" || textlength.Count(input.DisplayName) > 128 || textlength.Count(input.Email) > 255 || textlength.Count(input.MobilePhone) > 64 || textlength.Count(input.OfficePhone) > 64 {
-		return Principal{}, ErrInvalid
+	input, err := normalizeProfileInput(input)
+	if err != nil {
+		return Principal{}, err
 	}
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
@@ -270,8 +266,8 @@ func (s *Service) UpdateProfile(ctx context.Context, principal Principal, input 
 // ChangePassword verifies the current password and keeps only the current session
 // alive. This protects other devices while not interrupting the user who changed it.
 func (s *Service) ChangePassword(ctx context.Context, principal Principal, input ChangePasswordInput, requestID, ipAddress string) error {
-	if input.CurrentPassword == "" || textlength.Count(input.NewPassword) < 10 {
-		return ErrInvalid
+	if err := validatePasswordChange(input); err != nil {
+		return err
 	}
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {

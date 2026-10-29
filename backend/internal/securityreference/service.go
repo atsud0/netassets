@@ -11,6 +11,7 @@ import (
 
 	"netassets/internal/auth"
 	"netassets/internal/pagination"
+	"netassets/internal/textlength"
 )
 
 var (
@@ -97,10 +98,10 @@ func canRead(principal auth.Principal) bool {
 func validateFilter(filter Filter) error {
 	filter.OrganizationID = strings.TrimSpace(filter.OrganizationID)
 	if filter.OrganizationID != "" && !uuidPattern.MatchString(filter.OrganizationID) {
-		return ErrInvalid
+		return invalidInput("组织标识不正确")
 	}
-	if len(strings.TrimSpace(filter.Keyword)) > 200 {
-		return ErrInvalid
+	if textlength.Count(strings.TrimSpace(filter.Keyword)) > 200 {
+		return invalidInput("搜索关键词最多 200 字")
 	}
 	return nil
 }
@@ -124,18 +125,7 @@ func normalizeAssetSelection(input *AssetSelectionInput) {
 }
 
 func validAssetSelection(input AssetSelectionInput) bool {
-	if input.Dimension != "organization" && input.Dimension != "business_system" && input.Dimension != "network_area" {
-		return false
-	}
-	if len(input.IDs) < 1 || len(input.IDs) > maxSelectionIDs {
-		return false
-	}
-	for _, id := range input.IDs {
-		if !uuidPattern.MatchString(id) {
-			return false
-		}
-	}
-	return true
+	return validateAssetSelection(input) == nil
 }
 
 func (s *Service) SearchOrganizations(ctx context.Context, principal auth.Principal, filter Filter) (pagination.Result[Organization], error) {
@@ -246,8 +236,8 @@ func (s *Service) ResolvePublicAssets(ctx context.Context, principal auth.Princi
 		return AssetSelectionResult{}, ErrForbidden
 	}
 	normalizeAssetSelection(&input)
-	if !validAssetSelection(input) {
-		return AssetSelectionResult{}, ErrInvalid
+	if err := validateAssetSelection(input); err != nil {
+		return AssetSelectionResult{}, err
 	}
 	predicate := ""
 	switch input.Dimension {

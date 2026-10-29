@@ -4,6 +4,7 @@ import { computed, onMounted, reactive, ref } from 'vue'
 import { ElMessage, ElMessageBox, type FormInstance, type FormRules } from 'element-plus'
 import { apiClient, getAPIErrorMessage } from '../api/client'
 import { useAuthStore } from '../stores/auth'
+import { loadOptions } from '../api/remediation'
 
 interface Organization { id: string; code: string; name: string; type: string; status: string }
 interface Permission { key: string; name: string; description?: string }
@@ -59,12 +60,31 @@ const userForm = reactive({ username: '', password: '', display_name: '', email:
 const roleForm = reactive({ key: '', name: '', description: '', status: 'enabled' as 'enabled' | 'disabled', permission_keys: [] as string[] })
 const userRules: FormRules = {
   username: [{ required: true, message: '请输入用户名', trigger: 'blur' }, { pattern: /^[A-Za-z0-9][A-Za-z0-9_.-]{2,63}$/, message: '用户名为 3-64 位字母、数字、._-', trigger: 'blur' }],
-  password: [{ validator: (_rule, value, callback) => editingUser.value || String(value).length >= 10 ? callback() : callback(new Error('初始密码至少 10 位')), trigger: 'blur' }],
-  display_name: [{ required: true, message: '请输入姓名', trigger: 'blur' }],
+  password: [{ validator: (_rule, value, callback) => callback(editingUser.value ? undefined : passwordError(String(value ?? ''), '初始密码')), trigger: 'blur' }],
+  display_name: [{ validator: (_rule, value, callback) => {
+    const name = String(value ?? '').trim()
+    callback(!name ? new Error('请输入姓名') : Array.from(name).length > 128 ? new Error('姓名最多 128 字') : undefined)
+  }, trigger: 'blur' }],
+  email: [{ validator: (_rule, value, callback) => callback(textFieldError(value, '邮箱', 255)), trigger: 'blur' }],
+  mobile_phone: [{ validator: (_rule, value, callback) => callback(textFieldError(value, '手机号码', 64)), trigger: 'blur' }],
+  office_phone: [{ validator: (_rule, value, callback) => callback(textFieldError(value, '办公电话', 64)), trigger: 'blur' }],
+}
+function textFieldError(value: unknown, label: string, limit: number) {
+  return Array.from(String(value ?? '').trim()).length > limit ? new Error(`${label}最多 ${limit} 字`) : undefined
+}
+function passwordError(password: string, label: string) {
+  if (Array.from(password).length < 10) return new Error(`${label}至少 10 位`)
+  if (new TextEncoder().encode(password).length > 72) return new Error(`${label}最多 72 字节`)
+  return undefined
 }
 const roleRules: FormRules = {
   key: [{ required: true, message: '请输入角色编码', trigger: 'blur' }, { pattern: /^[a-z][a-z0-9_]{2,63}$/, message: '使用 3-64 位小写字母、数字或下划线', trigger: 'blur' }],
-  name: [{ required: true, message: '请输入角色名称', trigger: 'blur' }],
+  name: [{ validator: (_rule, value: string, callback) => {
+    const name = (value ?? '').trim()
+    callback(!name ? new Error('请输入角色名称') : Array.from(name).length > 128 ? new Error('角色名称最多 128 字') : undefined)
+  }, trigger: 'blur' }],
+  description: [{ validator: (_rule, value: string, callback) => callback(Array.from((value ?? '').trim()).length > 5000 ? new Error('角色说明最多 5000 字') : undefined), trigger: 'blur' }],
+  permission_keys: [{ type: 'array', required: true, min: 1, message: '请至少选择一项权限', trigger: 'change' }],
 }
 
 const isGroupAdmin = computed(() => auth.isGroupAdmin)
@@ -137,8 +157,8 @@ async function load() {
   loading.value = true
   try {
     const requests: Promise<unknown>[] = [
-      apiClient.get<ListResponse<Organization>>('/users/manageable-organizations', { params: { page: 1, page_size: 100 } })
-        .then((response) => { organizations.value = response.data.items }),
+      loadOptions<Organization>('/users/manageable-organizations')
+        .then((items) => { organizations.value = items }),
       loadRoleOptions(),
     ]
     permissions.value = []
@@ -222,14 +242,30 @@ async function openUserDetail(item: UserItem) {
     detailLoading.value = false
   }
 }
-function validAppointments() {
-  if (!userForm.appointments.length) return canOmitAppointments.value
-  if (userForm.appointments.filter((item) => item.is_primary).length !== 1) return false
+function appointmentError() {
+  if (!userForm.appointments.length) return canOmitAppointments.value ? '' : '请至少配置一个组织任职，或选择集团范围角色'
   const ids = new Set<string>()
-  return userForm.appointments.every((item) => item.organization_id && !ids.has(item.organization_id) && (ids.add(item.organization_id), item.assignments.length > 0 && item.assignments.every((assignment) => assignment.role_id && assignment.data_scope)))
+  for (const [index, item] of userForm.appointments.entries()) {
+    const label = `第 ${index + 1} 个任职组织`
+    if (!item.organization_id) return `${label}不能为空`
+    if (ids.has(item.organization_id)) return `${label}重复，请选择不同组织`
+    ids.add(item.organization_id)
+    if (!item.assignments.length) return `${label}至少需要一个组织角色`
+    const roleIDs = new Set<string>()
+    for (const assignment of item.assignments) {
+      if (!assignment.role_id) return `${label}请选择组织角色`
+      if (roleIDs.has(assignment.role_id)) return `${label}的组织角色重复`
+      roleIDs.add(assignment.role_id)
+      if (!['organization', 'organization_and_descendants', 'owned'].includes(assignment.data_scope)) return `${label}请选择有效的数据范围`
+    }
+  }
+  if (userForm.appointments.filter(item => item.is_primary).length !== 1) return '组织任职必须且只能设置一个主组织'
+  return ''
 }
 async function submitUser() {
-  if (!userFormRef.value || !(await userFormRef.value.validate()) || !validAppointments()) { ElMessage.warning('请完整设置集团角色，或设置组织任职、主组织和组织角色'); return }
+  if (!userFormRef.value || !(await userFormRef.value.validate().catch(() => false))) return
+  const message = appointmentError()
+  if (message) { ElMessage.warning(message); return }
   submitting.value = true
   try {
     const payload = { display_name: userForm.display_name, email: userForm.email, mobile_phone: userForm.mobile_phone, office_phone: userForm.office_phone, global_role_ids: isGroupAdmin.value ? userForm.global_role_ids : [], appointments: userForm.appointments }
@@ -252,7 +288,7 @@ async function changeStatus(item: UserItem) {
 }
 async function resetPassword(item: UserItem) {
   try {
-    const result = await ElMessageBox.prompt(`请设置“${item.display_name}”的临时密码（至少 10 位）。重置后原会话立即失效，用户下次登录必须修改密码。`, '重置密码', { inputType: 'password', inputPattern: /^.{10,}$/, inputErrorMessage: '密码至少 10 位' })
+    const result = await ElMessageBox.prompt(`请设置“${item.display_name}”的临时密码（至少 10 位，最多 72 字节）。重置后原会话立即失效，用户下次登录必须修改密码。`, '重置密码', { inputType: 'password', inputValidator: value => passwordError(value, '临时密码')?.message ?? true })
     await apiClient.post(`/users/${item.id}/reset-password`, { password: result.value })
     ElMessage.success('临时密码已设置，用户下次登录必须修改密码')
   } catch (error) { if (error !== 'cancel' && error !== 'close') ElMessage.error(getAPIErrorMessage(error, '重置密码失败')) }
@@ -261,7 +297,7 @@ async function resetPassword(item: UserItem) {
 function openCreateRole() { editingRole.value = null; Object.assign(roleForm, { key: '', name: '', description: '', status: 'enabled', permission_keys: [] }); roleDialogVisible.value = true }
 function openEditRole(item: Role) { if (item.is_system) return; editingRole.value = item; Object.assign(roleForm, { key: item.key, name: item.name, description: item.description ?? '', status: item.status, permission_keys: item.permissions.map((permission) => permission.key) }); roleDialogVisible.value = true }
 async function submitRole() {
-  if (!roleFormRef.value || !(await roleFormRef.value.validate()) || !roleForm.permission_keys.length) { ElMessage.warning('请至少选择一项权限'); return }
+  if (!roleFormRef.value || !(await roleFormRef.value.validate().catch(() => false))) return
   roleSubmitting.value = true
   try {
     const payload = { ...roleForm }
@@ -373,7 +409,7 @@ onMounted(load)
 
     <el-dialog v-model="userDialogVisible" :title="userDialogTitle" width="780px" destroy-on-close>
       <el-form ref="userFormRef" :model="userForm" :rules="userRules" label-position="top">
-        <div class="form-grid two-columns"><el-form-item label="用户名" prop="username"><el-input v-model="userForm.username" :disabled="!!editingUser" /></el-form-item><el-form-item v-if="!editingUser" label="临时密码" prop="password"><el-input v-model="userForm.password" type="password" show-password /></el-form-item><el-form-item label="姓名" prop="display_name"><el-input v-model="userForm.display_name" maxlength="128" /></el-form-item><el-form-item label="邮箱"><el-input v-model="userForm.email" maxlength="255" /></el-form-item><el-form-item label="手机号码"><el-input v-model="userForm.mobile_phone" maxlength="64" /></el-form-item><el-form-item label="办公电话"><el-input v-model="userForm.office_phone" maxlength="64" /></el-form-item></div>
+        <div class="form-grid two-columns"><el-form-item label="用户名" prop="username"><el-input v-model="userForm.username" :disabled="!!editingUser" /></el-form-item><el-form-item v-if="!editingUser" label="临时密码" prop="password"><el-input v-model="userForm.password" type="password" show-password /></el-form-item><el-form-item label="姓名" prop="display_name"><el-input v-model="userForm.display_name" /></el-form-item><el-form-item label="邮箱" prop="email"><el-input v-model="userForm.email" /></el-form-item><el-form-item label="手机号码" prop="mobile_phone"><el-input v-model="userForm.mobile_phone" /></el-form-item><el-form-item label="办公电话" prop="office_phone"><el-input v-model="userForm.office_phone" /></el-form-item></div>
         <el-form-item v-if="isGroupAdmin && groupRoles.length" label="集团范围角色"><el-checkbox-group v-model="userForm.global_role_ids"><el-checkbox v-for="role in groupRoles" :key="role.id" :label="role.id">{{ role.name }}</el-checkbox></el-checkbox-group><div class="form-hint">集团角色适用于全集团。仅承担集团安全运营等集团职责的账号可不配置组织任职，避免额外获得子公司岗位权限。</div></el-form-item>
         <div class="appointment-header"><strong>组织任职与角色{{ isGroupAdmin ? '（集团角色账号可选）' : '' }}</strong><el-button size="small" plain type="primary" :disabled="eligibleOrganizations.length === 0" @click="addAppointment">新增任职组织</el-button></div>
         <el-alert v-if="userForm.appointments.length === 0" :title="canOmitAppointments ? '当前账号仅授予集团范围角色，不附加任何组织岗位权限。' : '未选择集团范围角色时，至少需要配置一个组织任职。'" :type="canOmitAppointments ? 'info' : 'warning'" :closable="false" show-icon class="appointment-empty-alert" />
@@ -382,7 +418,7 @@ onMounted(load)
       <template #footer><el-button @click="userDialogVisible=false">取消</el-button><el-button type="primary" :loading="submitting" @click="submitUser">保存</el-button></template>
     </el-dialog>
 
-    <el-dialog v-if="isGroupAdmin" v-model="roleDialogVisible" :title="roleDialogTitle" width="700px" destroy-on-close><el-form ref="roleFormRef" :model="roleForm" :rules="roleRules" label-position="top"><div class="form-grid two-columns"><el-form-item label="角色编码" prop="key"><el-input v-model="roleForm.key" :disabled="!!editingRole" placeholder="如：asset_operator" /></el-form-item><el-form-item label="角色名称" prop="name"><el-input v-model="roleForm.name" /></el-form-item><el-form-item label="状态"><el-radio-group v-model="roleForm.status"><el-radio value="enabled">启用</el-radio><el-radio value="disabled">停用</el-radio></el-radio-group></el-form-item></div><el-form-item label="角色说明"><el-input v-model="roleForm.description" type="textarea" :rows="2" maxlength="5000" /></el-form-item><el-form-item label="权限项"><el-checkbox-group v-model="roleForm.permission_keys" class="permission-checkboxes"><el-checkbox v-for="permission in permissions" :key="permission.key" :label="permission.key">{{ permission.name }} <small>{{ permission.key }}</small></el-checkbox></el-checkbox-group></el-form-item></el-form><template #footer><el-button @click="roleDialogVisible=false">取消</el-button><el-button type="primary" :loading="roleSubmitting" @click="submitRole">保存角色</el-button></template></el-dialog>
+    <el-dialog v-if="isGroupAdmin" v-model="roleDialogVisible" :title="roleDialogTitle" width="700px" destroy-on-close><el-form ref="roleFormRef" :model="roleForm" :rules="roleRules" label-position="top"><div class="form-grid two-columns"><el-form-item label="角色编码" prop="key"><el-input v-model="roleForm.key" :disabled="!!editingRole" placeholder="如：asset_operator" /></el-form-item><el-form-item label="角色名称" prop="name"><el-input v-model="roleForm.name" /></el-form-item><el-form-item label="状态"><el-radio-group v-model="roleForm.status"><el-radio value="enabled">启用</el-radio><el-radio value="disabled">停用</el-radio></el-radio-group></el-form-item></div><el-form-item label="角色说明" prop="description"><el-input v-model="roleForm.description" type="textarea" :rows="2" /></el-form-item><el-form-item label="权限项" prop="permission_keys"><el-checkbox-group v-model="roleForm.permission_keys" class="permission-checkboxes"><el-checkbox v-for="permission in permissions" :key="permission.key" :label="permission.key">{{ permission.name }} <small>{{ permission.key }}</small></el-checkbox></el-checkbox-group></el-form-item></el-form><template #footer><el-button @click="roleDialogVisible=false">取消</el-button><el-button type="primary" :loading="roleSubmitting" @click="submitRole">保存角色</el-button></template></el-dialog>
   </section>
 </template>
 

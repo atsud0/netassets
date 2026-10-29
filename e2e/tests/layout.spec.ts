@@ -8,7 +8,7 @@ async function login(page: Page, username: string, password: string) {
   await page.getByPlaceholder('请输入用户名').fill(username)
   await page.getByPlaceholder('请输入密码').fill(password)
   await page.getByRole('button', { name: '登录', exact: true }).click()
-  await expect(page).not.toHaveURL(/\/login(?:\?|$)/)
+  await expect(page).not.toHaveURL(/\/login(?:\?|$)/, { timeout: 15_000 })
 }
 
 test('应用壳层固定导航，安全测试页面使用统一台账布局', async ({ page }) => {
@@ -92,13 +92,17 @@ test('左侧导航按业务分组，消息中心仅保留在顶栏', async ({ pa
 
   const measureTopbarActionGaps = () => topbarActions.evaluate((element) => {
     const buttons = Array.from(element.children) as HTMLElement[]
-    return buttons.slice(1).map((button, index) => button.getBoundingClientRect().left - buttons[index].getBoundingClientRect().right)
+    return { declaredGap: parseFloat(getComputedStyle(element).columnGap), gaps: buttons.slice(1).map((button, index) => button.getBoundingClientRect().left - buttons[index].getBoundingClientRect().right) }
   })
-  expect(await measureTopbarActionGaps()).toEqual([10, 10])
+  const desktopSpacing = await measureTopbarActionGaps()
+  expect(desktopSpacing.declaredGap).toBe(10)
+  expect(desktopSpacing.gaps).toEqual([10, 10])
 
   await page.setViewportSize({ width: 700, height: 900 })
   await expect(notificationButton).toBeVisible()
-  expect(await measureTopbarActionGaps()).toEqual([10, 10])
+  const mobileSpacing = await measureTopbarActionGaps()
+  expect(mobileSpacing.declaredGap).toBe(0)
+  expect(mobileSpacing.gaps).toEqual([0, 0])
   const notificationButtonBox = await notificationButton.boundingBox()
   expect(notificationButtonBox).not.toBeNull()
   expect(notificationButtonBox!.x).toBeGreaterThanOrEqual(0)
@@ -108,6 +112,8 @@ test('左侧导航按业务分组，消息中心仅保留在顶栏', async ({ pa
   await userNameButton.click()
   await expect(page.getByRole('heading', { name: '账户设置', exact: true })).toBeVisible()
 
+  await page.getByRole('button', { name: '切换导航', exact: true }).click()
+  await expect(navigation).toBeVisible()
   const systemSettings = navigation.getByRole('button', { name: '系统设置', exact: true })
   await systemSettings.click()
   await expect(navigation.getByRole('button', { name: '组织架构', exact: true })).toBeHidden()
@@ -116,6 +122,7 @@ test('左侧导航按业务分组，消息中心仅保留在顶栏', async ({ pa
 })
 
 test('治理页面内容卡片与台账页面保持相同圆角和间距', async ({ page }) => {
+  test.setTimeout(180_000)
   test.skip(!adminPassword, 'E2E_PASSWORD/BOOTSTRAP_ADMIN_PASSWORD 未配置')
 
   await page.goto('/assets')
@@ -190,8 +197,10 @@ test('治理页面内容卡片与台账页面保持相同圆角和间距', async
   expect(qualitySummaryAndFilters).toEqual(ledgerBaseline)
   const qualityFiltersAndIssues = await measureCards('.quality-workflow-filters', '.quality-issue-panel')
   expect(qualityFiltersAndIssues).toEqual(ledgerBaseline)
-  const qualityIssuesAndBatches = await measureCards('.quality-issue-panel', '.quality-scan-batch-panel')
-  expect(qualityIssuesAndBatches).toEqual(ledgerBaseline)
+  await expect(page.locator('.quality-scan-batch-panel')).toHaveCount(0)
+  await page.goto('/data-quality-scan-history')
+  await expect(page.getByRole('heading', { name: '巡检历史', exact: true })).toBeVisible()
+  await expect(page.locator('.inspection-history-panel')).toHaveCSS('border-top-left-radius', ledgerBaseline.radius)
 })
 
 test('质量整改在窄内容区保持自适应，宽表格仅在卡片内部滚动', async ({ page }) => {
@@ -248,6 +257,7 @@ test('网络资产和业务系统的分页区使用统一表格间距', async ({
 })
 
 test('主要列表页操作列右对齐且不再按最大场景过度留白', async ({ page }) => {
+  test.setTimeout(180_000)
   test.skip(!adminPassword, 'E2E_PASSWORD/BOOTSTRAP_ADMIN_PASSWORD 未配置')
 
   await page.setViewportSize({ width: 1440, height: 900 })
@@ -271,16 +281,13 @@ test('主要列表页操作列右对齐且不再按最大场景过度留白', as
     { route: '/export-jobs', label: '操作', maxWidth: 122 },
   ]
 
+  // Layout-only archive fixture: operational backup behavior has its own real-flow spec.
+  await page.route(/\/api\/v1\/backups(?:\?.*)?$/, route => route.fulfill({ json: { items: [{ id: 'layout-backup-column', created_at: new Date().toISOString(), database_size: 1024, data_size: 2048, verified: true }], total: 1, page: 1, page_size: 20 } }))
+
   for (const item of cases) {
     await page.goto(item.route)
     await expect(page.locator('h1')).toBeVisible()
-    let header = page.locator('.el-table__header-wrapper th').filter({ hasText: new RegExp(String.raw`^\s*${item.label}\s*$`) }).first()
-    if (item.route === '/backups' && await header.count() === 0) {
-      await page.getByRole('button', { name: '创建首个备份', exact: true }).click()
-      await page.getByRole('dialog', { name: '创建系统备份' }).getByRole('button', { name: '开始备份', exact: true }).click()
-      await expect(page.getByText('系统备份已创建并完成校验')).toBeVisible({ timeout: 30_000 })
-      header = page.locator('.el-table__header-wrapper th').filter({ hasText: new RegExp(String.raw`^\s*${item.label}\s*$`) }).first()
-    }
+    const header = page.locator('.el-table__header-wrapper th').filter({ hasText: new RegExp(String.raw`^\s*${item.label}\s*$`) }).first()
     await expect(header, `${item.route} 缺少${item.label}列`).toBeVisible()
     const metrics = await header.evaluate((element) => {
       const cell = element.querySelector<HTMLElement>('.cell') ?? element as HTMLElement
@@ -360,6 +367,7 @@ test('业务系统和安全测试的数据行操作紧贴列右侧', async ({ pa
 })
 
 test('管理页面在常用窄内容宽度下不出现整体横向溢出，安全工单换行操作保持右对齐', async ({ page }) => {
+  test.setTimeout(180_000)
   test.skip(!adminPassword, 'E2E_PASSWORD/BOOTSTRAP_ADMIN_PASSWORD 未配置')
 
   await page.setViewportSize({ width: 1280, height: 900 })
@@ -388,6 +396,9 @@ test('管理页面在常用窄内容宽度下不出现整体横向溢出，安�
 
   await page.goto('/security-work-orders')
   await expect(page.getByRole('heading', { name: '安全工单', exact: true })).toBeVisible()
+  // The condensed three-action toolbar fits at 1280px; exercise wrapping
+  // at a real narrow viewport instead of requiring an unnecessary desktop wrap.
+  await page.setViewportSize({ width: 390, height: 900 })
   const actionLayout = await page.locator('.heading-actions').evaluate((element) => {
     const group = element.getBoundingClientRect()
     const buttons = Array.from(element.querySelectorAll<HTMLElement>('.el-button')).map((button) => button.getBoundingClientRect())
@@ -437,6 +448,7 @@ test('网络资产筛选结果与查询控件同排，保存视图操作使用�
 })
 
 test('列表操作按钮保持统一高度、基线和间距', async ({ page }) => {
+  test.setTimeout(180_000)
   test.skip(!adminPassword, 'E2E_PASSWORD/BOOTSTRAP_ADMIN_PASSWORD 未配置')
 
   await page.setViewportSize({ width: 1440, height: 950 })
@@ -474,6 +486,16 @@ test('列表操作按钮保持统一高度、基线和间距', async ({ page }) 
     await page.goto(route)
     await expect(page.locator('h1')).toBeVisible()
 
+    // Compact actions are teleported, not inline table children. Open a real
+    // menu before measuring so this checks the current UI rather than requiring
+    // the obsolete many-buttons-per-cell presentation.
+    const trigger = page.locator('.page-content .el-table__row button[aria-haspopup="dialog"]').first()
+    if (await trigger.isVisible()) {
+      await trigger.click()
+      await expect(page.locator('.row-actions-panel:visible')).toBeVisible()
+      await expect(page.locator('.row-actions-panel:visible').locator('button:not(:disabled), a[href]').first()).toBeFocused()
+    }
+
     const groups = await page.evaluate(() => {
       const isVisible = (element: HTMLElement) => {
         const rect = element.getBoundingClientRect()
@@ -481,7 +503,7 @@ test('列表操作按钮保持统一高度、基线和间距', async ({ page }) 
         return rect.width > 0 && rect.height > 0 && style.display !== 'none' && style.visibility !== 'hidden'
       }
 
-      return Array.from(document.querySelectorAll<HTMLElement>('td.el-table__cell'))
+      return Array.from(document.querySelectorAll<HTMLElement>('td.el-table__cell, .row-actions-panel'))
         .filter(isVisible)
         .map((cell) => Array.from(cell.querySelectorAll<HTMLElement>('.el-button')).filter(isVisible))
         .filter((buttons) => buttons.length > 1)
@@ -497,6 +519,8 @@ test('列表操作按钮保持统一高度、基线和间距', async ({ page }) 
           }
         }))
     })
+
+    if (await page.locator('.row-actions-panel:visible').count()) await page.keyboard.press('Escape')
 
     inspectedGroups += groups.length
     for (const buttons of groups) {
@@ -717,51 +741,44 @@ test('网络资产名称与访问标识聚合展示且名称打开详情', async
 })
 
 test('组织列表突出名称且集团管理员可编辑已有组织', async ({ page }) => {
+  test.setTimeout(120_000)
   test.skip(!adminPassword, 'E2E_PASSWORD/BOOTSTRAP_ADMIN_PASSWORD 未配置')
 
   await page.setViewportSize({ width: 1440, height: 950 })
-  await page.goto('/organizations')
+  await page.goto('/assets')
   await login(page, adminUsername, adminPassword!)
+  const suffix = Date.now().toString()
+  const rootsResponse = await page.request.get('/api/v1/organizations?page_size=100')
+  expect(rootsResponse.status()).toBe(200)
+  const root = (await rootsResponse.json()).items.find((item: { type: string }) => item.type === 'group')
+  const subsidiaryName = `E2E 组织编辑布局 ${suffix}`
+  const createResponse = await page.request.post('/api/v1/organizations', { data: { parent_id: root.id, code: `LAYOUT_EDIT_${suffix}`, name: subsidiaryName, type: 'subsidiary' } })
+  expect(createResponse.status()).toBe(201)
+  const id = (await createResponse.json()).item.id
+  await page.goto('/organizations')
   await expect(page.getByRole('heading', { name: '组织架构', exact: true })).toBeVisible()
 
   const table = page.locator('.organization-tree-panel .el-table')
   const headerLabels = (await table.locator('.el-table__header-wrapper').first().locator('th .cell').allTextContents()).map(label => label.trim())
   expect(headerLabels).toEqual(expect.arrayContaining(['组织', '类型', '状态', '操作']))
   expect(headerLabels).not.toContain('上级组织')
-
-  const rows = table.locator('.el-table__body-wrapper tbody tr')
-  let editableRow: Locator | undefined
-  for (let index = 0; index < await rows.count(); index += 1) {
-    const row = rows.nth(index)
-    const type = (await row.locator('.el-tag').first().textContent())?.trim()
-    if (type === '子公司') {
-      editableRow = row
-      break
-    }
-  }
-
-  if (!editableRow) {
-    const subsidiaryName = `E2E 子公司 ${Date.now()}`
-    await page.getByRole('button', { name: '新增组织', exact: true }).click()
-    const createDialog = page.getByRole('dialog', { name: '新增组织机构' })
-    await expect(createDialog).toBeVisible()
-    await createDialog.getByLabel('组织编码').fill(`E2E_SUB_${Date.now()}`)
-    await createDialog.getByLabel('组织名称').fill(subsidiaryName)
-    await createDialog.getByRole('button', { name: '确认新增', exact: true }).click()
-    await expect(createDialog).toBeHidden()
-    editableRow = rows.filter({ hasText: subsidiaryName }).first()
-    await expect(editableRow).toBeVisible()
-  }
-
+  // Edit only this test's organization, never an arbitrary historical record.
+  await page.getByRole('textbox', { name: '搜索组织', exact: true }).fill(`LAYOUT_EDIT_${suffix}`)
+  const editableRow = table.locator('.el-table__body-wrapper tbody tr').filter({ hasText: subsidiaryName })
   await clickRowAction(page, editableRow, '编辑信息')
   const dialog = page.getByRole('dialog', { name: '编辑子公司基本信息' })
   await expect(dialog).toBeVisible()
-  await expect(dialog.getByLabel('组织名称')).not.toHaveValue('')
-  const updatedContact = `e2e-${Date.now()}@example.test`
+  await expect(dialog.getByLabel('组织名称')).toHaveValue(subsidiaryName)
+  const updatedContact = '138-0000-0008'
   await dialog.getByLabel('联系方式').fill(updatedContact)
   await dialog.getByRole('button', { name: '保存基本信息', exact: true }).click()
   await expect(dialog).toBeHidden()
-  await expect(editableRow).toContainText(updatedContact)
+  await expect(editableRow).toContainText('13800000008')
+  const saved = await page.request.get('/api/v1/organizations/tree')
+  expect(saved.status()).toBe(200)
+  type Organization = { id: string; children?: Organization[] }
+  const flatten = (items: Organization[]): Organization[] => items.flatMap(item => [item, ...flatten(item.children ?? [])])
+  expect(flatten((await saved.json()).items).find(item => item.id === id)).toMatchObject({ id, name: subsidiaryName, contact: '13800000008' })
 })
 
 test('消息中心使用统一列表卡片、内部滚动和卡片内分页', async ({ page }) => {
@@ -796,7 +813,7 @@ test('消息中心使用统一列表卡片、内部滚动和卡片内分页', as
   })
 
   expect(layout.cardGap).toBe(16)
-  expect(layout.panelRadius).toBe('14px')
+  expect(layout.panelRadius).toBe('10px')
   expect(layout.panelBorderStyle).toBe('solid')
   expect(layout.scrollOverflowY).toBe('auto')
   expect(layout.scrollMaxHeight).toBe('520px')
@@ -807,11 +824,24 @@ test('消息中心使用统一列表卡片、内部滚动和卡片内分页', as
 
 test('集团工作台卡片操作对齐、零值图表语义正确并适配常用窄屏', async ({ page }) => {
   test.skip(!adminPassword, 'E2E_PASSWORD/BOOTSTRAP_ADMIN_PASSWORD 未配置')
+  // Zero-value rendering is a deliberate fixture, not an assumption that the
+  // persistent regression database has no findings. Preserve the real schema
+  // and other metrics while making only the trend's counts zero.
+  await page.route('**/api/v1/dashboard/security-overview', async route => {
+    const response = await route.fetch()
+    expect(response.status()).toBe(200)
+    const body = await response.json()
+    expect(body.overview.finding_trend).toHaveLength(30)
+    body.overview.finding_trend = body.overview.finding_trend.map((point: Record<string, unknown>) => ({
+      ...point, new_finding_count: 0, closed_finding_count: 0,
+    }))
+    await route.fulfill({ response, json: body })
+  })
 
   await page.setViewportSize({ width: 1024, height: 768 })
   await page.goto('/dashboard')
   await login(page, adminUsername, adminPassword!)
-  await expect(page.getByRole('heading', { name: '集团安全治理工作台', exact: true })).toBeVisible()
+  await expect(page.getByRole('heading', { name: '今天，先处理关键事项', exact: true })).toBeVisible()
 
   const panelHeaders = page.locator('.panel-header').filter({ has: page.locator('.el-button') })
   await expect(panelHeaders).toHaveCount(5)

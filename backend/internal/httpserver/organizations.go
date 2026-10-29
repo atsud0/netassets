@@ -15,7 +15,7 @@ func registerOrganizationRoutes(api *gin.RouterGroup, requireAuth gin.HandlerFun
 	group.GET("", func(c *gin.Context) {
 		page, err := parsePageQuery(c)
 		if err != nil {
-			writeAPIError(c, http.StatusBadRequest, "invalid_query", "分页参数不正确，page_size 最大为 100")
+			writeAPIError(c, http.StatusBadRequest, "invalid_query", pageQueryErrorMessage(err))
 			return
 		}
 		result, err := service.Search(c.Request.Context(), mustPrincipal(c), page)
@@ -41,10 +41,15 @@ func registerOrganizationRoutes(api *gin.RouterGroup, requireAuth gin.HandlerFun
 			writeAPIError(c, http.StatusBadRequest, "invalid_request", "组织信息格式不正确")
 			return
 		}
+		var validation *organization.ValidationError
 		item, err := service.Create(c.Request.Context(), mustPrincipal(c), input, c.GetString("request_id"), c.ClientIP())
 		switch {
 		case errors.Is(err, organization.ErrForbidden):
 			writeAPIError(c, http.StatusForbidden, "forbidden", "当前账号无权新增组织")
+		case errors.Is(err, organization.ErrInvalidContact):
+			writeAPIError(c, http.StatusBadRequest, "invalid_contact_phone", "联系方式：请填写手机号码、座机号码或分机号，最多 64 字")
+		case errors.As(err, &validation):
+			writeAPIError(c, http.StatusBadRequest, "invalid_organization", validation.Message)
 		case errors.Is(err, organization.ErrInvalid):
 			writeAPIError(c, http.StatusBadRequest, "invalid_organization", "请检查组织编码、名称、类型和上级组织")
 		case errors.Is(err, organization.ErrNotFound):
@@ -64,10 +69,15 @@ func registerOrganizationRoutes(api *gin.RouterGroup, requireAuth gin.HandlerFun
 			writeAPIError(c, http.StatusBadRequest, "invalid_request", "组织信息格式不正确")
 			return
 		}
+		var validation *organization.ValidationError
 		item, err := service.Update(c.Request.Context(), mustPrincipal(c), c.Param("id"), input, c.GetString("request_id"), c.ClientIP())
 		switch {
 		case errors.Is(err, organization.ErrForbidden):
 			writeAPIError(c, http.StatusForbidden, "forbidden", "当前账号无权编辑组织信息")
+		case errors.Is(err, organization.ErrInvalidContact):
+			writeAPIError(c, http.StatusBadRequest, "invalid_contact_phone", "联系方式：请填写手机号码、座机号码或分机号，最多 64 字")
+		case errors.As(err, &validation):
+			writeAPIError(c, http.StatusBadRequest, "invalid_organization", validation.Message)
 		case errors.Is(err, organization.ErrInvalid):
 			writeAPIError(c, http.StatusBadRequest, "invalid_organization", "请检查组织名称及基本信息")
 		case errors.Is(err, organization.ErrNotFound):
@@ -149,9 +159,12 @@ func registerOrganizationRoutes(api *gin.RouterGroup, requireAuth gin.HandlerFun
 }
 
 func writeOrganizationLifecycleError(c *gin.Context, logger *slog.Logger, operation string, err error) bool {
+	var validation *organization.ValidationError
 	switch {
 	case errors.Is(err, organization.ErrForbidden):
 		writeAPIError(c, http.StatusForbidden, "forbidden", "仅集团管理员可以管理组织生命周期")
+	case errors.As(err, &validation):
+		writeAPIError(c, http.StatusBadRequest, "invalid_organization", validation.Message)
 	case errors.Is(err, organization.ErrInvalid):
 		writeAPIError(c, http.StatusBadRequest, "invalid_organization", "组织标识或请求参数不正确")
 	case errors.Is(err, organization.ErrNotFound):

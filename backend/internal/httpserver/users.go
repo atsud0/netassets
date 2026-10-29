@@ -37,6 +37,11 @@ func registerUserRoutes(api *gin.RouterGroup, requireAuth gin.HandlerFunc, servi
 			return
 		}
 		if errors.Is(err, userdomain.ErrInvalid) {
+			var inputErr *userdomain.InputValidationError
+			if errors.As(err, &inputErr) {
+				writeAPIError(c, http.StatusBadRequest, "invalid_query", inputErr.Error())
+				return
+			}
 			writeAPIError(c, http.StatusBadRequest, "invalid_query", "用户筛选条件不正确")
 			return
 		}
@@ -50,7 +55,7 @@ func registerUserRoutes(api *gin.RouterGroup, requireAuth gin.HandlerFunc, servi
 	group.GET("/manageable-organizations", func(c *gin.Context) {
 		page, err := parsePageQuery(c)
 		if err != nil {
-			writeAPIError(c, http.StatusBadRequest, "invalid_query", "分页参数不正确，page_size 最大为 100")
+			writeAPIError(c, http.StatusBadRequest, "invalid_query", pageQueryErrorMessage(err))
 			return
 		}
 		result, err := service.SearchManageableOrganizations(c.Request.Context(), mustPrincipal(c), page)
@@ -133,9 +138,12 @@ func writeUserActionResult(c *gin.Context, logger *slog.Logger, err error, fallb
 	writeUserError(c, logger, err, fallback)
 }
 func writeUserError(c *gin.Context, logger *slog.Logger, err error, fallback string) {
+	var inputErr *userdomain.InputValidationError
 	switch {
 	case errors.Is(err, userdomain.ErrForbidden):
 		writeAPIError(c, http.StatusForbidden, "forbidden", "当前账号无权管理用户")
+	case errors.As(err, &inputErr):
+		writeAPIError(c, http.StatusBadRequest, "invalid_user", inputErr.Error())
 	case errors.Is(err, userdomain.ErrInvalid):
 		writeAPIError(c, http.StatusBadRequest, "invalid_user", "请检查用户资料、密码、任职组织、角色和数据范围")
 	case errors.Is(err, userdomain.ErrNotFound):

@@ -125,8 +125,13 @@ func NormalizeInput(input Input) (Input, error) {
 	input.PageKey = strings.TrimSpace(input.PageKey)
 	input.Name = strings.TrimSpace(input.Name)
 	definition, ok := pageDefinitions[input.PageKey]
-	if !ok || input.Name == "" || utf8.RuneCountInString(input.Name) > 100 {
-		return Input{}, ErrInvalid
+	switch {
+	case !ok:
+		return Input{}, invalidInput("请选择支持保存筛选视图的页面")
+	case input.Name == "":
+		return Input{}, invalidInput("视图名称不能为空")
+	case utf8.RuneCountInString(input.Name) > 100:
+		return Input{}, invalidInput("视图名称最多 100 字")
 	}
 	if input.Filters == nil {
 		input.Filters = map[string]string{}
@@ -276,7 +281,7 @@ func (s *Service) Update(ctx context.Context, p auth.Principal, id string, input
 		return View{}, err
 	}
 	if p.UserID == "" || !uuidPattern.MatchString(strings.TrimSpace(id)) {
-		return View{}, ErrInvalid
+		return View{}, invalidInput("保存视图标识不正确")
 	}
 	filters, _ := json.Marshal(input.Filters)
 	tx, err := s.pool.Begin(ctx)
@@ -292,7 +297,7 @@ func (s *Service) Update(ctx context.Context, p auth.Principal, id string, input
 		return View{}, fmt.Errorf("find saved filter view: %w", err)
 	}
 	if existingPage != input.PageKey {
-		return View{}, ErrInvalid
+		return View{}, invalidInput("保存视图所属页面不能修改")
 	}
 	if input.IsDefault {
 		if _, err := tx.Exec(ctx, `UPDATE saved_filter_views SET is_default=false,updated_at=now() WHERE user_id=$1::uuid AND page_key=$2 AND id<>$3::uuid AND is_default`, p.UserID, input.PageKey, id); err != nil {

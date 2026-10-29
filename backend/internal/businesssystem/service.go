@@ -28,7 +28,6 @@ import (
 	"netassets/internal/notification"
 	"netassets/internal/pagination"
 	"netassets/internal/remediationretire"
-	"netassets/internal/textlength"
 )
 
 var (
@@ -583,10 +582,10 @@ func normalizeSelectedExportIDs(ids []string) ([]string, error) {
 	}
 	result := make([]string, 0, len(ids))
 	seen := make(map[string]struct{}, len(ids))
-	for _, rawID := range ids {
+	for index, rawID := range ids {
 		id := strings.TrimSpace(rawID)
 		if !businessSystemUUIDPattern.MatchString(id) {
-			return nil, ErrInvalid
+			return nil, invalidInput(fmt.Sprintf("选中业务系统：第 %d 项标识不正确", index+1))
 		}
 		if _, exists := seen[id]; exists {
 			continue
@@ -594,7 +593,7 @@ func normalizeSelectedExportIDs(ids []string) ([]string, error) {
 		seen[id] = struct{}{}
 		result = append(result, id)
 		if len(result) > MaxSelectedExportRows {
-			return nil, ErrInvalid
+			return nil, invalidInput(fmt.Sprintf("选中业务系统：单次最多导出 %d 条", MaxSelectedExportRows))
 		}
 	}
 	return result, nil
@@ -703,7 +702,7 @@ func (s *Service) create(ctx context.Context, principal auth.Principal, input Cr
 		return BusinessSystem{}, fmt.Errorf("load system organization: %w", err)
 	}
 	if organizationStatus != "enabled" {
-		return BusinessSystem{}, ErrInvalid
+		return BusinessSystem{}, invalidInput("所属组织：请选择已启用的组织")
 	}
 
 	var item BusinessSystem
@@ -886,7 +885,7 @@ func (s *Service) Update(ctx context.Context, principal auth.Principal, systemID
 		return BusinessSystem{}, fmt.Errorf("load updated system organization: %w", err)
 	}
 	if organizationStatus != "enabled" {
-		return BusinessSystem{}, ErrInvalid
+		return BusinessSystem{}, invalidInput("所属组织：请选择已启用的组织")
 	}
 	if current.OrganizationID != input.OrganizationID {
 		var linkedAssets int
@@ -1487,10 +1486,10 @@ func normalizeImportMode(principal auth.Principal, mode string) (string, error) 
 		mode = ImportModeSkipDuplicates
 	}
 	if mode != ImportModeSkipDuplicates && mode != ImportModeUpdateWorking {
-		return "", ErrInvalid
+		return "", invalidInput("导入模式：请选择跳过重复项或更新工作版本")
 	}
 	if mode == ImportModeUpdateWorking && !usesWorkingInventory(principal) {
-		return "", ErrInvalid
+		return "", invalidInput("导入模式：当前账号不能使用更新工作版本模式")
 	}
 	return mode, nil
 }
@@ -1578,6 +1577,9 @@ func (s *Service) AnalyzeImportColumns(ctx context.Context, principal auth.Princ
 		return ImportColumnAnalysis{}, ErrForbidden
 	}
 	organizationID = strings.TrimSpace(organizationID)
+	if !businessSystemUUIDPattern.MatchString(organizationID) {
+		return ImportColumnAnalysis{}, invalidInput("导入组织：请选择有效的所属组织")
+	}
 	allowed, err := access.CanOperateOrganization(ctx, s.pool, principal, organizationID, "system.manage")
 	if err != nil {
 		return ImportColumnAnalysis{}, err
@@ -1586,8 +1588,11 @@ func (s *Service) AnalyzeImportColumns(ctx context.Context, principal auth.Princ
 		return ImportColumnAnalysis{}, ErrForbidden
 	}
 	rows, _, err := readImportRows(fileName, reader)
-	if err != nil || len(rows) == 0 || len(rows)-1 > MaxImportRows {
-		return ImportColumnAnalysis{}, ErrInvalid
+	if err != nil {
+		return ImportColumnAnalysis{}, err
+	}
+	if err := validateImportRows(rows, 1); err != nil {
+		return ImportColumnAnalysis{}, err
 	}
 	definitions, err := customfield.NewService(s.pool).ActiveDefinitionsForOrganization(ctx, principal, "business_system", organizationID)
 	if err != nil {
@@ -1595,7 +1600,7 @@ func (s *Service) AnalyzeImportColumns(ctx context.Context, principal auth.Princ
 	}
 	analysis, err := importmapping.Analyze(dropBusinessSystemTemplateExampleRows(rows, definitions), businessSystemImportFields(definitions))
 	if err != nil {
-		return ImportColumnAnalysis{}, ErrInvalid
+		return ImportColumnAnalysis{}, invalidImportMapping(err)
 	}
 	return analysis, nil
 }
@@ -1606,6 +1611,9 @@ func (s *Service) PreviewImport(ctx context.Context, principal auth.Principal, o
 		return ImportResult{}, ErrForbidden
 	}
 	organizationID = strings.TrimSpace(organizationID)
+	if !businessSystemUUIDPattern.MatchString(organizationID) {
+		return ImportResult{}, invalidInput("导入组织：请选择有效的所属组织")
+	}
 	allowed, err := access.CanOperateOrganization(ctx, s.pool, principal, organizationID, "system.manage")
 	if err != nil {
 		return ImportResult{}, err
@@ -1618,8 +1626,11 @@ func (s *Service) PreviewImport(ctx context.Context, principal auth.Principal, o
 		return ImportResult{}, err
 	}
 	rows, fileType, err := readImportRows(fileName, reader)
-	if err != nil || len(rows) < 2 || len(rows)-1 > MaxImportRows {
-		return ImportResult{}, ErrInvalid
+	if err != nil {
+		return ImportResult{}, err
+	}
+	if err := validateImportRows(rows, 2); err != nil {
+		return ImportResult{}, err
 	}
 	customService := customfield.NewService(s.pool)
 	definitions, err := customService.ActiveDefinitionsForOrganization(ctx, principal, "business_system", organizationID)
@@ -1628,7 +1639,7 @@ func (s *Service) PreviewImport(ctx context.Context, principal auth.Principal, o
 	}
 	headers, mappedHeaders, err := resolveBusinessSystemImportHeaders(rows[0], mapping, definitions)
 	if err != nil {
-		return ImportResult{}, ErrInvalid
+		return ImportResult{}, invalidImportMapping(err)
 	}
 	result := ImportResult{FileName: filepath.Base(fileName), FileType: fileType, ImportMode: mode, Errors: make([]ImportError, 0), TotalCount: countBusinessSystemImportDataRows(rows, headers)}
 	seen := make(map[string]struct{}, result.TotalCount)
@@ -1712,6 +1723,9 @@ func (s *Service) Import(ctx context.Context, principal auth.Principal, organiza
 		return ImportResult{}, ErrForbidden
 	}
 	organizationID = strings.TrimSpace(organizationID)
+	if !businessSystemUUIDPattern.MatchString(organizationID) {
+		return ImportResult{}, invalidInput("导入组织：请选择有效的所属组织")
+	}
 	allowed, err := access.CanOperateOrganization(ctx, s.pool, principal, organizationID, "system.manage")
 	if err != nil {
 		return ImportResult{}, err
@@ -1724,8 +1738,11 @@ func (s *Service) Import(ctx context.Context, principal auth.Principal, organiza
 		return ImportResult{}, err
 	}
 	rows, fileType, err := readImportRows(fileName, reader)
-	if err != nil || len(rows) < 2 || len(rows)-1 > MaxImportRows {
-		return ImportResult{}, ErrInvalid
+	if err != nil {
+		return ImportResult{}, err
+	}
+	if err := validateImportRows(rows, 2); err != nil {
+		return ImportResult{}, err
 	}
 	customService := customfield.NewService(s.pool)
 	definitions, err := customService.ActiveDefinitionsForOrganization(ctx, principal, "business_system", organizationID)
@@ -1734,7 +1751,7 @@ func (s *Service) Import(ctx context.Context, principal auth.Principal, organiza
 	}
 	headers, mappedHeaders, err := resolveBusinessSystemImportHeaders(rows[0], mapping, definitions)
 	if err != nil {
-		return ImportResult{}, ErrInvalid
+		return ImportResult{}, invalidImportMapping(err)
 	}
 	result := ImportResult{FileName: filepath.Base(fileName), FileType: fileType, ImportMode: mode, Errors: make([]ImportError, 0), TotalCount: countBusinessSystemImportDataRows(rows, headers)}
 	seen := make(map[string]struct{}, result.TotalCount)
@@ -1969,21 +1986,27 @@ func readImportRows(fileName string, reader io.Reader) ([][]string, string, erro
 		csvReader.FieldsPerRecord = -1
 		csvReader.TrimLeadingSpace = true
 		rows, err := csvReader.ReadAll()
-		return rows, "csv", err
+		if err != nil {
+			return nil, "", invalidInput("导入文件：CSV 内容无法解析，请检查分隔符和引号")
+		}
+		return rows, "csv", nil
 	case ".xlsx":
 		file, err := excelize.OpenReader(reader)
 		if err != nil {
-			return nil, "", err
+			return nil, "", invalidInput("导入文件：无法打开 XLSX，请检查文件是否损坏或加密")
 		}
 		defer file.Close()
 		sheets := file.GetSheetList()
 		if len(sheets) == 0 {
-			return nil, "", ErrInvalid
+			return nil, "", invalidInput("导入文件：XLSX 至少需要一个工作表")
 		}
 		rows, err := file.GetRows(sheets[0])
-		return rows, "xlsx", err
+		if err != nil {
+			return nil, "", invalidInput("导入文件：无法读取 XLSX 的第一个工作表")
+		}
+		return rows, "xlsx", nil
 	default:
-		return nil, "", ErrInvalid
+		return nil, "", invalidInput("导入文件格式：仅支持 CSV 或 XLSX")
 	}
 }
 
@@ -2133,34 +2156,7 @@ func normalize(input *CreateInput) {
 	input.SecurityNotes = strings.TrimSpace(input.SecurityNotes)
 }
 func validInput(input CreateInput) bool {
-	if !codePattern.MatchString(input.Code) || input.Name == "" || textlength.Count(input.Name) > 255 || input.OrganizationID == "" {
-		return false
-	}
-	if !validOwnerContact(input.OwnerContact) {
-		return false
-	}
-	if !oneOf(input.Status, "planning", "running", "suspended", "offline", "archived") || !oneOf(input.Level, "normal", "important", "core") {
-		return false
-	}
-	if !oneOf(input.InternetExposure, "yes", "no", "partial", "unknown") {
-		return false
-	}
-	if !oneOf(input.ContainsPersonalInformation, "yes", "no", "unknown") || !oneOf(input.ContainsSensitivePersonalInformation, "yes", "no", "unknown") {
-		return false
-	}
-	if input.ContainsPersonalInformation == "no" && input.ContainsSensitivePersonalInformation == "yes" {
-		return false
-	}
-	if input.PersonalInformationRecordCount != nil && *input.PersonalInformationRecordCount < 0 {
-		return false
-	}
-	if !oneOf(input.DataVolumeOver100K, "yes", "no", "unknown") {
-		return false
-	}
-	if !oneOf(input.ContainsImportantData, "yes", "no", "unknown", "pending") || !oneOf(input.ContainsCoreData, "yes", "no", "unknown", "pending") {
-		return false
-	}
-	return true
+	return validateCreateFields(input) == nil
 }
 func oneOf(value string, values ...string) bool {
 	for _, candidate := range values {
@@ -2253,7 +2249,7 @@ func ownerContactError(input CreateInput) error {
 	if !validOwnerContact(input.OwnerContact) {
 		return ErrInvalidOwnerContact
 	}
-	return ErrInvalid
+	return validateCreateFields(input)
 }
 
 // validOwnerContact keeps obviously unusable contact numbers out of the ledger.

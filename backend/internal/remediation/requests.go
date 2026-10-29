@@ -17,14 +17,22 @@ type RequestInput struct {
 }
 
 func (s *Service) Request(ctx context.Context, p auth.Principal, id string, in RequestInput) (Object, error) {
-	if !contains([]string{"extension", "reassign", "false_positive", "risk_acceptance"}, in.Type) || !textOK(in.Reason, 10000, true) {
-		return nil, ErrInvalid
+	if !contains([]string{"extension", "reassign", "false_positive", "risk_acceptance"}, in.Type) {
+		return nil, invalidField("申请类型：请选择延期、转派、误报或风险接受")
+	}
+	if !textOK(in.Reason, 10000, true) {
+		return nil, invalidField("申请原因：请输入 1 至 10000 字")
 	}
 	if !textOK(in.Mitigation, 5000, false) {
-		return nil, ErrInvalid
+		return nil, invalidField("缓解措施：最多 5000 字")
 	}
-	if in.Type == "extension" && (!textOK(in.Mitigation, 5000, true) || in.ProposedDueAt == nil || !in.ProposedDueAt.After(time.Now())) {
-		return nil, ErrInvalid
+	if in.Type == "extension" {
+		if !textOK(in.Mitigation, 5000, true) {
+			return nil, invalidField("延期缓解措施：请输入 1 至 5000 字")
+		}
+		if in.ProposedDueAt == nil || !in.ProposedDueAt.After(time.Now()) {
+			return nil, invalidField("拟延期截止时间：须晚于当前时间")
+		}
 	}
 	tx, err := s.begin(ctx)
 	if err != nil {
@@ -58,8 +66,14 @@ type DecideInput struct {
 }
 
 func (s *Service) Decide(ctx context.Context, p auth.Principal, id string, in DecideInput) error {
-	if !validID(id) || !contains([]string{"approved", "rejected"}, in.Decision) || !textOK(in.Reason, 10000, true) {
-		return ErrInvalid
+	if !validID(id) {
+		return invalidField("整改申请标识不正确")
+	}
+	if !contains([]string{"approved", "rejected"}, in.Decision) {
+		return invalidField("审批结论：请选择批准或拒绝")
+	}
+	if !textOK(in.Reason, 10000, true) {
+		return invalidField("审批原因：请输入 1 至 10000 字")
 	}
 	tx, err := s.begin(ctx)
 	if err != nil {
@@ -93,14 +107,14 @@ func (s *Service) Decide(ctx context.Context, p auth.Principal, id string, in De
 		switch kind {
 		case "extension":
 			if proposed == nil || !proposed.After(t.DueAt) || !proposed.After(time.Now()) {
-				return ErrInvalid
+				return invalidField("拟延期截止时间：须晚于原截止时间及当前时间")
 			}
 			var orderDue, grantUntil time.Time
 			if err = tx.QueryRow(ctx, `SELECT w.due_at,g.valid_until FROM security_work_orders w JOIN remediation_grants g ON g.id=$2::uuid WHERE w.id=$1::uuid`, t.WorkOrderID, t.GrantID).Scan(&orderDue, &grantUntil); err != nil {
 				return err
 			}
 			if proposed.After(grantUntil) {
-				return ErrInvalid
+				return invalidField("拟延期截止时间：不能超过执行人的授权有效期")
 			}
 			if proposed.After(orderDue) {
 				if !group {
@@ -116,7 +130,7 @@ func (s *Service) Decide(ctx context.Context, p auth.Principal, id string, in De
 			_, err = tx.Exec(ctx, `UPDATE remediation_tasks SET due_at=$2 WHERE id=$1::uuid`, t.ID, proposed)
 		case "reassign":
 			if !validID(in.GrantID) {
-				return ErrInvalid
+				return invalidField("转派执行人：请选择有效的人员授权")
 			}
 			var assignee string
 			if err = tx.QueryRow(ctx, `SELECT user_id::text FROM remediation_grants WHERE id=$1::uuid AND remediation_grant_valid(id,user_id,$2::uuid,$3::uuid) AND valid_until >= $4`, in.GrantID, t.OrganizationID, t.SystemID, t.DueAt).Scan(&assignee); err != nil {
@@ -131,7 +145,7 @@ func (s *Service) Decide(ctx context.Context, p auth.Principal, id string, in De
 			if kind == "risk_acceptance" {
 				outcome = "risk_accepted"
 				if in.RiskUntil == nil || !in.RiskUntil.After(time.Now()) {
-					return ErrInvalid
+					return invalidField("风险接受有效期：须晚于当前时间")
 				}
 			}
 			if kind == "risk_acceptance" {

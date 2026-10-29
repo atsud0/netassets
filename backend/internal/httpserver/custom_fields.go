@@ -14,7 +14,7 @@ func registerCustomFieldRoutes(api *gin.RouterGroup, requireAuth gin.HandlerFunc
 	g.GET("", func(c *gin.Context) {
 		page, err := parsePageQuery(c)
 		if err != nil {
-			writeAPIError(c, http.StatusBadRequest, "invalid_query", "分页参数不正确，page_size 最大为 100")
+			writeAPIError(c, http.StatusBadRequest, "invalid_query", pageQueryErrorMessage(err))
 			return
 		}
 		result, err := svc.Search(c.Request.Context(), mustPrincipal(c), strings.TrimSpace(c.Query("resource_type")), page)
@@ -27,7 +27,7 @@ func registerCustomFieldRoutes(api *gin.RouterGroup, requireAuth gin.HandlerFunc
 	g.GET("/fillable", func(c *gin.Context) {
 		page, err := parsePageQuery(c)
 		if err != nil {
-			writeAPIError(c, http.StatusBadRequest, "invalid_query", "分页参数不正确，page_size 最大为 100")
+			writeAPIError(c, http.StatusBadRequest, "invalid_query", pageQueryErrorMessage(err))
 			return
 		}
 		result, err := svc.SearchFillableDefinitions(c.Request.Context(), mustPrincipal(c), strings.TrimSpace(c.Query("resource_type")), page)
@@ -71,7 +71,12 @@ func writeCustomFieldError(c *gin.Context, logger *slog.Logger, err error) {
 	case errors.Is(err, customfield.ErrNotFound):
 		writeAPIError(c, http.StatusNotFound, "custom_field_not_found", "自定义字段不存在")
 	case errors.Is(err, customfield.ErrInvalid):
-		writeAPIError(c, http.StatusBadRequest, "invalid_custom_field", "请检查字段编码、名称、类型、选项及排序")
+		message := "请检查字段编码、名称、类型、选项及排序"
+		var validation *customfield.DefinitionValidationError
+		if errors.As(err, &validation) {
+			message = validation.Message
+		}
+		writeAPIError(c, http.StatusBadRequest, "invalid_custom_field", message)
 	case errors.Is(err, customfield.ErrConflict):
 		writeAPIError(c, http.StatusConflict, "field_key_exists", "该对象类型下字段编码已存在")
 	case errors.Is(err, customfield.ErrVersionRequired):

@@ -327,17 +327,20 @@ func ValidateValues(definitions []Definition, values []Value) (map[string]Defini
 	provided := make(map[string]any, len(values))
 	for _, value := range values {
 		definition, ok := byKey[value.FieldKey]
-		if !ok || !validFieldValue(definition, value.Value) {
-			return nil, nil, ErrInvalid
+		if !ok {
+			return nil, nil, invalidValue("自定义字段编码无效，请刷新后重试")
+		}
+		if err := validateFieldValue(definition, value.Value); err != nil {
+			return nil, nil, invalidValue(err.Error())
 		}
 		if _, duplicate := provided[value.FieldKey]; duplicate {
-			return nil, nil, ErrInvalid
+			return nil, nil, fieldValueError(definition, "不能重复填写")
 		}
 		provided[value.FieldKey] = value.Value
 	}
 	for _, definition := range definitions {
 		if definition.IsRequired && isBlank(provided[definition.FieldKey]) {
-			return nil, nil, ErrInvalid
+			return nil, nil, fieldValueError(definition, "不能为空")
 		}
 	}
 	return byKey, provided, nil

@@ -27,7 +27,7 @@ async function changePassword(page: Page, before: string, after: string) {
   await expect(page).not.toHaveURL(/\/profile/)
 }
 
-test('组织管理员直接派给外包人员，个人提交后逐项组织确认和集团复测', async ({ page, browser }) => {
+test('组织管理员直接派给外包人员，个人提交后逐项组织确认和集团复测', async ({ page, browser }, testInfo) => {
   test.skip(!password, 'requires isolated test credentials')
   test.setTimeout(240_000)
   page.setDefaultTimeout(15_000)
@@ -36,12 +36,12 @@ test('组织管理员直接派给外包人员，个人提交后逐项组织确�
   const formal = 'Repair-Formal-2026!'
   await login(page, process.env.E2E_USERNAME ?? 'admin', password!)
   const group = (await api(page, '/organizations?page_size=100')).items.find((o: { type: string }) => o.type === 'group')
-  const org = (await api(page, '/organizations', { parent_id: group.id, code: `RP_${suffix}`, name: `修复验收组织_${suffix}`, short_name: '修复验收', type: 'subsidiary', manager: '王工', contact: 'repair@example.com', notes: '' })).item
+  const org = (await api(page, '/organizations', { parent_id: group.id, code: `RP_${suffix}`, name: `修复验收组织_${suffix}`, short_name: '修复验收', type: 'subsidiary', manager: '王工', contact: '13800000018', notes: '' })).item
   const system = (await api(page, '/business-systems', { code: `RP_SYS_${suffix}`, name: `修复验收系统_${suffix}`, organization_id: org.id, owner_name: '王工', owner_contact: '13800000018', status: 'running', level: 'normal', internet_exposure: 'yes', contains_personal_information: 'no', contains_sensitive_personal_information: 'no', contains_important_data: 'no', contains_core_data: 'no', data_volume_over_100k: 'no', custom_values: [] })).item
   const roles = (await api(page, '/roles/assignable?page_size=100')).items
   const orgRole = roles.find((r: { key: string }) => r.key === 'organization_admin')
   await api(page, '/users', { username: `rp_manager_${suffix}`, password: temporary, display_name: '修复组织管理员', appointments: [{ organization_id: org.id, is_primary: true, assignments: [{ role_id: orgRole.id, data_scope: 'organization' }] }], global_role_ids: [] })
-  const vendor = await api(page, '/vendors', { organization_id: org.id, name: `外包厂商_${suffix}`, contact: '项目负责人', status: 'enabled' })
+  const vendor = await api(page, '/vendors', { organization_id: org.id, name: `外包厂商_${suffix}`, contact: '13800000018', status: 'enabled' })
   const worker = await api(page, '/remediation-grants', { organization_id: org.id, business_system_id: system.id, vendor_id: vendor.id, participant_type: 'external', username: `rp_worker_${suffix}`, display_name: '外包开发张工', password: temporary, valid_until: new Date(Date.now() + 30 * 86400000).toISOString() })
   const findingIDs: string[] = []
   for (const index of [1, 2]) findingIDs.push((await api(page, '/security-findings', { title: `修复验证漏洞${index}_${suffix}`, severity: 'high', status: 'pending', assignee_organization_id: org.id, business_system_id: system.id, vulnerability_type: '输入验证', description: `需要修复的公开描述${index}`, evidence: '按说明验证输入校验', remediation_advice: '完善输入校验并自测', source: 'manual', discovered_at: new Date().toISOString() })).item.id)
@@ -67,7 +67,7 @@ test('组织管理员直接派给外包人员，个人提交后逐项组织确�
     await expect(dialog).not.toBeVisible()
     const tasks = (await api(manager, `/remediation-tasks?work_order_id=${order.id}`)).items
     expect(tasks).toHaveLength(2)
-    await manager.screenshot({ path: 'test-results/remediation-manager.png', fullPage: true })
+    await manager.screenshot({ path: testInfo.outputPath('remediation-manager.png'), fullPage: true })
 
     await login(workerPage, `rp_worker_${suffix}`, temporary)
     await changePassword(workerPage, temporary, formal)
@@ -76,7 +76,7 @@ test('组织管理员直接派给外包人员，个人提交后逐项组织确�
     await expect(workerPage.getByRole('button', { name: '安全工单', exact: true })).toHaveCount(0)
     const denied = await workerPage.evaluate(async () => (await fetch('/api/v1/assets')).status)
     expect(denied).toBe(403)
-    await workerPage.screenshot({path:'test-results/ui-executor.png'})
+    await workerPage.screenshot({path:testInfo.outputPath('ui-executor.png')})
     const proofs: { task_id: string; attachment_id: string; content: string }[] = []
     for (const task of tasks) {
       await workerPage.goto(`/repair/tasks?task_id=${task.id}`)
@@ -104,8 +104,8 @@ test('组织管理员直接派给外包人员，个人提交后逐项组织确�
       await detail.getByRole('tab', { name: '提交与审核', exact: true }).click()
       await expect(detail.getByRole('tabpanel',{name:'提交与审核',exact:true}).getByText('已修复输入校验并部署 release-2026', { exact: true })).toBeVisible()
     }
-    await workerPage.screenshot({ path: 'test-results/remediation-worker.png', fullPage: true })
-    await writeFile('test-results/remediation-restore-fixture.json', JSON.stringify({order_id: order.id, tasks: proofs}))
+    await workerPage.screenshot({ path: testInfo.outputPath('remediation-worker.png'), fullPage: true })
+    await writeFile(testInfo.outputPath('remediation-restore-fixture.json'), JSON.stringify({order_id: order.id, tasks: proofs}))
     await manager.goto(`/remediation?work_order_id=${order.id}`)
     await manager.locator('.repair-list-panel thead .el-checkbox').click()
     await manager.getByRole('button', {name:'进入逐项审核',exact:true}).click()
@@ -119,7 +119,7 @@ test('组织管理员直接派给外包人员，个人提交后逐项组织确�
       await detail.getByRole('button', { name: '确认并送集团复测', exact: true }).click()
       await expect(manager.getByText('请先确认已核对提交版本、目标环境与证明材料',{exact:true})).toBeVisible()
       await detail.getByText('我已核对目标环境、提交版本及证明材料',{exact:true}).click()
-      if(index===0)await manager.screenshot({path:'test-results/ui-organization-review.png'})
+      if(index===0)await manager.screenshot({path:testInfo.outputPath('ui-organization-review.png')})
       await detail.getByRole('button', { name: '确认并送集团复测', exact: true }).click()
       // Queue order follows the displayed table, not the fixture creation order.
       await expect.poll(async () => (await api(manager, `/remediation-tasks?work_order_id=${order.id}`)).items.filter((item:{status:string})=>item.status==='pending_security_review').length).toBe(index+1)

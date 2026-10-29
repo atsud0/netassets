@@ -160,8 +160,11 @@ func (s *Service) SearchSubmissionDiffItems(
 ) (pagination.Result[SubmissionResourceChange], error) {
 	resourceType = strings.TrimSpace(resourceType)
 	changeType = strings.TrimSpace(changeType)
-	if !validSubmissionDiffResourceType(resourceType) || !validSubmissionDiffChangeType(changeType) {
-		return pagination.Result[SubmissionResourceChange]{}, ErrInvalid
+	if !validSubmissionDiffResourceType(resourceType) {
+		return pagination.Result[SubmissionResourceChange]{}, invalidInput("资源类型：请选择网络资产或业务系统")
+	}
+	if !validSubmissionDiffChangeType(changeType) {
+		return pagination.Result[SubmissionResourceChange]{}, invalidInput("变更类型：请选择新增、修改或移除")
 	}
 	current, previous, err := s.loadSubmissionMetadata(ctx, principal, taskID, organizationID)
 	if err != nil {

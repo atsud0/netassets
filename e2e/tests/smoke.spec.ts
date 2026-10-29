@@ -1,14 +1,70 @@
-import { expect, test, type Locator, type Page } from '@playwright/test'
+import { randomBytes } from 'node:crypto'
+import { expect, test, type APIRequestContext, type Locator, type Page } from '@playwright/test'
 import { clickRowAction } from '../helpers/row-actions'
+import { findRecordPage, showRecordPage } from '../helpers/pagination'
 
 const adminUsername = process.env.E2E_USERNAME ?? 'admin'
 const adminPassword = process.env.E2E_PASSWORD
+
+/** Pick an absent IP as the logged-in group, before switching to a child user.
+ * The old timestamp suffix had only 250 values and collided with retained runs.
+ * RFC 2544 benchmark addresses are fixture data only; no network probe is sent.
+ * Bound the read-only search; never retry a failed write or reuse another org's IP.
+ */
+async function unusedFixtureIP(request: APIRequestContext) {
+  for (let attempt = 0; attempt < 16; attempt += 1) {
+    const bytes = randomBytes(3)
+    const candidate = `198.${18 + (bytes[0] & 1)}.${bytes[1]}.${1 + bytes[2] % 254}`
+    const existing = await findRecordPage<{ type: string; value: string }>(
+      request, `/api/v1/assets?q=${encodeURIComponent(candidate)}`,
+      item => item.type === 'ip' && item.value === candidate, 100,
+    )
+    if (!existing) return candidate
+  }
+  throw new Error('无法为 smoke 夹具分配尚未使用的 IP；未执行创建或导入')
+}
+
+/** Group lists intentionally sort overdue work first; use the real organization
+ * filter rather than assuming this newly issued fixture appears on page one. */
+async function findFixtureWorkOrder(page: Page, organizationID: string, organizationName: string, title: string) {
+  const selects = page.locator('.security-panel .filter-bar .el-select')
+  // In the orders tab, group/security roles have organization + status;
+  // subsidiary roles only have status. Do not mistake that status for an org.
+  const organizationSelect = selects.first()
+  if (await selects.count() > 1 && !(await organizationSelect.innerText()).includes(organizationName)) {
+    await organizationSelect.click()
+    await organizationSelect.getByRole('combobox').fill(organizationName)
+    await page.getByRole('option', { name: organizationName, exact: true }).click()
+    const loaded = page.waitForResponse(response => {
+      const url = new URL(response.url())
+      return url.pathname === '/api/v1/security-work-orders' && url.searchParams.get('organization_id') === organizationID && response.request().method() === 'GET'
+    })
+    await page.locator('.security-panel .filter-bar').getByRole('button', { name: '筛选', exact: true }).click()
+    expect((await loaded).status()).toBe(200)
+  }
+  const row = page.locator('.security-panel .el-table__body-wrapper tbody tr').filter({ hasText: title }).first()
+  await expect(row).toBeVisible({ timeout: 15_000 })
+  return row
+}
+
+async function deleteOwnedFixtures(page: Page, assets: string[], systems: string[], reason: string) {
+  for (const [resource, ids] of [['assets', assets], ['business-systems', systems]] as const) {
+    for (const id of ids) {
+      const current = await page.request.get(`/api/v1/${resource}/${id}`)
+      expect(current.status()).toBe(200)
+      const { item } = await current.json()
+      const query = new URLSearchParams({ expected_version: String(item.version), direct_change_reason: reason })
+      const deleted = await page.request.delete(`/api/v1/${resource}/${id}?${query}`)
+      expect(deleted.status(), await deleted.text()).toBe(204)
+    }
+  }
+}
 
 async function login(page: Page, username: string, password: string) {
   await page.getByPlaceholder('请输入用户名').fill(username)
   await page.getByPlaceholder('请输入密码').fill(password)
   await page.getByRole('button', { name: '登录', exact: true }).click()
-  await expect(page).not.toHaveURL(/\/login(?:\?|$)/)
+  await expect(page).not.toHaveURL(/\/login(?:\?|$)/, { timeout: 15_000 })
 }
 
 async function selectFormOption(page: Page, dialog: Locator, label: string, option: string) {
@@ -18,6 +74,47 @@ async function selectFormOption(page: Page, dialog: Locator, label: string, opti
   if (!listboxID) throw new Error(`未找到“${label}”下拉框的选项列表`)
   await item.locator('.el-select').click()
   await page.locator(`[id="${listboxID}"]`).getByRole('option', { name: option, exact: true }).click()
+}
+
+// Notification ordering prioritizes unread/urgent records before recency. On a
+// preserved database a new warning can legitimately be beyond page one.
+async function findNotificationCard(page: Page, category: string, label: string, text: string) {
+  await page.goto('/notifications')
+  await page.locator('.notification-summary-panel .el-select').click()
+  const filtered = page.waitForResponse(response => {
+    const url = new URL(response.url())
+    return response.request().method() === 'GET' && url.pathname === '/api/v1/notifications' && url.searchParams.get('category') === category && url.searchParams.get('page') === '1'
+  })
+  await page.getByRole('option', { name: label, exact: true }).click()
+  expect((await filtered).status()).toBe(200)
+  const found = await findRecordPage<{ title: string; message: string }>(page.request, `/api/v1/notifications?category=${category}`, item => `${item.title} ${item.message}`.includes(text))
+  expect(found, `应存在 ${label} 消息：${text}`).toBeTruthy()
+  const pagination = page.locator('.notification-list-panel .el-pagination')
+  for (let target = 2; target <= found!.page; target++) {
+    const loaded = page.waitForResponse(response => {
+      const url = new URL(response.url())
+      return response.request().method() === 'GET' && url.pathname === '/api/v1/notifications' && url.searchParams.get('category') === category && url.searchParams.get('page') === String(target)
+    })
+    await pagination.locator('.btn-next').click()
+    expect((await loaded).status()).toBe(200)
+    await expect(pagination.locator('.number.is-active')).toHaveText(String(target))
+  }
+  const card = page.locator('.notification-card').filter({ hasText: text }).first()
+  await expect(card).toBeVisible()
+  return card
+}
+
+// Wait for the exact query before asserting table contents. Retained audit logs
+// legitimately take longer than the 5s locator budget; keep the existing 15s
+// request budget and still require the rendered event and resource identifier.
+async function searchAuditLogs(page: Page, keyword: string) {
+  await page.getByPlaceholder('搜索摘要、资源 ID、请求 ID、人员或组织').fill(keyword)
+  const loaded = page.waitForResponse(response => {
+    const url = new URL(response.url())
+    return response.request().method() === 'GET' && url.pathname === '/api/v1/audit-logs' && url.searchParams.get('q') === keyword && url.searchParams.get('page') === '1'
+  })
+  await page.getByRole('button', { name: '查询', exact: true }).click()
+  expect((await loaded).status()).toBe(200)
 }
 
 async function ensureTaskDetailOpen(page: Page, taskName: string) {
@@ -90,7 +187,7 @@ test('集团创建子公司账号，子公司隔离登记业务系统和网络�
   const systemName = `客户数据系统_${suffix}`
   const domainAsset = `portal-${suffix}.example.com`
   const domainAssetName = `门户资产_${suffix}`
-  const importedIP = `198.51.100.${Number(suffix.slice(-2)) % 250 + 1}`
+  const importedIP = await unusedFixtureIP(page.request)
   const scopeExcludedIP = `10.250.${Number(suffix.slice(-4, -2)) % 250}.${Number(suffix.slice(-2)) % 250 + 1}`
   const importFileName = `assets-${suffix}.csv`
   const systemImportFileName = `business-systems-${suffix}.csv`
@@ -120,8 +217,18 @@ test('集团创建子公司账号，子公司隔离登记业务系统和网络�
   let dialog = page.getByRole('dialog', { name: '新增组织机构' })
   await dialog.getByPlaceholder('如：SUBSIDIARY_01').fill(organizationCode)
   await dialog.getByPlaceholder('请输入完整名称').fill(organizationName)
+  const organizationCreated = page.waitForResponse(response => new URL(response.url()).pathname === '/api/v1/organizations' && response.request().method() === 'POST')
   await dialog.getByRole('button', { name: '确认新增' }).click()
+  const organizationCreatedResponse = await organizationCreated
+  expect(organizationCreatedResponse.status()).toBe(201)
+  const { item: createdOrganization } = await organizationCreatedResponse.json() as { item: { id: string; code: string } }
+  expect(createdOrganization.code).toBe(organizationCode)
+  const organizationID = createdOrganization.id
+  // The retained organization tree is paginated; a new row need not be on
+  // page one. Locate it through the real local search, then restore the tree.
+  await page.getByRole('textbox', { name: '搜索组织', exact: true }).fill(organizationCode)
   await expect(page.getByText(organizationName, { exact: true })).toBeVisible()
+  await page.getByRole('textbox', { name: '搜索组织', exact: true }).clear()
 
   await page.getByRole('button', { name: '编辑集团信息', exact: true }).click()
   dialog = page.getByRole('dialog', { name: '编辑集团基本信息' })
@@ -211,8 +318,7 @@ test('集团创建子公司账号，子公司隔离登记业务系统和网络�
   await expect(page.getByRole('button', { name: '用户管理', exact: true })).toBeVisible()
   await expect(page.getByRole('button', { name: '网络区域配置' })).toHaveCount(0)
 
-  await page.goto('/notifications')
-  let inventoryNotificationCard = page.locator('.notification-card').filter({ hasText: inventoryTaskName }).first()
+  let inventoryNotificationCard = await findNotificationCard(page, 'inventory_task_received', '填报任务', inventoryTaskName)
   await expect(inventoryNotificationCard).toContainText('收到新的填报任务')
   await inventoryNotificationCard.getByRole('button', { name: '查看处理', exact: true }).click()
   await expect(page).toHaveURL(/\/inventory-tasks\?task_id=[^&]+&organization_id=[^&]+$/)
@@ -225,7 +331,7 @@ test('集团创建子公司账号，子公司隔离登记业务系统和网络�
 
   await page.getByRole('button', { name: '填报任务', exact: true }).click()
   await expect(page.getByRole('button', { name: '创建任务', exact: true })).toHaveCount(0)
-  await expect(page.getByText(inventoryTaskName, { exact: true })).toBeVisible()
+  await expect(page.locator('.el-table__row').filter({ hasText: inventoryTaskName }).getByRole('button', { name: inventoryTaskName, exact: true })).toBeVisible()
   let taskDetail = await ensureTaskDetailOpen(page, inventoryTaskName)
   let qualityProgressRow = taskDetail.locator('.task-organization-table .el-table__body-wrapper tbody tr').filter({ hasText: organizationName }).first()
   await clickRowAction(page, qualityProgressRow, '开始填报')
@@ -477,13 +583,7 @@ test('集团创建子公司账号，子公司隔离登记业务系统和网络�
   await expect(page.getByText('网络资产已删除')).toBeVisible()
   await expect(page.getByText(importedIP, { exact: true })).toHaveCount(0)
 
-  const excludedAssetStatus = await page.evaluate(async ({ organizationCode: code, value }) => {
-    const organizationResponse = await fetch('/api/v1/organizations?page=1&page_size=100')
-    if (!organizationResponse.ok) throw new Error(`organizations request failed: ${organizationResponse.status}`)
-    const organizations = await organizationResponse.json()
-    const organization = organizations.items.find((item: { code: string }) => item.code === code)
-    if (!organization) throw new Error(`organization not found: ${code}`)
-
+  const excludedAssetStatus = await page.evaluate(async ({ organizationID, value }) => {
     const response = await fetch('/api/v1/assets', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -491,7 +591,7 @@ test('集团创建子公司账号，子公司隔离登记业务系统和网络�
         type: 'ip',
         value,
         name: '专项任务范围外内网资产',
-        organization_id: organization.id,
+        organization_id: organizationID,
         environment: 'production',
         network_scope: 'private',
         status: 'active',
@@ -501,7 +601,7 @@ test('集团创建子公司账号，子公司隔离登记业务系统和网络�
       }),
     })
     return response.status
-  }, { organizationCode, value: scopeExcludedIP })
+  }, { organizationID, value: scopeExcludedIP })
   expect(excludedAssetStatus).toBe(201)
 
   await page.getByRole('button', { name: '更多操作', exact: true }).click()
@@ -541,18 +641,14 @@ test('集团创建子公司账号，子公司隔离登记业务系统和网络�
 
   // 工作版本默认只是组织工作台账，必须显式纳入本次填报任务；资产纳入时会
   // 按其业务系统关联自动带入对应系统，之后质量检查才会看到 1 个系统 / 1 项资产。
-  const inventoryContext = await page.evaluate(async ({ taskName, organizationName }) => {
-    const [taskResponse, organizationResponse] = await Promise.all([
-      fetch('/api/v1/inventory-tasks?page=1&page_size=100'),
-      fetch('/api/v1/organizations?page=1&page_size=100'),
-    ])
+  const inventoryContext = await page.evaluate(async ({ taskName, organizationID }) => {
+    const taskResponse = await fetch(`/api/v1/inventory-tasks?q=${encodeURIComponent(taskName)}&page=1&page_size=100`)
+    if (!taskResponse.ok) throw new Error(`inventory task lookup failed: ${taskResponse.status}`)
     const tasks = await taskResponse.json()
-    const organizations = await organizationResponse.json()
     const task = tasks.items.find((item: { id: string; name: string }) => item.name === taskName)
-    const organization = organizations.items.find((item: { id: string; name: string }) => item.name === organizationName)
-    if (!task || !organization) throw new Error('填报任务或组织上下文不存在')
-    return { taskID: task.id as string, organizationID: organization.id as string }
-  }, { taskName: inventoryTaskName, organizationName })
+    if (!task) throw new Error('填报任务上下文不存在')
+    return { taskID: task.id as string, organizationID }
+  }, { taskName: inventoryTaskName, organizationID })
   await page.goto(`/assets?mode=inventory&task_id=${inventoryContext.taskID}&organization_id=${inventoryContext.organizationID}&task_name=${encodeURIComponent(inventoryTaskName)}&asset_network_scope=public`)
   await expect(page.getByText(`当前为“${inventoryTaskName}”选择上报模式`)).toBeVisible()
   const workingAssetRow = page.locator('.data-table-panel').last().locator('.el-table__body-wrapper tbody tr').filter({ hasText: domainAsset }).first()
@@ -560,11 +656,18 @@ test('集团创建子公司账号，子公司隔离登记业务系统和网络�
   await clickRowAction(page, workingAssetRow, '选择上报')
   await expect(page.getByText('已选择该网络资产纳入本次上报')).toBeVisible()
 
+  const initialUsers = page.waitForResponse(response => new URL(response.url()).pathname === '/api/v1/users' && response.request().method() === 'GET')
   await page.goto('/users')
   await expect(page).toHaveURL(/\/users$/)
   await expect(page.getByRole('heading', { name: '用户管理' })).toBeVisible()
   await expect(page.getByRole('tab', { name: '角色与权限' })).toHaveCount(0)
-  await expect(page.getByText('本人资料在账户设置维护')).toBeVisible()
+  expect((await initialUsers).status()).toBe(200)
+  await page.getByPlaceholder('姓名、用户名、联系方式或组织').fill(subsidiaryUsername)
+  const ownUserResponse = page.waitForResponse(response => new URL(response.url()).pathname === '/api/v1/users' && new URL(response.url()).searchParams.get('keyword') === subsidiaryUsername)
+  await page.getByRole('button', { name: '查询', exact: true }).click()
+  expect((await ownUserResponse).status()).toBe(200)
+  const ownUserRow = page.locator('.el-table__body-wrapper tbody tr').filter({ hasText: subsidiaryUsername })
+  await expect(ownUserRow.getByText('本人资料在账户设置维护', { exact: true })).toBeVisible()
 
   await page.getByRole('button', { name: '填报任务', exact: true }).click()
   await ensureTaskDetailOpen(page, inventoryTaskName)
@@ -581,8 +684,7 @@ test('集团创建子公司账号，子公司隔离登记业务系统和网络�
   await page.getByRole('button', { name: '退出', exact: true }).click()
   await login(page, adminUsername, adminPassword!)
 
-  await page.goto('/notifications')
-  inventoryNotificationCard = page.locator('.notification-card').filter({ hasText: inventoryTaskName }).first()
+  inventoryNotificationCard = await findNotificationCard(page, 'inventory_task_review', '填报审核', inventoryTaskName)
   await expect(inventoryNotificationCard).toContainText('填报任务待审核')
   await expect(inventoryNotificationCard).toContainText(organizationName)
   await inventoryNotificationCard.getByRole('button', { name: '查看处理', exact: true }).click()
@@ -592,22 +694,18 @@ test('集团创建子公司账号，子公司隔离登记业务系统和网络�
   await closeTaskDetail(page)
   await page.getByRole('button', { name: '查看全部任务', exact: true }).click()
 
-  const populatedScopePreview = await page.evaluate(async ({ code }) => {
-    const organizationsResponse = await fetch('/api/v1/organizations?page=1&page_size=100')
-    const organizations = await organizationsResponse.json()
-    const organization = organizations.items.find((item: { code: string }) => item.code === code)
-    if (!organization) throw new Error(`organization not found: ${code}`)
+  const populatedScopePreview = await page.evaluate(async ({ organizationID }) => {
     const response = await fetch('/api/v1/inventory-tasks/scope-preview', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        organization_ids: [organization.id],
+        organization_ids: [organizationID],
         required_fields: ['business_systems', 'network_assets'],
         asset_network_scope: 'public',
       }),
     })
     return { status: response.status, body: await response.json() }
-  }, { code: organizationCode })
+  }, { organizationID })
   expect(populatedScopePreview.status).toBe(200)
   // 工作版本尚未审核发布，不应被正式台账范围预览误计入；任务提交快照
   // 仍会保留本次已选择的 1 个系统 / 1 项资产（下方进度断言验证）。
@@ -640,8 +738,7 @@ test('集团创建子公司账号，子公司隔离登记业务系统和网络�
   await closeTaskDetail(page)
   await page.getByRole('button', { name: '退出', exact: true }).click()
   await login(page, subsidiaryUsername, formalPassword)
-  await page.goto('/notifications')
-  inventoryNotificationCard = page.locator('.notification-card').filter({ hasText: inventoryTaskName }).first()
+  inventoryNotificationCard = await findNotificationCard(page, 'inventory_task_returned', '填报退回', inventoryTaskName)
   await expect(inventoryNotificationCard).toContainText('填报任务已退回')
   await inventoryNotificationCard.getByRole('button', { name: '查看处理', exact: true }).click()
   await expect(page.getByText('当前正在查看消息关联的填报任务及目标组织')).toBeVisible()
@@ -689,7 +786,7 @@ test('集团创建子公司账号，子公司隔离登记业务系统和网络�
   const taskDownload = await taskDownloadPromise
   expect(taskDownload.suggestedFilename()).toBe(`填报任务结果-${inventoryTaskName}.xlsx`)
   const taskCSVExport = await page.evaluate(async ({ taskName, expectedOrganization }) => {
-    const listResponse = await fetch('/api/v1/inventory-tasks')
+    const listResponse = await fetch(`/api/v1/inventory-tasks?q=${encodeURIComponent(taskName)}&page=1&page_size=100`)
     const list = await listResponse.json()
     const task = list.items.find((item: { name: string }) => item.name === taskName)
     const response = await fetch(`/api/v1/inventory-tasks/${task.id}/export?format=csv`)
@@ -702,25 +799,22 @@ test('集团创建子公司账号，子公司隔离登记业务系统和网络�
   expect(taskCSVExport.text).toContain('已通过')
   expect(taskCSVExport.text).toContain('已补充统计口径并重新提交')
 
-  const securityFixture = await page.evaluate(async ({ expectedOrganizationCode, expectedAsset, expectedSystemCode, suffixValue }) => {
-    const [organizationsResponse, assetsResponse, systemsResponse] = await Promise.all([
-      fetch(`/api/v1/organizations?q=${encodeURIComponent(expectedOrganizationCode)}&page=1&page_size=100`),
+  const securityFixture = await page.evaluate(async ({ organizationID, expectedAsset, expectedSystemCode, suffixValue }) => {
+    const [assetsResponse, systemsResponse] = await Promise.all([
       fetch(`/api/v1/assets?q=${encodeURIComponent(expectedAsset)}&page=1&page_size=20`),
       fetch(`/api/v1/business-systems?q=${encodeURIComponent(expectedSystemCode)}&page=1&page_size=20`),
     ])
-    const organizations = await organizationsResponse.json()
     const assets = await assetsResponse.json()
     const systems = await systemsResponse.json()
-    const organization = organizations.items.find((item: { code: string }) => item.code === expectedOrganizationCode)
     const asset = assets.items.find((item: { value: string }) => item.value === expectedAsset)
     const system = systems.items.find((item: { code: string }) => item.code === expectedSystemCode)
-    if (!organization || !asset || !system) throw new Error('security work order fixture references not found')
+    if (!asset || !system) throw new Error('security work order fixture references not found')
 
     const findingResponse = await fetch('/api/v1/security-findings', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         title: `未授权访问漏洞_PW_${suffixValue}`, severity: 'high', status: 'pending',
-        assignee_organization_id: organization.id, asset_id: asset.id, business_system_id: system.id,
+        assignee_organization_id: organizationID, asset_id: asset.id, business_system_id: system.id,
         vulnerability_type: '未授权访问', description: '互联网入口未校验登录态即可访问敏感功能。',
         evidence: 'E2E 脱敏验证记录', remediation_advice: '补充统一身份认证与服务端权限校验。',
         source: 'manual', discovered_at: new Date().toISOString(),
@@ -733,7 +827,7 @@ test('集团创建子公司账号，子公司隔离登记业务系统和网络�
     const orderResponse = await fetch('/api/v1/security-work-orders', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        title: `互联网资产高危漏洞整改_PW_${suffixValue}`, assignee_organization_id: organization.id,
+        title: `互联网资产高危漏洞整改_PW_${suffixValue}`, assignee_organization_id: organizationID,
         description: '集团渗透测试发现高危未授权访问问题。',
         remediation_requirement: '完成权限校验修复、自测并提交整改说明。', due_at: dueAt.toISOString(), finding_ids: [finding.id],
       }),
@@ -745,41 +839,39 @@ test('集团创建子公司账号，子公司隔离登记业务系统和网络�
     })
     if (!issueResponse.ok) throw new Error(`issue security work order failed: ${issueResponse.status} ${await issueResponse.text()}`)
     return { id: order.id as string, number: order.number as string, title: order.title as string }
-  }, { expectedOrganizationCode: organizationCode, expectedAsset: domainAsset, expectedSystemCode: systemCode, suffixValue: suffix })
+  }, { organizationID, expectedAsset: domainAsset, expectedSystemCode: systemCode, suffixValue: suffix })
   const workOrderNumber = securityFixture.number
 
   await page.getByRole('button', { name: '安全工单', exact: true }).click()
   await expect(page).toHaveURL(/\/security-work-orders$/)
-  let securityRow = page.locator('.security-panel .el-table__body-wrapper tbody tr').filter({ hasText: securityFixture.title }).first()
+  let securityRow = await findFixtureWorkOrder(page, organizationID, organizationName, securityFixture.title)
   await expect(securityRow).toContainText('已下发')
   await expect(securityRow).toContainText(organizationName)
 
   await page.getByRole('button', { name: '退出', exact: true }).click()
   await login(page, subsidiaryUsername, formalPassword)
 
-  await page.goto('/notifications')
-  await expect(page.getByRole('heading', { name: '消息中心', exact: true })).toBeVisible()
-  let notificationCard = page.locator('.notification-card').filter({ hasText: securityFixture.title }).first()
+  let notificationCard = await findNotificationCard(page, 'work_order_received', '新工单', securityFixture.title)
   await expect(notificationCard).toContainText('收到新的安全工单')
   await notificationCard.getByRole('button', { name: '标记已读', exact: true }).click()
   await expect(notificationCard).toContainText('已读')
 
   await page.getByRole('button', { name: '安全工单', exact: true }).click()
-  securityRow = page.locator('.security-panel .el-table__body-wrapper tbody tr').filter({ hasText: securityFixture.title }).first()
+  securityRow = await findFixtureWorkOrder(page, organizationID, organizationName, securityFixture.title)
   await expect(securityRow).toBeVisible()
   await clickRowAction(page, securityRow, '接收')
   dialog = page.getByRole('dialog', { name: '接收安全工单' })
   await dialog.getByRole('button', { name: '确认接收安全工单', exact: true }).click()
   await expect(page.getByText('安全工单已接收')).toBeVisible()
 
-  securityRow = page.locator('.security-panel .el-table__body-wrapper tbody tr').filter({ hasText: securityFixture.title }).first()
+  securityRow = await findFixtureWorkOrder(page, organizationID, organizationName, securityFixture.title)
   await clickRowAction(page, securityRow, '更新进度')
   dialog = page.getByRole('dialog', { name: '更新整改进度' })
   await dialog.locator('textarea').first().fill('已完成权限中间件修复，正在开展回归测试。')
   await dialog.getByRole('button', { name: '确认更新整改进度', exact: true }).click()
   await expect(page.getByText('整改进度已更新')).toBeVisible()
 
-  securityRow = page.locator('.security-panel .el-table__body-wrapper tbody tr').filter({ hasText: securityFixture.title }).first()
+  securityRow = await findFixtureWorkOrder(page, organizationID, organizationName, securityFixture.title)
   await clickRowAction(page, securityRow, '详情')
   let workOrderDrawer = page.getByRole('dialog', { name: '安全工单详情' })
   await workOrderDrawer.locator('input[type=file]').setInputFiles({ name: remediationAttachmentName, mimeType: 'text/plain', buffer: Buffer.from('PW remediation evidence') })
@@ -789,7 +881,7 @@ test('集团创建子公司账号，子公司隔离登记业务系统和网络�
   await expect(workOrderDrawer.getByText(remediationAttachmentName, { exact: true })).toBeVisible()
   await workOrderDrawer.locator('.el-drawer__close-btn').click()
 
-  securityRow = page.locator('.security-panel .el-table__body-wrapper tbody tr').filter({ hasText: securityFixture.title }).first()
+  securityRow = await findFixtureWorkOrder(page, organizationID, organizationName, securityFixture.title)
   await clickRowAction(page, securityRow, '提交复测')
   dialog = page.getByRole('dialog', { name: '提交集团复测' })
   await dialog.locator('textarea').first().fill('已上线权限校验修复，自测未再发现未授权访问。')
@@ -799,8 +891,7 @@ test('集团创建子公司账号，子公司隔离登记业务系统和网络�
   await page.getByRole('button', { name: '退出', exact: true }).click()
   await login(page, adminUsername, adminPassword!)
 
-  await page.goto('/notifications')
-  notificationCard = page.locator('.notification-card').filter({ hasText: securityFixture.title }).first()
+  notificationCard = await findNotificationCard(page, 'work_order_review', '待集团复测', securityFixture.title)
   await expect(notificationCard).toContainText('安全工单待复测')
   await notificationCard.getByRole('button', { name: '查看处理', exact: true }).click()
   await expect(page).toHaveURL(new RegExp(`/security-work-orders\\?work_order_id=${securityFixture.id}$`))
@@ -808,7 +899,7 @@ test('集团创建子公司账号，子公司隔离登记业务系统和网络�
   await expect(notificationWorkOrderDrawer).toContainText(securityFixture.title)
   await notificationWorkOrderDrawer.locator('.el-drawer__close-btn').click()
 
-  securityRow = page.locator('.security-panel .el-table__body-wrapper tbody tr').filter({ hasText: securityFixture.title }).first()
+  securityRow = await findFixtureWorkOrder(page, organizationID, organizationName, securityFixture.title)
   await clickRowAction(page, securityRow, '退回')
   dialog = page.getByRole('dialog', { name: '复测不通过并退回' })
   await dialog.locator('textarea').first().fill('复测发现一个接口仍可绕过权限校验，请继续整改。')
@@ -818,7 +909,7 @@ test('集团创建子公司账号，子公司隔离登记业务系统和网络�
   await page.getByRole('button', { name: '退出', exact: true }).click()
   await login(page, subsidiaryUsername, formalPassword)
   await page.getByRole('button', { name: '安全工单', exact: true }).click()
-  securityRow = page.locator('.security-panel .el-table__body-wrapper tbody tr').filter({ hasText: securityFixture.title }).first()
+  securityRow = await findFixtureWorkOrder(page, organizationID, organizationName, securityFixture.title)
   await expect(securityRow).toContainText('已退回')
   await clickRowAction(page, securityRow, '提交复测')
   dialog = page.getByRole('dialog', { name: '提交集团复测' })
@@ -829,13 +920,13 @@ test('集团创建子公司账号，子公司隔离登记业务系统和网络�
   await page.getByRole('button', { name: '退出', exact: true }).click()
   await login(page, adminUsername, adminPassword!)
   await page.getByRole('button', { name: '安全工单', exact: true }).click()
-  securityRow = page.locator('.security-panel .el-table__body-wrapper tbody tr').filter({ hasText: securityFixture.title }).first()
+  securityRow = await findFixtureWorkOrder(page, organizationID, organizationName, securityFixture.title)
   await clickRowAction(page, securityRow, '复测通过')
   dialog = page.getByRole('dialog', { name: '复测通过并关闭' })
   await dialog.locator('textarea').first().fill('集团复测通过，未授权访问问题已修复。')
   await dialog.getByRole('button', { name: '确认复测通过并关闭', exact: true }).click()
   await expect(page.getByText('安全工单已关闭')).toBeVisible()
-  securityRow = page.locator('.security-panel .el-table__body-wrapper tbody tr').filter({ hasText: securityFixture.title }).first()
+  securityRow = await findFixtureWorkOrder(page, organizationID, organizationName, securityFixture.title)
   await expect(securityRow).toContainText('已关闭')
   await clickRowAction(page, securityRow, '详情')
   workOrderDrawer = page.getByRole('dialog', { name: '安全工单详情' })
@@ -855,8 +946,7 @@ test('集团创建子公司账号，子公司隔离登记业务系统和网络�
   await page.getByRole('button', { name: '审计日志', exact: true }).click()
   await expect(page).toHaveURL(/\/audit-logs$/)
   await expect(page.getByRole('heading', { name: '审计日志', exact: true })).toBeVisible()
-  await page.getByPlaceholder('搜索摘要、资源 ID、请求 ID、人员或组织').fill(inventoryTaskName)
-  await page.getByRole('button', { name: '查询', exact: true }).click()
+  await searchAuditLogs(page, inventoryTaskName)
   const auditRow = page.locator('.audit-table-panel .el-table__body-wrapper tbody tr').filter({ hasText: '导出填报结果' }).first()
   await expect(auditRow).toBeVisible()
   await clickRowAction(page, auditRow, '查看')
@@ -865,8 +955,7 @@ test('集团创建子公司账号，子公司隔离登记业务系统和网络�
   await expect(auditDrawer).toContainText('导出填报结果')
   await expect(auditDrawer).toContainText(inventoryTaskName)
   await auditDrawer.locator('.el-drawer__close-btn').click()
-  await page.getByPlaceholder('搜索摘要、资源 ID、请求 ID、人员或组织').fill(workOrderNumber)
-  await page.getByRole('button', { name: '查询', exact: true }).click()
+  await searchAuditLogs(page, workOrderNumber)
   const workOrderAuditRow = page.locator('.audit-table-panel .el-table__body-wrapper tbody tr').filter({ hasText: '关闭安全工单' }).first()
   await expect(workOrderAuditRow).toContainText(workOrderNumber)
 })
@@ -879,7 +968,6 @@ test('集团创建安全测试批次并批量导入授权范围内漏洞', async
   const batchName = `安全测试批次_PW_${suffix}`
   const assetValue = `scope-pw-${suffix}.example.com`
   const outOfScopeValue = `out-of-scope-pw-${suffix}.example.com`
-  const scopeIP = `198.51.100.${Number(suffix.slice(-3)) % 250 + 1}`
   const importFindingTitle = `批量导入漏洞_PW_${suffix}`
   const linkedFindingTitle = `端口标识待关联漏洞_PW_${suffix}`
   const riskAcceptedUntil = futureDateTime(30)
@@ -892,6 +980,8 @@ test('集团创建安全测试批次并批量导入授权范围内漏洞', async
   await login(page, adminUsername, adminPassword!)
   await expect(page).toHaveURL(/\/security-test-batches$/)
   await expect(page.getByRole('heading', { name: '安全测试', exact: true })).toBeVisible()
+
+  const scopeIP = await unusedFixtureIP(page.request)
 
   await page.evaluate(async ({ value, scopeIP, outOfScopeValue, code, name }) => {
     const organizationsResponse = await fetch('/api/v1/organizations')
@@ -1013,6 +1103,9 @@ test('集团创建安全测试批次并批量导入授权范围内漏洞', async
   await expect(importDialog.getByRole('button', { name: /处理 .*待关联漏洞/, exact: true })).toHaveCount(0)
   await importDialog.getByRole('button', { name: '关闭', exact: true }).click()
   await page.getByRole('tab', { name: '漏洞与安全发现', exact: true }).click()
+  await page.locator('.filter-bar .el-select').filter({ hasText: '全部责任组织' }).getByRole('combobox').fill(organizationName)
+  await page.getByRole('option', { name: organizationName, exact: true }).click()
+  await page.getByRole('button', { name: '筛选', exact: true }).click()
   const linkedFindingRow = page.locator('.security-panel .el-table__body-wrapper tbody tr').filter({ hasText: linkedFindingTitle }).first()
   await expect(linkedFindingRow).toContainText(scopeIP)
   await expect(linkedFindingRow).toContainText(batchName)
@@ -1028,16 +1121,19 @@ test('集团创建安全测试批次并批量导入授权范围内漏洞', async
   await riskDialog.getByPlaceholder('说明暂不整改的业务原因、补偿措施和责任判断').fill('业务系统正在进行重大版本切换，当前采用访问控制和专项监控作为补偿措施。')
   await riskDialog.locator('.el-date-editor input').fill(riskAcceptedUntil.input)
   await riskDialog.locator('.el-date-editor input').press('Enter')
-  await riskDialog.getByRole('button', { name: '确认接受风险', exact: true }).click()
+  const [acceptRiskResponse] = await Promise.all([
+    page.waitForResponse(response => response.request().method() === 'POST' && /\/api\/v1\/security-findings\/[^/]+\/accept-risk$/.test(new URL(response.url()).pathname)),
+    riskDialog.getByRole('button', { name: '确认接受风险', exact: true }).click(),
+  ])
+  expect(acceptRiskResponse.status()).toBe(200)
+  const acceptedFinding = (await acceptRiskResponse.json()).item
+  expect(acceptedFinding.title).toBe(importFindingTitle)
+  const findingID = acceptedFinding.id as string
+  expect(findingID).toBeTruthy()
   await expect(page.getByText('风险接受已保存', { exact: true })).toBeVisible()
   await expect(findingDrawer).toContainText('风险接受中')
   await expect(findingDrawer).toContainText(riskAcceptedUntil.display)
 
-  const findingID = await page.evaluate(async (title) => {
-    const response = await fetch('/api/v1/security-findings')
-    const data = await response.json()
-    return data.items.find((item: { title: string }) => item.title === title)?.id as string
-  }, importFindingTitle)
   const acceptedAudit = await page.evaluate(async (id) => {
     const response = await fetch(`/api/v1/audit-logs?resource_type=security_finding&q=${encodeURIComponent(id)}&page_size=100`)
     if (!response.ok) throw new Error(`audit request failed: ${response.status}`)
@@ -1091,15 +1187,14 @@ test('集团管理员可从回收站恢复误删网络资产并保留审计记�
   }, assetValue)
   const assetID = created.item.id as string
 
-  const deleteStatus = await page.evaluate(async (id) => {
-    const response = await fetch(`/api/v1/assets/${id}?direct_change_reason=${encodeURIComponent('验证回收站恢复流程')}`, { method: 'DELETE' })
-    return response.status
-  }, assetID)
+  const deleted = await page.request.delete(`/api/v1/assets/${assetID}?expected_version=${created.item.version}&direct_change_reason=${encodeURIComponent('验证回收站恢复流程')}`)
+  const deleteStatus = deleted.status()
   expect(deleteStatus).toBe(204)
 
   await page.goto('/recycle-bin')
   await expect(page).toHaveURL(/\/recycle-bin\/?$/)
   await expect(page.getByRole('heading', { name: '回收站', exact: true })).toBeVisible()
+  await showRecordPage(page, '/api/v1/recycle-bin?resource_type=asset', assetID, page.locator('.el-pagination'))
   const row = page.locator('.data-table-panel .el-table__body-wrapper tbody tr').filter({ hasText: assetValue }).first()
   await expect(row).toBeVisible()
   await clickRowAction(page, row, '恢复')
@@ -1109,14 +1204,14 @@ test('集团管理员可从回收站恢复误删网络资产并保留审计记�
 
   const restored = await page.evaluate(async ({ id, value }) => {
     const [assetsResponse, auditResponse] = await Promise.all([
-      fetch('/api/v1/assets'),
+      fetch(`/api/v1/assets/${id}`),
       fetch(`/api/v1/audit-logs?resource_type=asset&q=${encodeURIComponent(id)}&page_size=100`),
     ])
     if (!assetsResponse.ok || !auditResponse.ok) throw new Error('restore verification request failed')
     const assets = await assetsResponse.json()
     const audit = await auditResponse.json()
     return {
-      exists: assets.items.some((item: { id: string; value: string }) => item.id === id && item.value === value),
+      exists: assets.item.id === id && assets.item.value === value,
       restoredAudited: audit.items.some((item: { action: string }) => item.action === 'asset.restore'),
     }
   }, { id: assetID, value: assetValue })
@@ -1219,10 +1314,7 @@ test('资产与业务系统保存字段级变更历史并可在资产页面查�
   await expect(historyDrawer.getByText(originalAssetName, { exact: true })).toBeVisible()
   await expect(historyDrawer.getByText(updatedAssetName, { exact: true })).toBeVisible()
 
-  await page.evaluate(async ({ assetID, systemID }) => {
-    await fetch(`/api/v1/assets/${assetID}?direct_change_reason=${encodeURIComponent('验证字段变更历史')}`, { method: 'DELETE' })
-    await fetch(`/api/v1/business-systems/${systemID}`, { method: 'DELETE' })
-  }, { assetID: result.assetID, systemID: result.systemID })
+  await deleteOwnedFixtures(page, [result.assetID], [result.systemID], '验证字段变更历史')
 })
 
 test('集团管理员可批量归档恢复业务系统并批量调整资产状态和网络区域', async ({ page }) => {
@@ -1231,17 +1323,6 @@ test('集团管理员可批量归档恢复业务系统并批量调整资产状�
 
   await page.goto('/login')
   await login(page, adminUsername, adminPassword!)
-  await page.evaluate(async () => {
-    const [assetResponse, systemResponse] = await Promise.all([fetch('/api/v1/assets'), fetch('/api/v1/business-systems')])
-    const assetData = await assetResponse.json()
-    const systemData = await systemResponse.json()
-    for (const item of assetData.items.filter((entry: { name?: string }) => entry.name?.startsWith('批量测试资产_'))) {
-      await fetch(`/api/v1/assets/${item.id}?direct_change_reason=${encodeURIComponent('验证批量资产操作')}`, { method: 'DELETE' })
-    }
-    for (const item of systemData.items.filter((entry: { name?: string }) => entry.name?.startsWith('批量测试系统_'))) {
-      await fetch(`/api/v1/business-systems/${item.id}`, { method: 'DELETE' })
-    }
-  })
   const suffix = Date.now().toString()
   const systemNames = [`批量测试系统_${suffix}_1`, `批量测试系统_${suffix}_2`]
   const assetNames = [`批量测试资产_${suffix}_1`, `批量测试资产_${suffix}_2`]
@@ -1290,7 +1371,22 @@ test('集团管理员可批量归档恢复业务系统并批量调整资产状�
     return { area, systems, assets }
   }, { suffix, systemNames, assetNames })
 
+  const initialSystems = page.waitForResponse(response => response.request().method() === 'GET' && new URL(response.url()).pathname === '/api/v1/business-systems')
   await page.goto('/systems')
+  expect((await initialSystems).status()).toBe(200)
+  // The retained database may put this fixture across the default page boundary.
+  // Exercise the real search rather than assuming both new records are on page 1.
+  const systemSearch = `批量测试系统_${suffix}`
+  const systemsLoaded = page.waitForResponse(response => {
+    const url = new URL(response.url())
+    return response.request().method() === 'GET' && url.pathname === '/api/v1/business-systems' && url.searchParams.get('q') === systemSearch
+  })
+  const systemSearchInput = page.getByPlaceholder('搜索系统名称、组织或负责人，也可输入编码')
+  await systemSearchInput.fill(systemSearch)
+  await systemSearchInput.press('Enter')
+  const filteredSystems = await systemsLoaded
+  expect(filteredSystems.status()).toBe(200)
+  expect((await filteredSystems.json()).items.map((item: { id: string }) => item.id).sort()).toEqual(fixture.systems.map((item: { id: string }) => item.id).sort())
   for (const name of systemNames) {
     const row = page.locator('.data-table-panel .el-table__body-wrapper tbody tr').filter({ hasText: name }).first()
     await expect(row).toBeVisible()
@@ -1314,9 +1410,21 @@ test('集团管理员可批量归档恢复业务系统并批量调整资产状�
   await expect(restoreResult).toContainText('成功 2 个，失败 0 个')
   await restoreResult.getByRole('button', { name: '关闭', exact: true }).click()
 
+  const initialAssets = page.waitForResponse(response => response.request().method() === 'GET' && new URL(response.url()).pathname === '/api/v1/assets')
   await page.getByRole('button', { name: '网络资产', exact: true }).click()
   await expect(page).toHaveURL(/\/assets$/)
-  await page.getByPlaceholder('搜索资产值、名称、系统或负责人').fill(`批量测试资产_${suffix}`)
+  expect((await initialAssets).status()).toBe(200)
+  const assetSearch = `批量测试资产_${suffix}`
+  const assetsLoaded = page.waitForResponse(response => {
+    const url = new URL(response.url())
+    return response.request().method() === 'GET' && url.pathname === '/api/v1/assets' && url.searchParams.get('q') === assetSearch
+  })
+  const assetSearchInput = page.getByPlaceholder('搜索资产值、名称、系统或负责人')
+  await assetSearchInput.fill(assetSearch)
+  await assetSearchInput.press('Enter')
+  const filteredAssets = await assetsLoaded
+  expect(filteredAssets.status()).toBe(200)
+  expect((await filteredAssets.json()).items.map((item: { id: string }) => item.id).sort()).toEqual(fixture.assets.map((item: { id: string }) => item.id).sort())
   for (const name of assetNames) {
     const row = page.locator('.data-table-panel .el-table__body-wrapper tbody tr').filter({ hasText: name }).first()
     await expect(row).toBeVisible()
@@ -1348,11 +1456,13 @@ test('集团管理员可批量归档恢复业务系统并批量调整资产状�
   await areaResult.getByRole('button', { name: '关闭', exact: true }).click()
 
   const verification = await page.evaluate(async ({ assetIDs, systemIDs, areaID }) => {
-    const [assetResponse, systemResponse] = await Promise.all([fetch('/api/v1/assets'), fetch('/api/v1/business-systems')])
-    const assetData = await assetResponse.json()
-    const systemData = await systemResponse.json()
-    const assets = assetData.items.filter((item: { id: string }) => assetIDs.includes(item.id))
-    const systems = systemData.items.filter((item: { id: string }) => systemIDs.includes(item.id))
+    const read = async (resource: string, id: string) => {
+      const response = await fetch(`/api/v1/${resource}/${id}`)
+      if (!response.ok) throw new Error(`${resource}/${id}: ${response.status}`)
+      return (await response.json()).item
+    }
+    const assets = await Promise.all(assetIDs.map((id: string) => read('assets', id)))
+    const systems = await Promise.all(systemIDs.map((id: string) => read('business-systems', id)))
     return {
       assetsUpdated: assets.length === 2 && assets.every((item: { status: string; network_area_id?: string }) => item.status === 'disabled' && item.network_area_id === areaID),
       systemsRestored: systems.length === 2 && systems.every((item: { status: string }) => item.status === 'running'),
@@ -1361,8 +1471,5 @@ test('集团管理员可批量归档恢复业务系统并批量调整资产状�
   expect(verification.assetsUpdated).toBeTruthy()
   expect(verification.systemsRestored).toBeTruthy()
 
-  await page.evaluate(async ({ assetIDs, systemIDs }) => {
-    for (const id of assetIDs) await fetch(`/api/v1/assets/${id}?direct_change_reason=${encodeURIComponent('验证批量资产操作')}`, { method: 'DELETE' })
-    for (const id of systemIDs) await fetch(`/api/v1/business-systems/${id}`, { method: 'DELETE' })
-  }, { assetIDs: fixture.assets.map((item: { id: string }) => item.id), systemIDs: fixture.systems.map((item: { id: string }) => item.id) })
+  await deleteOwnedFixtures(page, fixture.assets.map((item: { id: string }) => item.id), fixture.systems.map((item: { id: string }) => item.id), '验证批量资产操作')
 })

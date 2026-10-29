@@ -321,14 +321,14 @@ func (s *Service) permissionsForRole(ctx context.Context, roleID string) ([]Perm
 
 func (s *Service) verifyPermissions(ctx context.Context, keys []string) error {
 	if len(keys) == 0 {
-		return ErrInvalid
+		return invalidInput("请至少选择一项权限")
 	}
 	var count int
 	if err := s.pool.QueryRow(ctx, `SELECT count(*) FROM permissions WHERE permission_key = ANY($1::varchar[])`, keys).Scan(&count); err != nil {
 		return fmt.Errorf("verify permissions: %w", err)
 	}
 	if count != len(keys) {
-		return ErrInvalid
+		return invalidInput("权限项不存在，请重新选择权限")
 	}
 	return nil
 }
@@ -352,8 +352,21 @@ func normalizeAndValidate(input *Input, creating bool) error {
 	}
 	sort.Strings(result)
 	input.PermissionKeys = result
-	if (creating && !roleKeyRule.MatchString(input.Key)) || input.Name == "" || textlength.Count(input.Name) > 128 || textlength.Count(input.Description) > 5000 || (input.Status != "enabled" && input.Status != "disabled") || len(input.PermissionKeys) == 0 {
-		return ErrInvalid
+	switch {
+	case creating && input.Key == "":
+		return invalidInput("角色编码不能为空")
+	case creating && !roleKeyRule.MatchString(input.Key):
+		return invalidInput("角色编码须为 3–64 位小写字母、数字或下划线，且以字母开头")
+	case input.Name == "":
+		return invalidInput("角色名称不能为空")
+	case textlength.Count(input.Name) > 128:
+		return invalidInput("角色名称最多 128 字")
+	case textlength.Count(input.Description) > 5000:
+		return invalidInput("角色说明最多 5000 字")
+	case input.Status != "enabled" && input.Status != "disabled":
+		return invalidInput("请选择有效的角色状态")
+	case len(input.PermissionKeys) == 0:
+		return invalidInput("请至少选择一项权限")
 	}
 	return nil
 }

@@ -114,10 +114,11 @@ func securityWorkOrderErrorFixtures() []securityWorkOrderFixture {
 			name:    "import candidate",
 			handler: candidateWriter,
 			errors: map[string]error{
-				"forbidden": securityworkorder.ErrForbidden,
-				"invalid":   securityworkorder.ErrInvalid,
-				"not_found": securityworkorder.ErrNotFound,
-				"conflict":  securityworkorder.ErrState,
+				"forbidden":     securityworkorder.ErrForbidden,
+				"invalid":       securityworkorder.ErrInvalid,
+				"not_found":     securityworkorder.ErrNotFound,
+				"conflict":      securityworkorder.ErrConflict,
+				"invalid_state": securityworkorder.ErrState,
 			},
 		},
 		{

@@ -15,7 +15,7 @@ func registerNotificationRoutes(api *gin.RouterGroup, requireAuth gin.HandlerFun
 	routes.GET("", func(c *gin.Context) {
 		page, err := parsePageQuery(c)
 		if err != nil {
-			writeAPIError(c, http.StatusBadRequest, "invalid_query", "分页参数不正确，page_size 最大为 100")
+			writeAPIError(c, http.StatusBadRequest, "invalid_query", pageQueryErrorMessage(err))
 			return
 		}
 		category := c.Query("category")
@@ -54,7 +54,10 @@ func registerNotificationRoutes(api *gin.RouterGroup, requireAuth gin.HandlerFun
 			return
 		}
 		if err := service.MarkRead(c.Request.Context(), mustPrincipal(c), input.Key); err != nil {
+			var validation *notification.ValidationError
 			switch {
+			case errors.As(err, &validation):
+				writeAPIError(c, http.StatusBadRequest, "invalid_request", validation.Message)
 			case errors.Is(err, notification.ErrInvalid):
 				writeAPIError(c, http.StatusBadRequest, "invalid_request", "消息标记参数不正确")
 			case errors.Is(err, notification.ErrNotFound):

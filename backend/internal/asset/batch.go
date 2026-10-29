@@ -3,6 +3,7 @@ package asset
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 
 	"netassets/internal/auth"
@@ -116,7 +117,7 @@ func normalizeBatchUpdateInput(input BatchUpdateInput) ([]string, *string, *stri
 	if input.Status != nil {
 		value := strings.ToLower(strings.TrimSpace(*input.Status))
 		if !oneOf(value, "active", "pending", "disabled", "archived") {
-			return nil, nil, nil, ErrInvalid
+			return nil, nil, nil, invalidInput("批量更新状态：请选择有效的资产状态")
 		}
 		status = &value
 	}
@@ -126,21 +127,24 @@ func normalizeBatchUpdateInput(input BatchUpdateInput) ([]string, *string, *stri
 		networkAreaID = &value
 	}
 	if status == nil && networkAreaID == nil {
-		return nil, nil, nil, ErrInvalid
+		return nil, nil, nil, invalidInput("批量更新内容：请至少指定资产状态或网络区域")
 	}
 	return ids, status, networkAreaID, nil
 }
 
 func normalizeBatchIDs(values []string) ([]string, error) {
-	if len(values) == 0 || len(values) > MaxBatchItems {
-		return nil, ErrInvalid
+	if len(values) == 0 {
+		return nil, invalidInput("批量更新资产：请至少选择一个资产")
+	}
+	if len(values) > MaxBatchItems {
+		return nil, invalidInput(fmt.Sprintf("批量更新资产：单次最多选择 %d 个资产", MaxBatchItems))
 	}
 	ids := make([]string, 0, len(values))
 	seen := make(map[string]struct{}, len(values))
-	for _, value := range values {
+	for index, value := range values {
 		id := strings.TrimSpace(value)
 		if id == "" {
-			return nil, ErrInvalid
+			return nil, invalidInput(fmt.Sprintf("批量更新资产：第 %d 项资产标识不能为空", index+1))
 		}
 		if _, exists := seen[id]; exists {
 			continue
@@ -149,7 +153,7 @@ func normalizeBatchIDs(values []string) ([]string, error) {
 		ids = append(ids, id)
 	}
 	if len(ids) == 0 {
-		return nil, ErrInvalid
+		return nil, invalidInput("批量更新资产：请至少选择一个资产")
 	}
 	return ids, nil
 }
@@ -176,6 +180,10 @@ func assetBatchError(err error) (string, string) {
 	case errors.Is(err, ErrEditConflict):
 		return "asset_edit_conflict", "资产已被其他人修改，请刷新后重试"
 	case errors.Is(err, ErrInvalid):
+		var validation *InputValidationError
+		if errors.As(err, &validation) {
+			return "invalid", validation.Message
+		}
 		return "invalid", "资产编号、状态或网络区域不符合要求"
 	case errors.Is(err, ErrConflict):
 		return "conflict", "更新后与现有网络资产冲突"

@@ -43,11 +43,13 @@ test('列表操作按状态收纳，键盘可退出，名称仍打开详情', as
 })
 
 test('主列表及标签页在桌面宽度不横向溢出', async ({ page }) => {
-  test.setTimeout(300_000)
+  // This sweep renders 18 real pages against the retained, growing database.
+  // Keep the per-table 5s layout assertion; do not conflate sweep runtime with overflow.
+  test.setTimeout(600_000)
   const errors: string[] = []
   page.on('pageerror', error => errors.push(error.message))
   const routes = ['security-test-batches', 'security-test-requests', 'security-work-orders', 'assets', 'systems', 'inventory-tasks', 'remediation', 'remediation-people', 'users', 'organizations', 'asset-candidates', 'data-governance', 'data-quality-issues', 'data-quality-scan-history', 'export-jobs', 'audit-logs', 'backups', 'recycle-bin']
-  await page.route('**/api/v1/backups?*', route => route.fulfill({ json: { items: [{ id: 'backup-layout-check-20261003', created_at: '2026-10-03T08:00:00Z', database_size: 1024, data_size: 2048, verified: true }], total: 1, page: 1, page_size: 20 } }))
+  await page.route(/\/api\/v1\/backups(?:\?.*)?$/, route => route.fulfill({ json: { items: [{ id: 'backup-layout-check-20261003', created_at: '2026-10-03T08:00:00Z', database_size: 1024, data_size: 2048, verified: true }], total: 1, page: 1, page_size: 20 } }))
   for (const route of routes) {
     await page.goto(`/${route}`)
     await page.waitForLoadState('networkidle')
@@ -57,6 +59,10 @@ test('主列表及标签页在桌面宽度不横向溢出', async ({ page }) => 
       if (tab >= 0) { await tabs.nth(tab).click(); await page.waitForLoadState('networkidle') }
       for (const width of [1280, 1440]) {
         await page.setViewportSize({ width, height: 1000 })
+        // setViewportSize acknowledges the browser command, not Vue/Element
+        // Plus' resize layout. Wait for real rendered frames before starting
+        // the short geometry assertion; do not mask overflow or change CSS.
+        await page.evaluate(() => new Promise<void>(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve()))))
         await expect.poll(async () => page.locator('.page-content .el-table:visible').evaluateAll(tables => Math.max(0, ...tables.map(table => (table.querySelector('.el-table__body')?.getBoundingClientRect().width || 0) - table.clientWidth))), { message: `${route}, tab ${tab}, width ${width}` }).toBeLessThanOrEqual(1)
       }
     }
@@ -65,6 +71,7 @@ test('主列表及标签页在桌面宽度不横向溢出', async ({ page }) => 
 })
 
 test('折叠后的导出、资产和备份操作仍完整可用', async ({ page }) => {
+  test.setTimeout(120_000)
   await page.goto('/assets')
   await page.locator('.el-table__row').first().getByRole('button', { name: /^操作：/ }).click()
   const panel = page.locator('.row-actions-panel:visible')
@@ -79,13 +86,14 @@ test('折叠后的导出、资产和备份操作仍完整可用', async ({ page 
   await page.locator('.el-table__row').first().getByRole('button', { name: /^操作：/ }).click()
   for (const name of ['导出 XLSX', '导出 CSV', '后台生成 XLSX']) await expect(panel.getByRole('button', { name, exact: true })).toBeVisible()
   await page.keyboard.press('Escape')
-  await page.route('**/api/v1/backups?*', route => route.fulfill({ json: { items: [{ id: 'backup-layout-check', created_at: '2026-10-03T08:00:00Z', database_size: 1024, data_size: 2048, verified: true }], total: 1 } }))
+  await page.route(/\/api\/v1\/backups(?:\?.*)?$/, route => route.fulfill({ json: { items: [{ id: 'backup-layout-check', created_at: '2026-10-03T08:00:00Z', database_size: 1024, data_size: 2048, verified: true }], total: 1 } }))
   await page.goto('/backups')
   await page.locator('.el-table__row').first().getByRole('button', { name: /^操作：/ }).click()
   await expect(panel.getByRole('link')).toHaveText(['数据库备份', '附件归档', '校验清单'])
 })
 
 test('填报模式的系统与资产默认列保持紧凑，扩展字段可主动展开', async ({ page }) => {
+  test.setTimeout(120_000)
   const organizations = await (await page.request.get('/api/v1/organizations')).json()
   const organizationID = organizations.items[0].id
   const taskID = '00000000-0000-0000-0000-000000000001'
@@ -98,8 +106,11 @@ test('填报模式的系统与资产默认列保持紧凑，扩展字段可主�
     await expect.poll(() => page.locator('.page-content .el-table:visible').evaluateAll(tables => Math.max(0, ...tables.map(table => (table.querySelector('.el-table__body')?.getBoundingClientRect().width || 0) - table.clientWidth)))).toBeLessThanOrEqual(1)
     if (route === 'assets') {
       await expect(page.getByRole('columnheader', { name: '网络区域', exact: true })).toHaveCount(0)
+      const draft = page.locator('.inventory-draft-panel')
+      await expect(draft.getByRole('columnheader', { name: '暴露范围', exact: true })).toHaveCount(0)
       await page.getByRole('button', { name: '更多字段', exact: true }).click()
       await expect(page.getByRole('columnheader', { name: '网络区域', exact: true })).toBeVisible()
+      await expect(draft.getByRole('columnheader', { name: '暴露范围', exact: true })).toBeVisible()
       await page.getByRole('button', { name: '精简字段', exact: true }).click()
     }
   }

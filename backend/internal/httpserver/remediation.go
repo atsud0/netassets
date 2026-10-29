@@ -15,6 +15,7 @@ import (
 
 func registerRemediationRoutes(api *gin.RouterGroup, requireAuth gin.HandlerFunc, s *remediation.Service, logger *slog.Logger) {
 	respond := func(c *gin.Context, value any, err error) {
+		var validation *remediation.ValidationError
 		if errors.Is(err, remediation.ErrForbidden) || errors.Is(err, remediation.ErrNotFound) {
 			if e := s.RecordDenial(c.Request.Context(), "access_denied"); e != nil {
 				logger.Error("record denied remediation request", "error", e)
@@ -27,6 +28,8 @@ func registerRemediationRoutes(api *gin.RouterGroup, requireAuth gin.HandlerFunc
 			writeAPIError(c, 403, "forbidden", "当前账号无权执行此操作；已有账号接受邀请时请先登录对应账号")
 		case errors.Is(err, remediation.ErrConflict):
 			writeAPIError(c, 409, "state_conflict", "状态或版本已变化，或该记录已存在，请刷新后重试")
+		case errors.As(err, &validation):
+			writeAPIError(c, 400, "invalid_request", validation.Message)
 		case errors.Is(err, remediation.ErrInvalid):
 			writeAPIError(c, 400, "invalid_request", "请检查人员授权、任务期限及必填内容是否符合要求")
 		case err != nil:
@@ -73,7 +76,7 @@ func registerRemediationRoutes(api *gin.RouterGroup, requireAuth gin.HandlerFunc
 	secured.GET("/vendor-catalog", func(c *gin.Context) {
 		page, err := parsePageQuery(c)
 		if err != nil {
-			respond(c, nil, remediation.ErrInvalid)
+			writeAPIError(c, 400, "invalid_request", pageQueryErrorMessage(err))
 			return
 		}
 		out, err := s.Catalog(c.Request.Context(), mustPrincipal(c), page)
@@ -92,7 +95,7 @@ func registerRemediationRoutes(api *gin.RouterGroup, requireAuth gin.HandlerFunc
 	secured.GET("/vendor-memberships", func(c *gin.Context) {
 		page, err := parsePageQuery(c)
 		if err != nil {
-			respond(c, nil, remediation.ErrInvalid)
+			writeAPIError(c, 400, "invalid_request", pageQueryErrorMessage(err))
 			return
 		}
 		out, err := s.Memberships(c.Request.Context(), mustPrincipal(c), page)
@@ -126,7 +129,7 @@ func registerRemediationRoutes(api *gin.RouterGroup, requireAuth gin.HandlerFunc
 	secured.GET("/remediation-options", func(c *gin.Context) {
 		page, err := parsePageQuery(c)
 		if err != nil {
-			respond(c, nil, remediation.ErrInvalid)
+			writeAPIError(c, 400, "invalid_request", pageQueryErrorMessage(err))
 			return
 		}
 		out, err := s.Options(c.Request.Context(), mustPrincipal(c), page)
@@ -135,7 +138,7 @@ func registerRemediationRoutes(api *gin.RouterGroup, requireAuth gin.HandlerFunc
 	secured.GET("/vendors", func(c *gin.Context) {
 		page, err := parsePageQuery(c)
 		if err != nil {
-			respond(c, nil, remediation.ErrInvalid)
+			writeAPIError(c, 400, "invalid_request", pageQueryErrorMessage(err))
 			return
 		}
 		out, err := s.Vendors(c.Request.Context(), mustPrincipal(c), page)
@@ -159,7 +162,7 @@ func registerRemediationRoutes(api *gin.RouterGroup, requireAuth gin.HandlerFunc
 	secured.GET("/remediation-grants", func(c *gin.Context) {
 		page, err := parsePageQuery(c)
 		if err != nil {
-			respond(c, nil, remediation.ErrInvalid)
+			writeAPIError(c, 400, "invalid_request", pageQueryErrorMessage(err))
 			return
 		}
 		out, err := s.People(c.Request.Context(), mustPrincipal(c), c.Query("organization_id"), c.Query("business_system_id"), page)
@@ -187,7 +190,7 @@ func registerRemediationRoutes(api *gin.RouterGroup, requireAuth gin.HandlerFunc
 	secured.GET("/remediation-invitations", func(c *gin.Context) {
 		page, err := parsePageQuery(c)
 		if err != nil {
-			respond(c, nil, remediation.ErrInvalid)
+			writeAPIError(c, 400, "invalid_request", pageQueryErrorMessage(err))
 			return
 		}
 		out, err := s.Invitations(c.Request.Context(), mustPrincipal(c), page)
@@ -217,7 +220,7 @@ func registerRemediationRoutes(api *gin.RouterGroup, requireAuth gin.HandlerFunc
 	secured.GET("/security-work-orders/:id/assignable-findings", func(c *gin.Context) {
 		page, err := parsePageQuery(c)
 		if err != nil {
-			respond(c, nil, remediation.ErrInvalid)
+			writeAPIError(c, 400, "invalid_request", pageQueryErrorMessage(err))
 			return
 		}
 		out, err := s.AssignableFindings(c.Request.Context(), mustPrincipal(c), c.Param("id"), page)
@@ -300,7 +303,7 @@ func registerRemediationRoutes(api *gin.RouterGroup, requireAuth gin.HandlerFunc
 		group.GET("", func(c *gin.Context) {
 			page, err := parsePageQuery(c)
 			if err != nil {
-				respond(c, nil, remediation.ErrInvalid)
+				writeAPIError(c, 400, "invalid_request", pageQueryErrorMessage(err))
 				return
 			}
 			out, err := s.List(c.Request.Context(), mustPrincipal(c), repairFilter(c, executor, page))
@@ -309,7 +312,7 @@ func registerRemediationRoutes(api *gin.RouterGroup, requireAuth gin.HandlerFunc
 		group.GET("/systems", func(c *gin.Context) {
 			page, err := parsePageQuery(c)
 			if err != nil {
-				respond(c, nil, remediation.ErrInvalid)
+				writeAPIError(c, 400, "invalid_request", pageQueryErrorMessage(err))
 				return
 			}
 			out, err := s.TaskSystems(c.Request.Context(), mustPrincipal(c), executor, page)
@@ -318,7 +321,7 @@ func registerRemediationRoutes(api *gin.RouterGroup, requireAuth gin.HandlerFunc
 		group.GET("/statistics", func(c *gin.Context) {
 			page, err := parsePageQuery(c)
 			if err != nil {
-				respond(c, nil, remediation.ErrInvalid)
+				writeAPIError(c, 400, "invalid_request", pageQueryErrorMessage(err))
 				return
 			}
 			out, err := s.Statistics(c.Request.Context(), mustPrincipal(c), repairFilter(c, executor, page))
@@ -333,7 +336,7 @@ func registerRemediationRoutes(api *gin.RouterGroup, requireAuth gin.HandlerFunc
 			group.GET("/:id/"+kind, func(c *gin.Context) {
 				page, err := parsePageQuery(c)
 				if err != nil {
-					respond(c, nil, remediation.ErrInvalid)
+					writeAPIError(c, 400, "invalid_request", pageQueryErrorMessage(err))
 					return
 				}
 				out, err := s.Children(c.Request.Context(), mustPrincipal(c), c.Param("id"), kind, executor, page)

@@ -16,7 +16,7 @@ func registerBackupRoutes(api *gin.RouterGroup, requireAuth gin.HandlerFunc, ser
 	routes.GET("", func(c *gin.Context) {
 		page, err := parsePageQuery(c)
 		if err != nil {
-			writeAPIError(c, http.StatusBadRequest, "invalid_query", "分页参数不正确，page_size 最大为 100")
+			writeAPIError(c, http.StatusBadRequest, "invalid_query", pageQueryErrorMessage(err))
 			return
 		}
 		result, err := service.Search(c.Request.Context(), mustPrincipal(c), page)

@@ -64,12 +64,23 @@ func (s *Service) AddAttachment(ctx context.Context, principal auth.Principal, b
 	input.FileName = sanitizeOriginalFilename(input.FileName)
 	input.Description = strings.TrimSpace(input.Description)
 	ext := strings.ToLower(filepath.Ext(input.FileName))
-	if input.Reader == nil || input.FileName == "" || input.SizeBytes <= 0 || input.SizeBytes > MaxAttachmentSize ||
-		textlength.Count(input.Description) > 500 || !validAttachmentCategory(input.Category) {
-		return Attachment{}, ErrInvalid
+	if input.Reader == nil || input.FileName == "" || input.SizeBytes <= 0 {
+		return Attachment{}, &ValidationError{Message: "请选择有效的附件文件"}
+	}
+	if textlength.Count(input.FileName) > 255 {
+		return Attachment{}, &ValidationError{Message: "附件文件名最多 255 字"}
+	}
+	if input.SizeBytes > MaxAttachmentSize {
+		return Attachment{}, &ValidationError{Message: "单个附件不能超过 20MB"}
+	}
+	if textlength.Count(input.Description) > 500 {
+		return Attachment{}, &ValidationError{Message: "附件说明最多 500 字"}
+	}
+	if !validAttachmentCategory(input.Category) {
+		return Attachment{}, &ValidationError{Message: "附件类型：请选择测试报告或参考材料"}
 	}
 	if _, ok := allowedAttachmentExtensions[ext]; !ok {
-		return Attachment{}, ErrInvalid
+		return Attachment{}, &ValidationError{Message: "附件文件格式不支持，仅支持 PDF、图片、TXT、CSV、XLSX、DOCX、ZIP"}
 	}
 	if batch.Status == "draft" || batch.Status == "cancelled" {
 		return Attachment{}, ErrState
@@ -101,8 +112,11 @@ func (s *Service) AddAttachment(ctx context.Context, principal auth.Principal, b
 	if err != nil {
 		return Attachment{}, fmt.Errorf("store security test batch attachment: %w", err)
 	}
-	if written != input.SizeBytes || written > MaxAttachmentSize {
-		return Attachment{}, ErrInvalid
+	if written > MaxAttachmentSize {
+		return Attachment{}, &ValidationError{Message: "单个附件不能超过 20MB"}
+	}
+	if written != input.SizeBytes {
+		return Attachment{}, &ValidationError{Message: "附件内容不完整，请重新选择文件上传"}
 	}
 	if _, err := tempFile.Seek(0, io.SeekStart); err != nil {
 		return Attachment{}, fmt.Errorf("inspect security test batch attachment: %w", err)
@@ -164,8 +178,11 @@ func (s *Service) GetAttachment(ctx context.Context, principal auth.Principal, b
 	if !principal.CanManageSecurityTests() {
 		return Attachment{}, ErrForbidden
 	}
-	if !validUUID(batchID) || !validUUID(attachmentID) {
-		return Attachment{}, ErrInvalid
+	if !validUUID(batchID) {
+		return Attachment{}, &ValidationError{Message: "安全测试批次标识不正确"}
+	}
+	if !validUUID(attachmentID) {
+		return Attachment{}, &ValidationError{Message: "附件标识不正确"}
 	}
 	if _, err := s.get(ctx, batchID); err != nil {
 		return Attachment{}, err
@@ -227,7 +244,7 @@ func (s *Service) SearchAttachments(ctx context.Context, principal auth.Principa
 		return pagination.Result[Attachment]{}, ErrForbidden
 	}
 	if !validUUID(batchID) {
-		return pagination.Result[Attachment]{}, ErrInvalid
+		return pagination.Result[Attachment]{}, &ValidationError{Message: "安全测试批次标识不正确"}
 	}
 	if _, err := s.get(ctx, batchID); err != nil {
 		return pagination.Result[Attachment]{}, err
@@ -299,15 +316,6 @@ func sanitizeOriginalFilename(value string) string {
 		}
 		return r
 	}, value)
-	if len(value) > 255 {
-		ext := filepath.Ext(value)
-		base := strings.TrimSuffix(value, ext)
-		maxBase := 255 - len(ext)
-		if maxBase < 1 {
-			return ""
-		}
-		value = base[:maxBase] + ext
-	}
 	return value
 }
 

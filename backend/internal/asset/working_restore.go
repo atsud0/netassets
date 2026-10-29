@@ -25,7 +25,7 @@ func (s *Service) RestorePublishedVersion(ctx context.Context, principal auth.Pr
 		return Asset{}, err
 	}
 	if current.IsWorkingCopy {
-		return Asset{}, ErrInvalid
+		return Asset{}, invalidInput("恢复来源：请选择已发布的正式资产，不能选择工作版本")
 	}
 	if input.OrganizationID != current.OrganizationID {
 		return Asset{}, ErrForbidden
@@ -42,7 +42,7 @@ func (s *Service) RestorePublishedVersion(ctx context.Context, principal auth.Pr
 		return Asset{}, ErrVersionRequired
 	}
 	if (*input.ExpectedVersion == 0) != (input.ExpectedWorkingVersionID == "") {
-		return Asset{}, ErrInvalid
+		return Asset{}, invalidInput("恢复版本：无工作版本时版本号必须为 0 且标识为空；已有工作版本时须同时提供其标识和正整数版本号")
 	}
 
 	working, err := s.getWorkingBySource(ctx, principal, current.ID)

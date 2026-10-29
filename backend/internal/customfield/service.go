@@ -79,18 +79,8 @@ func normalize(in *DefinitionInput) {
 		in.Options[i] = strings.TrimSpace(in.Options[i])
 	}
 }
-func valid(in DefinitionInput) bool {
-	if (in.ResourceType != "asset" && in.ResourceType != "business_system") || !keyPattern.MatchString(in.FieldKey) || in.FieldName == "" || len(in.FieldName) > 128 || in.SortOrder < 0 || in.SortOrder > 100000 {
-		return false
-	}
-	switch in.FieldType {
-	case "text", "textarea", "number", "date", "boolean":
-		return len(in.Options) == 0
-	case "select", "multiselect":
-		return len(in.Options) > 0 && len(in.Options) <= 100
-	}
-	return false
-}
+func valid(in DefinitionInput) bool { return validateDefinition(in) == nil }
+
 func (s *Service) List(ctx context.Context, p auth.Principal, typ string) ([]Definition, error) {
 	result, err := s.Search(ctx, p, typ, pagination.Query{Page: 1, PageSize: pagination.MaxPageSize})
 	return result.Items, err
@@ -101,7 +91,7 @@ func (s *Service) Search(ctx context.Context, p auth.Principal, typ string, page
 		return pagination.Result[Definition]{}, err
 	}
 	if typ != "asset" && typ != "business_system" {
-		return pagination.Result[Definition]{}, ErrInvalid
+		return pagination.Result[Definition]{}, invalidDefinition("对象类型：请选择网络资产或业务系统")
 	}
 	return s.searchDefinitions(ctx, `resource_type=$1`, []any{typ}, page)
 }
@@ -142,8 +132,8 @@ func (s *Service) Create(ctx context.Context, p auth.Principal, in DefinitionInp
 		return Definition{}, err
 	}
 	normalize(&in)
-	if !valid(in) {
-		return Definition{}, ErrInvalid
+	if err := validateDefinition(in); err != nil {
+		return Definition{}, err
 	}
 	raw, _ := json.Marshal(in.Options)
 	var d Definition
@@ -189,8 +179,17 @@ func (s *Service) Update(ctx context.Context, p auth.Principal, id string, in De
 	if in.FieldType == "" {
 		in.FieldType = current.FieldType
 	}
-	if in.ResourceType != current.ResourceType || in.FieldKey != current.FieldKey || in.FieldType != current.FieldType || !valid(in) {
-		return Definition{}, ErrInvalid
+	if in.ResourceType != current.ResourceType {
+		return Definition{}, invalidDefinition("对象类型创建后不可修改")
+	}
+	if in.FieldKey != current.FieldKey {
+		return Definition{}, invalidDefinition("字段编码创建后不可修改")
+	}
+	if in.FieldType != current.FieldType {
+		return Definition{}, invalidDefinition("字段类型创建后不可修改")
+	}
+	if err := validateDefinition(in); err != nil {
+		return Definition{}, err
 	}
 	raw, _ = json.Marshal(in.Options)
 	var updated Definition
@@ -252,7 +251,7 @@ func resourceOrg(ctx context.Context, p *pgxpool.Pool, typ, id string) (string, 
 	} else if typ == "business_system" {
 		q = `SELECT owner_organization_id::text FROM business_systems WHERE id=$1::uuid AND deleted_at IS NULL`
 	} else {
-		return "", ErrInvalid
+		return "", invalidDefinition("对象类型：请选择网络资产或业务系统")
 	}
 	err := p.QueryRow(ctx, q, id).Scan(&org)
 	if errors.Is(err, pgx.ErrNoRows) {
@@ -333,11 +332,14 @@ func (s *Service) SaveValues(ctx context.Context, p auth.Principal, typ, id stri
 	provided := make(map[string]any, len(in.Values))
 	for _, value := range in.Values {
 		if _, duplicate := provided[value.FieldKey]; duplicate {
-			return ErrInvalid
+			return invalidDefinition("自定义字段重复提交：" + value.FieldKey)
 		}
 		d, found := byKey[value.FieldKey]
-		if !found || !validFieldValue(d, value.Value) {
-			return ErrInvalid
+		if !found {
+			return invalidDefinition("自定义字段不存在或已停用：" + value.FieldKey)
+		}
+		if err := validateFieldValue(d, value.Value); err != nil {
+			return err
 		}
 		provided[value.FieldKey] = value.Value
 	}
@@ -375,7 +377,7 @@ func (s *Service) SaveValues(ctx context.Context, p auth.Principal, typ, id stri
 			value, present = existing[d.FieldKey]
 		}
 		if !present || isBlank(value) {
-			return ErrInvalid
+			return invalidDefinition("自定义字段“" + d.FieldName + "”：不能为空")
 		}
 	}
 	tx, err := s.pool.Begin(ctx)
@@ -423,7 +425,7 @@ func (s *Service) FillableDefinitions(ctx context.Context, p auth.Principal, typ
 
 func (s *Service) SearchFillableDefinitions(ctx context.Context, p auth.Principal, typ string, page pagination.Query) (pagination.Result[Definition], error) {
 	if typ != "asset" && typ != "business_system" {
-		return pagination.Result[Definition]{}, ErrInvalid
+		return pagination.Result[Definition]{}, invalidDefinition("对象类型：请选择网络资产或业务系统")
 	}
 	permission := "asset.manage"
 	if typ == "business_system" {

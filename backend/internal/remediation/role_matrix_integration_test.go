@@ -166,7 +166,7 @@ func setupRoleMatrix(t *testing.T) *roleMatrixFixture {
 	}
 
 	orgAdminB := createRoleMatrixScopedPrincipal(t, pool, "rm_org_admin_b_"+suffix, "organization_admin", f.orgB)
-	vendor, err := f.repairs.SaveVendor(ctx, f.securityAdmin, "", f.orgB, "角色矩阵厂商_"+suffix, "厂商联系人", "enabled")
+	vendor, err := f.repairs.SaveVendor(ctx, f.securityAdmin, "", f.orgB, "角色矩阵厂商_"+suffix, "13800000018", "enabled")
 	if err != nil {
 		t.Fatalf("save vendor: %v", err)
 	}

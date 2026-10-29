@@ -168,19 +168,19 @@ func validateIssueFilter(filter *IssueFilter) error {
 	filter.ResourceType = strings.TrimSpace(filter.ResourceType)
 	filter.Assignee = strings.TrimSpace(filter.Assignee)
 	if filter.OrganizationID != "" && !scanUUIDPattern.MatchString(filter.OrganizationID) {
-		return ErrInvalid
+		return invalidIssue("组织筛选标识格式不正确")
 	}
 	if filter.Status != "" && !validIssueStatus(filter.Status) {
-		return ErrInvalid
+		return invalidIssue("请选择有效的问题状态")
 	}
 	if filter.Severity != "" && filter.Severity != "error" && filter.Severity != "warning" {
-		return ErrInvalid
+		return invalidIssue("请选择有效的严重程度")
 	}
 	if filter.ResourceType != "" && filter.ResourceType != "asset" && filter.ResourceType != "business_system" {
-		return ErrInvalid
+		return invalidIssue("请选择有效的检查对象")
 	}
 	if filter.Assignee != "" && filter.Assignee != "me" && !scanUUIDPattern.MatchString(filter.Assignee) {
-		return ErrInvalid
+		return invalidIssue("整改负责人筛选条件格式不正确")
 	}
 	if filter.Limit <= 0 {
 		filter.Limit = 100
@@ -288,7 +288,7 @@ func (s *Service) SearchIssueAssignees(ctx context.Context, p auth.Principal, is
 	}
 	issueID = strings.TrimSpace(issueID)
 	if !scanUUIDPattern.MatchString(issueID) {
-		return pagination.Result[IssueAssignee]{}, ErrInvalid
+		return pagination.Result[IssueAssignee]{}, invalidIssue("数据质量问题标识格式不正确")
 	}
 	var organizationID string
 	if err := s.pool.QueryRow(ctx, `SELECT organization_id::text FROM data_quality_issues WHERE id=$1::uuid`, issueID).Scan(&organizationID); errors.Is(err, pgx.ErrNoRows) {
@@ -347,7 +347,7 @@ func (s *Service) GetIssue(ctx context.Context, p auth.Principal, issueID string
 		if !canUseQualityWorkflow(p) {
 			return IssueDetail{}, ErrForbidden
 		}
-		return IssueDetail{}, ErrInvalid
+		return IssueDetail{}, invalidIssue("数据质量问题标识格式不正确")
 	}
 	item, err := scanIssue(s.pool.QueryRow(ctx, `SELECT `+issueFields+` FROM data_quality_issues i
 		JOIN data_quality_rules quality_rule ON quality_rule.id=i.rule_id
@@ -412,13 +412,19 @@ func (s *Service) StartIssue(ctx context.Context, p auth.Principal, issueID stri
 }
 
 func (s *Service) startIssue(ctx context.Context, p auth.Principal, issueID string, input StartInput, allowedStatuses []string, requestID, ipAddress string) (Issue, error) {
+	if !canUseQualityWorkflow(p) {
+		return Issue{}, ErrForbidden
+	}
 	input.AssigneeUserID = strings.TrimSpace(input.AssigneeUserID)
 	input.Note = strings.TrimSpace(input.Note)
 	if input.AssigneeUserID == "" {
 		input.AssigneeUserID = p.UserID
 	}
-	if !scanUUIDPattern.MatchString(input.AssigneeUserID) || textlength.Count(input.Note) > 5000 {
-		return Issue{}, ErrInvalid
+	if !scanUUIDPattern.MatchString(input.AssigneeUserID) {
+		return Issue{}, invalidIssue("请选择有效的整改负责人")
+	}
+	if textlength.Count(input.Note) > 5000 {
+		return Issue{}, invalidIssue("处理说明最多 5000 字")
 	}
 	return s.transitionIssue(ctx, p, issueID, requestID, ipAddress, "started", allowedStatuses, "in_progress", input.Note, func(ctx context.Context, tx pgx.Tx, item Issue) error {
 		return updateIssueAssignee(ctx, tx, item, input.AssigneeUserID, p.UserID)
@@ -426,10 +432,16 @@ func (s *Service) startIssue(ctx context.Context, p auth.Principal, issueID stri
 }
 
 func (s *Service) AssignIssue(ctx context.Context, p auth.Principal, issueID string, input StartInput, requestID, ipAddress string) (Issue, error) {
+	if !canUseQualityWorkflow(p) {
+		return Issue{}, ErrForbidden
+	}
 	input.AssigneeUserID = strings.TrimSpace(input.AssigneeUserID)
 	input.Note = strings.TrimSpace(input.Note)
-	if !scanUUIDPattern.MatchString(input.AssigneeUserID) || textlength.Count(input.Note) > 5000 {
-		return Issue{}, ErrInvalid
+	if !scanUUIDPattern.MatchString(input.AssigneeUserID) {
+		return Issue{}, invalidIssue("请选择有效的整改负责人")
+	}
+	if textlength.Count(input.Note) > 5000 {
+		return Issue{}, invalidIssue("处理说明最多 5000 字")
 	}
 	return s.transitionIssue(ctx, p, issueID, requestID, ipAddress, "assigned", []string{"pending", "in_progress"}, "", input.Note, func(ctx context.Context, tx pgx.Tx, item Issue) error {
 		return updateIssueAssignee(ctx, tx, item, input.AssigneeUserID, p.UserID)
@@ -442,7 +454,7 @@ func updateIssueAssignee(ctx context.Context, tx pgx.Tx, item Issue, assigneeUse
 		return err
 	}
 	if !valid {
-		return ErrInvalid
+		return invalidIssue("整改负责人须为该组织下的启用用户")
 	}
 	_, err := tx.Exec(ctx, `UPDATE data_quality_issues SET assignee_user_id=$2::uuid,updated_by=$3::uuid,updated_at=now() WHERE id=$1::uuid`, item.ID, assigneeUserID, actorUserID)
 	return err
@@ -453,9 +465,15 @@ func (s *Service) SubmitIssue(ctx context.Context, p auth.Principal, issueID str
 }
 
 func (s *Service) submitIssue(ctx context.Context, p auth.Principal, issueID string, input SubmitInput, allowedStatuses []string, requestID, ipAddress string) (Issue, error) {
+	if !canUseQualityWorkflow(p) {
+		return Issue{}, ErrForbidden
+	}
 	input.Note = strings.TrimSpace(input.Note)
-	if input.Note == "" || textlength.Count(input.Note) > 5000 {
-		return Issue{}, ErrInvalid
+	if input.Note == "" {
+		return Issue{}, invalidIssue("处理说明不能为空")
+	}
+	if textlength.Count(input.Note) > 5000 {
+		return Issue{}, invalidIssue("处理说明最多 5000 字")
 	}
 	return s.transitionIssue(ctx, p, issueID, requestID, ipAddress, "submitted", allowedStatuses, "pending_review", input.Note, func(ctx context.Context, tx pgx.Tx, item Issue) error {
 		_, err := tx.Exec(ctx, `UPDATE data_quality_issues SET rectification_note=$2,submitted_by=$3::uuid,submitted_at=now(),assignee_user_id=COALESCE(assignee_user_id,$3::uuid),updated_by=$3::uuid,updated_at=now() WHERE id=$1::uuid`, item.ID, input.Note, p.UserID)
@@ -468,8 +486,11 @@ func (s *Service) ReviewIssue(ctx context.Context, p auth.Principal, issueID str
 		return Issue{}, ErrForbidden
 	}
 	input.Note = strings.TrimSpace(input.Note)
-	if (!input.Approved && input.Note == "") || textlength.Count(input.Note) > 5000 {
-		return Issue{}, ErrInvalid
+	if !input.Approved && input.Note == "" {
+		return Issue{}, invalidIssue("退回整改时处理说明不能为空")
+	}
+	if textlength.Count(input.Note) > 5000 {
+		return Issue{}, invalidIssue("处理说明最多 5000 字")
 	}
 	eventType, next, resolution := "returned", "in_progress", ""
 	if input.Approved {
@@ -487,14 +508,20 @@ func (s *Service) ExemptIssue(ctx context.Context, p auth.Principal, issueID str
 	}
 	input.Reason = strings.TrimSpace(input.Reason)
 	input.ExpiresAt = strings.TrimSpace(input.ExpiresAt)
-	if input.Reason == "" || textlength.Count(input.Reason) > 5000 {
-		return Issue{}, ErrInvalid
+	if input.Reason == "" {
+		return Issue{}, invalidIssue("豁免原因不能为空")
+	}
+	if textlength.Count(input.Reason) > 5000 {
+		return Issue{}, invalidIssue("豁免原因最多 5000 字")
 	}
 	var expiresAt *time.Time
 	if input.ExpiresAt != "" {
 		parsed, err := time.Parse(time.RFC3339, input.ExpiresAt)
-		if err != nil || !parsed.After(time.Now()) {
-			return Issue{}, ErrInvalid
+		if err != nil {
+			return Issue{}, invalidIssue("豁免有效期格式不正确")
+		}
+		if !parsed.After(time.Now()) {
+			return Issue{}, invalidIssue("豁免有效期必须晚于当前时间")
 		}
 		expiresAt = &parsed
 	}
@@ -509,8 +536,8 @@ func (s *Service) ReopenIssue(ctx context.Context, p auth.Principal, issueID, no
 		return Issue{}, ErrForbidden
 	}
 	note = strings.TrimSpace(note)
-	if len(note) > 5000 {
-		return Issue{}, ErrInvalid
+	if textlength.Count(note) > 5000 {
+		return Issue{}, invalidIssue("处理说明最多 5000 字")
 	}
 	return s.transitionIssue(ctx, p, issueID, requestID, ipAddress, "reopened", []string{"closed", "exempted"}, "pending", note, func(ctx context.Context, tx pgx.Tx, item Issue) error {
 		_, err := tx.Exec(ctx, `UPDATE data_quality_issues SET resolution_type=NULL,closed_at=NULL,exemption_reason=NULL,exemption_expires_at=NULL,review_note=NULL,reviewed_by=NULL,reviewed_at=NULL,updated_by=$2::uuid,updated_at=now() WHERE id=$1::uuid`, item.ID, p.UserID)
@@ -524,7 +551,7 @@ func (s *Service) transitionIssue(ctx context.Context, p auth.Principal, issueID
 	}
 	issueID = strings.TrimSpace(issueID)
 	if !scanUUIDPattern.MatchString(issueID) {
-		return Issue{}, ErrInvalid
+		return Issue{}, invalidIssue("数据质量问题标识格式不正确")
 	}
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {

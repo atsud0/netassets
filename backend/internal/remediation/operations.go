@@ -16,8 +16,26 @@ func (s *Service) UpdateSource(ctx context.Context, p auth.Principal, id string,
 	if executor || !security(ctx, s.pool, p) {
 		return nil, ErrForbidden
 	}
-	if !validID(id) || !textOK(in.Reason, 2000, true) || !textOK(in.Material.Title, 255, true) || !textOK(in.Material.Description, 20000, true) || !contains([]string{"critical", "high", "medium", "low", "info"}, in.Material.Severity) || !textOK(in.Material.Evidence, 20000, false) || !textOK(in.Material.Advice, 20000, false) {
-		return nil, ErrInvalid
+	if !validID(id) {
+		return nil, invalidField("整改任务标识不正确")
+	}
+	if !textOK(in.Reason, 2000, true) {
+		return nil, invalidField("变更原因：请输入 1 至 2000 字")
+	}
+	if !textOK(in.Material.Title, 255, true) {
+		return nil, invalidField("发现标题：请输入 1 至 255 字")
+	}
+	if !textOK(in.Material.Description, 20000, true) {
+		return nil, invalidField("发现描述：请输入 1 至 20000 字")
+	}
+	if !contains([]string{"critical", "high", "medium", "low", "info"}, in.Material.Severity) {
+		return nil, invalidField("严重程度：请选择有效的严重程度")
+	}
+	if !textOK(in.Material.Evidence, 20000, false) {
+		return nil, invalidField("发现证据：最多 20000 字")
+	}
+	if !textOK(in.Material.Advice, 20000, false) {
+		return nil, invalidField("整改建议：最多 20000 字")
 	}
 	tx, err := s.begin(ctx)
 	if err != nil {
@@ -84,8 +102,17 @@ type CatalogInput struct {
 }
 
 func (s *Service) SaveCatalog(ctx context.Context, p auth.Principal, id string, in CatalogInput) (Object, error) {
-	if !textOK(in.Name, 255, true) || !contains([]string{"enabled", "disabled"}, in.Status) || !textOK(in.Reason, 2000, true) || (id != "" && !validID(id)) {
-		return nil, ErrInvalid
+	if !textOK(in.Name, 255, true) {
+		return nil, invalidField("统一厂商名称：请输入 1 至 255 字")
+	}
+	if !textOK(in.Reason, 2000, true) {
+		return nil, invalidField("变更原因：请输入 1 至 2000 字")
+	}
+	if !contains([]string{"enabled", "disabled"}, in.Status) {
+		return nil, invalidField("统一厂商状态：请选择启用或停用")
+	}
+	if id != "" && !validID(id) {
+		return nil, invalidField("统一厂商标识不正确")
 	}
 	tx, err := s.begin(ctx)
 	if err != nil {
@@ -126,8 +153,20 @@ func (s *Service) Memberships(ctx context.Context, p auth.Principal, page pagina
 	return pageObjects(ctx, s.pool, `SELECT m.vendor_id,m.user_id,c.name vendor_name,u.display_name,m.status,m.valid_until FROM vendor_memberships m JOIN vendor_catalog c ON c.id=m.vendor_id JOIN users u ON u.id=m.user_id ORDER BY c.name,u.display_name,m.user_id`, page)
 }
 func (s *Service) UpdateMembership(ctx context.Context, p auth.Principal, vendor, user, status, reason string, until time.Time) error {
-	if !validID(vendor) || !validID(user) || !contains([]string{"enabled", "disabled"}, status) || !textOK(reason, 2000, true) || (status == "enabled" && !until.After(time.Now())) {
-		return ErrInvalid
+	if !validID(vendor) {
+		return invalidField("统一厂商标识不正确")
+	}
+	if !validID(user) {
+		return invalidField("厂商成员标识不正确")
+	}
+	if !contains([]string{"enabled", "disabled"}, status) {
+		return invalidField("厂商成员状态：请选择启用或停用")
+	}
+	if !textOK(reason, 2000, true) {
+		return invalidField("变更原因：请输入 1 至 2000 字")
+	}
+	if status == "enabled" && !until.After(time.Now()) {
+		return invalidField("厂商成员有效期：须晚于当前时间")
 	}
 	tx, err := s.begin(ctx)
 	if err != nil {
@@ -159,8 +198,11 @@ func (s *Service) Settings(ctx context.Context, p auth.Principal) (Object, error
 	return readObject(ctx, s.pool, `SELECT overdue_reminder_days FROM remediation_settings WHERE singleton`)
 }
 func (s *Service) SetSettings(ctx context.Context, p auth.Principal, days int, reason string) error {
-	if days < 1 || days > 30 || !textOK(reason, 2000, true) {
-		return ErrInvalid
+	if days < 1 || days > 30 {
+		return invalidField("逾期提醒间隔：须为 1 至 30 天")
+	}
+	if !textOK(reason, 2000, true) {
+		return invalidField("变更原因：请输入 1 至 2000 字")
 	}
 	tx, err := s.begin(ctx)
 	if err != nil {
@@ -200,8 +242,14 @@ func (s *Service) TaskSystems(ctx context.Context, p auth.Principal, mine bool, 
 // not block the rest, and the caller receives a per-task result. The whole call is
 // idempotent through the key, so a retried request cannot acknowledge twice.
 func (s *Service) AcknowledgeRevived(ctx context.Context, p auth.Principal, ids []string, reason, key string) ([]Object, error) {
-	if len(ids) < 1 || len(ids) > 200 || len(key) < 8 || len(key) > 100 || !textOK(reason, 2000, true) {
-		return nil, ErrInvalid
+	if len(ids) < 1 || len(ids) > 200 {
+		return nil, invalidField("待确认任务：请选择 1 至 200 条任务")
+	}
+	if len(key) < 8 || len(key) > 100 {
+		return nil, invalidField("幂等标识：须为 8 至 100 字节")
+	}
+	if !textOK(reason, 2000, true) {
+		return nil, invalidField("确认原因：请输入 1 至 2000 字")
 	}
 	tx, err := s.begin(ctx)
 	if err != nil {
@@ -241,7 +289,7 @@ func (s *Service) AcknowledgeRevived(ctx context.Context, p auth.Principal, ids 
 
 func (s *Service) acknowledgeOne(ctx context.Context, tx pgx.Tx, p auth.Principal, id, reason, key string) (Object, error) {
 	if !validID(id) {
-		return nil, ErrInvalid
+		return nil, invalidField("整改任务标识不正确")
 	}
 	t, err := loadTask(ctx, tx, id)
 	if err != nil {

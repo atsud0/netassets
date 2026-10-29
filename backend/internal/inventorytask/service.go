@@ -276,7 +276,7 @@ func (s *Service) Search(ctx context.Context, principal auth.Principal, taskID s
 func (s *Service) loadTaskForExport(ctx context.Context, principal auth.Principal, taskID string) (*Task, error) {
 	taskID = strings.TrimSpace(taskID)
 	if taskID == "" {
-		return nil, ErrInvalid
+		return nil, invalidInput("请提供填报任务编号")
 	}
 	var item Task
 	var requiredFieldsJSON, qualityRulesJSON []byte
@@ -342,7 +342,7 @@ func (s *Service) Export(ctx context.Context, principal auth.Principal, taskID, 
 		if errors.Is(err, exportfile.ErrSynchronousXLSXTooLarge) {
 			return nil, "", "", 0, ErrExportTooLarge
 		}
-		return nil, "", "", 0, ErrInvalid
+		return nil, "", "", 0, invalidInput("导出格式仅支持 csv 或 xlsx")
 	}
 	data, contentType, fileName, err := buildExport(*selected, format)
 	if err != nil {
@@ -450,7 +450,7 @@ func buildExport(task Task, format string) ([]byte, string, string, error) {
 	}
 	data, contentType, fileName, err := exportfile.Build(format, "填报任务结果-"+sanitizeExportName(task.Name), inventoryTaskExportHeaders(), rows)
 	if errors.Is(err, exportfile.ErrInvalidFormat) {
-		return nil, "", "", ErrInvalid
+		return nil, "", "", invalidInput("导出格式仅支持 csv 或 xlsx")
 	}
 	if errors.Is(err, exportfile.ErrSynchronousXLSXTooLarge) {
 		return nil, "", "", ErrExportTooLarge
@@ -895,7 +895,7 @@ func (s *Service) Submit(ctx context.Context, principal auth.Principal, taskID, 
 	}
 	input.Note = strings.TrimSpace(input.Note)
 	if textlength.Count(input.Note) > 5000 {
-		return OrganizationProgress{}, ErrInvalid
+		return OrganizationProgress{}, invalidInput("提交说明最多 5000 字")
 	}
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
@@ -1128,7 +1128,7 @@ func (s *Service) UpdateStatus(ctx context.Context, principal auth.Principal, ta
 	}
 	input.Status = strings.TrimSpace(input.Status)
 	if input.Status != "active" && input.Status != "closed" && input.Status != "archived" {
-		return ErrInvalid
+		return invalidInput("任务状态仅支持进行中、已关闭或已归档")
 	}
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
@@ -1167,7 +1167,7 @@ func (s *Service) SearchOrganizations(ctx context.Context, principal auth.Princi
 	taskID = strings.TrimSpace(taskID)
 	organizationID = strings.TrimSpace(organizationID)
 	if taskID == "" {
-		return pagination.Result[OrganizationProgress]{}, ErrInvalid
+		return pagination.Result[OrganizationProgress]{}, invalidInput("请提供填报任务编号")
 	}
 	visibilityCTE := `
 		WITH RECURSIVE descendant_roots(id) AS (
@@ -1436,38 +1436,41 @@ func normalizeCreateInput(input *CreateInput) error {
 	if input.AssetNetworkScope == "" {
 		input.AssetNetworkScope = "all"
 	}
-	if input.Name == "" || textlength.Count(input.Name) > 255 || textlength.Count(input.Description) > 5000 || input.StartAt.IsZero() ||
-		input.DeadlineAt.IsZero() || !input.DeadlineAt.After(input.StartAt) ||
-		(input.Status != "draft" && input.Status != "active") || !validAssetNetworkScope(input.AssetNetworkScope) {
-		return ErrInvalid
+	if input.Name == "" {
+		return invalidInput("任务名称不能为空")
+	}
+	if textlength.Count(input.Name) > 255 {
+		return invalidInput("任务名称最多 255 字")
+	}
+	if textlength.Count(input.Description) > 5000 {
+		return invalidInput("任务说明最多 5000 字")
+	}
+	if input.StartAt.IsZero() {
+		return invalidInput("请选择开始时间")
+	}
+	if input.DeadlineAt.IsZero() {
+		return invalidInput("请选择截止时间")
+	}
+	if !input.DeadlineAt.After(input.StartAt) {
+		return invalidInput("截止时间必须晚于开始时间")
+	}
+	if input.Status != "draft" && input.Status != "active" {
+		return invalidInput("任务状态仅支持草稿或进行中")
 	}
 	input.OrganizationIDs = uniqueNonEmpty(input.OrganizationIDs)
 	input.RequiredFields = uniqueNonEmpty(input.RequiredFields)
 	input.QualityRules = uniqueNonEmpty(input.QualityRules)
-	if len(input.OrganizationIDs) == 0 || len(input.OrganizationIDs) > 1000 || len(input.RequiredFields) > 100 || len(input.QualityRules) > 100 || !validRequiredFields(input.RequiredFields) {
-		return ErrInvalid
+	if err := validateScopeSelections(input.OrganizationIDs, input.RequiredFields, input.AssetNetworkScope); err != nil {
+		return err
+	}
+	if len(input.QualityRules) > 100 {
+		return invalidInput("质量规则最多选择 100 项")
 	}
 	return nil
 }
 
 func validAssetNetworkScope(value string) bool {
 	return value == "all" || value == "public" || value == "private"
-}
-
-func validRequiredFields(fields []string) bool {
-	allowed := map[string]bool{
-		"business_systems": true,
-		"data_security":    true,
-		"network_assets":   true,
-		"owner_contacts":   true,
-	}
-	for _, field := range fields {
-		if !allowed[field] {
-			return false
-		}
-	}
-	includeSystems, includeAssets := selectedResourceTypes(fields)
-	return includeSystems || includeAssets
 }
 
 func selectedResourceTypes(requiredFields []string) (includeSystems, includeAssets bool) {
@@ -1486,10 +1489,13 @@ func normalizeReviewInput(input *ReviewInput) error {
 	input.Decision = strings.TrimSpace(input.Decision)
 	input.ReturnReason = strings.TrimSpace(input.ReturnReason)
 	if input.Decision != "approved" && input.Decision != "returned" {
-		return ErrInvalid
+		return invalidInput("请选择有效的审核结果")
 	}
-	if input.Decision == "returned" && (input.ReturnReason == "" || textlength.Count(input.ReturnReason) > 2000) {
-		return ErrInvalid
+	if input.Decision == "returned" && input.ReturnReason == "" {
+		return invalidInput("退回原因不能为空")
+	}
+	if input.Decision == "returned" && textlength.Count(input.ReturnReason) > 2000 {
+		return invalidInput("退回原因最多 2000 字")
 	}
 	if input.Decision == "approved" {
 		input.ReturnReason = ""

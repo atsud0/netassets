@@ -10,6 +10,7 @@ import (
 	"netassets/internal/auth"
 	"netassets/internal/findingstatus"
 	"netassets/internal/pagination"
+	"netassets/internal/textlength"
 )
 
 type Material struct {
@@ -24,8 +25,7 @@ type Material struct {
 }
 
 func (m Material) valid() bool {
-	return textOK(m.Title, 255, true) && contains([]string{"critical", "high", "medium", "low", "info"}, m.Severity) &&
-		textOK(m.Description, 20000, true) && textOK(m.Requirement, 20000, true) && textOK(m.Evidence, 20000, false) && textOK(m.Advice, 20000, false) && textOK(m.AffectedLocation, 2000, false)
+	return validateMaterial(m) == nil
 }
 
 type AssignInput struct {
@@ -44,25 +44,40 @@ func writeMaterial(ctx context.Context, tx pgx.Tx, p auth.Principal, id string, 
 		return err
 	}
 	if len(m.AttachmentIDs) > 30 {
-		return ErrInvalid
+		return invalidField("材料附件：最多选择 30 个附件")
 	}
 	for _, file := range m.AttachmentIDs {
 		if !validID(file) {
-			return ErrInvalid
+			return invalidField("材料附件标识不正确")
 		}
 		tag, e := tx.Exec(ctx, `INSERT INTO remediation_material_attachments(task_id,material_revision,attachment_id) SELECT $1::uuid,$2,id FROM remediation_attachments WHERE id=$3::uuid AND task_id=$1::uuid AND visibility='participants' ON CONFLICT DO NOTHING`, id, revision, file)
 		if e != nil {
 			return e
 		}
 		if tag.RowsAffected() != 1 {
-			return ErrInvalid
+			return invalidField("材料附件：须选择本任务中对参与人员可见且未重复的附件")
 		}
 	}
 	return nil
 }
 func (s *Service) Assign(ctx context.Context, p auth.Principal, orderID, key string, in AssignInput) (Object, error) {
-	if !validID(orderID) || !validID(in.FindingID) || !validID(in.GrantID) || !in.Material.valid() || !textOK(in.TargetEnvironment, 255, true) || !in.DueAt.After(time.Now()) {
-		return nil, ErrInvalid
+	if !validID(orderID) {
+		return nil, invalidField("安全工单标识不正确")
+	}
+	if !validID(in.FindingID) {
+		return nil, invalidField("安全发现标识不正确")
+	}
+	if !validID(in.GrantID) {
+		return nil, invalidField("执行人：请选择有效的人员授权")
+	}
+	if err := validateMaterial(in.Material); err != nil {
+		return nil, err
+	}
+	if !textOK(in.TargetEnvironment, 255, true) {
+		return nil, invalidField("目标环境：请输入 1 至 255 字")
+	}
+	if !in.DueAt.After(time.Now()) {
+		return nil, invalidField("任务截止时间：须晚于当前时间")
 	}
 	tx, err := s.begin(ctx)
 	if err != nil {
@@ -104,8 +119,11 @@ func (s *Service) Assign(ctx context.Context, p auth.Principal, orderID, key str
 	if err != nil {
 		return nil, dbError(err)
 	}
-	if !validID(system) || severity != in.Material.Severity {
-		return nil, ErrInvalid
+	if !validID(system) {
+		return nil, invalidField("业务系统：安全发现尚未关联有效的业务系统")
+	}
+	if severity != in.Material.Severity {
+		return nil, invalidField("严重程度：须与安全发现的严重程度一致")
 	}
 	var assignee string
 	err = tx.QueryRow(ctx, `SELECT user_id::text FROM remediation_grants WHERE id=$1::uuid AND remediation_grant_valid(id,user_id,$2::uuid,$3::uuid) AND valid_until >= $4`, in.GrantID, org, system, in.DueAt).Scan(&assignee)
@@ -173,19 +191,25 @@ func blockedReasons() []string {
 }
 
 func taskQuery(p auth.Principal, in Filter) (string, []any, error) {
-	if in.OrderID != "" && !validID(in.OrderID) || in.SystemID != "" && !validID(in.SystemID) || len(in.Keyword) > 200 {
-		return "", nil, ErrInvalid
+	if in.OrderID != "" && !validID(in.OrderID) {
+		return "", nil, invalidField("安全工单标识不正确")
+	}
+	if in.SystemID != "" && !validID(in.SystemID) {
+		return "", nil, invalidField("业务系统标识不正确")
+	}
+	if textlength.Count(in.Keyword) > 200 {
+		return "", nil, invalidField("搜索关键词最多 200 字")
 	}
 	if in.Status != "" && !contains([]string{"all", "active", "pending_acceptance", "in_progress", "pending_org_review", "pending_security_review", "completed", "cancelled"}, in.Status) {
-		return "", nil, ErrInvalid
+		return "", nil, invalidField("请选择有效的整改任务状态")
 	}
 	if in.Severity != "" && !contains([]string{"critical", "high", "medium", "low", "info"}, in.Severity) {
-		return "", nil, ErrInvalid
+		return "", nil, invalidField("请选择有效的严重程度")
 	}
 	// The reason vocabulary is the database function's, not the caller's, so an
 	// unknown value is rejected instead of silently returning an empty queue.
 	if in.ExecutionBlockedReason != "" && !contains(blockedReasons(), in.ExecutionBlockedReason) {
-		return "", nil, ErrInvalid
+		return "", nil, invalidField("请选择有效的执行阻塞原因")
 	}
 	if in.Mine && in.Status == "" {
 		in.Status = "active"
@@ -291,7 +315,7 @@ COALESCE((SELECT jsonb_agg(jsonb_build_object('id',a.id,'original_name',a.origin
 	}
 	sql, ok := queries[kind]
 	if !ok {
-		return pagination.Result[Object]{}, ErrInvalid
+		return pagination.Result[Object]{}, invalidField("请选择有效的任务明细类型")
 	}
 	// Recheck authorization inside the data statement, including download/list races.
 	sql = `SELECT * FROM (` + sql + `) visible WHERE remediation_can_read($3::uuid,$1::uuid)`
@@ -299,7 +323,7 @@ COALESCE((SELECT jsonb_agg(jsonb_build_object('id',a.id,'original_name',a.origin
 }
 func (s *Service) AssignableFindings(ctx context.Context, p auth.Principal, orderID string, page pagination.Query) (pagination.Result[Object], error) {
 	if !validID(orderID) {
-		return pagination.Result[Object]{}, ErrInvalid
+		return pagination.Result[Object]{}, invalidField("安全工单标识不正确")
 	}
 	var org string
 	if err := s.pool.QueryRow(ctx, `SELECT assignee_organization_id::text FROM security_work_orders WHERE id=$1::uuid`, orderID).Scan(&org); err != nil {
@@ -351,11 +375,8 @@ func (s *Service) Act(ctx context.Context, p auth.Principal, id, action, key str
 	if action == "source-update" {
 		return s.UpdateSource(ctx, p, id, in, executor)
 	}
-	if !textOK(in.BlockedDependency, 2000, false) || !textOK(in.VerifiedEnvironment, 255, false) || !textOK(in.NoDeploymentReason, 2000, false) {
-		return nil, ErrInvalid
-	}
-	if !textOK(in.Reason, 20000, false) || !textOK(in.InternalNote, 20000, false) || !textOK(in.Progress, 5000, false) || !textOK(in.BlockedReason, 2000, false) {
-		return nil, ErrInvalid
+	if err := validateActionFields(in); err != nil {
+		return nil, err
 	}
 	tx, err := s.begin(ctx)
 	if err != nil {
@@ -420,7 +441,7 @@ func (s *Service) Act(ctx context.Context, p auth.Principal, id, action, key str
 			return nil, ErrConflict
 		}
 		if in.ExpectedCompletion == nil || !in.ExpectedCompletion.After(time.Now()) {
-			return nil, ErrInvalid
+			return nil, invalidField("预计完成时间：须晚于当前时间")
 		}
 		next = "in_progress"
 		_, err = tx.Exec(ctx, `UPDATE remediation_tasks SET accepted_at=now(),expected_completion_at=$2 WHERE id=$1::uuid`, id, in.ExpectedCompletion)
@@ -428,14 +449,22 @@ func (s *Service) Act(ctx context.Context, p auth.Principal, id, action, key str
 		if err = requireExecutor(); err != nil {
 			return nil, err
 		}
-		if t.Status != "in_progress" || !textOK(in.Progress, 5000, true) {
+		if t.Status != "in_progress" {
 			return nil, ErrConflict
 		}
-		if in.ExpectedCompletion == nil || !in.ExpectedCompletion.After(time.Now()) {
-			return nil, ErrInvalid
+		if !textOK(in.Progress, 5000, true) {
+			return nil, invalidField("整改进度：请输入 1 至 5000 字")
 		}
-		if strings.TrimSpace(in.BlockedReason) != "" && (!textOK(in.BlockedDependency, 2000, true) || in.BlockedUntil == nil || !in.BlockedUntil.After(time.Now())) {
-			return nil, ErrInvalid
+		if in.ExpectedCompletion == nil || !in.ExpectedCompletion.After(time.Now()) {
+			return nil, invalidField("预计完成时间：须晚于当前时间")
+		}
+		if strings.TrimSpace(in.BlockedReason) != "" {
+			if !textOK(in.BlockedDependency, 2000, true) {
+				return nil, invalidField("阻塞依赖：请输入 1 至 2000 字")
+			}
+			if in.BlockedUntil == nil || !in.BlockedUntil.After(time.Now()) {
+				return nil, invalidField("阻塞预计解除时间：须晚于当前时间")
+			}
 		}
 		if strings.TrimSpace(in.BlockedReason) == "" {
 			in.BlockedDependency = ""
@@ -445,11 +474,14 @@ func (s *Service) Act(ctx context.Context, p auth.Principal, id, action, key str
 		details["progress"] = in.Progress
 		details["blocked_reason"] = in.BlockedReason
 	case "comment":
-		if t.Status == "completed" || t.Status == "cancelled" || !textOK(in.Reason, 10000, true) {
+		if t.Status == "completed" || t.Status == "cancelled" {
 			return nil, ErrConflict
 		}
+		if !textOK(in.Reason, 10000, true) {
+			return nil, invalidField("评论内容：请输入 1 至 10000 字")
+		}
 		if in.Visibility != "participants" && in.Visibility != "internal" {
-			return nil, ErrInvalid
+			return nil, invalidField("评论可见范围：请选择参与人员或内部")
 		}
 		if in.Visibility == "internal" && (executor || !internal(ctx, tx, p, t)) {
 			return nil, ErrForbidden
@@ -464,20 +496,34 @@ func (s *Service) Act(ctx context.Context, p auth.Principal, id, action, key str
 		if t.Status != "in_progress" {
 			return nil, ErrConflict
 		}
-		if !textOK(in.Summary, 20000, true) || !textOK(in.SelfTestResult, 20000, true) || !textOK(in.ChangeReference, 255, false) || len(in.AttachmentIDs) > 30 {
-			return nil, ErrInvalid
+		if !textOK(in.Summary, 20000, true) {
+			return nil, invalidField("整改总结：请输入 1 至 20000 字")
+		}
+		if !textOK(in.SelfTestResult, 20000, true) {
+			return nil, invalidField("自测结果：请输入 1 至 20000 字")
+		}
+		if !textOK(in.ChangeReference, 255, false) {
+			return nil, invalidField("变更单号：最多 255 字")
+		}
+		if len(in.AttachmentIDs) > 30 {
+			return nil, invalidField("提交附件：最多选择 30 个附件")
 		}
 		if !contains([]string{"code_only", "test", "target", "not_applicable"}, in.DeploymentStatus) {
-			return nil, ErrInvalid
+			return nil, invalidField("部署状态：请选择有效的部署状态")
 		}
-		if t.DeploymentRequired && (in.DeploymentStatus != "target" || strings.TrimSpace(in.ChangeReference) == "") {
-			return nil, ErrInvalid
+		if t.DeploymentRequired {
+			if in.DeploymentStatus != "target" {
+				return nil, invalidField("部署状态：该任务须完成目标环境部署后才能提交")
+			}
+			if strings.TrimSpace(in.ChangeReference) == "" {
+				return nil, invalidField("变更单号：目标环境部署必须填写变更单号")
+			}
 		}
 		if (in.DeploymentStatus == "target" || in.DeploymentStatus == "test") && (in.DeployedAt == nil || in.DeployedAt.After(time.Now().Add(time.Minute))) {
-			return nil, ErrInvalid
+			return nil, invalidField("部署时间：请填写有效时间，不能晚于当前时间一分钟以上")
 		}
 		if in.DeploymentStatus == "not_applicable" && !textOK(in.NoDeploymentReason, 2000, true) {
-			return nil, ErrInvalid
+			return nil, invalidField("无需部署原因：请输入 1 至 2000 字")
 		}
 		var submission string
 		err = tx.QueryRow(ctx, `INSERT INTO remediation_submissions(task_id,revision,material_revision,author_id,remediation_summary,deployment_status,target_environment,change_reference,deployed_at,self_test_result,no_deployment_reason)
@@ -487,14 +533,14 @@ func (s *Service) Act(ctx context.Context, p auth.Principal, id, action, key str
 		}
 		for _, attachment := range in.AttachmentIDs {
 			if !validID(attachment) {
-				return nil, ErrInvalid
+				return nil, invalidField("提交附件标识不正确")
 			}
 			tag, e := tx.Exec(ctx, `INSERT INTO remediation_submission_attachments(submission_id,attachment_id) SELECT $1::uuid,id FROM remediation_attachments WHERE id=$2::uuid AND task_id=$3::uuid AND visibility='participants' ON CONFLICT DO NOTHING`, submission, attachment, id)
 			if e != nil {
 				return nil, e
 			}
 			if tag.RowsAffected() != 1 {
-				return nil, ErrInvalid
+				return nil, invalidField("提交附件：须选择本任务中对参与人员可见且未重复的附件")
 			}
 		}
 		_, err = tx.Exec(ctx, `UPDATE remediation_tasks SET current_submission_id=$2::uuid,return_reason='' WHERE id=$1::uuid`, id, submission)
@@ -531,11 +577,22 @@ func (s *Service) Act(ctx context.Context, p auth.Principal, id, action, key str
 		if in.Decision == "pass" && !current {
 			return nil, ErrConflict
 		}
-		if t.Status != expected || t.SubmissionID != in.SubmissionID || !textOK(in.Reason, 20000, true) || !contains([]string{"pass", "return"}, in.Decision) {
+		if t.Status != expected || t.SubmissionID != in.SubmissionID {
 			return nil, ErrConflict
 		}
-		if stage == "security" && (!textOK(in.VerifiedEnvironment, 255, true) || in.VerifiedAt == nil || in.VerifiedAt.After(time.Now())) {
-			return nil, ErrInvalid
+		if !textOK(in.Reason, 20000, true) {
+			return nil, invalidField("审核意见：请输入 1 至 20000 字")
+		}
+		if !contains([]string{"pass", "return"}, in.Decision) {
+			return nil, invalidField("审核结论：请选择通过或退回")
+		}
+		if stage == "security" {
+			if !textOK(in.VerifiedEnvironment, 255, true) {
+				return nil, invalidField("验证环境：请输入 1 至 255 字")
+			}
+			if in.VerifiedAt == nil || in.VerifiedAt.After(time.Now()) {
+				return nil, invalidField("验证时间：请填写不晚于当前时间的验证时间")
+			}
 		}
 		if stage == "security" {
 			var submitted time.Time
@@ -543,7 +600,7 @@ func (s *Service) Act(ctx context.Context, p auth.Principal, id, action, key str
 				return nil, err
 			}
 			if in.VerifiedAt.Before(submitted) {
-				return nil, ErrInvalid
+				return nil, invalidField("验证时间：不能早于本次整改提交时间")
 			}
 		}
 		var selfReview bool
@@ -587,7 +644,7 @@ func (s *Service) Act(ctx context.Context, p auth.Principal, id, action, key str
 			return nil, err
 		}
 		if !textOK(in.Reason, 2000, true) {
-			return nil, ErrInvalid
+			return nil, invalidField("恢复任务确认原因：请输入 1 至 2000 字")
 		}
 		var revivedAt, ackedAt *time.Time
 		if err = tx.QueryRow(ctx, `SELECT revived_at,revived_ack_at FROM remediation_tasks WHERE id=$1::uuid`, id).Scan(&revivedAt, &ackedAt); err != nil {
@@ -634,8 +691,14 @@ func (s *Service) Act(ctx context.Context, p auth.Principal, id, action, key str
 		if err = requireManager("remediation.assign"); err != nil {
 			return nil, err
 		}
-		if !contains([]string{"pending_acceptance", "in_progress", "pending_org_review", "pending_security_review"}, t.Status) || !in.Material.valid() || strings.TrimSpace(in.Reason) == "" {
+		if !contains([]string{"pending_acceptance", "in_progress", "pending_org_review", "pending_security_review"}, t.Status) {
 			return nil, ErrConflict
+		}
+		if err := validateMaterial(in.Material); err != nil {
+			return nil, err
+		}
+		if strings.TrimSpace(in.Reason) == "" {
+			return nil, invalidField("材料变更原因不能为空")
 		}
 		if contains([]string{"pending_org_review", "pending_security_review"}, t.Status) {
 			if !in.InvalidateSubmission {
@@ -650,8 +713,11 @@ func (s *Service) Act(ctx context.Context, p auth.Principal, id, action, key str
 			next = "in_progress"
 		}
 		if in.TargetEnvironment != "" {
-			if !textOK(in.TargetEnvironment, 255, true) || in.DeploymentRequired == nil {
-				return nil, ErrInvalid
+			if !textOK(in.TargetEnvironment, 255, true) {
+				return nil, invalidField("目标环境：请输入 1 至 255 字")
+			}
+			if in.DeploymentRequired == nil {
+				return nil, invalidField("部署要求：变更目标环境时须明确是否需要部署")
 			}
 			if _, err = tx.Exec(ctx, `UPDATE remediation_tasks SET target_environment=$2,deployment_required=$3 WHERE id=$1::uuid`, id, in.TargetEnvironment, *in.DeploymentRequired); err != nil {
 				return nil, err
@@ -662,7 +728,7 @@ func (s *Service) Act(ctx context.Context, p auth.Principal, id, action, key str
 			return nil, err
 		}
 		if severity != in.Material.Severity {
-			return nil, ErrInvalid
+			return nil, invalidField("严重程度：须与安全发现的严重程度一致")
 		}
 		if err = writeMaterial(ctx, tx, p, id, t.MaterialRevision+1, in.Material); err != nil {
 			return nil, err
@@ -688,7 +754,7 @@ func (s *Service) Act(ctx context.Context, p auth.Principal, id, action, key str
 		_, err = tx.Exec(ctx, `UPDATE remediation_tasks SET completion_reason=NULL,completed_at=NULL,current_submission_id=NULL,return_reason=$2 WHERE id=$1::uuid`, id, in.Reason)
 		next = "in_progress"
 	default:
-		return nil, ErrInvalid
+		return nil, invalidField("不支持的整改任务操作")
 	}
 	if err != nil {
 		return nil, dbError(err)
@@ -729,7 +795,7 @@ func refreshOrder(ctx context.Context, tx pgx.Tx, id string) error {
 }
 func (s *Service) OrderSummary(ctx context.Context, p auth.Principal, id string) (Object, error) {
 	if !validID(id) {
-		return nil, ErrInvalid
+		return nil, invalidField("安全工单标识不正确")
 	}
 	out, err := readObject(ctx, s.pool, `SELECT w.id,w.work_order_no,w.execution_mode,w.status,w.due_at,w.assignee_organization_id,
  (SELECT count(*) FROM security_work_order_findings l WHERE l.work_order_id=w.id) total,
@@ -745,8 +811,11 @@ func (s *Service) Options(ctx context.Context, p auth.Principal, page pagination
 
 // CloseOrder is the only closing path for individual execution mode.
 func (s *Service) CloseOrder(ctx context.Context, p auth.Principal, id, reason string) error {
-	if !validID(id) || !textOK(reason, 10000, true) {
-		return ErrInvalid
+	if !validID(id) {
+		return invalidField("安全工单标识不正确")
+	}
+	if !textOK(reason, 10000, true) {
+		return invalidField("关闭原因：请输入 1 至 10000 字")
 	}
 	tx, err := s.begin(ctx)
 	if err != nil {

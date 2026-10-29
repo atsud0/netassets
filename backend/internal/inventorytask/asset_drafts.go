@@ -115,7 +115,7 @@ func (s *Service) validateAssetDraftCustomValues(ctx context.Context, values []c
 		return nil, err
 	}
 	if _, _, err := customfield.ValidateValues(definitions, values); err != nil {
-		return nil, ErrInvalid
+		return nil, mapDraftCustomValueError(err)
 	}
 	// json.Marshal(nil) produces the JSON scalar null. Submission snapshots
 	// and working-version diffs expect custom_values to be an array and call
@@ -132,7 +132,7 @@ func (s *Service) CreateAssetDraft(ctx context.Context, principal auth.Principal
 	}
 	input.OrganizationID = organizationID
 	if input.ExpectedVersion != nil && *input.ExpectedVersion <= 0 {
-		return AssetDraft{}, ErrInvalid
+		return AssetDraft{}, invalidInput("草稿版本无效，请刷新后重试")
 	}
 	normalizedValue, err := asset.PrepareCreateInput(&input)
 	if err != nil {
@@ -152,7 +152,7 @@ func (s *Service) CreateAssetDraft(ctx context.Context, principal auth.Principal
 		return AssetDraft{}, err
 	}
 	if assignment.AssetNetworkScope != "all" && input.NetworkScope != assignment.AssetNetworkScope {
-		return AssetDraft{}, ErrInvalid
+		return AssetDraft{}, invalidInput("资产网络范围不符合本次填报任务的核查范围")
 	}
 	if err := validateDraftReferences(ctx, tx, organizationID, input); err != nil {
 		return AssetDraft{}, err
@@ -245,7 +245,7 @@ func (s *Service) createAssetChangeDraft(ctx context.Context, principal auth.Pri
 		return AssetDraft{}, fmt.Errorf("load formal asset for draft: %w", err)
 	}
 	if assignment.AssetNetworkScope != "all" && current.NetworkScope != assignment.AssetNetworkScope {
-		return AssetDraft{}, ErrInvalid
+		return AssetDraft{}, invalidInput("资产网络范围不符合本次填报任务的核查范围")
 	}
 	if operation == "delete" {
 		current.CustomValues, err = customfield.ValuesInTx(ctx, tx, "asset", sourceAssetID)
@@ -260,7 +260,7 @@ func (s *Service) createAssetChangeDraft(ctx context.Context, principal auth.Pri
 			return AssetDraft{}, mapAssetError(err)
 		}
 		if assignment.AssetNetworkScope != "all" && input.NetworkScope != assignment.AssetNetworkScope {
-			return AssetDraft{}, ErrInvalid
+			return AssetDraft{}, invalidInput("资产网络范围不符合本次填报任务的核查范围")
 		}
 		if err := validateDraftReferences(ctx, tx, organizationID, input); err != nil {
 			return AssetDraft{}, err
@@ -327,7 +327,7 @@ func (s *Service) UpdateAssetDraft(ctx context.Context, principal auth.Principal
 	}
 	input.OrganizationID = organizationID
 	if input.ExpectedVersion == nil || *input.ExpectedVersion <= 0 {
-		return AssetDraft{}, ErrInvalid
+		return AssetDraft{}, invalidInput("草稿版本无效，请刷新后重试")
 	}
 	normalizedValue, err := asset.PrepareCreateInput(&input)
 	if err != nil {
@@ -350,7 +350,7 @@ func (s *Service) UpdateAssetDraft(ctx context.Context, principal auth.Principal
 		return AssetDraft{}, err
 	}
 	if assignment.AssetNetworkScope != "all" && input.NetworkScope != assignment.AssetNetworkScope {
-		return AssetDraft{}, ErrInvalid
+		return AssetDraft{}, invalidInput("资产网络范围不符合本次填报任务的核查范围")
 	}
 	if err := validateDraftReferences(ctx, tx, organizationID, input); err != nil {
 		return AssetDraft{}, err
@@ -368,12 +368,12 @@ func (s *Service) UpdateAssetDraft(ctx context.Context, principal auth.Principal
 		return AssetDraft{}, ErrConflict
 	}
 	result, err := tx.Exec(ctx, `
-		UPDATE inventory_asset_drafts SET asset_type=$5,asset_value=$6,normalized_value=$7,asset_name=NULLIF($8,''),
-		       environment=$9,network_scope=$10,network_area_id=NULLIF($11,'')::uuid,business_system_id=NULLIF($12,'')::uuid,business_system_draft_id=NULLIF($13,'')::uuid,
-		       status=$14,importance=$15,owner_user_id=NULLIF($16,'')::uuid,owner_name=NULLIF($17,''),notes=NULLIF($18,''),
-		       expires_at=$19,custom_values=$20::jsonb,draft_status='editing',version=version+1,updated_by=$21::uuid,last_edited_by=$21::uuid,updated_at=now()
-		WHERE id::text=$4 AND task_id::text=$1 AND organization_id::text=$2 AND operation IN ('create','update') AND draft_status IN `+inventorydraft.EditableSQL+` AND version=$22
-	`, taskID, organizationID, principal.UserID, draftID, input.Type, input.Value, normalizedValue, input.Name,
+		UPDATE inventory_asset_drafts SET asset_type=$4,asset_value=$5,normalized_value=$6,asset_name=NULLIF($7,''),
+		       environment=$8,network_scope=$9,network_area_id=NULLIF($10,'')::uuid,business_system_id=NULLIF($11,'')::uuid,business_system_draft_id=NULLIF($12,'')::uuid,
+		       status=$13,importance=$14,owner_user_id=NULLIF($15,'')::uuid,owner_name=NULLIF($16,''),notes=NULLIF($17,''),
+		       expires_at=$18,custom_values=$19::jsonb,draft_status='editing',version=version+1,updated_by=$20::uuid,last_edited_by=$20::uuid,updated_at=now()
+		WHERE id::text=$3 AND task_id::text=$1 AND organization_id::text=$2 AND operation IN ('create','update') AND draft_status IN `+inventorydraft.EditableSQL+` AND version=$21
+	`, taskID, organizationID, draftID, input.Type, input.Value, normalizedValue, input.Name,
 		input.Environment, input.NetworkScope, input.NetworkAreaID, input.BusinessSystemID, systemDraftID, input.Status, input.Importance,
 		input.OwnerUserID, input.OwnerName, input.Notes, input.ExpiresAt, customValues, principal.UserID, input.ExpectedVersion)
 	if err != nil {
@@ -405,7 +405,7 @@ func (s *Service) DeleteAssetDraft(ctx context.Context, principal auth.Principal
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 	if expectedVersion <= 0 {
-		return ErrInvalid
+		return invalidInput("草稿版本无效，请刷新后重试")
 	}
 	if _, err := s.loadDraftAssignment(ctx, tx, principal, taskID, organizationID, true, "network_assets"); err != nil {
 		return err
@@ -547,7 +547,7 @@ func resolveBusinessSystemReference(ctx context.Context, q queryRower, organizat
 		return "", "", err
 	}
 	if !exists {
-		return "", "", ErrInvalid
+		return "", "", invalidInput("请选择本组织有效的业务系统或填报草稿")
 	}
 	return "", referenceID, nil
 }
@@ -560,7 +560,7 @@ func validateDraftReferences(ctx context.Context, q queryRower, organizationID s
 		return fmt.Errorf("load draft organization: %w", err)
 	}
 	if organizationStatus != "enabled" {
-		return ErrInvalid
+		return invalidInput("所属组织已停用，请联系管理员")
 	}
 	if input.NetworkAreaID != "" {
 		var ok bool
@@ -568,7 +568,7 @@ func validateDraftReferences(ctx context.Context, q queryRower, organizationID s
 			return fmt.Errorf("validate draft network area: %w", err)
 		}
 		if !ok {
-			return ErrInvalid
+			return invalidInput("请选择本组织有效且已启用的网络区域")
 		}
 	}
 	if input.BusinessSystemID != "" {
@@ -577,7 +577,7 @@ func validateDraftReferences(ctx context.Context, q queryRower, organizationID s
 			return fmt.Errorf("validate draft business system: %w", err)
 		}
 		if !ok {
-			return ErrInvalid
+			return invalidInput("请选择本组织有效的业务系统或填报草稿")
 		}
 	}
 	if input.OwnerUserID != "" {
@@ -586,7 +586,7 @@ func validateDraftReferences(ctx context.Context, q queryRower, organizationID s
 			return fmt.Errorf("validate draft owner: %w", err)
 		}
 		if !ok {
-			return ErrInvalid
+			return invalidInput("请选择本组织有效且已启用的负责人")
 		}
 	}
 	return nil
@@ -647,6 +647,10 @@ func writeDraftAudit(ctx context.Context, tx pgx.Tx, principal auth.Principal, o
 }
 
 func mapAssetError(err error) error {
+	var validation *asset.InputValidationError
+	if errors.As(err, &validation) {
+		return invalidInput(validation.Message)
+	}
 	switch {
 	case errors.Is(err, asset.ErrInvalid):
 		return ErrInvalid
@@ -701,6 +705,18 @@ func settleFindingImportCandidate(ctx context.Context, tx pgx.Tx, draftID, asset
 		    SELECT id FROM asset_candidates WHERE working_version_draft_id=$1::uuid
 		) AND candidate.status='pending'`, draftID, assetID, userID); err != nil {
 		return fmt.Errorf("settle published finding import candidates: %w", err)
+	}
+	// Candidates released when the working version was first confirmed already
+	// have status=imported (or duplicate). They are no longer in the pending
+	// queue, but must still point at the formal asset after publication so the
+	// import history does not retain an unresolved asset reference.
+	if _, err := tx.Exec(ctx, `
+		UPDATE security_finding_import_candidates candidate
+		SET matched_asset_id=$2::uuid, updated_at=now()
+		WHERE candidate.asset_candidate_id IN (
+		    SELECT id FROM asset_candidates WHERE working_version_draft_id=$1::uuid
+		) AND candidate.status IN ('imported','duplicate')`, draftID, assetID); err != nil {
+		return fmt.Errorf("attach released finding import candidates to published asset: %w", err)
 	}
 	if _, err := tx.Exec(ctx, `
 		UPDATE security_finding_imports i
@@ -783,7 +799,7 @@ func publishAssetDrafts(ctx context.Context, tx pgx.Tx, principal auth.Principal
 			}
 		case "update":
 			if item.sourceID == "" {
-				return ErrInvalid
+				return invalidInput("资产变更草稿缺少来源正式资产，无法审核发布")
 			}
 			resourceID = item.sourceID
 			action, summary = "asset.update", "审核发布填报网络资产变更"
@@ -824,7 +840,7 @@ func publishAssetDrafts(ctx context.Context, tx pgx.Tx, principal auth.Principal
 			}
 		case "delete":
 			if item.sourceID == "" {
-				return ErrInvalid
+				return invalidInput("资产删除草稿缺少来源正式资产，无法审核发布")
 			}
 			resourceID = item.sourceID
 			action, summary = "asset.delete", "审核发布填报网络资产删除"
@@ -844,7 +860,7 @@ func publishAssetDrafts(ctx context.Context, tx pgx.Tx, principal auth.Principal
 				return err
 			}
 		default:
-			return ErrInvalid
+			return invalidInput("资产草稿操作类型不正确，无法审核发布")
 		}
 		if item.operation != "delete" {
 			if _, err := tx.Exec(ctx, `DELETE FROM asset_organizations WHERE asset_id::text=$1 AND is_primary`, resourceID); err != nil {

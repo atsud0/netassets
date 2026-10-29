@@ -96,7 +96,7 @@ test('任务中新建业务系统在提交和审核通过前与正式台账隔�
         short_name: organizationName,
         type: 'subsidiary',
         manager: '业务系统草稿负责人',
-        contact: 'business-draft-owner@example.com',
+        contact: '13800000018',
         notes: '填报任务业务系统草稿隔离自动化测试',
       }),
     })

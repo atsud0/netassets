@@ -45,8 +45,11 @@ type workingVersionSnapshot struct {
 func (s *Service) WorkingVersionDiff(ctx context.Context, principal auth.Principal, resourceType, draftID string) (WorkingVersionDiff, error) {
 	resourceType = strings.TrimSpace(resourceType)
 	draftID = strings.TrimSpace(draftID)
-	if !validSubmissionDiffResourceType(resourceType) || draftID == "" {
-		return WorkingVersionDiff{}, ErrInvalid
+	if !validSubmissionDiffResourceType(resourceType) {
+		return WorkingVersionDiff{}, invalidInput("工作版本类型仅支持网络资产或业务系统")
+	}
+	if draftID == "" {
+		return WorkingVersionDiff{}, invalidInput("请提供工作版本标识")
 	}
 
 	var (

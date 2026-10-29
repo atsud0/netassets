@@ -795,8 +795,8 @@ LEFT JOIN notification_reads nr
 
 func (s *Service) MarkRead(ctx context.Context, principal auth.Principal, key string) error {
 	key = strings.TrimSpace(key)
-	if key == "" || len(key) > 255 {
-		return ErrInvalid
+	if err := validateReadKey(key); err != nil {
+		return err
 	}
 	visible, err := s.isVisible(ctx, principal, key)
 	if err != nil {

@@ -3,6 +3,7 @@ package businesssystem
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 
 	"netassets/internal/auth"
@@ -69,15 +70,21 @@ func (s *Service) SetArchivedBatch(ctx context.Context, principal auth.Principal
 }
 
 func normalizeBatchArchiveItems(values []BatchArchiveItem) ([]BatchArchiveItem, error) {
-	if len(values) == 0 || len(values) > MaxBatchItems {
-		return nil, ErrInvalid
+	if len(values) == 0 {
+		return nil, invalidInput("批量处理业务系统：请至少选择一个业务系统")
+	}
+	if len(values) > MaxBatchItems {
+		return nil, invalidInput(fmt.Sprintf("批量处理业务系统：单次最多选择 %d 个业务系统", MaxBatchItems))
 	}
 	items := make([]BatchArchiveItem, 0, len(values))
 	seen := make(map[string]struct{}, len(values))
-	for _, value := range values {
+	for index, value := range values {
 		id := strings.TrimSpace(value.ID)
-		if id == "" || value.ExpectedVersion <= 0 {
-			return nil, ErrInvalid
+		if id == "" {
+			return nil, invalidInput(fmt.Sprintf("批量处理业务系统：第 %d 项业务系统标识不能为空", index+1))
+		}
+		if value.ExpectedVersion <= 0 {
+			return nil, invalidInput(fmt.Sprintf("批量处理业务系统：第 %d 项缺少有效版本号，请刷新后重试", index+1))
 		}
 		if _, exists := seen[id]; exists {
 			continue
@@ -87,7 +94,7 @@ func normalizeBatchArchiveItems(values []BatchArchiveItem) ([]BatchArchiveItem, 
 		items = append(items, value)
 	}
 	if len(items) == 0 {
-		return nil, ErrInvalid
+		return nil, invalidInput("批量处理业务系统：请至少选择一个业务系统")
 	}
 	return items, nil
 }
@@ -99,6 +106,10 @@ func businessSystemBatchError(err error, action string) (string, string) {
 	case errors.Is(err, ErrNotFound):
 		return "not_found", "业务系统不存在"
 	case errors.Is(err, ErrInvalid):
+		var validation *InputValidationError
+		if errors.As(err, &validation) {
+			return "invalid_id", validation.Message
+		}
 		return "invalid_id", "业务系统编号不正确"
 	case errors.Is(err, ErrVersionRequired):
 		return "expected_version_required", "缺少业务系统版本，请刷新后重试"

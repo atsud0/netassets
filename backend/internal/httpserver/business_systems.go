@@ -33,7 +33,7 @@ func registerBusinessSystemRoutes(api *gin.RouterGroup, requireAuth gin.HandlerF
 	group.GET("/imports", func(c *gin.Context) {
 		page, err := parsePageQuery(c)
 		if err != nil {
-			writeAPIError(c, http.StatusBadRequest, "invalid_query", "分页参数不正确，page_size 最大为 100")
+			writeAPIError(c, http.StatusBadRequest, "invalid_query", pageQueryErrorMessage(err))
 			return
 		}
 		result, err := service.SearchImports(c.Request.Context(), mustPrincipal(c), page)
@@ -81,7 +81,7 @@ func registerBusinessSystemRoutes(api *gin.RouterGroup, requireAuth gin.HandlerF
 				return
 			}
 			if errors.Is(err, businesssystem.ErrInvalid) {
-				writeAPIError(c, http.StatusBadRequest, "invalid_selection", "选中业务系统参数不正确，单次最多导出 200 条")
+				writeAPIError(c, http.StatusBadRequest, "invalid_selection", businessSystemInputErrorMessage(err, "选中业务系统参数不正确，单次最多导出 200 条"))
 				return
 			}
 			logger.Error("export business systems csv", "error", err, "request_id", c.GetString("request_id"))
@@ -90,13 +90,17 @@ func registerBusinessSystemRoutes(api *gin.RouterGroup, requireAuth gin.HandlerF
 		}
 
 		data, contentType, fileName, count, err := service.Export(c.Request.Context(), mustPrincipal(c), filter, format, c.GetString("request_id"), c.ClientIP())
+		if errors.Is(err, businesssystem.ErrForbidden) {
+			writeAPIError(c, http.StatusForbidden, "forbidden", "当前账号无权导出业务系统")
+			return
+		}
 		if errors.Is(err, businesssystem.ErrExportTooLarge) {
 			writeAPIError(c, http.StatusUnprocessableEntity, "synchronous_xlsx_limit_exceeded", "同步 XLSX 导出最多支持 5000 条数据，请改用 CSV 格式导出")
 			return
 		}
 		if errors.Is(err, businesssystem.ErrInvalid) {
 			if len(selectedIDs) > 0 {
-				writeAPIError(c, http.StatusBadRequest, "invalid_selection", "选中业务系统参数不正确，单次最多导出 200 条")
+				writeAPIError(c, http.StatusBadRequest, "invalid_selection", businessSystemInputErrorMessage(err, "选中业务系统参数不正确，单次最多导出 200 条"))
 			} else {
 				writeAPIError(c, http.StatusBadRequest, "invalid_format", "导出格式仅支持 csv 或 xlsx")
 			}
@@ -142,8 +146,12 @@ func registerBusinessSystemRoutes(api *gin.RouterGroup, requireAuth gin.HandlerF
 		c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, maxAssetImportBytes)
 		organizationID := strings.TrimSpace(c.PostForm("organization_id"))
 		fileHeader, err := c.FormFile("file")
-		if err != nil || organizationID == "" {
-			writeAPIError(c, http.StatusBadRequest, "invalid_request", "请选择所属组织并上传 CSV 或 XLSX 文件")
+		if organizationID == "" {
+			writeAPIError(c, http.StatusBadRequest, "invalid_request", "所属组织：请选择导入数据所属组织")
+			return
+		}
+		if err != nil {
+			writeAPIError(c, http.StatusBadRequest, "invalid_request", "导入文件：请上传 CSV 或 XLSX 文件")
 			return
 		}
 		if fileHeader.Size > maxAssetImportBytes {
@@ -161,7 +169,7 @@ func registerBusinessSystemRoutes(api *gin.RouterGroup, requireAuth gin.HandlerF
 		case errors.Is(err, businesssystem.ErrForbidden):
 			writeAPIError(c, http.StatusForbidden, "forbidden", "当前账号无权分析该组织的业务系统导入文件")
 		case errors.Is(err, businesssystem.ErrInvalid):
-			writeAPIError(c, http.StatusBadRequest, "invalid_import", "文件格式、列数或数据行数不符合要求（最多 200 列、5000 行）")
+			writeAPIError(c, http.StatusBadRequest, "invalid_import", businessSystemInputErrorMessage(err, "文件格式、列数或数据行数不符合要求（最多 5000 行；列数上限为 200 与当前配置字段数的较大值）"))
 		case err != nil:
 			logger.Error("analyze business system import columns", "error", err, "request_id", c.GetString("request_id"))
 			writeAPIError(c, http.StatusInternalServerError, "internal_error", "分析业务系统导入文件失败")
@@ -179,8 +187,12 @@ func registerBusinessSystemRoutes(api *gin.RouterGroup, requireAuth gin.HandlerF
 			return
 		}
 		fileHeader, err := c.FormFile("file")
-		if err != nil || organizationID == "" {
-			writeAPIError(c, http.StatusBadRequest, "invalid_request", "请选择所属组织并上传 CSV 或 XLSX 文件")
+		if organizationID == "" {
+			writeAPIError(c, http.StatusBadRequest, "invalid_request", "所属组织：请选择导入数据所属组织")
+			return
+		}
+		if err != nil {
+			writeAPIError(c, http.StatusBadRequest, "invalid_request", "导入文件：请上传 CSV 或 XLSX 文件")
 			return
 		}
 		if fileHeader.Size > maxAssetImportBytes {
@@ -198,7 +210,7 @@ func registerBusinessSystemRoutes(api *gin.RouterGroup, requireAuth gin.HandlerF
 		case errors.Is(err, businesssystem.ErrForbidden):
 			writeAPIError(c, http.StatusForbidden, "forbidden", "当前账号无权预检该组织的业务系统导入文件")
 		case errors.Is(err, businesssystem.ErrInvalid):
-			writeAPIError(c, http.StatusBadRequest, "invalid_import", "文件格式、表头或数据行数不符合要求（最多 5000 行）")
+			writeAPIError(c, http.StatusBadRequest, "invalid_import", businessSystemInputErrorMessage(err, "文件格式、表头或数据行数不符合要求（最多 5000 行）"))
 		case err != nil:
 			logger.Error("preview 业务系统 import", "error", err, "request_id", c.GetString("request_id"))
 			writeAPIError(c, http.StatusInternalServerError, "internal_error", "预检业务系统导入文件失败")
@@ -216,8 +228,12 @@ func registerBusinessSystemRoutes(api *gin.RouterGroup, requireAuth gin.HandlerF
 			return
 		}
 		fileHeader, err := c.FormFile("file")
-		if err != nil || organizationID == "" {
-			writeAPIError(c, http.StatusBadRequest, "invalid_request", "请选择所属组织并上传 CSV 或 XLSX 文件")
+		if organizationID == "" {
+			writeAPIError(c, http.StatusBadRequest, "invalid_request", "所属组织：请选择导入数据所属组织")
+			return
+		}
+		if err != nil {
+			writeAPIError(c, http.StatusBadRequest, "invalid_request", "导入文件：请上传 CSV 或 XLSX 文件")
 			return
 		}
 		if fileHeader.Size > maxAssetImportBytes {
@@ -235,7 +251,7 @@ func registerBusinessSystemRoutes(api *gin.RouterGroup, requireAuth gin.HandlerF
 		case errors.Is(err, businesssystem.ErrForbidden):
 			writeAPIError(c, http.StatusForbidden, "forbidden", "当前账号无权向该组织导入业务系统")
 		case errors.Is(err, businesssystem.ErrInvalid):
-			writeAPIError(c, http.StatusBadRequest, "invalid_import", "文件格式、表头或数据行数不符合要求（最多 5000 行）")
+			writeAPIError(c, http.StatusBadRequest, "invalid_import", businessSystemInputErrorMessage(err, "文件格式、表头或数据行数不符合要求（最多 5000 行）"))
 		case err != nil:
 			logger.Error("import business systems", "error", err, "request_id", c.GetString("request_id"))
 			writeAPIError(c, http.StatusInternalServerError, "internal_error", "批量导入业务系统失败")
@@ -246,7 +262,7 @@ func registerBusinessSystemRoutes(api *gin.RouterGroup, requireAuth gin.HandlerF
 	group.GET("", func(c *gin.Context) {
 		page, err := parsePageQuery(c)
 		if err != nil {
-			writeAPIError(c, http.StatusBadRequest, "invalid_query", "分页参数不正确，page_size 最大为 100")
+			writeAPIError(c, http.StatusBadRequest, "invalid_query", pageQueryErrorMessage(err))
 			return
 		}
 		result, err := service.SearchWithFilter(c.Request.Context(), mustPrincipal(c), businesssystem.SearchFilter{
@@ -277,7 +293,7 @@ func registerBusinessSystemRoutes(api *gin.RouterGroup, requireAuth gin.HandlerF
 		case errors.Is(err, businesssystem.ErrForbidden):
 			writeAPIError(c, http.StatusForbidden, "forbidden", "当前账号无权批量处理业务系统")
 		case errors.Is(err, businesssystem.ErrInvalid):
-			writeAPIError(c, http.StatusBadRequest, "invalid_batch", "请选择带有最新版本号的业务系统")
+			writeAPIError(c, http.StatusBadRequest, "invalid_batch", businessSystemInputErrorMessage(err, "请选择带有最新版本号的业务系统"))
 		case err != nil:
 			logger.Error("batch change business system status", "error", err, "request_id", c.GetString("request_id"))
 			writeAPIError(c, http.StatusInternalServerError, "internal_error", "批量处理业务系统失败")
@@ -314,7 +330,7 @@ func registerBusinessSystemRoutes(api *gin.RouterGroup, requireAuth gin.HandlerF
 	group.GET("/:id/assets", func(c *gin.Context) {
 		page, err := parsePageQuery(c)
 		if err != nil {
-			writeAPIError(c, http.StatusBadRequest, "invalid_query", "分页参数不正确，page_size 最大为 100")
+			writeAPIError(c, http.StatusBadRequest, "invalid_query", pageQueryErrorMessage(err))
 			return
 		}
 		result, err := service.SearchRelatedAssets(c.Request.Context(), mustPrincipal(c), c.Param("id"), page)
@@ -363,7 +379,7 @@ func registerBusinessSystemRoutes(api *gin.RouterGroup, requireAuth gin.HandlerF
 		case errors.Is(err, businesssystem.ErrInvalidOwnerContact):
 			writeAPIError(c, http.StatusBadRequest, "invalid_owner_contact", "联系方式格式不正确，请填写手机号码、座机或分机号")
 		case errors.Is(err, businesssystem.ErrInvalid):
-			writeAPIError(c, http.StatusBadRequest, "invalid_business_system", "请检查系统信息和数据安全属性")
+			writeAPIError(c, http.StatusBadRequest, "invalid_business_system", businessSystemInputErrorMessage(err, "请检查系统信息和数据安全属性"))
 		case errors.Is(err, businesssystem.ErrNotFound):
 			writeAPIError(c, http.StatusNotFound, "organization_not_found", "所属组织不存在")
 		case errors.Is(err, businesssystem.ErrConflict):
@@ -393,7 +409,7 @@ func registerBusinessSystemRoutes(api *gin.RouterGroup, requireAuth gin.HandlerF
 		case errors.Is(err, businesssystem.ErrInvalidOwnerContact):
 			writeAPIError(c, http.StatusBadRequest, "invalid_owner_contact", "联系方式格式不正确，请填写手机号码、座机或分机号")
 		case errors.Is(err, businesssystem.ErrInvalid):
-			writeAPIError(c, http.StatusBadRequest, "invalid_business_system", "请检查系统信息和数据安全属性")
+			writeAPIError(c, http.StatusBadRequest, "invalid_business_system", businessSystemInputErrorMessage(err, "请检查系统信息和数据安全属性"))
 		case errors.Is(err, businesssystem.ErrNotFound):
 			writeAPIError(c, http.StatusNotFound, "business_system_not_found", "业务系统或所属组织不存在")
 		case errors.Is(err, businesssystem.ErrFormalVersionConflict):
@@ -431,7 +447,7 @@ func registerBusinessSystemRoutes(api *gin.RouterGroup, requireAuth gin.HandlerF
 		case errors.Is(err, businesssystem.ErrForbidden):
 			writeAPIError(c, http.StatusForbidden, "forbidden", "当前账号无权删除该业务系统")
 		case errors.Is(err, businesssystem.ErrInvalid):
-			writeAPIError(c, http.StatusBadRequest, "invalid_business_system_id", "业务系统编号不正确")
+			writeAPIError(c, http.StatusBadRequest, "invalid_business_system_id", businessSystemInputErrorMessage(err, "业务系统编号不正确"))
 		case errors.Is(err, businesssystem.ErrNotFound):
 			writeAPIError(c, http.StatusNotFound, "business_system_not_found", "业务系统不存在")
 		case errors.Is(err, businesssystem.ErrInUse):

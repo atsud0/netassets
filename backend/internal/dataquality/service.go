@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"regexp"
 	"sort"
 	"strings"
@@ -15,6 +16,7 @@ import (
 	"netassets/internal/assetobservation"
 	"netassets/internal/auth"
 	"netassets/internal/pagination"
+	"netassets/internal/textlength"
 )
 
 var (
@@ -24,6 +26,17 @@ var (
 	ErrConflict          = errors.New("conflict")
 	ErrInvalidTransition = errors.New("invalid transition")
 )
+
+// RuleValidationError exposes only an actionable, safe rule-input message.
+// It preserves ErrInvalid for existing callers and error-code mappings.
+type RuleValidationError struct {
+	Message string
+}
+
+func (e *RuleValidationError) Error() string { return e.Message }
+func (e *RuleValidationError) Unwrap() error { return ErrInvalid }
+
+func invalidRule(message string) error { return &RuleValidationError{Message: message} }
 
 const (
 	maxRuleConditions     = 10
@@ -261,88 +274,95 @@ func validConditionValues(condition RuleCondition, spec conditionFieldSpec) erro
 	valueCount := len(condition.Values)
 	for _, value := range condition.Values {
 		if len(value) > maxConditionValueSize {
-			return ErrInvalid
+			return invalidRule("条件值不能超过 256 字节")
 		}
 		if spec.kind == "uuid" && !conditionUUIDPattern.MatchString(value) {
-			return ErrInvalid
+			return invalidRule("条件值中的组织或网络区域标识格式不正确")
 		}
 		if spec.allowedValues != nil && !spec.allowedValues[value] {
-			return ErrInvalid
+			return invalidRule("条件值必须选择当前字段支持的选项")
 		}
 	}
 
 	switch spec.kind {
 	case "presence":
 		if (condition.Operator != "is_true" && condition.Operator != "is_false") || valueCount != 0 {
-			return ErrInvalid
+			return invalidRule("关联存在性条件仅支持为真或为假，且无需填写条件值")
 		}
 		return nil
 	case "boolean":
 		if condition.Operator != "is_true" && condition.Operator != "is_false" && condition.Operator != "empty" && condition.Operator != "not_empty" {
-			return ErrInvalid
+			return invalidRule("布尔条件仅支持为真、为假、为空或不为空")
 		}
 		if valueCount != 0 {
-			return ErrInvalid
+			return invalidRule("当前条件运算符无需填写条件值")
 		}
 		return nil
 	case "multiselect":
 		if condition.Operator == "empty" || condition.Operator == "not_empty" {
 			if valueCount != 0 {
-				return ErrInvalid
+				return invalidRule("为空或不为空条件无需填写条件值")
 			}
 			return nil
 		}
 		if condition.Operator != "in" && condition.Operator != "not_in" {
-			return ErrInvalid
+			return invalidRule("多选字段条件仅支持包含、排除、为空或不为空")
 		}
 	default:
 		if condition.Operator == "empty" || condition.Operator == "not_empty" {
 			if valueCount != 0 {
-				return ErrInvalid
+				return invalidRule("为空或不为空条件无需填写条件值")
 			}
 			return nil
 		}
 		if condition.Operator != "eq" && condition.Operator != "ne" && condition.Operator != "in" && condition.Operator != "not_in" {
-			return ErrInvalid
+			return invalidRule("请选择当前字段支持的条件运算符")
 		}
 	}
 
 	if condition.Operator == "eq" || condition.Operator == "ne" {
 		if valueCount != 1 {
-			return ErrInvalid
+			return invalidRule("等于或不等于条件必须填写一个条件值")
 		}
 		return nil
 	}
 	if valueCount < 1 || valueCount > maxConditionValues {
-		return ErrInvalid
+		return invalidRule("包含或排除条件须填写 1 至 50 个条件值")
 	}
 	return nil
 }
 
 func (s *Service) validateConditions(ctx context.Context, resourceType string, conditions []RuleCondition) error {
 	if len(conditions) > maxRuleConditions {
-		return ErrInvalid
+		return invalidRule("生效条件最多 10 条")
 	}
 	seen := map[string]bool{}
-	for _, condition := range conditions {
+	for index, condition := range conditions {
 		if condition.Field == "" || len(condition.Field) > 128 || condition.Operator == "" {
-			return ErrInvalid
+			return invalidRule(fmt.Sprintf("第 %d 条生效条件的字段和运算符不能为空，字段最多 128 字节", index+1))
 		}
 		spec, ok := builtinConditionField(resourceType, condition.Field)
 		var err error
 		if !ok {
 			spec, err = s.customConditionField(ctx, resourceType, condition.Field)
+			if errors.Is(err, ErrInvalid) {
+				return invalidRule(fmt.Sprintf("第 %d 条生效条件请选择有效字段", index+1))
+			}
 			if err != nil {
 				return err
 			}
 		}
 		if err := validConditionValues(condition, spec); err != nil {
+			var validationError *RuleValidationError
+			if errors.As(err, &validationError) {
+				return invalidRule(fmt.Sprintf("第 %d 条生效条件：%s", index+1, validationError.Message))
+			}
 			return err
 		}
 		raw, _ := json.Marshal(condition)
 		key := string(raw)
 		if seen[key] {
-			return ErrInvalid
+			return invalidRule(fmt.Sprintf("第 %d 条生效条件与前面的条件重复", index+1))
 		}
 		seen[key] = true
 	}
@@ -350,25 +370,57 @@ func (s *Service) validateConditions(ctx context.Context, resourceType string, c
 }
 
 func (s *Service) valid(ctx context.Context, in Input) error {
-	if in.RuleName == "" || len(in.RuleName) > 128 || (in.ResourceType != "asset" && in.ResourceType != "business_system") || (in.RuleType != "required" && in.RuleType != "stale" && in.RuleType != "expiry") || (in.Severity != "error" && in.Severity != "warning") || in.SortOrder < 0 || in.SortOrder > 100000 {
-		return ErrInvalid
+	if in.RuleName == "" {
+		return invalidRule("规则名称不能为空")
+	}
+	if textlength.Count(in.RuleName) > 128 {
+		return invalidRule("规则名称最多 128 字")
+	}
+	if in.ResourceType != "asset" && in.ResourceType != "business_system" {
+		return invalidRule("请选择有效的检查对象")
+	}
+	if in.RuleType != "required" && in.RuleType != "stale" && in.RuleType != "expiry" {
+		return invalidRule("请选择有效的规则类型")
+	}
+	if in.Severity != "error" && in.Severity != "warning" {
+		return invalidRule("请选择有效的问题等级")
+	}
+	if in.SortOrder < 0 || in.SortOrder > 100000 {
+		return invalidRule("排序须为 0 至 100000 的整数")
 	}
 	if in.RuleType == "stale" {
-		if in.TargetField != "updated_at" || in.StaleAfterDays < 1 || in.StaleAfterDays > 3650 || in.ExpiryWarningDays != 0 {
-			return ErrInvalid
+		if in.TargetField != "updated_at" {
+			return invalidRule("长期未维护规则的检查项须为最后更新时间")
+		}
+		if in.StaleAfterDays < 1 || in.StaleAfterDays > 3650 {
+			return invalidRule("未维护天数须为 1 至 3650 的整数")
+		}
+		if in.ExpiryWarningDays != 0 {
+			return invalidRule("长期未维护规则不支持提前提醒天数")
 		}
 	} else if in.RuleType == "expiry" {
-		validTarget := in.TargetField == "expires_at" || isExternalExpiryTarget(in.TargetField)
-		if in.ResourceType != "asset" || !validTarget || in.StaleAfterDays != 0 || in.ExpiryWarningDays < 0 || in.ExpiryWarningDays > 3650 {
-			return ErrInvalid
+		if in.ResourceType != "asset" {
+			return invalidRule("到期提醒规则的检查对象须为网络资产")
+		}
+		if in.TargetField != "expires_at" && !isExternalExpiryTarget(in.TargetField) {
+			return invalidRule("请选择有效的到期提醒检查项")
+		}
+		if in.StaleAfterDays != 0 {
+			return invalidRule("到期提醒规则不支持未维护天数")
+		}
+		if in.ExpiryWarningDays < 0 || in.ExpiryWarningDays > 3650 {
+			return invalidRule("提前提醒天数须为 0 至 3650 的整数")
 		}
 	} else {
-		if in.StaleAfterDays != 0 || in.ExpiryWarningDays != 0 {
-			return ErrInvalid
+		if in.StaleAfterDays != 0 {
+			return invalidRule("必填检查规则不支持未维护天数")
+		}
+		if in.ExpiryWarningDays != 0 {
+			return invalidRule("必填检查规则不支持提前提醒天数")
 		}
 		if !builtinTarget(in.ResourceType, in.TargetField) {
 			if !strings.HasPrefix(in.TargetField, "custom:") || len(strings.TrimPrefix(in.TargetField, "custom:")) == 0 {
-				return ErrInvalid
+				return invalidRule("请选择有效的必填检查项")
 			}
 			var exists bool
 			err := s.pool.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM custom_field_definitions WHERE resource_type=$1 AND field_key=$2)`, in.ResourceType, strings.TrimPrefix(in.TargetField, "custom:")).Scan(&exists)
@@ -376,7 +428,7 @@ func (s *Service) valid(ctx context.Context, in Input) error {
 				return err
 			}
 			if !exists {
-				return ErrInvalid
+				return invalidRule("请选择有效的必填检查项")
 			}
 		}
 	}

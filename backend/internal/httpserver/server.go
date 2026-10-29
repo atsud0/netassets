@@ -69,7 +69,9 @@ func NewWithContext(ctx context.Context, cfg config.Config, pool *pgxpool.Pool, 
 	})
 	if pool != nil {
 		backupService := backup.NewService(pool, cfg.DatabaseURL, cfg.DataDir)
-		router.Use(writeMaintenanceMiddleware(backupService.WriteGate()))
+		// api was created before the backup service. Gin groups snapshot parent
+		// middleware, so adding this only to router would leave API writes unguarded.
+		api.Use(writeMaintenanceMiddleware(backupService.WriteGate()))
 		authService := auth.NewService(pool, cfg.SessionTTL)
 		requireAuth := registerAuthRoutes(api, cfg, authService, logger)
 		registerOrganizationRoutes(api, requireAuth, organization.NewService(pool), logger)
@@ -86,6 +88,7 @@ func NewWithContext(ctx context.Context, cfg config.Config, pool *pgxpool.Pool, 
 		registerNetworkAreaRoutes(api, requireAuth, networkarea.NewService(pool), logger)
 		registerCustomFieldRoutes(api, requireAuth, customFieldService, logger)
 		dataQualityService := dataquality.NewService(pool)
+		dataQualityService.StartExemptionExpiry(ctx, backupService.WriteGate(), logger)
 		registerDataQualityRuleRoutes(api, requireAuth, dataQualityService, logger)
 		autoScanSchedule, err := dataquality.NewAutoScanSchedule(
 			cfg.DataQualityAutoScanEnabled,

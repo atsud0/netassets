@@ -234,17 +234,17 @@ func TestNormalizeBatchArchiveItemsDeduplicatesAndRequiresVersions(t *testing.T)
 	if len(items) != 2 || items[0].ID != "system-a" || items[1].ID != "system-b" {
 		t.Fatalf("unexpected normalized items: %#v", items)
 	}
-	if _, err := normalizeBatchArchiveItems(nil); err != ErrInvalid {
+	if _, err := normalizeBatchArchiveItems(nil); !errors.Is(err, ErrInvalid) {
 		t.Fatalf("empty batch error = %v, want ErrInvalid", err)
 	}
-	if _, err := normalizeBatchArchiveItems([]BatchArchiveItem{{ID: "system-a"}}); err != ErrInvalid {
+	if _, err := normalizeBatchArchiveItems([]BatchArchiveItem{{ID: "system-a"}}); !errors.Is(err, ErrInvalid) {
 		t.Fatalf("missing version error = %v, want ErrInvalid", err)
 	}
 	tooMany := make([]BatchArchiveItem, MaxBatchItems+1)
 	for index := range tooMany {
 		tooMany[index] = BatchArchiveItem{ID: fmt.Sprintf("system-%d", index), ExpectedVersion: 1}
 	}
-	if _, err := normalizeBatchArchiveItems(tooMany); err != ErrInvalid {
+	if _, err := normalizeBatchArchiveItems(tooMany); !errors.Is(err, ErrInvalid) {
 		t.Fatalf("oversized batch error = %v, want ErrInvalid", err)
 	}
 }

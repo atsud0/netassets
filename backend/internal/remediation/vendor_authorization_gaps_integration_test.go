@@ -349,7 +349,7 @@ func TestVendorListIsScopedToTheAdministratorOrganization(t *testing.T) {
 		t.Fatalf("assign other administrator: %v", err)
 	}
 	otherAdmin := auth.Principal{UserID: otherAdminID, Permissions: []string{"remediation.people.manage", "vendor.manage"}}
-	foreign, err := f.s.SaveVendor(f.ctx, f.group, "", otherOrg, "外部厂商_"+suffixOf(t), "外部联系人", "enabled")
+	foreign, err := f.s.SaveVendor(f.ctx, f.group, "", otherOrg, "外部厂商_"+suffixOf(t), "13800000018", "enabled")
 	must(t, err)
 
 	seen, err := f.s.Vendors(f.ctx, otherAdmin, page)

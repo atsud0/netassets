@@ -125,20 +125,32 @@ watch(mustChangePassword, (required) => {
     sessionTotal.value = 0
   }
 }, { immediate: true })
+function profileTextRule(label: string, limit: number, required = false) {
+  return { required, trigger: 'blur', validator: (_rule: unknown, value: string, callback: (error?: Error) => void) => {
+    const text = (value ?? '').trim()
+    if (required && !text) callback(new Error(`${label}不能为空`))
+    else if (Array.from(text).length > limit) callback(new Error(`${label}最多 ${limit} 字`))
+    else callback()
+  } }
+}
 const profileRules: FormRules = {
-  display_name: [{ required: true, message: '请输入显示名称', trigger: 'blur' }],
-  email: [{ max: 255, message: '邮箱不能超过 255 个字符', trigger: 'blur' }],
-  mobile_phone: [{ max: 64, message: '手机号码不能超过 64 个字符', trigger: 'blur' }],
-  office_phone: [{ max: 64, message: '办公电话不能超过 64 个字符', trigger: 'blur' }],
+  display_name: [profileTextRule('显示名称', 128, true)],
+  email: [profileTextRule('邮箱', 255)],
+  mobile_phone: [profileTextRule('手机号码', 64)],
+  office_phone: [profileTextRule('办公电话', 64)],
 }
 const passwordRules: FormRules = {
   current_password: [{ required: true, message: '请输入当前密码', trigger: 'blur' }],
-  new_password: [{ required: true, min: 10, message: '新密码至少需要 10 位', trigger: 'blur' }],
+  new_password: [{ required: true, trigger: 'blur', validator: (_rule, value: string, callback) => {
+    if (Array.from(value ?? '').length < 10) callback(new Error('新密码至少需要 10 位'))
+    else if (new TextEncoder().encode(value).length > 72) callback(new Error('新密码最多 72 字节'))
+    else callback()
+  } }],
   confirm_password: [{ validator: (_rule, value, callback) => value === passwordForm.new_password ? callback() : callback(new Error('两次输入的新密码不一致')), trigger: 'blur' }],
 }
 
 async function saveProfile() {
-  if (!profileFormRef.value || !(await profileFormRef.value.validate())) return
+  if (!profileFormRef.value || !(await profileFormRef.value.validate().catch(() => false))) return
   savingProfile.value = true
   try {
     const response = await apiClient.put<{ user: typeof auth.user }>('/auth/profile', profileForm)
@@ -152,7 +164,7 @@ async function saveProfile() {
 }
 
 async function changePassword() {
-  if (!passwordFormRef.value || !(await passwordFormRef.value.validate())) return
+  if (!passwordFormRef.value || !(await passwordFormRef.value.validate().catch(() => false))) return
   savingPassword.value = true
   try {
     await apiClient.put('/auth/profile/password', {
@@ -184,10 +196,10 @@ async function changePassword() {
         <h2>个人资料</h2>
         <el-form ref="profileFormRef" :model="profileForm" :rules="profileRules" label-position="top">
           <el-form-item label="用户名"><el-input :model-value="username" disabled /></el-form-item>
-          <el-form-item label="显示名称" prop="display_name"><el-input v-model="profileForm.display_name" maxlength="128" /></el-form-item>
-          <el-form-item label="邮箱" prop="email"><el-input v-model="profileForm.email" maxlength="255" placeholder="如：name@example.com" /></el-form-item>
-          <el-form-item label="手机号码" prop="mobile_phone"><el-input v-model="profileForm.mobile_phone" maxlength="64" placeholder="如：13800000000" /></el-form-item>
-          <el-form-item label="办公电话" prop="office_phone"><el-input v-model="profileForm.office_phone" maxlength="64" placeholder="如：010-12345678" /></el-form-item>
+          <el-form-item label="显示名称" prop="display_name"><el-input v-model="profileForm.display_name" /></el-form-item>
+          <el-form-item label="邮箱" prop="email"><el-input v-model="profileForm.email" placeholder="如：name@example.com" /></el-form-item>
+          <el-form-item label="手机号码" prop="mobile_phone"><el-input v-model="profileForm.mobile_phone" placeholder="如：13800000000" /></el-form-item>
+          <el-form-item label="办公电话" prop="office_phone"><el-input v-model="profileForm.office_phone" placeholder="如：010-12345678" /></el-form-item>
           <el-button type="primary" :loading="savingProfile" @click="saveProfile">保存个人资料</el-button>
         </el-form>
       </div>

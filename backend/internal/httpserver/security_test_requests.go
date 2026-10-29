@@ -15,7 +15,7 @@ func registerSecurityTestRequestRoutes(api *gin.RouterGroup, requireAuth gin.Han
 	group.GET("", func(c *gin.Context) {
 		page, err := parsePageQuery(c)
 		if err != nil {
-			writeAPIError(c, http.StatusBadRequest, "invalid_query", "分页参数不正确，page_size 最大为 100")
+			writeAPIError(c, http.StatusBadRequest, "invalid_query", pageQueryErrorMessage(err))
 			return
 		}
 		result, err := service.Search(c.Request.Context(), mustPrincipal(c), c.Query("status"), c.Query("keyword"), page)
@@ -28,7 +28,7 @@ func registerSecurityTestRequestRoutes(api *gin.RouterGroup, requireAuth gin.Han
 	group.GET("/scope-candidates", func(c *gin.Context) {
 		page, err := parsePageQuery(c)
 		if err != nil {
-			writeAPIError(c, http.StatusBadRequest, "invalid_query", "分页参数不正确，page_size 最大为 100")
+			writeAPIError(c, http.StatusBadRequest, "invalid_query", pageQueryErrorMessage(err))
 			return
 		}
 		result, err := service.SearchScopeCandidates(c.Request.Context(), mustPrincipal(c), securitytestrequest.ScopeCandidateFilter{
@@ -73,7 +73,7 @@ func registerSecurityTestRequestRoutes(api *gin.RouterGroup, requireAuth gin.Han
 	group.GET("/:id/events", func(c *gin.Context) {
 		page, err := parsePageQuery(c)
 		if err != nil {
-			writeAPIError(c, http.StatusBadRequest, "invalid_query", "分页参数不正确，page_size 最大为 100")
+			writeAPIError(c, http.StatusBadRequest, "invalid_query", pageQueryErrorMessage(err))
 			return
 		}
 		result, err := service.SearchEvents(c.Request.Context(), mustPrincipal(c), c.Param("id"), page)
@@ -173,7 +173,12 @@ func writeSecurityTestRequestError(c *gin.Context, logger *slog.Logger, operatio
 	case errors.Is(err, securitytestrequest.ErrForbidden):
 		writeAPIError(c, http.StatusForbidden, "forbidden", "当前账号无权执行该操作")
 	case errors.Is(err, securitytestrequest.ErrInvalid):
-		writeAPIError(c, http.StatusBadRequest, "invalid_request", "请检查申请信息：范围需包含 1 至 200 项公网资产，联系人和上线对象必须填写")
+		message := "请检查申请信息：范围需包含 1 至 200 项公网资产，联系人和上线对象必须填写"
+		var validationError *securitytestrequest.InputValidationError
+		if errors.As(err, &validationError) {
+			message = validationError.Message
+		}
+		writeAPIError(c, http.StatusBadRequest, "invalid_request", message)
 	case errors.Is(err, securitytestrequest.ErrNotFound):
 		writeAPIError(c, http.StatusNotFound, "not_found", "上线安全测试申请不存在")
 	case errors.Is(err, securitytestrequest.ErrState):

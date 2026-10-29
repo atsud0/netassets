@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import RowActions from '../components/RowActions.vue'
 import { computed, onMounted, reactive, ref } from 'vue'
-import { ElMessage, ElMessageBox, type FormInstance, type FormRules } from 'element-plus'
+import { ElMessage, ElMessageBox, type FormInstance, type FormRules, type FormItemRule } from 'element-plus'
 import { apiClient, getAPIErrorMessage } from '../api/client'
 
 interface ListResponse<T> { items: T[]; total: number; page: number; page_size: number }
@@ -194,11 +194,16 @@ const scopeByOrganization = computed(() => {
   return Array.from(groups, ([name, count]) => ({ name, count }))
 })
 
+function batchTextRule(limit: number, message: string): FormItemRule {
+  return { validator: (_rule, value: string, callback) => callback(Array.from((value ?? '').trim()).length > limit ? new Error(message) : undefined), trigger: 'blur' }
+}
+
 const rules: FormRules = {
-  batch_name: [{ required: true, message: '请输入批次名称', trigger: 'blur' }],
+  batch_name: [{ required: true, whitespace: true, message: '请输入批次名称', trigger: 'blur' }, batchTextRule(255, '批次名称最多 255 字')],
   test_type: [{ required: true, message: '请选择测试类型', trigger: 'change' }],
-  provider: [{ required: true, message: '请输入测试单位或团队', trigger: 'blur' }],
-  authorization_note: [{ required: true, message: '请输入授权说明', trigger: 'blur' }],
+  provider: [{ required: true, whitespace: true, message: '请输入测试单位或团队', trigger: 'blur' }, batchTextRule(255, '测试单位最多 255 字')],
+  authorization_note: [{ required: true, whitespace: true, message: '请输入授权说明', trigger: 'blur' }, batchTextRule(20000, '授权说明最多 20000 字')],
+  notes: [batchTextRule(20000, '测试约束最多 20000 字')],
   start_at: [{ required: true, message: '请选择计划开始时间', trigger: 'change' }],
   end_at: [{ required: true, message: '请选择计划结束时间', trigger: 'change' }],
   asset_ids: [{ required: true, type: 'array', min: 1, max: 200, message: '请选择 1 至 200 项公网资产', trigger: 'change' }],
@@ -447,7 +452,7 @@ async function applyBulkScope() {
 }
 
 async function save() {
-  if (!formRef.value || !(await formRef.value.validate())) return
+  if (!formRef.value || !(await formRef.value.validate().catch(() => false))) return
   if (!form.start_at || !form.end_at || form.end_at <= form.start_at) {
     ElMessage.warning('计划结束时间必须晚于开始时间')
     return
@@ -551,7 +556,11 @@ async function runAction(item: SecurityTestBatch, action: 'authorize' | 'start' 
   try {
     const result = await ElMessageBox.prompt(config.message, config.title, {
       confirmButtonText: '确认', cancelButtonText: '返回', type: config.type,
-      inputValidator: value => !config.required || Boolean(value?.trim()) || '取消原因不能为空',
+      inputValidator: value => {
+        if (config.required && !value?.trim()) return '取消原因不能为空'
+        if (Array.from(value ?? '').length > 2000) return `${action === 'cancel' ? '取消原因' : '操作说明'}最多 2000 字`
+        return true
+      },
     })
     actionLoading.value = true
     await apiClient.post(`/security-test-batches/${item.id}/${action}`, { comment: result.value ?? '' })
@@ -596,6 +605,10 @@ function formatBytes(value: number) {
 async function uploadAttachment() {
   if (!currentBatch.value || !attachmentFile.value) {
     ElMessage.warning('请先选择要上传的附件')
+    return
+  }
+  if (Array.from(attachmentDescription.value.trim()).length > 500) {
+    ElMessage.warning('附件说明最多 500 字')
     return
   }
   attachmentLoading.value = true
@@ -714,15 +727,15 @@ function formatTime(value?: string) {
     <el-dialog v-model="dialogVisible" :title="editingID ? '编辑安全测试批次' : '新建安全测试批次'" width="980px" destroy-on-close>
       <el-form ref="formRef" :model="form" :rules="rules" label-width="120px">
         <div class="form-grid-two">
-          <el-form-item label="批次名称" prop="batch_name"><el-input v-model="form.batch_name" maxlength="255" placeholder="如：2026年第三季度互联网资产渗透测试" /></el-form-item>
+          <el-form-item label="批次名称" prop="batch_name"><el-input v-model="form.batch_name" placeholder="如：2026年第三季度互联网资产渗透测试" /></el-form-item>
           <el-form-item label="测试类型" prop="test_type"><el-select v-model="form.test_type" style="width:100%"><el-option v-for="(label, value) in typeLabels" :key="value" :label="label" :value="value" /></el-select></el-form-item>
-          <el-form-item label="测试单位" prop="provider"><el-input v-model="form.provider" maxlength="255" placeholder="集团安全团队或第三方机构" /></el-form-item>
+          <el-form-item label="测试单位" prop="provider"><el-input v-model="form.provider" placeholder="集团安全团队或第三方机构" /></el-form-item>
           <el-form-item label="测试时间" required>
             <div class="date-range-inline"><el-date-picker v-model="form.start_at" type="datetime" placeholder="开始时间" /><span>至</span><el-date-picker v-model="form.end_at" type="datetime" placeholder="结束时间" /></div>
           </el-form-item>
         </div>
-        <el-form-item label="授权说明" prop="authorization_note"><el-input v-model="form.authorization_note" type="textarea" :rows="3" maxlength="20000" show-word-limit placeholder="说明授权人、授权依据、允许的测试方式与边界" /></el-form-item>
-        <el-form-item label="测试约束"><el-input v-model="form.notes" type="textarea" :rows="2" maxlength="20000" placeholder="如：禁止破坏性测试，不得进行拒绝服务测试" /></el-form-item>
+        <el-form-item label="授权说明" prop="authorization_note"><el-input v-model="form.authorization_note" type="textarea" :rows="3" placeholder="说明授权人、授权依据、允许的测试方式与边界" /></el-form-item>
+        <el-form-item label="测试约束" prop="notes"><el-input v-model="form.notes" type="textarea" :rows="2" placeholder="如：禁止破坏性测试，不得进行拒绝服务测试" /></el-form-item>
         <el-form-item label="公网资产范围" prop="asset_ids">
           <div class="scope-picker">
             <div class="scope-picker-actions">
@@ -811,7 +824,7 @@ function formatTime(value?: string) {
             </el-select>
             <el-button type="primary" :loading="attachmentLoading" :disabled="!attachmentFile" @click="uploadAttachment">上传附件</el-button>
           </div>
-          <el-input v-model="attachmentDescription" maxlength="500" placeholder="附件说明（可选）" />
+          <el-input v-model="attachmentDescription" placeholder="附件说明（可选，最多 500 字）" />
         </div>
         <div v-loading="attachmentListLoading">
           <el-empty v-if="!attachmentListLoading && !batchAttachments.length" description="暂未上传测试附件" :image-size="60" />

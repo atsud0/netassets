@@ -56,7 +56,7 @@ test('已有资产和业务系统的修改删除先进入任务草稿，审核�
         short_name: `草稿子公司_${suffix}`,
         type: 'subsidiary',
         manager: '已有资源草稿负责人',
-        contact: 'existing-draft-owner@example.com',
+        contact: '13800000018',
         notes: '已有资产和业务系统任务草稿隔离自动化测试',
       }),
     })).item

@@ -3,13 +3,16 @@ package remediation
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
 	"golang.org/x/crypto/bcrypt"
 	"netassets/internal/auth"
+	"netassets/internal/contactphone"
 	"netassets/internal/pagination"
+	"netassets/internal/textlength"
 )
 
 type PersonInput struct {
@@ -24,26 +27,44 @@ type PersonInput struct {
 }
 
 func validatePerson(in PersonInput) error {
-	if !validID(in.OrganizationID) || !validID(in.SystemID) || !usernamePattern.MatchString(in.Username) || !textOK(in.DisplayName, 128, true) || !in.ValidUntil.After(time.Now()) {
-		return ErrInvalid
+	if !validID(in.OrganizationID) {
+		return invalidField("所属组织：请选择有效的组织")
+	}
+	if !validID(in.SystemID) {
+		return invalidField("业务系统：请选择有效的业务系统")
+	}
+	if !usernamePattern.MatchString(in.Username) {
+		return invalidField("用户名：须为 3 至 64 位，以字母或数字开头，仅支持字母、数字、下划线、点和连字符")
+	}
+	if !textOK(in.DisplayName, 128, true) {
+		return invalidField("姓名：请输入 1 至 128 字")
+	}
+	if !in.ValidUntil.After(time.Now()) {
+		return invalidField("授权有效期：须晚于当前时间")
 	}
 	if in.ParticipantType != "internal" && in.ParticipantType != "external" {
-		return ErrInvalid
+		return invalidField("人员类型：请选择内部人员或外部人员")
 	}
-	if (in.ParticipantType == "external") != validID(in.VendorID) {
-		return ErrInvalid
+	if in.ParticipantType == "external" && !validID(in.VendorID) {
+		return invalidField("合作厂商：外部人员须选择有效的合作厂商")
+	}
+	if in.ParticipantType == "internal" && in.VendorID != "" {
+		return invalidField("合作厂商：内部人员不能关联合作厂商")
 	}
 	return nil
 }
 func checkSystem(ctx context.Context, tx pgx.Tx, org, system, vendor string) error {
-	var ok bool
-	err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM business_systems WHERE id=$1::uuid AND owner_organization_id=$2::uuid AND deleted_at IS NULL AND system_status<>'archived')
- AND ($3='' OR EXISTS(SELECT 1 FROM vendors WHERE id=NULLIF($3,'')::uuid AND organization_id=$2::uuid AND status='enabled' AND EXISTS(SELECT 1 FROM vendor_catalog c WHERE c.id=vendors.catalog_id AND c.status='enabled')))`, system, org, vendor).Scan(&ok)
+	var systemAvailable, vendorAvailable bool
+	err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM business_systems WHERE id=$1::uuid AND owner_organization_id=$2::uuid AND deleted_at IS NULL AND system_status<>'archived'),
+ ($3='' OR EXISTS(SELECT 1 FROM vendors WHERE id=NULLIF($3,'')::uuid AND organization_id=$2::uuid AND status='enabled' AND EXISTS(SELECT 1 FROM vendor_catalog c WHERE c.id=vendors.catalog_id AND c.status='enabled')))`, system, org, vendor).Scan(&systemAvailable, &vendorAvailable)
 	if err != nil {
 		return dbError(err)
 	}
-	if !ok {
-		return ErrInvalid
+	if !systemAvailable {
+		return invalidField("业务系统：须属于所选组织且未删除、未归档")
+	}
+	if !vendorAvailable {
+		return invalidField("合作厂商：须为所选组织的有效合作厂商，且统一厂商未停用")
 	}
 	return nil
 }
@@ -75,8 +96,8 @@ func (s *Service) CreatePerson(ctx context.Context, p auth.Principal, in PersonI
 	if err := validatePerson(in); err != nil {
 		return nil, err
 	}
-	if len(in.Password) < 10 || len(in.Password) > 72 {
-		return nil, ErrInvalid
+	if err := validatePersonPassword(in.Password); err != nil {
+		return nil, err
 	}
 	if err := allowed(ctx, s.pool, p, in.OrganizationID, "remediation.people.manage"); err != nil {
 		return nil, err
@@ -150,8 +171,11 @@ func (s *Service) Invitations(ctx context.Context, p auth.Principal, page pagina
  WHERE remediation_can_manage($1::uuid,i.organization_id,'remediation.people.manage') ORDER BY i.created_at DESC,i.id`, page, p.UserID)
 }
 func (s *Service) RevokeInvitation(ctx context.Context, p auth.Principal, id, reason string) error {
-	if !validID(id) || !textOK(reason, 2000, true) {
-		return ErrInvalid
+	if !textOK(reason, 2000, true) {
+		return invalidField("撤销原因：请输入 1 至 2000 字")
+	}
+	if !validID(id) {
+		return invalidField("邀请标识不正确")
 	}
 	tx, err := s.begin(ctx)
 	if err != nil {
@@ -176,7 +200,7 @@ func (s *Service) RevokeInvitation(ctx context.Context, p auth.Principal, id, re
 
 func (s *Service) AcceptInvitation(ctx context.Context, p *auth.Principal, in AcceptInvitationInput) (Object, error) {
 	if len(in.Token) != 48 {
-		return nil, ErrInvalid
+		return nil, invalidField("邀请令牌格式不正确，请使用完整的邀请链接")
 	}
 	tx, err := s.begin(ctx)
 	if err != nil {
@@ -198,16 +222,16 @@ func (s *Service) AcceptInvitation(ctx context.Context, p *auth.Principal, in Ac
 		return nil, err
 	}
 	if !person.ValidUntil.After(time.Now()) {
-		return nil, ErrInvalid
+		return nil, invalidField("授权有效期已过，请联系邀请人重新授权")
 	}
 	var userID string
 	err = tx.QueryRow(ctx, `SELECT id::text FROM users WHERE lower(username)=lower($1) AND deleted_at IS NULL`, person.Username).Scan(&userID)
 	if errors.Is(err, pgx.ErrNoRows) {
 		if p != nil {
-			return nil, ErrInvalid
+			return nil, invalidField("受邀用户名尚未创建账号，请退出登录后通过邀请链接创建账号")
 		}
-		if len(in.Password) < 10 || len(in.Password) > 72 {
-			return nil, ErrInvalid
+		if err := validatePersonPassword(in.Password); err != nil {
+			return nil, err
 		}
 		hash, e := bcrypt.GenerateFromPassword([]byte(in.Password), bcrypt.DefaultCost)
 		if e != nil {
@@ -230,8 +254,11 @@ func (s *Service) AcceptInvitation(ctx context.Context, p *auth.Principal, in Ac
 	return out, tx.Commit(ctx)
 }
 func (s *Service) People(ctx context.Context, p auth.Principal, org, system string, page pagination.Query) (pagination.Result[Object], error) {
-	if org != "" && !validID(org) || system != "" && !validID(system) {
-		return pagination.Result[Object]{}, ErrInvalid
+	if org != "" && !validID(org) {
+		return pagination.Result[Object]{}, invalidField("所属组织标识不正确")
+	}
+	if system != "" && !validID(system) {
+		return pagination.Result[Object]{}, invalidField("业务系统标识不正确")
 	}
 	return pageObjects(ctx, s.pool, `SELECT g.id,g.user_id,u.username,u.display_name,g.organization_id,o.organization_name,g.business_system_id,b.system_name,
  g.vendor_id,COALESCE(v.name,'') vendor_name,g.participant_type,g.status,g.valid_until,
@@ -243,8 +270,18 @@ func (s *Service) People(ctx context.Context, p auth.Principal, org, system stri
  ORDER BY u.display_name,g.created_at DESC`, page, p.UserID, org, system)
 }
 func (s *Service) UpdateGrant(ctx context.Context, p auth.Principal, id, status string, until time.Time, reason string) error {
-	if !validID(id) || (status != "enabled" && status != "revoked") || !textOK(reason, 2000, true) {
-		return ErrInvalid
+	reasonField := "变更原因"
+	if status == "revoked" {
+		reasonField = "撤销原因"
+	}
+	if !textOK(reason, 2000, true) {
+		return invalidField(fmt.Sprintf("%s：请输入 1 至 2000 字", reasonField))
+	}
+	if !validID(id) {
+		return invalidField("人员授权标识不正确")
+	}
+	if status != "enabled" && status != "revoked" {
+		return invalidField("授权状态：请选择启用或撤销")
 	}
 	tx, err := s.begin(ctx)
 	if err != nil {
@@ -261,8 +298,11 @@ func (s *Service) UpdateGrant(ctx context.Context, p auth.Principal, id, status 
 		return err
 	}
 	if status == "enabled" {
-		if !until.After(time.Now()) || until.Before(currentUntil) {
-			return ErrInvalid
+		if !until.After(time.Now()) {
+			return invalidField("授权有效期：须晚于当前时间")
+		}
+		if until.Before(currentUntil) {
+			return invalidField("续期有效期：不能早于原授权有效期")
 		}
 	} else {
 		until = currentUntil
@@ -278,7 +318,8 @@ func (s *Service) UpdateGrant(ctx context.Context, p auth.Principal, id, status 
 	// vendor roster at all, or a vendor, catalog entry or account that has been
 	// disabled, reassigned to another organization or deleted. Those need the 厂商 page
 	// or an administrator, so the renewal is refused instead of silently reporting a
-	// collaboration that nobody can work on.
+	// collaboration that nobody can work on. Internal grants have no vendor chain;
+	// they still require the same active account, organization and system.
 	if status == "enabled" {
 		var restorable bool
 		if err = tx.QueryRow(ctx, `
@@ -286,11 +327,12 @@ func (s *Service) UpdateGrant(ctx context.Context, p auth.Principal, id, status 
 			 JOIN users u ON u.id=g.user_id AND u.status='enabled' AND u.deleted_at IS NULL
 			 JOIN organizations o ON o.id=g.organization_id AND o.status='enabled' AND o.deleted_at IS NULL
 			 JOIN business_systems b ON b.id=g.business_system_id AND b.owner_organization_id=g.organization_id AND b.deleted_at IS NULL AND b.system_status<>'archived'
-			 JOIN vendors v ON v.id=g.vendor_id AND v.status='enabled' AND v.organization_id=g.organization_id
-			 JOIN vendor_catalog c ON c.id=v.catalog_id AND c.status='enabled'
+			 LEFT JOIN vendors v ON v.id=g.vendor_id
+			 LEFT JOIN vendor_catalog c ON c.id=v.catalog_id
 			 WHERE g.id=$1::uuid
-			   AND EXISTS(SELECT 1 FROM vendor_memberships vm WHERE vm.vendor_id=c.id AND vm.user_id=g.user_id
-			              AND vm.status='enabled' AND vm.valid_from<=$2::timestamptz))`, id, until).Scan(&restorable); err != nil {
+			   AND (g.vendor_id IS NULL OR (v.status='enabled' AND v.organization_id=g.organization_id AND c.status='enabled'
+			     AND EXISTS(SELECT 1 FROM vendor_memberships vm WHERE vm.vendor_id=c.id AND vm.user_id=g.user_id
+			                AND vm.status='enabled' AND vm.valid_from<=$2::timestamptz))))`, id, until).Scan(&restorable); err != nil {
 			return err
 		}
 		if !restorable {
@@ -323,8 +365,21 @@ func (s *Service) Vendors(ctx context.Context, p auth.Principal, page pagination
  WHERE remediation_can_manage($1::uuid,v.organization_id,'vendor.manage') OR remediation_can_manage($1::uuid,v.organization_id,'remediation.people.manage') ORDER BY v.name`, page, p.UserID)
 }
 func (s *Service) SaveVendor(ctx context.Context, p auth.Principal, id, org, name, contact, status string) (Object, error) {
-	if !textOK(name, 255, true) || !textOK(contact, 255, false) || !validID(org) || (status != "enabled" && status != "disabled") || (id != "" && !validID(id)) {
-		return nil, ErrInvalid
+	if !textOK(name, 255, true) {
+		return nil, invalidField("厂商名称：请输入 1 至 255 字")
+	}
+	contact = contactphone.Normalize(contact)
+	if textlength.Count(contact) > contactphone.MaxLength || !contactphone.IsValid(contact) {
+		return nil, invalidField("联系方式：请填写手机号码、座机号码或分机号，最多 64 字")
+	}
+	if !validID(org) {
+		return nil, invalidField("合作组织：请选择有效的组织")
+	}
+	if status != "enabled" && status != "disabled" {
+		return nil, invalidField("厂商状态：请选择启用或停用")
+	}
+	if id != "" && !validID(id) {
+		return nil, invalidField("合作厂商标识不正确")
 	}
 	tx, err := s.begin(ctx)
 	if err != nil {
@@ -351,7 +406,7 @@ func (s *Service) SaveVendor(ctx context.Context, p auth.Principal, id, org, nam
 			return nil, err
 		}
 		if before["name"] != name {
-			return nil, ErrInvalid
+			return nil, invalidField("合作厂商名称不能在组织内修改，请由集团管理员维护统一厂商名称")
 		}
 		var returned string
 		err = tx.QueryRow(ctx, `UPDATE vendors SET name=$3,contact=$4,status=$5 WHERE id=$1::uuid AND organization_id=$2::uuid RETURNING id::text`, id, org, name, contact, status).Scan(&returned)

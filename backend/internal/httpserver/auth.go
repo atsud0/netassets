@@ -64,7 +64,7 @@ func registerAuthRoutes(api *gin.RouterGroup, cfg config.Config, service *auth.S
 		}
 		user, err := service.UpdateProfile(c.Request.Context(), mustPrincipal(c), input, c.GetString("request_id"), c.ClientIP())
 		if errors.Is(err, auth.ErrInvalid) {
-			writeAPIError(c, http.StatusBadRequest, "invalid_profile", "请填写有效的显示名称和联系方式")
+			writeAPIError(c, http.StatusBadRequest, "invalid_profile", authFieldMessage(err, "请填写有效的显示名称和联系方式"))
 			return
 		}
 		if errors.Is(err, auth.ErrUnauthorized) {
@@ -87,7 +87,7 @@ func registerAuthRoutes(api *gin.RouterGroup, cfg config.Config, service *auth.S
 		}
 		err := service.ChangePassword(c.Request.Context(), mustPrincipal(c), input, c.GetString("request_id"), c.ClientIP())
 		if errors.Is(err, auth.ErrInvalid) {
-			writeAPIError(c, http.StatusBadRequest, "invalid_password", "当前密码不能为空，新密码至少需要 10 位")
+			writeAPIError(c, http.StatusBadRequest, "invalid_password", authFieldMessage(err, "当前密码不能为空，新密码至少需要 10 位"))
 			return
 		}
 		if errors.Is(err, auth.ErrUnauthorized) {
@@ -104,7 +104,7 @@ func registerAuthRoutes(api *gin.RouterGroup, cfg config.Config, service *auth.S
 	authGroup.GET("/sessions", requireAuth, requireSession, func(c *gin.Context) {
 		page, err := parsePageQuery(c)
 		if err != nil {
-			writeAPIError(c, http.StatusBadRequest, "invalid_query", "分页参数不正确，page_size 最大为 100")
+			writeAPIError(c, http.StatusBadRequest, "invalid_query", pageQueryErrorMessage(err))
 			return
 		}
 		result, err := service.SearchSessions(c.Request.Context(), mustPrincipal(c), page)
@@ -161,7 +161,7 @@ func registerAuthRoutes(api *gin.RouterGroup, cfg config.Config, service *auth.S
 	authGroup.GET("/api-tokens", requireAuth, requireSession, func(c *gin.Context) {
 		page, err := parsePageQuery(c)
 		if err != nil {
-			writeAPIError(c, http.StatusBadRequest, "invalid_query", "分页参数不正确，page_size 最大为 100")
+			writeAPIError(c, http.StatusBadRequest, "invalid_query", pageQueryErrorMessage(err))
 			return
 		}
 		result, err := service.ListAPITokens(c.Request.Context(), mustPrincipal(c), page)
@@ -181,7 +181,7 @@ func registerAuthRoutes(api *gin.RouterGroup, cfg config.Config, service *auth.S
 		result, err := service.CreateAPIToken(c.Request.Context(), mustPrincipal(c), input, c.GetString("request_id"), c.ClientIP())
 		switch {
 		case errors.Is(err, auth.ErrInvalid):
-			writeAPIError(c, http.StatusBadRequest, "invalid_api_token", "名称不能为空且不超过 100 字，期限应为 1 至 365 天")
+			writeAPIError(c, http.StatusBadRequest, "invalid_api_token", authFieldMessage(err, "名称不能为空且不超过 100 字，期限应为 1 至 365 天"))
 		case errors.Is(err, auth.ErrAPITokenLimit):
 			writeAPIError(c, http.StatusConflict, "api_token_limit_reached", "每个用户最多同时保留 10 个有效 API Token")
 		case errors.Is(err, auth.ErrAPITokenNameConflict):

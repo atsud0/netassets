@@ -1,4 +1,5 @@
 import { expect, test } from '@playwright/test'
+import { loginSavedViewOwner } from '../helpers/saved-view-owner'
 
 // Saving a filter view must not depend on whether the current filter happens to match
 // anything. The reported failure was "请检查页面、名称和筛选条件；名称最多 100 字" when
@@ -9,10 +10,7 @@ import { expect, test } from '@playwright/test'
 // This test drives the real page rather than the API, because the bug is in what the
 // page chooses to send.
 test.beforeEach(async ({ page }) => {
-  const response = await page.request.post('/api/v1/auth/login', {
-    data: { username: process.env.E2E_USERNAME, password: process.env.E2E_PASSWORD },
-  })
-  expect(response.ok()).toBeTruthy()
+  await loginSavedViewOwner(page)
 })
 
 async function saveView(page: import('@playwright/test').Page, name: string) {

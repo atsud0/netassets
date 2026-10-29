@@ -94,7 +94,7 @@ test('集团安全管理角色化全链路：下发填报、资产入库、漏�
 
     const organizationResult = await jsonRequest<{ item: Organization }>(groupAdmin.context, 'POST', '/api/v1/organizations', {
       parent_id: group.id, code: organizationCode, name: organizationName, short_name: '角色流程组织', type: 'subsidiary',
-      manager: '角色流程测试', contact: 'flow@example.invalid', notes: '角色化全链路 E2E 数据',
+      manager: '角色流程测试', contact: '13800000018', notes: '角色化全链路 E2E 数据',
     }, 201, '集团管理员创建组织')
     const organization = organizationResult.item
 
@@ -221,7 +221,7 @@ test('集团安全管理角色化全链路：下发填报、资产入库、漏�
       groupAdmin.context.newPage(), security.context.newPage(), organizationAdmin.context.newPage(), editor.context.newPage(),
     ])
     await Promise.all(rolePages.map((page) => page.goto('/dashboard')))
-    await expect(rolePages[0].getByText('集团管理员').or(rolePages[0].getByText('集团安全治理')).first()).toBeVisible()
+    await expect(rolePages[0].getByText('集团管理视角', { exact: true })).toBeVisible()
     await expect(rolePages[1].getByText('集团安全运营视角', { exact: true })).toBeVisible()
     await expect(rolePages[2].getByText('所属组织视角', { exact: true })).toBeVisible()
     await expect(rolePages[3].getByRole('heading', { name: '今天，先处理关键事项', exact: true })).toBeVisible()

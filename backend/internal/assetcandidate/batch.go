@@ -150,7 +150,12 @@ func describeBatchError(err error) (string, string) {
 	case errors.Is(err, ErrNotFound):
 		return "not_found", "待确认资产或关联正式资产不存在"
 	case errors.Is(err, ErrInvalid):
-		return "invalid_asset_candidate", "请检查资产类型、资产值、所属组织和处理信息"
+		message := "请检查资产类型、资产值、所属组织和处理信息"
+		var fieldError *InputValidationError
+		if errors.As(err, &fieldError) {
+			message = fieldError.Message
+		}
+		return "invalid_asset_candidate", message
 	case errors.Is(err, asset.ErrConflict):
 		return "invalid_state", "该待确认资产已处理，或正式资产存在重复"
 	default:

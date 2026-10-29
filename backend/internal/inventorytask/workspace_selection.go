@@ -47,7 +47,7 @@ func (s *Service) SelectWorkspaceAsset(ctx context.Context, p auth.Principal, ta
 		return AssetDraft{}, ErrForbidden
 	}
 	if expectedVersion <= 0 {
-		return AssetDraft{}, ErrInvalid
+		return AssetDraft{}, invalidInput("选择资产必须提供大于 0 的 expected_version")
 	}
 	tx, e := s.pool.Begin(ctx)
 	if e != nil {
@@ -71,14 +71,14 @@ func (s *Service) SelectWorkspaceAsset(ctx context.Context, p auth.Principal, ta
 		return AssetDraft{}, ErrEditConflict
 	}
 	if assignment.AssetNetworkScope != "all" && assignment.AssetNetworkScope != scope {
-		return AssetDraft{}, ErrInvalid
+		return AssetDraft{}, invalidInput("资产网络范围与本次填报任务要求不一致")
 	}
 	if systemDraftID != "" {
 		var selectedTaskID string
 		var systemVersion int
 		e = tx.QueryRow(ctx, `SELECT COALESCE(task_id::text,''), version FROM inventory_business_system_drafts WHERE id::text=$1 AND organization_id::text=$2 AND draft_status IN ('editing','returned') FOR UPDATE`, systemDraftID, organizationID).Scan(&selectedTaskID, &systemVersion)
 		if errors.Is(e, pgx.ErrNoRows) {
-			return AssetDraft{}, ErrInvalid
+			return AssetDraft{}, invalidInput("关联业务系统工作版本不存在或已不可编辑，请重新选择关联业务系统")
 		}
 		if e != nil {
 			return AssetDraft{}, e
@@ -86,7 +86,10 @@ func (s *Service) SelectWorkspaceAsset(ctx context.Context, p auth.Principal, ta
 		switch selectedTaskID {
 		case "":
 			if _, e = s.loadDraftAssignment(ctx, tx, p, taskID, organizationID, true, "business_systems"); e != nil {
-				return AssetDraft{}, ErrInvalid
+				if errors.Is(e, ErrState) {
+					return AssetDraft{}, invalidInput("关联业务系统尚未上报，当前任务不允许同时纳入该业务系统")
+				}
+				return AssetDraft{}, e
 			}
 			// The dependency draft is bound to this task in the same transaction as
 			// the asset. Its version is read and matched inside that transaction so
@@ -103,7 +106,7 @@ func (s *Service) SelectWorkspaceAsset(ctx context.Context, p auth.Principal, ta
 			// Once the first asset has selected it into this task, subsequent
 			// assets can reuse that dependency without treating it as a conflict.
 		default:
-			return AssetDraft{}, ErrInvalid
+			return AssetDraft{}, invalidInput("关联业务系统已纳入其他填报任务，不能随此资产重复选择")
 		}
 	}
 	r, e := tx.Exec(ctx, `UPDATE inventory_asset_drafts SET task_id=$2::uuid,selected_at=now(),version=version+1,last_edited_by=$3::uuid,updated_by=$3::uuid,updated_at=now() WHERE id::text=$1 AND organization_id::text=$4 AND task_id IS NULL AND draft_status IN ('editing','returned') AND version=$5`, draftID, taskID, p.UserID, organizationID, expectedVersion)
@@ -127,7 +130,7 @@ func (s *Service) SelectWorkspaceBusinessSystem(ctx context.Context, p auth.Prin
 		return BusinessSystemDraft{}, ErrForbidden
 	}
 	if expectedVersion <= 0 {
-		return BusinessSystemDraft{}, ErrInvalid
+		return BusinessSystemDraft{}, invalidInput("选择业务系统必须提供大于 0 的 expected_version")
 	}
 	tx, e := s.pool.Begin(ctx)
 	if e != nil {
@@ -200,24 +203,27 @@ func (s *Service) SelectWorkspaceBusinessSystemsBatch(ctx context.Context, p aut
 }
 
 func normalizeWorkspaceSelectionItems(values []WorkspaceSelectionItem) ([]WorkspaceSelectionItem, error) {
-	if len(values) == 0 || len(values) > MaxWorkspaceSelectionItems {
-		return nil, ErrInvalid
+	if len(values) == 0 {
+		return nil, invalidInput("请至少选择一项需要上报的资源")
+	}
+	if len(values) > MaxWorkspaceSelectionItems {
+		return nil, invalidInput("单次最多选择 200 项需要上报的资源")
 	}
 	items := make([]WorkspaceSelectionItem, 0, len(values))
 	seen := make(map[string]struct{}, len(values))
-	for _, value := range values {
+	for index, value := range values {
 		id := strings.TrimSpace(value.ID)
-		if id == "" || value.ExpectedVersion <= 0 {
-			return nil, ErrInvalid
+		if id == "" {
+			return nil, invalidInput(fmt.Sprintf("第 %d 项资源标识不能为空", index+1))
+		}
+		if value.ExpectedVersion <= 0 {
+			return nil, invalidInput(fmt.Sprintf("第 %d 项资源必须提供大于 0 的 expected_version", index+1))
 		}
 		if _, exists := seen[id]; exists {
 			continue
 		}
 		seen[id] = struct{}{}
 		items = append(items, WorkspaceSelectionItem{ID: id, ExpectedVersion: value.ExpectedVersion})
-	}
-	if len(items) == 0 {
-		return nil, ErrInvalid
 	}
 	return items, nil
 }
@@ -233,6 +239,10 @@ func workspaceSelectionError(err error) (string, string) {
 	case errors.Is(err, ErrState):
 		return "invalid_state", "资源已纳入任务或当前任务状态不允许选择"
 	case errors.Is(err, ErrInvalid):
+		var validationError *InputValidationError
+		if errors.As(err, &validationError) {
+			return "invalid", validationError.Message
+		}
 		return "invalid", "资源不符合任务类型、网络范围或关联资源要求"
 	default:
 		return "internal_error", "选择失败，请稍后重试"

@@ -14,7 +14,7 @@ func registerChangeHistoryRoutes(api *gin.RouterGroup, requireAuth gin.HandlerFu
 	api.GET("/assets/:id/change-history", requireAuth, func(c *gin.Context) {
 		page, err := parsePageQuery(c)
 		if err != nil {
-			writeAPIError(c, http.StatusBadRequest, "invalid_query", "分页参数不正确，page_size 最大为 100")
+			writeAPIError(c, http.StatusBadRequest, "invalid_query", pageQueryErrorMessage(err))
 			return
 		}
 		result, err := service.SearchAsset(c.Request.Context(), mustPrincipal(c), c.Param("id"), page)
@@ -36,7 +36,7 @@ func registerChangeHistoryRoutes(api *gin.RouterGroup, requireAuth gin.HandlerFu
 	api.GET("/business-systems/:id/change-history", requireAuth, func(c *gin.Context) {
 		page, err := parsePageQuery(c)
 		if err != nil {
-			writeAPIError(c, http.StatusBadRequest, "invalid_query", "分页参数不正确，page_size 最大为 100")
+			writeAPIError(c, http.StatusBadRequest, "invalid_query", pageQueryErrorMessage(err))
 			return
 		}
 		result, err := service.SearchBusinessSystem(c.Request.Context(), mustPrincipal(c), c.Param("id"), page)

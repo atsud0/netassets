@@ -1,5 +1,7 @@
 import { expect, test, type APIRequestContext, type APIResponse } from '@playwright/test'
 
+import { findRecordPage, showRecordPage } from '../helpers/pagination'
+
 const adminUsername = process.env.E2E_USERNAME ?? 'admin'
 const adminPassword = process.env.E2E_PASSWORD
 
@@ -20,17 +22,15 @@ async function expectStatus(response: APIResponse, expected: number, label: stri
 async function waitForScheduledBatch(request: APIRequestContext) {
   const deadline = Date.now() + 90_000
   while (Date.now() < deadline) {
-    const response = await request.get('/api/v1/data-quality-scan-batches?page=1&page_size=100')
-    await expectStatus(response, 200, '读取自动质量巡检批次')
-    const items = (await response.json() as { items: ScanBatch[] }).items
-    const scheduled = items.find((item) => item.trigger_type === 'scheduled')
-    if (scheduled) return scheduled
+    const scheduled = await findRecordPage<ScanBatch>(request, '/api/v1/data-quality-scan-batches', item => item.trigger_type === 'scheduled', 100)
+    if (scheduled) return scheduled.item
     await new Promise((resolve) => setTimeout(resolve, 500))
   }
   throw new Error('系统启动后 90 秒内未生成每日自动质量巡检批次')
 }
 
 test('每日质量巡检使用系统身份、批次来源和审计留痕', async ({ page }) => {
+  test.setTimeout(120_000)
   test.skip(!adminPassword, 'E2E_PASSWORD/BOOTSTRAP_ADMIN_PASSWORD 未配置')
   const login = await page.request.post('/api/v1/auth/login', { data: { username: adminUsername, password: adminPassword } })
   await expectStatus(login, 200, '集团管理员登录')
@@ -53,6 +53,10 @@ test('每日质量巡检使用系统身份、批次来源和审计留痕', async
   expect(audit?.details.scheduled_for).toBe(batch.scheduled_for)
 
   await page.goto('/data-quality-scan-history')
+  await expect(page.getByRole('heading', { name: '巡检历史', exact: true })).toBeVisible()
+  await showRecordPage(page, '/api/v1/data-quality-scan-batches', batch.id, page.locator('.el-pagination'))
+  const batchRow = page.locator('.el-table__row').filter({ hasText: '系统自动' }).first()
+  await expect(batchRow).toBeVisible()
   await expect(page.getByText('系统自动', { exact: true }).first()).toBeVisible()
   await expect(page.getByText('系统调度器', { exact: true }).first()).toBeVisible()
 })

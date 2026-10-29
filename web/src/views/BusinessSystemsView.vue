@@ -1,11 +1,12 @@
 <script setup lang="ts">
 import RowActions from '../components/RowActions.vue'
 import { computed, onMounted, reactive, ref, watch } from 'vue'
-import { useRoute } from 'vue-router'
-import { ElMessage, ElMessageBox, type FormInstance, type FormRules, type UploadFile, type UploadFiles } from 'element-plus'
+import { useRoute, useRouter } from 'vue-router'
+import { ElMessage, ElMessageBox, type FormInstance, type FormRules, type FormItemRule, type UploadFile, type UploadFiles } from 'element-plus'
 import { UploadFilled } from '@element-plus/icons-vue'
 import { apiClient, getAPIErrorMessage, getDownloadAPIError } from '../api/client'
 import { createExportJob } from '../api/export-jobs'
+import { loadOptions } from '../api/remediation'
 import { useAuthStore } from '../stores/auth'
 import WorkingVersionDiffDrawer from '../components/WorkingVersionDiffDrawer.vue'
 import ResourceSubmissionHistoryDrawer from '../components/ResourceSubmissionHistoryDrawer.vue'
@@ -55,6 +56,7 @@ type FormData = {
 
 const auth = useAuthStore()
 const route = useRoute()
+const router = useRouter()
 const loading = ref(false)
 const submitting = ref(false)
 const dialogVisible = ref(false)
@@ -139,9 +141,18 @@ function emptyForm(): FormData {
     contains_important_data: 'unknown', contains_core_data: 'unknown', data_storage_location: '', security_notes: '',
   }
 }
+// PostgreSQL varchar counts Unicode code points, not UTF-16 code units.
+// Keep over-limit text intact so users can correct it instead of silently
+// truncating valid emoji text through a native maxlength attribute.
+function systemTextRule(limit: number, message: string): FormItemRule {
+  return { validator: (_rule, value: string, callback) => callback(Array.from((value ?? '').trim()).length > limit ? new Error(message) : undefined), trigger: 'blur' }
+}
 const rules: FormRules = {
   code: [{ required: true, message: '请输入系统编码', trigger: 'blur' }, { pattern: /^[A-Za-z0-9][A-Za-z0-9_-]{1,63}$/, message: '使用 2-64 位字母、数字、下划线或横线', trigger: 'blur' }],
-  name: [{ required: true, message: '请输入系统名称', trigger: 'blur' }],
+  name: [{ required: true, whitespace: true, message: '请输入系统名称', trigger: 'blur' }, systemTextRule(255, '系统名称最多 255 字')],
+  short_name: [systemTextRule(128, '系统简称最多 128 字')],
+  owner_name: [systemTextRule(128, '负责人最多 128 字')],
+  deployment_type: [systemTextRule(32, '部署方式最多 32 字')],
   organization_id: [{ required: true, message: '请选择所属组织', trigger: 'change' }],
   // The owner contact is the only channel a group security manager has to reach
   // the system owner, so it is validated here instead of failing on submit.
@@ -197,8 +208,8 @@ async function loadDraftSystems() {
 
 async function load() {
   try {
-    const organizationResponse = await apiClient.get<ListResponse<Organization>>('/organizations', { params: { page_size: 100 } })
-    organizations.value = organizationResponse.data.items
+    // Select controls must include enabled organizations beyond the first page.
+    organizations.value = await loadOptions<Organization>('/organizations')
     try {
       const customResponse = await apiClient.get<ListResponse<CustomField>>('/custom-fields/fillable', { params: { resource_type: 'business_system', page_size: 100 } })
       customFields.value = customResponse.data.items
@@ -311,7 +322,9 @@ async function submit() {
   // Store the same normalized form the validator checked, so "138-0000-0000"
   // does not survive as a differently searchable value in the ledger.
   form.owner_contact = normalizeContactPhone(form.owner_contact)
-  if (!formRef.value || !(await formRef.value.validate())) return
+  // Element Plus rejects invalid forms; this is expected field validation,
+  // not an unhandled submit error (the mutation try/catch starts below).
+  if (!formRef.value || !await formRef.value.validate().catch(() => false)) return
   const missing = customFields.value.find((field) => field.is_required && isEmptyCustomValue(customValues[field.field_key]))
   if (missing) { ElMessage.warning(`请填写自定义字段：${missing.field_name}`); return }
   submitting.value = true
@@ -831,7 +844,7 @@ onMounted(load)
 
 <template>
   <section>
-    <el-alert v-if="inventoryMode" :title="`正在填报：${inventoryTaskName} · ${inventoryOrganizationName}`" description="这里展示组织工作台账。新增或修改先保存为未上报版本，选择纳入本次任务并提交审核后，才会发布到集团正式台账。" type="warning" :closable="false" show-icon class="inventory-draft-alert" />
+    <el-alert v-if="inventoryMode" :title="`正在填报：${inventoryTaskName} · ${inventoryOrganizationName}`" type="warning" :closable="false" show-icon class="inventory-draft-alert"><span>这里展示组织工作台账。新增或修改先保存为未上报版本，选择纳入本次任务并提交审核后，才会发布到集团正式台账。</span> <el-button size="small" @click="router.push('/inventory-tasks')">返回填报任务</el-button></el-alert>
     <div class="page-heading">
       <h1>业务系统</h1>
     </div>
@@ -841,8 +854,8 @@ onMounted(load)
       <el-select v-model="statusFilter" clearable placeholder="全部状态" @change="resetAndLoadSystems" @clear="resetAndLoadSystems">
         <el-option v-for="(label, value) in statusLabels" :key="value" :label="label" :value="value" />
       </el-select>
-      <el-select v-if="auth.isGroupAdmin && !inventoryMode" v-model="organizationFilter" clearable filterable placeholder="全部组织" @change="resetAndLoadSystems" @clear="resetAndLoadSystems">
-        <el-option v-for="item in eligibleOrganizations" :key="item.id" :label="item.name" :value="item.id" />
+      <el-select v-if="auth.isGroupAdmin && !inventoryMode" v-model="organizationFilter" clearable filterable placeholder="全部组织" fit-input-width popper-class="organization-select-popper" placement="bottom-start" :fallback-placements="['bottom-start']" @change="resetAndLoadSystems" @clear="resetAndLoadSystems">
+        <el-option v-for="item in eligibleOrganizations" :key="item.id" :label="item.name" :title="item.name" :value="item.id" />
       </el-select>
       <el-button @click="resetAndLoadSystems">查询</el-button>
       <span class="asset-filter-count">共 {{ total }} 条</span>
@@ -857,7 +870,7 @@ onMounted(load)
         <el-table-column label="变更类型" width="90"><template #default="scope"><el-tag :type="scope.row.operation === 'delete' ? 'danger' : scope.row.operation === 'update' ? 'warning' : 'success'" effect="plain">{{ draftOperationLabels[scope.row.operation || 'create'] }}</el-tag></template></el-table-column>
         <el-table-column label="草稿状态" width="105"><template #default="scope"><el-tag type="warning" effect="plain">{{ draftStatusLabels[scope.row.draft_status || 'editing'] || scope.row.draft_status }}</el-tag></template></el-table-column>
         <el-table-column label="填报归属" min-width="180"><template #default="scope"><span v-if="!draftOwnerLabel(scope.row)" class="list-secondary">尚未分配填报人</span><template v-else><span>{{ draftOwnerLabel(scope.row) }}</span><span v-if="draftTakeoverSummary(scope.row)" class="list-secondary">{{ draftTakeoverSummary(scope.row) }}</span><span v-else-if="draftLastEditedHint(scope.row)" class="list-secondary">{{ draftLastEditedHint(scope.row) }}</span></template></template></el-table-column>
-        <el-table-column label="操作" width="120" fixed="right" align="right" header-align="right" class-name="table-action-column"><template #default="scope"><RowActions :label="`操作：${scope.row.name || scope.row.title || scope.row.code || scope.row.display_name || scope.row.id}`"><el-button link type="primary" @click="openWorkingVersionDiff(scope.row)">查看变更</el-button><el-button v-if="scope.row.operation !== 'delete'" link type="primary" :disabled="scope.row.draft_status === 'submitted'" @click="openEditDialog(scope.row)">编辑</el-button><el-button v-if="canTakeOverDraft(scope.row)" link type="warning" @click="takeoverDraft(scope.row)">接管</el-button><el-button link type="danger" :disabled="scope.row.draft_status === 'submitted'" @click="removeDraft(scope.row)">取消上报</el-button></RowActions></template></el-table-column>
+        <el-table-column label="操作" width="88" fixed="right" align="right" header-align="right" class-name="table-action-column"><template #default="scope"><RowActions :label="`操作：${scope.row.name || scope.row.title || scope.row.code || scope.row.display_name || scope.row.id}`"><el-button link type="primary" @click="openWorkingVersionDiff(scope.row)">查看变更</el-button><el-button v-if="scope.row.operation !== 'delete'" link type="primary" :disabled="scope.row.draft_status === 'submitted'" @click="openEditDialog(scope.row)">编辑</el-button><el-button v-if="canTakeOverDraft(scope.row)" link type="warning" @click="takeoverDraft(scope.row)">接管</el-button><el-button link type="danger" :disabled="scope.row.draft_status === 'submitted'" @click="removeDraft(scope.row)">取消上报</el-button></RowActions></template></el-table-column>
       </el-table>
       <div v-if="draftTotal > 0" class="table-pagination"><el-pagination background layout="total, sizes, prev, pager, next" :total="draftTotal" :current-page="draftPage" :page-size="draftPageSize" :page-sizes="[20, 50, 100]" @current-change="handleDraftPageChange" @size-change="handleDraftPageSizeChange" /></div>
     </div>
@@ -923,14 +936,14 @@ onMounted(load)
         <div class="form-grid two-columns">
           <el-form-item label="所属组织" prop="organization_id"><el-select v-model="form.organization_id" :disabled="inventoryMode || !auth.isGroupAdmin" style="width:100%"><el-option v-for="item in eligibleOrganizations" :key="item.id" :label="item.name" :value="item.id" /></el-select></el-form-item>
           <el-form-item label="系统编码" prop="code"><el-input v-model="form.code" placeholder="如：CRM_001" maxlength="64" /><div class="muted-text">系统字段，用于导入、接口关联和数据去重；日常列表不显示。</div></el-form-item>
-          <el-form-item label="系统名称" prop="name"><el-input v-model="form.name" placeholder="请输入系统名称" maxlength="255" /></el-form-item>
-          <el-form-item label="系统简称"><el-input v-model="form.short_name" maxlength="128" /></el-form-item>
+          <el-form-item label="系统名称" prop="name"><el-input v-model="form.name" placeholder="请输入系统名称" /></el-form-item>
+          <el-form-item label="系统简称" prop="short_name"><el-input v-model="form.short_name" /></el-form-item>
           <el-form-item label="运行状态"><el-select v-model="form.status" style="width:100%"><el-option label="运行中" value="running" /><el-option label="规划中" value="planning" /><el-option label="暂停" value="suspended" /><el-option label="已下线" value="offline" /><el-option v-if="editingID" label="已归档" value="archived" /></el-select></el-form-item>
           <el-form-item label="系统等级"><el-select v-model="form.level" style="width:100%"><el-option label="一般" value="normal" /><el-option label="重要" value="important" /><el-option label="核心" value="core" /></el-select></el-form-item>
-          <el-form-item label="负责人"><el-input v-model="form.owner_name" maxlength="128" /></el-form-item>
+          <el-form-item label="负责人" prop="owner_name"><el-input v-model="form.owner_name" /></el-form-item>
           <el-form-item label="联系方式" prop="owner_contact"><el-input v-model="form.owner_contact" maxlength="64" placeholder="手机号码、座机或分机号" /></el-form-item>
           <el-form-item label="互联网暴露情况"><el-select v-model="form.internet_exposure" style="width:100%"><el-option label="是" value="yes" /><el-option label="否" value="no" /><el-option label="部分" value="partial" /><el-option label="待确认" value="unknown" /></el-select></el-form-item>
-          <el-form-item label="部署方式"><el-input v-model="form.deployment_type" placeholder="如：集团私有云" /></el-form-item>
+          <el-form-item label="部署方式" prop="deployment_type"><el-input v-model="form.deployment_type" placeholder="如：集团私有云" /></el-form-item>
           <el-form-item label="系统说明" class="full-span"><el-input v-model="form.description" type="textarea" :rows="2" /></el-form-item>
         </div>
         <div class="form-section-title">数据安全属性</div>

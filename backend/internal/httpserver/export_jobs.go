@@ -16,7 +16,7 @@ func registerExportJobRoutes(api *gin.RouterGroup, requireAuth gin.HandlerFunc, 
 	routes.GET("", func(c *gin.Context) {
 		page, err := parsePageQuery(c)
 		if err != nil {
-			writeAPIError(c, http.StatusBadRequest, "invalid_query", "分页参数不正确，page_size 最大为 100")
+			writeAPIError(c, http.StatusBadRequest, "invalid_query", pageQueryErrorMessage(err))
 			return
 		}
 		result, err := service.Search(c.Request.Context(), mustPrincipal(c), page, c.Query("status"), c.Query("resource_type"))
@@ -70,7 +70,12 @@ func handleExportJobError(c *gin.Context, logger *slog.Logger, err error, operat
 	case errors.Is(err, exportjob.ErrForbidden):
 		writeAPIError(c, http.StatusForbidden, "export_job_forbidden", "当前账号无权导出所选资源")
 	case errors.Is(err, exportjob.ErrInvalid):
-		writeAPIError(c, http.StatusBadRequest, "invalid_export_job", "请检查导出资源类型、格式和筛选条件")
+		message := "请检查导出资源类型、格式和筛选条件"
+		var field *exportjob.InputValidationError
+		if errors.As(err, &field) {
+			message = field.Message
+		}
+		writeAPIError(c, http.StatusBadRequest, "invalid_export_job", message)
 	case errors.Is(err, exportjob.ErrNotFound):
 		writeAPIError(c, http.StatusNotFound, "export_job_not_found", "导出任务不存在、已删除或不属于当前账号")
 	case errors.Is(err, exportjob.ErrBusy):

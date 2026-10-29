@@ -15,7 +15,7 @@ func registerRoleRoutes(api *gin.RouterGroup, requireAuth gin.HandlerFunc, servi
 	group.GET("", func(c *gin.Context) {
 		page, err := parsePageQuery(c)
 		if err != nil {
-			writeAPIError(c, http.StatusBadRequest, "invalid_query", "分页参数不正确，page_size 最大为 100")
+			writeAPIError(c, http.StatusBadRequest, "invalid_query", pageQueryErrorMessage(err))
 			return
 		}
 		result, err := service.Search(c.Request.Context(), mustPrincipal(c), page)
@@ -33,7 +33,7 @@ func registerRoleRoutes(api *gin.RouterGroup, requireAuth gin.HandlerFunc, servi
 	group.GET("/assignable", func(c *gin.Context) {
 		page, err := parsePageQuery(c)
 		if err != nil {
-			writeAPIError(c, http.StatusBadRequest, "invalid_query", "分页参数不正确，page_size 最大为 100")
+			writeAPIError(c, http.StatusBadRequest, "invalid_query", pageQueryErrorMessage(err))
 			return
 		}
 		result, err := service.SearchAssignable(c.Request.Context(), mustPrincipal(c), page)
@@ -51,7 +51,7 @@ func registerRoleRoutes(api *gin.RouterGroup, requireAuth gin.HandlerFunc, servi
 	group.GET("/permissions", func(c *gin.Context) {
 		page, err := parsePageQuery(c)
 		if err != nil {
-			writeAPIError(c, http.StatusBadRequest, "invalid_query", "分页参数不正确，page_size 最大为 100")
+			writeAPIError(c, http.StatusBadRequest, "invalid_query", pageQueryErrorMessage(err))
 			return
 		}
 		result, err := service.SearchPermissions(c.Request.Context(), mustPrincipal(c), page)
@@ -103,9 +103,12 @@ func registerRoleRoutes(api *gin.RouterGroup, requireAuth gin.HandlerFunc, servi
 }
 
 func writeRoleResult(c *gin.Context, logger *slog.Logger, err error, item roledomain.Role, success int, fallback string) {
+	var fieldErr *roledomain.InputValidationError
 	switch {
 	case errors.Is(err, roledomain.ErrForbidden):
 		writeAPIError(c, http.StatusForbidden, "system_role_protected", "系统角色不可修改，或当前账号无权操作")
+	case errors.As(err, &fieldErr):
+		writeAPIError(c, http.StatusBadRequest, "invalid_role", fieldErr.Error())
 	case errors.Is(err, roledomain.ErrInvalid):
 		writeAPIError(c, http.StatusBadRequest, "invalid_role", "请检查角色名称、编码、状态和权限项")
 	case errors.Is(err, roledomain.ErrConflict):

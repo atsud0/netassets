@@ -98,7 +98,7 @@ func validateDraftRestore(principal auth.Principal, permission string, expectedV
 		return ErrForbidden
 	}
 	if expectedVersion <= 0 {
-		return ErrInvalid
+		return invalidInput("恢复工作版本必须提供大于 0 的 expected_version")
 	}
 	return nil
 }

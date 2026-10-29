@@ -1,14 +1,12 @@
 import { expect, test } from '@playwright/test'
+import { loginSavedViewOwner } from '../helpers/saved-view-owner'
 
 // Deleting a saved view has to leave the page in the state the deletion implies:
 // the view is gone from the selector, and the asset list is reloaded so the page and
 // the view list agree again. Otherwise the user keeps looking at a result set that is
 // named by a view which no longer exists, with no indication that anything happened.
 test.beforeEach(async ({ page }) => {
-  const response = await page.request.post('/api/v1/auth/login', {
-    data: { username: process.env.E2E_USERNAME, password: process.env.E2E_PASSWORD },
-  })
-  expect(response.ok()).toBeTruthy()
+  await loginSavedViewOwner(page)
 })
 
 test('删除保存视图后网络资产列表立即刷新', async ({ page }) => {

@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import RowActions from '../components/RowActions.vue'
 import { computed, onMounted, reactive, ref, watch } from 'vue'
-import { ElMessage, ElMessageBox, type FormInstance, type FormRules } from 'element-plus'
+import { ElMessage, ElMessageBox, type FormInstance, type FormItemRule, type FormRules } from 'element-plus'
 import { apiClient, getAPIErrorMessage } from '../api/client'
 import { useAuthStore } from '../stores/auth'
 import { clampToLines, clampTooltip } from '../utils/truncate'
@@ -54,7 +54,21 @@ const createRef = ref<FormInstance>()
 const acceptRef = ref<FormInstance>()
 const createForm = reactive({ asset_type: 'domain', asset_value: '', name: '', organization_id: '', source: 'manual', source_reference: '', notes: '' })
 const acceptForm = reactive({ organization_id: '', name: '', business_system_id: '', network_area_id: '', environment: 'production', network_scope: 'public', status: 'active', importance: 'normal', owner_name: '', notes: '', review_note: '' })
-const createRules: FormRules = { asset_value: [{ required: true, message: '请输入资产值', trigger: 'blur' }], organization_id: [{ required: true, message: '请选择建议所属组织', trigger: 'change' }] }
+// Match the server's Unicode code-point limits, not UTF-16 code units. Do not
+// truncate input: an over-limit value stays visible for the user to correct.
+function candidateTextRule(limit: number, message: string): FormItemRule {
+  return {
+    validator: (_rule, value: string, callback) => callback(Array.from((value ?? '').trim()).length > limit ? new Error(message) : undefined),
+    trigger: 'blur',
+  }
+}
+const createRules: FormRules = {
+  asset_value: [{ required: true, whitespace: true, message: '请输入资产值', trigger: 'blur' }],
+  organization_id: [{ required: true, message: '请选择建议所属组织', trigger: 'change' }],
+  name: [candidateTextRule(255, '资产名称最多 255 字')],
+  source_reference: [candidateTextRule(255, '来源参考最多 255 字')],
+  notes: [candidateTextRule(5000, '备注最多 5000 字')],
+}
 const acceptRules: FormRules = { organization_id: [{ required: true, message: '请选择资产所属组织', trigger: 'change' }], environment: [{ required: true, message: '请选择环境', trigger: 'change' }], network_scope: [{ required: true, message: '请选择网络暴露范围', trigger: 'change' }] }
 const enabledOrganizations = computed(() => organizations.value.filter((item) => item.status === 'enabled'))
 const selectedOrganizationID = computed(() => acceptForm.organization_id || selected.value?.organization_id || '')
@@ -162,7 +176,7 @@ function changePageSize(nextPageSize: number) {
 function resetCreate() { Object.assign(createForm, { asset_type: 'domain', asset_value: '', name: '', organization_id: enabledOrganizations.value[0]?.id ?? '', source: 'manual', source_reference: '', notes: '' }) }
 function openCreate() { resetCreate(); createVisible.value = true }
 async function submitCreate() {
-  if (!createRef.value || !(await createRef.value.validate())) return
+  if (!createRef.value || !(await createRef.value.validate().catch(() => false))) return
   creating.value = true
   try { await apiClient.post('/asset-candidates', { ...createForm, suggested_data: {} }); ElMessage.success('待确认资产已新增'); createVisible.value = false; await refreshAfterMutation() } catch (error) { ElMessage.error(getAPIErrorMessage(error, '新增待确认资产失败')) } finally { creating.value = false }
 }
@@ -210,6 +224,20 @@ onMounted(async () => {
 // queue is theirs to work on or still waiting for headquarters.
 const policies = ref<SelfServicePolicy[]>([])
 const policySaving = ref(false)
+const policySearch = ref('')
+const policyPage = ref(1)
+const policyPageSize = ref(50)
+const policyByOrganization = computed(() => new Map(policies.value.map(item => [item.organization_id, item])))
+const filteredPolicies = computed(() => {
+  const keyword = policySearch.value.trim().toLocaleLowerCase()
+  return keyword ? policies.value.filter(item => item.organization_name.toLocaleLowerCase().includes(keyword)) : policies.value
+})
+// Keep row references, so paging or searching cannot discard an unsaved edit.
+const visiblePolicies = computed(() => filteredPolicies.value.slice((policyPage.value - 1) * policyPageSize.value, policyPage.value * policyPageSize.value))
+watch([policySearch, policyPageSize], () => { policyPage.value = 1 })
+watch(() => filteredPolicies.value.length, total => {
+  policyPage.value = Math.min(policyPage.value, Math.max(1, Math.ceil(total / policyPageSize.value)))
+})
 async function loadPolicies() {
   try {
     const response = await apiClient.get<ListResponse<SelfServicePolicy>>('/asset-candidates/self-service-policies')
@@ -219,7 +247,7 @@ async function loadPolicies() {
   }
 }
 function policyFor(organizationID?: string) {
-  return policies.value.find((item) => item.organization_id === organizationID)
+  return organizationID ? policyByOrganization.value.get(organizationID) : undefined
 }
 async function savePolicy(row: SelfServicePolicy) {
   policySaving.value = true
@@ -247,9 +275,9 @@ async function savePolicy(row: SelfServicePolicy) {
       <div class="button-row"><el-button @click="load">刷新</el-button><el-button type="primary" @click="openCreate">新增待确认资产</el-button></div>
     </div>
     <div class="panel candidate-filter-panel"><el-radio-group v-model="filterStatus"><el-radio-button label="pending">待处理</el-radio-button><el-radio-button label="">全部</el-radio-button><el-radio-button label="accepted">已入库</el-radio-button><el-radio-button label="ignored">已忽略</el-radio-button><el-radio-button label="duplicate">重复</el-radio-button><el-radio-button label="invalid">无效</el-radio-button></el-radio-group><div class="filter-stat-list"><div class="filter-stat"><span>待处理</span><strong>{{ pendingCount }}</strong></div></div></div>
-    <div class="panel data-table-panel"><div v-if="batchCandidates.length" class="table-panel-heading"><span class="table-subtext">已选 {{ selectedRows.length }} 条待确认资产</span><el-button type="primary" :disabled="selectedRows.length === 0" @click="openBatchAccept">批量确认入库</el-button></div><el-table v-loading="loading" :data="candidates" stripe max-height="620" @selection-change="toggleRowSelection"><el-table-column type="selection" width="44" :selectable="(row: Candidate) => row.status === 'pending'"/><el-table-column label="资产线索" min-width="230"><template #default="{ row }"><strong>{{ row.asset_value }}</strong><div class="table-subtext">{{ typeLabel[row.asset_type] ?? row.asset_type }} · 标准化：{{ row.normalized_value }}</div></template></el-table-column><el-table-column label="建议归属" min-width="155"><template #default="{ row }">{{ row.organization_name || '待确认' }}<div class="table-subtext">{{ row.finding_count ? `关联漏洞 ${row.finding_count} 个` : '无关联漏洞' }}<span v-if="row.finding_count && row.highest_severity"> · 最高{{ severityLabel[row.highest_severity] || row.highest_severity }}</span></div><div v-if="row.organization_id && !policyFor(row.organization_id)?.allow_self_service" class="table-subtext">需集团确认</div></template></el-table-column><el-table-column label="来源" min-width="145"><template #default="{ row }">{{ row.source === 'api' ? 'API' : row.source === 'finding_import' ? '漏洞导入' : '手工录入' }}<div v-if="row.source_reference" class="table-subtext">{{ row.source_reference }}</div></template></el-table-column><el-table-column label="状态" width="120"><template #default="{ row }"><el-tag :type="row.status === 'pending' ? 'warning' : row.status === 'accepted' ? 'success' : 'info'">{{ statusLabel[row.status] ?? row.status }}</el-tag><span v-if="row.review_note" class="list-secondary clamped-reason" :title="clampTooltip(row.review_note)" :style="clampToLines()">{{ row.review_note }}</span></template></el-table-column><el-table-column label="登记时间" width="180"><template #default="{ row }">{{ formatDate(row.created_at) }}</template></el-table-column><el-table-column label="操作" width="88" fixed="right" align="right" header-align="right" class-name="table-action-column"><template #default="{ row }"><RowActions :direct="row.status !== 'pending'" :label="`操作：${row.name || row.title || row.code || row.display_name || row.id}`"><template v-if="row.status === 'pending'"><el-button v-if="auth.isGroupAdmin || policyFor(row.organization_id)?.allow_self_service" link type="primary" @click="openAccept(row)">确认入库</el-button><el-button link @click="openDuplicate(row)">标记重复</el-button><el-button link @click="review(row, 'ignore')">忽略</el-button><el-button link type="danger" @click="review(row, 'invalidate')">无效</el-button></template><span v-else class="table-subtext">—</span></RowActions></template></el-table-column></el-table><div class="table-pagination"><el-pagination background layout="total, sizes, prev, pager, next" :total="total" :current-page="page" :page-size="pageSize" :page-sizes="[20, 50, 100]" @current-change="changePage" @size-change="changePageSize"/></div></div>
+    <div class="panel data-table-panel"><div v-if="batchCandidates.length" class="table-panel-heading"><span class="table-subtext">已选 {{ selectedRows.length }} 条待确认资产</span><el-button type="primary" :disabled="selectedRows.length === 0" @click="openBatchAccept">批量确认入库</el-button></div><el-table v-loading="loading" :data="candidates" stripe max-height="620" @selection-change="toggleRowSelection"><el-table-column type="selection" width="44" :selectable="(row: Candidate) => row.status === 'pending'"/><el-table-column label="资产线索" min-width="210"><template #default="{ row }"><strong>{{ row.asset_value }}</strong><div class="table-subtext">{{ typeLabel[row.asset_type] ?? row.asset_type }} · 标准化：{{ row.normalized_value }}</div></template></el-table-column><el-table-column label="建议归属" min-width="140"><template #default="{ row }">{{ row.organization_name || '待确认' }}<div class="table-subtext">{{ row.finding_count ? `关联漏洞 ${row.finding_count} 个` : '无关联漏洞' }}<span v-if="row.finding_count && row.highest_severity"> · 最高{{ severityLabel[row.highest_severity] || row.highest_severity }}</span></div><div v-if="row.organization_id && !policyFor(row.organization_id)?.allow_self_service" class="table-subtext">需集团确认</div></template></el-table-column><el-table-column label="来源" min-width="130"><template #default="{ row }">{{ row.source === 'api' ? 'API' : row.source === 'finding_import' ? '漏洞导入' : '手工录入' }}<div v-if="row.source_reference" class="table-subtext">{{ row.source_reference }}</div></template></el-table-column><el-table-column label="状态" width="120"><template #default="{ row }"><el-tag :type="row.status === 'pending' ? 'warning' : row.status === 'accepted' ? 'success' : 'info'">{{ statusLabel[row.status] ?? row.status }}</el-tag><span v-if="row.review_note" class="list-secondary clamped-reason" :title="clampTooltip(row.review_note)" :style="clampToLines()">{{ row.review_note }}</span></template></el-table-column><el-table-column label="登记时间" width="180"><template #default="{ row }">{{ formatDate(row.created_at) }}</template></el-table-column><el-table-column label="操作" width="88" fixed="right" align="right" header-align="right" class-name="table-action-column"><template #default="{ row }"><RowActions :direct="row.status !== 'pending'" :label="`操作：${row.name || row.title || row.code || row.display_name || row.id}`"><template v-if="row.status === 'pending'"><el-button v-if="auth.isGroupAdmin || policyFor(row.organization_id)?.allow_self_service" link type="primary" @click="openAccept(row)">确认入库</el-button><el-button link @click="openDuplicate(row)">标记重复</el-button><el-button link @click="review(row, 'ignore')">忽略</el-button><el-button link type="danger" @click="review(row, 'invalidate')">无效</el-button></template><span v-else class="table-subtext">—</span></RowActions></template></el-table-column></el-table><div class="table-pagination"><el-pagination background layout="total, sizes, prev, pager, next" :total="total" :current-page="page" :page-size="pageSize" :page-sizes="[20, 50, 100]" @current-change="changePage" @size-change="changePageSize"/></div></div>
 
-    <el-dialog v-model="createVisible" title="新增待确认资产" width="620px" destroy-on-close><el-alert type="info" :closable="false" title="待确认资产不会直接进入正式台账；请在核实后补充环境、范围、重要程度等信息后入库。" show-icon class="dialog-alert" /><el-form ref="createRef" :model="createForm" :rules="createRules" label-width="110px"><el-form-item label="资产类型" prop="asset_type"><el-select v-model="createForm.asset_type"><el-option label="域名" value="domain"/><el-option label="IP 地址" value="ip"/><el-option label="URL" value="url"/><el-option label="网络服务" value="service"/><el-option label="其他" value="other"/></el-select></el-form-item><el-form-item label="资产值" prop="asset_value"><el-input v-model="createForm.asset_value" placeholder="如 portal.example.com 或 https://portal.example.com"/></el-form-item><el-form-item label="资产名称"><el-input v-model="createForm.name" placeholder="选填"/></el-form-item><el-form-item label="建议所属组织" prop="organization_id"><el-select v-model="createForm.organization_id" filterable><el-option v-for="org in enabledOrganizations" :key="org.id" :label="org.name" :value="org.id"/></el-select></el-form-item><el-form-item label="来源"><el-select v-model="createForm.source"><el-option label="手工录入" value="manual"/><el-option label="API 导入" value="api"/></el-select></el-form-item><el-form-item label="来源参考"><el-input v-model="createForm.source_reference" placeholder="工单、邮件或外部线索编号（选填）"/></el-form-item><el-form-item label="备注"><el-input v-model="createForm.notes" type="textarea" :rows="3"/></el-form-item></el-form><template #footer><el-button @click="createVisible=false">取消</el-button><el-button type="primary" :loading="creating" @click="submitCreate">保存线索</el-button></template></el-dialog>
+    <el-dialog v-model="createVisible" title="新增待确认资产" width="620px" destroy-on-close><el-alert type="info" :closable="false" title="待确认资产不会直接进入正式台账；请在核实后补充环境、范围、重要程度等信息后入库。" show-icon class="dialog-alert" /><el-form ref="createRef" :model="createForm" :rules="createRules" label-width="110px"><el-form-item label="资产类型" prop="asset_type"><el-select v-model="createForm.asset_type"><el-option label="域名" value="domain"/><el-option label="IP 地址" value="ip"/><el-option label="URL" value="url"/><el-option label="网络服务" value="service"/><el-option label="其他" value="other"/></el-select></el-form-item><el-form-item label="资产值" prop="asset_value"><el-input v-model="createForm.asset_value" placeholder="如 portal.example.com 或 https://portal.example.com"/></el-form-item><el-form-item label="资产名称" prop="name"><el-input v-model="createForm.name" placeholder="选填"/></el-form-item><el-form-item label="建议所属组织" prop="organization_id"><el-select v-model="createForm.organization_id" filterable><el-option v-for="org in enabledOrganizations" :key="org.id" :label="org.name" :value="org.id"/></el-select></el-form-item><el-form-item label="来源"><el-select v-model="createForm.source"><el-option label="手工录入" value="manual"/><el-option label="API 导入" value="api"/></el-select></el-form-item><el-form-item label="来源参考" prop="source_reference"><el-input v-model="createForm.source_reference" placeholder="工单、邮件或外部线索编号（选填）"/></el-form-item><el-form-item label="备注" prop="notes"><el-input v-model="createForm.notes" type="textarea" :rows="3"/></el-form-item></el-form><template #footer><el-button @click="createVisible=false">取消</el-button><el-button type="primary" :loading="creating" @click="submitCreate">保存线索</el-button></template></el-dialog>
 
     <el-dialog v-model="duplicateVisible" title="标记重复资产" width="560px" destroy-on-close>
       <el-alert type="warning" :closable="false" show-icon class="dialog-alert" title="请选择网络资产台账中已存在的对应资产。仅展示类型和标准化值均一致的资产。"/>
@@ -257,9 +285,11 @@ async function savePolicy(row: SelfServicePolicy) {
       <template #footer><el-button @click="duplicateVisible=false">取消</el-button><el-button type="primary" :loading="duplicateSubmitting" :disabled="!duplicateAssets.length" @click="markDuplicate">确认标记</el-button></template>
     </el-dialog>
 
-    <div v-if="auth.isGroupAdmin" class="panel">
+    <div v-if="auth.isGroupAdmin" class="panel policy-table-panel">
       <div class="table-panel-heading"><div><strong>组织自助确认策略</strong><span>开启后该组织运维人员可自行确认本组织资产线索，默认关闭</span></div></div>
-      <el-table :data="policies" stripe size="small"><el-table-column label="组织" min-width="200" prop="organization_name"/><el-table-column label="自助确认" width="120"><template #default="{ row }"><el-switch v-model="row.allow_self_service"/></template></el-table-column><el-table-column label="允许资产类型" min-width="240"><template #default="{ row }"><el-select v-model="row.allowed_asset_types" multiple clearable placeholder="留空表示全部类型"><el-option label="IP 地址" value="ip"/><el-option label="域名" value="domain"/><el-option label="URL" value="url"/><el-option label="主机名" value="hostname"/></el-select></template></el-table-column><el-table-column label="要求组织启用" width="140"><template #default="{ row }"><el-switch v-model="row.require_enabled_organization"/></template></el-table-column><el-table-column label="操作" width="90" align="right"><template #default="{ row }"><el-button link type="primary" :loading="policySaving" @click="savePolicy(row)">保存</el-button></template></el-table-column></el-table>
+      <el-input v-model="policySearch" aria-label="搜索组织自助确认策略" placeholder="按组织名称搜索策略" clearable class="policy-search" />
+      <el-table :data="visiblePolicies" stripe size="small"><el-table-column label="组织" min-width="200" prop="organization_name"/><el-table-column label="自助确认" width="120"><template #default="{ row }"><el-switch v-model="row.allow_self_service"/></template></el-table-column><el-table-column label="允许资产类型" min-width="240"><template #default="{ row }"><el-select v-model="row.allowed_asset_types" multiple clearable placeholder="留空表示全部类型"><el-option label="IP 地址" value="ip"/><el-option label="域名" value="domain"/><el-option label="URL" value="url"/><el-option label="主机名" value="hostname"/></el-select></template></el-table-column><el-table-column label="要求组织启用" width="140"><template #default="{ row }"><el-switch v-model="row.require_enabled_organization"/></template></el-table-column><el-table-column label="操作" width="90" align="right"><template #default="{ row }"><el-button link type="primary" :loading="policySaving" @click="savePolicy(row)">保存</el-button></template></el-table-column></el-table>
+      <div class="table-pagination"><el-pagination v-model:current-page="policyPage" v-model:page-size="policyPageSize" background layout="total, sizes, prev, pager, next" :total="filteredPolicies.length" :page-sizes="[20, 50, 100]" /></div>
     </div>
     <el-dialog v-model="batchVisible" title="批量确认入库" width="720px" destroy-on-close>
       <el-alert type="info" :closable="false" show-icon class="dialog-alert" title="批量确认将为每条选中的待确认资产生成未上报工作版本；缺少归属组织的线索会被跳过，请单独处理。"/>
@@ -273,5 +303,6 @@ async function savePolicy(row: SelfServicePolicy) {
 
 <style scoped>
 .candidate-filter-panel { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 12px; margin-bottom: 16px; }
+.policy-search { max-width: 360px; margin: 12px 0; }
 .table-pagination { display:flex; justify-content:flex-end; margin-top:18px; }
 </style>

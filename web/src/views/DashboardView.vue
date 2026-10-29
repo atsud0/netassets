@@ -101,12 +101,14 @@ const severityTotal = computed(() => overview.value.finding_severity.reduce((tot
 async function load() {
   loading.value = true
   try {
-    const [summaryResponse, overviewResponse] = await Promise.all([
-      apiClient.get<{ summary: DashboardSummary }>('/dashboard/summary'),
-      apiClient.get<{ overview: SecurityOverview }>('/dashboard/security-overview'),
+    await Promise.all([
+      apiClient.get<{ summary: DashboardSummary }>('/dashboard/summary').then(response => {
+        summary.value = response.data.summary
+      }),
+      apiClient.get<{ overview: SecurityOverview }>('/dashboard/security-overview').then(response => {
+        overview.value = response.data.overview
+      }),
     ])
-    summary.value = summaryResponse.data.summary
-    overview.value = overviewResponse.data.overview
   } catch (error) {
     ElMessage.error(getAPIErrorMessage(error, '读取安全治理统计失败'))
   } finally {

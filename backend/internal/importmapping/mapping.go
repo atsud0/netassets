@@ -2,12 +2,20 @@ package importmapping
 
 import (
 	"errors"
+	"fmt"
 	"strings"
 )
 
 const MaxColumns = 200
 
 var ErrInvalid = errors.New("invalid column mapping")
+
+type ValidationError struct{ Message string }
+
+func (err *ValidationError) Error() string { return err.Message }
+func (err *ValidationError) Unwrap() error { return ErrInvalid }
+
+func invalidMapping(message string) error { return &ValidationError{Message: message} }
 
 type Mapping map[string]int
 
@@ -68,8 +76,11 @@ func suggestedIndexes(headers []string, fields []Field) map[string]int {
 
 // Analyze returns source columns, sample values and automatic mapping suggestions.
 func Analyze(rows [][]string, fields []Field) (Analysis, error) {
-	if len(rows) == 0 || len(rows[0]) == 0 || len(rows[0]) > MaxColumns {
-		return Analysis{}, ErrInvalid
+	if len(rows) == 0 || len(rows[0]) == 0 {
+		return Analysis{}, invalidMapping("导入表头：不能为空")
+	}
+	if len(rows[0]) > max(MaxColumns, len(fields)) {
+		return Analysis{}, invalidMapping(fmt.Sprintf("导入表头：最多支持 %d 列", max(MaxColumns, len(fields))))
 	}
 	headers := rows[0]
 	suggestions := suggestedIndexes(headers, fields)
@@ -110,8 +121,11 @@ func Analyze(rows [][]string, fields []Field) (Analysis, error) {
 // Resolve validates an optional explicit mapping and returns field indexes plus
 // normalized headers for the existing custom-field spreadsheet parser.
 func Resolve(headers []string, mapping Mapping, fields []Field) (map[string]int, []string, error) {
-	if len(headers) == 0 || len(headers) > MaxColumns {
-		return nil, nil, ErrInvalid
+	if len(headers) == 0 {
+		return nil, nil, invalidMapping("导入表头：不能为空")
+	}
+	if len(headers) > max(MaxColumns, len(fields)) {
+		return nil, nil, invalidMapping(fmt.Sprintf("导入表头：最多支持 %d 列", max(MaxColumns, len(fields))))
 	}
 	byKey := make(map[string]Field, len(fields))
 	indexes := make(map[string]int, len(fields))
@@ -128,11 +142,15 @@ func Resolve(headers []string, mapping Mapping, fields []Field) (map[string]int,
 	} else {
 		used := make(map[int]struct{}, len(mapping))
 		for key, index := range mapping {
-			if _, allowed := byKey[key]; !allowed || index < 0 || index >= len(headers) {
-				return nil, nil, ErrInvalid
+			field, allowed := byKey[key]
+			if !allowed {
+				return nil, nil, invalidMapping("列映射：包含不支持的目标字段，请重新选择")
+			}
+			if index < 0 || index >= len(headers) {
+				return nil, nil, invalidMapping("列映射“" + field.Name + "”：请选择文件中的有效列")
 			}
 			if _, duplicate := used[index]; duplicate {
-				return nil, nil, ErrInvalid
+				return nil, nil, invalidMapping(fmt.Sprintf("列映射：文件第 %d 列不能重复映射", index+1))
 			}
 			used[index] = struct{}{}
 			indexes[key] = index
@@ -141,7 +159,7 @@ func Resolve(headers []string, mapping Mapping, fields []Field) (map[string]int,
 
 	for _, field := range fields {
 		if field.Required && indexes[field.Key] < 0 {
-			return nil, nil, ErrInvalid
+			return nil, nil, invalidMapping("列映射“" + field.Name + "”：缺少必填列，请补充表头或选择对应列")
 		}
 	}
 

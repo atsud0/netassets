@@ -16,7 +16,7 @@ func registerSecurityTestBatchRoutes(api *gin.RouterGroup, requireAuth gin.Handl
 	group.GET("", func(c *gin.Context) {
 		page, err := parsePageQuery(c)
 		if err != nil {
-			writeAPIError(c, http.StatusBadRequest, "invalid_query", "分页参数不正确，page_size 最大为 100")
+			writeAPIError(c, http.StatusBadRequest, "invalid_query", pageQueryErrorMessage(err))
 			return
 		}
 		result, err := service.Search(c.Request.Context(), mustPrincipal(c), c.Query("status"), page)
@@ -33,7 +33,7 @@ func registerSecurityTestBatchRoutes(api *gin.RouterGroup, requireAuth gin.Handl
 	group.GET("/:id/events", func(c *gin.Context) {
 		page, err := parsePageQuery(c)
 		if err != nil {
-			writeAPIError(c, http.StatusBadRequest, "invalid_query", "分页参数不正确，page_size 最大为 100")
+			writeAPIError(c, http.StatusBadRequest, "invalid_query", pageQueryErrorMessage(err))
 			return
 		}
 		result, err := service.SearchEvents(c.Request.Context(), mustPrincipal(c), c.Param("id"), page)
@@ -46,7 +46,7 @@ func registerSecurityTestBatchRoutes(api *gin.RouterGroup, requireAuth gin.Handl
 	group.GET("/:id/attachments", func(c *gin.Context) {
 		page, err := parsePageQuery(c)
 		if err != nil {
-			writeAPIError(c, http.StatusBadRequest, "invalid_query", "分页参数不正确，page_size 最大为 100")
+			writeAPIError(c, http.StatusBadRequest, "invalid_query", pageQueryErrorMessage(err))
 			return
 		}
 		result, err := service.SearchAttachments(c.Request.Context(), mustPrincipal(c), c.Param("id"), page)
@@ -150,9 +150,12 @@ func writeSecurityTestBatchResult(c *gin.Context, logger *slog.Logger, operation
 }
 
 func writeSecurityTestBatchError(c *gin.Context, logger *slog.Logger, operation string, err error) {
+	var validation *securitytestbatch.ValidationError
 	switch {
 	case errors.Is(err, securitytestbatch.ErrForbidden):
 		writeAPIError(c, http.StatusForbidden, "forbidden", "当前账号无安全测试管理权限")
+	case errors.As(err, &validation):
+		writeAPIError(c, http.StatusBadRequest, "invalid_security_test_batch", validation.Message)
 	case errors.Is(err, securitytestbatch.ErrInvalid):
 		writeAPIError(c, http.StatusBadRequest, "invalid_security_test_batch", "请检查批次信息、测试时间和操作说明，范围需包含 1 至 200 项公网资产")
 	case errors.Is(err, securitytestbatch.ErrNotFound):
@@ -168,9 +171,12 @@ func writeSecurityTestBatchError(c *gin.Context, logger *slog.Logger, operation 
 }
 
 func writeSecurityTestBatchAttachmentResult(c *gin.Context, logger *slog.Logger, operation string, status int, item securitytestbatch.Attachment, err error) {
+	var validation *securitytestbatch.ValidationError
 	switch {
 	case errors.Is(err, securitytestbatch.ErrForbidden):
 		writeAPIError(c, http.StatusForbidden, "forbidden", "当前账号无权上传、下载或删除安全测试批次附件")
+	case errors.As(err, &validation):
+		writeAPIError(c, http.StatusBadRequest, "invalid_attachment", validation.Message)
 	case errors.Is(err, securitytestbatch.ErrInvalid):
 		writeAPIError(c, http.StatusBadRequest, "invalid_attachment", "仅支持 PDF、图片、TXT、CSV、XLSX、DOCX、ZIP，且单个附件不超过 20MB")
 	case errors.Is(err, securitytestbatch.ErrState):

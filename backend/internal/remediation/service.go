@@ -19,6 +19,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"netassets/internal/auth"
 	"netassets/internal/pagination"
+	"netassets/internal/textlength"
 )
 
 var (
@@ -117,7 +118,7 @@ func pageObjects(ctx context.Context, q queryer, sql string, page pagination.Que
 }
 func allowed(ctx context.Context, q queryer, p auth.Principal, org, permission string) error {
 	if !validID(org) {
-		return ErrInvalid
+		return invalidField("所属组织标识不正确")
 	}
 	var ok bool
 	err := q.QueryRow(ctx, `SELECT remediation_can_manage($1::uuid,$2::uuid,$3)`, p.UserID, org, permission).Scan(&ok)
@@ -177,7 +178,7 @@ func event(ctx context.Context, tx pgx.Tx, p auth.Principal, t Task, action, vis
 }
 func idempotent(ctx context.Context, tx pgx.Tx, p auth.Principal, operation, key string, input any) (Object, string, error) {
 	if len(key) < 8 || len(key) > 128 {
-		return nil, "", ErrInvalid
+		return nil, "", invalidField("幂等标识：须为 8 至 128 字节")
 	}
 	b, err := json.Marshal(input)
 	if err != nil {
@@ -209,7 +210,7 @@ func saveResult(ctx context.Context, tx pgx.Tx, p auth.Principal, operation, key
 	return err
 }
 func textOK(value string, max int, required bool) bool {
-	return len(value) <= max && (!required || strings.TrimSpace(value) != "")
+	return textlength.Count(value) <= max && (!required || strings.TrimSpace(value) != "")
 }
 
 type Task struct {

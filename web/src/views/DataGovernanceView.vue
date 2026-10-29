@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import RowActions from '../components/RowActions.vue'
 import { computed, onMounted, reactive, ref, watch } from 'vue'
-import { ElMessage, type FormInstance } from 'element-plus'
+import { ElMessage, type FormInstance, type FormItemRule, type FormRules } from 'element-plus'
 import { apiClient, getAPIErrorMessage } from '../api/client'
 
 interface Field {
@@ -83,6 +83,23 @@ const ruleVisible = ref(false)
 const editingRuleID = ref('')
 const ruleFormRef = ref<FormInstance>()
 const ruleForm = reactive({ rule_name: '', description: '', resource_type: 'asset', rule_type: 'required' as 'required' | 'stale' | 'expiry', target_field: 'owner_name', severity: 'error', stale_after_days: 0, expiry_warning_days: 30, conditions: [] as RuleCondition[], is_enabled: true, sort_order: 0 })
+function governanceTextRule(limit: number, message: string): FormItemRule {
+  return { validator: (_rule, value: string, callback) => callback(Array.from((value ?? '').trim()).length > limit ? new Error(message) : undefined), trigger: 'blur' }
+}
+const fieldRules: FormRules = {
+  field_key: [{ required: true, whitespace: true, message: '请输入字段编码', trigger: 'blur' }],
+  field_name: [{ required: true, whitespace: true, message: '请输入字段名称', trigger: 'blur' }, governanceTextRule(128, '字段名称最多 128 字')],
+}
+const qualityRuleRules = computed<FormRules>(() => ({
+  rule_name: [{ required: true, whitespace: true, message: '请输入规则名称', trigger: 'blur' }, governanceTextRule(128, '规则名称最多 128 字')],
+  target_field: [{ required: true, message: '请选择目标字段', trigger: 'change' }],
+  stale_after_days: [{ required: ruleForm.rule_type === 'stale', message: '请设置未维护天数', trigger: 'change' }],
+  expiry_warning_days: [{ required: ruleForm.rule_type === 'expiry', message: '请设置提前提醒天数', trigger: 'change' }],
+  conditions: [{ validator: (_rule, _value, callback) => {
+    const message = conditionValidationMessage()
+    callback(message ? new Error(message) : undefined)
+  }, trigger: 'blur' }],
+}))
 const qualityCustomFields = ref<Field[]>([])
 const ruleOptionsLoaded = ref(false)
 const organizations = ref<Organization[]>([])
@@ -279,7 +296,7 @@ async function runScan() {
     if (scanFilters.organization_id) params.organization_id = scanFilters.organization_id
     if (scanFilters.resource_type) params.resource_type = scanFilters.resource_type
     if (scanFilters.severity) params.severity = scanFilters.severity
-    const response = await apiClient.get<{ result: ScanResult }>('/data-quality-rules/scan', { params })
+    const response = await apiClient.get<{ result: ScanResult }>('/data-quality-rules/scan', { params, timeout: 110_000 })
     scanResult.value = response.data.result
     const count = response.data.result.summary.total_issue_count
     ElMessage.success(count ? `检测完成，共发现 ${count} 项问题` : '检测完成，当前台账未发现问题')
@@ -332,8 +349,20 @@ function addCondition() {
 function removeCondition(index: number) {
   ruleForm.conditions.splice(index, 1)
 }
-function conditionsValid() {
-  return ruleForm.conditions.every((condition) => condition.field && condition.operator && (!conditionNeedsValue(condition.operator) || condition.values.length > 0))
+function conditionValidationMessage(): string {
+  if (ruleForm.conditions.length > 10) return '生效条件最多 10 条'
+  for (const [index, condition] of ruleForm.conditions.entries()) {
+    const prefix = `第 ${index + 1} 条生效条件：`
+    if (!condition.field || !condition.operator) return `${prefix}请选择字段和运算符`
+    const values = [...new Set(condition.values.map(value => value.trim()).filter(Boolean))]
+    if (conditionNeedsValue(condition.operator)) {
+      if (!values.length) return `${prefix}请填写条件值`
+      if (values.length > 50) return `${prefix}最多填写 50 个条件值`
+      if (!conditionUsesMultiple(condition.operator) && values.length !== 1) return `${prefix}必须填写一个条件值`
+    } else if (values.length) return `${prefix}当前运算符无需填写条件值`
+    if (values.some(value => new TextEncoder().encode(value).length > 256)) return `${prefix}条件值不能超过 256 字节`
+  }
+  return ''
 }
 function conditionValueLabel(condition: RuleCondition, value: string, resourceType = ruleForm.resource_type) {
   return conditionField(condition.field, resourceType)?.options?.find(([option]) => option === value)?.[1] ?? value
@@ -360,11 +389,7 @@ function openRuleEdit(item: QualityRule) {
   ruleVisible.value = true
 }
 async function saveRule() {
-  if (!ruleFormRef.value || !(await ruleFormRef.value.validate())) return
-  if (!conditionsValid()) {
-    ElMessage.warning('请完整填写生效条件的字段、运算符和值')
-    return
-  }
+  if (!ruleFormRef.value || !(await ruleFormRef.value.validate().catch(() => false))) return
   saving.value = true
   try {
     const payload = {
@@ -407,7 +432,7 @@ function payload() {
   return { ...form, options: form.optionsText.split(/\n|,/).map((item) => item.trim()).filter(Boolean) }
 }
 async function save() {
-  if (!formRef.value || !(await formRef.value.validate())) return
+  if (!formRef.value || !(await formRef.value.validate().catch(() => false))) return
   saving.value = true
   try {
     if (editingID.value) await apiClient.patch(`/custom-fields/${editingID.value}`, payload())
@@ -551,7 +576,7 @@ onMounted(load)
     </template>
 
     <el-dialog v-model="visible" :title="editingID ? '编辑集团自定义字段' : '新增集团自定义字段'" width="620px" destroy-on-close>
-      <el-form ref="formRef" :model="form" label-width="110px" :rules="{ field_key: [{ required: true, message: '请输入字段编码', trigger: 'blur' }], field_name: [{ required: true, message: '请输入字段名称', trigger: 'blur' }] }">
+      <el-form ref="formRef" :model="form" label-width="110px" :rules="fieldRules">
         <el-form-item label="字段编码" prop="field_key"><el-input v-model="form.field_key" :disabled="Boolean(editingID)" placeholder="如 data_retention_period；仅小写字母、数字、下划线" /></el-form-item>
         <el-form-item label="字段名称" prop="field_name"><el-input v-model="form.field_name" /></el-form-item>
         <el-form-item label="字段类型"><el-select v-model="form.field_type" :disabled="Boolean(editingID)"><el-option v-for="item in types" :key="item[0]" :value="item[0]" :label="item[1]" /></el-select></el-form-item>
@@ -564,14 +589,14 @@ onMounted(load)
       <template #footer><el-button @click="visible = false">取消</el-button><el-button type="primary" :loading="saving" @click="save">保存</el-button></template>
     </el-dialog>
     <el-dialog v-model="ruleVisible" :title="editingRuleID ? '编辑数据质量规则' : '新增数据质量规则'" width="860px" destroy-on-close>
-      <el-form ref="ruleFormRef" :model="ruleForm" label-width="110px" :rules="{ rule_name: [{ required: true, message: '请输入规则名称', trigger: 'blur' }], target_field: [{ required: true, message: '请选择目标字段', trigger: 'change' }], stale_after_days: [{ required: ruleForm.rule_type === 'stale', message: '请设置未维护天数', trigger: 'change' }], expiry_warning_days: [{ required: ruleForm.rule_type === 'expiry', message: '请设置提前提醒天数', trigger: 'change' }] }">
-        <el-form-item label="规则名称" prop="rule_name"><el-input v-model="ruleForm.rule_name" placeholder="如：资产责任人必填" /></el-form-item>
+      <el-form ref="ruleFormRef" :model="ruleForm" label-width="110px" :rules="qualityRuleRules">
+        <el-form-item label="规则名称" prop="rule_name"><el-input v-model="ruleForm.rule_name" placeholder="请输入规则名称，最多 128 字" /></el-form-item>
         <el-form-item label="检查对象"><el-select v-model="ruleForm.resource_type" :disabled="ruleForm.rule_type === 'expiry'" style="width:100%"><el-option label="网络资产" value="asset" /><el-option label="业务系统" value="business_system" /></el-select></el-form-item>
         <el-form-item label="规则类型"><el-select v-model="ruleForm.rule_type" style="width:100%"><el-option label="字段必填" value="required" /><el-option label="长期未更新" value="stale" /><el-option label="资产到期" value="expiry" /></el-select></el-form-item>
         <el-form-item label="目标字段" prop="target_field"><el-select v-model="ruleForm.target_field" :disabled="ruleForm.rule_type === 'stale'" filterable style="width:100%"><el-option v-for="item in ruleTargetOptions" :key="item[0]" :label="item[1]" :value="item[0]" /></el-select></el-form-item>
         <el-form-item v-if="ruleForm.rule_type === 'stale'" label="未维护天数" prop="stale_after_days"><el-input-number v-model="ruleForm.stale_after_days" :min="1" :max="3650" :step="30" /><span class="form-help-inline">超过该天数未更新即产生问题</span></el-form-item>
         <el-form-item v-if="ruleForm.rule_type === 'expiry'" label="提前提醒天数" prop="expiry_warning_days"><el-input-number v-model="ruleForm.expiry_warning_days" :min="0" :max="3650" :step="1" /><span class="form-help-inline">到期前 N 天及已过期资产都会产生问题；0 表示仅在到期时提醒</span></el-form-item>
-        <el-form-item label="生效条件">
+        <el-form-item label="生效条件" prop="conditions">
           <div class="condition-editor">
             <div class="condition-editor-heading"><span>不配置时检查全部资源；多个条件按“且（AND）”同时满足。</span><el-button type="primary" plain size="small" :disabled="ruleForm.conditions.length >= 10" @click="addCondition">添加条件</el-button></div>
             <div v-if="ruleForm.conditions.length === 0" class="condition-empty">当前规则对全部{{ ruleForm.resource_type === 'asset' ? '网络资产' : '业务系统' }}生效</div>
@@ -583,7 +608,7 @@ onMounted(load)
                 <el-select v-if="conditionField(condition.field)?.options?.length && conditionUsesMultiple(condition.operator)" v-model="condition.values" multiple filterable collapse-tags collapse-tags-tooltip placeholder="选择一个或多个条件值" class="condition-value"><el-option v-for="item in conditionField(condition.field)?.options" :key="item[0]" :label="item[1]" :value="item[0]" /></el-select>
                 <el-select v-else-if="conditionField(condition.field)?.options?.length" v-model="condition.values[0]" filterable placeholder="选择条件值" class="condition-value"><el-option v-for="item in conditionField(condition.field)?.options" :key="item[0]" :label="item[1]" :value="item[0]" /></el-select>
                 <el-select v-else-if="conditionUsesMultiple(condition.operator)" v-model="condition.values" multiple filterable allow-create default-first-option collapse-tags collapse-tags-tooltip placeholder="输入后回车，可添加多个值" class="condition-value" />
-                <el-input v-else v-model="condition.values[0]" maxlength="256" placeholder="输入条件值" class="condition-value" />
+                <el-input v-else v-model="condition.values[0]" placeholder="输入条件值" class="condition-value" />
               </template>
               <div v-else class="condition-value condition-no-value">无需填写值</div>
               <el-button link type="danger" @click="removeCondition(index)">删除</el-button>

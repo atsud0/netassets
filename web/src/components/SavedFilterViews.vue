@@ -79,6 +79,10 @@ async function saveView() {
     ElMessage.warning('请输入视图名称')
     return
   }
+  if (Array.from(name).length > 100) {
+    ElMessage.warning('视图名称最多 100 字')
+    return
+  }
   saving.value = true
   try {
     const response = await apiClient.post<ItemResponse<SavedFilterView>>('/saved-filter-views', {
@@ -160,7 +164,7 @@ defineExpose({ initialize, loadViews })
     <el-dialog v-model="dialogVisible" title="保存当前筛选" width="460px" append-to-body>
       <el-form label-position="top" @submit.prevent="saveView">
         <el-form-item label="视图名称" required>
-          <el-input v-model="viewName" maxlength="100" show-word-limit placeholder="例如：待确认的公网域名" @keyup.enter="saveView" />
+          <el-input v-model="viewName" placeholder="例如：待确认的公网域名" @keyup.enter="saveView" />
         </el-form-item>
         <el-form-item>
           <el-checkbox v-model="makeDefault">设为本页面默认视图</el-checkbox>

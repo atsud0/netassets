@@ -114,11 +114,11 @@ func (s *Service) ApproveLaunch(ctx context.Context, principal auth.Principal, i
 		return Request{}, ErrForbidden
 	}
 	if !validUUID(id) {
-		return Request{}, ErrInvalid
+		return Request{}, invalidInput("申请标识格式不正确")
 	}
 	input.Comment = strings.TrimSpace(input.Comment)
 	if textlength.Count(input.Comment) > 20000 {
-		return Request{}, ErrInvalid
+		return Request{}, invalidInput("上线说明不能超过 20000 个字符")
 	}
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {

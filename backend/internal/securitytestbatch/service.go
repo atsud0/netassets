@@ -16,7 +16,6 @@ import (
 
 	"netassets/internal/auth"
 	"netassets/internal/pagination"
-	"netassets/internal/textlength"
 )
 
 var (
@@ -121,7 +120,7 @@ func (s *Service) List(ctx context.Context, principal auth.Principal, status str
 	}
 	status = strings.TrimSpace(status)
 	if status != "" && !validStatus(status) {
-		return nil, ErrInvalid
+		return nil, &ValidationError{Message: "请选择有效的安全测试批次状态"}
 	}
 	rows, err := s.pool.Query(ctx, `
 		SELECT b.id::text, b.batch_code, b.batch_name, b.test_type, b.status, b.provider,
@@ -157,7 +156,7 @@ func (s *Service) Search(ctx context.Context, principal auth.Principal, status s
 	}
 	status = strings.TrimSpace(status)
 	if status != "" && !validStatus(status) {
-		return pagination.Result[Batch]{}, ErrInvalid
+		return pagination.Result[Batch]{}, &ValidationError{Message: "请选择有效的安全测试批次状态"}
 	}
 	rows, err := s.pool.Query(ctx, `
 		SELECT b.id::text, b.batch_code, b.batch_name, b.test_type, b.status, b.provider,
@@ -203,7 +202,7 @@ func (s *Service) Get(ctx context.Context, principal auth.Principal, id string) 
 		return Batch{}, ErrForbidden
 	}
 	if !validUUID(id) {
-		return Batch{}, ErrInvalid
+		return Batch{}, &ValidationError{Message: "安全测试批次标识不正确"}
 	}
 	item, err := s.get(ctx, id)
 	if err != nil {
@@ -223,7 +222,7 @@ func (s *Service) SearchEvents(ctx context.Context, principal auth.Principal, id
 		return pagination.Result[BatchEvent]{}, ErrForbidden
 	}
 	if !validUUID(id) {
-		return pagination.Result[BatchEvent]{}, ErrInvalid
+		return pagination.Result[BatchEvent]{}, &ValidationError{Message: "安全测试批次标识不正确"}
 	}
 	if _, err := s.get(ctx, id); err != nil {
 		return pagination.Result[BatchEvent]{}, err
@@ -262,8 +261,8 @@ func (s *Service) Create(ctx context.Context, principal auth.Principal, input In
 		return Batch{}, ErrForbidden
 	}
 	normalizeInput(&input)
-	if !validInput(input) {
-		return Batch{}, ErrInvalid
+	if err := validateInput(input); err != nil {
+		return Batch{}, err
 	}
 	code, err := newCode()
 	if err != nil {
@@ -305,11 +304,11 @@ func (s *Service) Update(ctx context.Context, principal auth.Principal, id strin
 		return Batch{}, ErrForbidden
 	}
 	if !validUUID(id) {
-		return Batch{}, ErrInvalid
+		return Batch{}, &ValidationError{Message: "安全测试批次标识不正确"}
 	}
 	normalizeInput(&input)
-	if !validInput(input) {
-		return Batch{}, ErrInvalid
+	if err := validateInput(input); err != nil {
+		return Batch{}, err
 	}
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
@@ -359,11 +358,7 @@ func (s *Service) Complete(ctx context.Context, principal auth.Principal, id str
 }
 
 func (s *Service) Cancel(ctx context.Context, principal auth.Principal, id string, input TransitionInput, requestID, ipAddress string) (Batch, error) {
-	comment := strings.TrimSpace(input.Comment)
-	if comment == "" {
-		return Batch{}, ErrInvalid
-	}
-	return s.transition(ctx, principal, id, []string{"draft", "authorized", "in_progress"}, "cancelled", "cancel", comment, requestID, ipAddress,
+	return s.transition(ctx, principal, id, []string{"draft", "authorized", "in_progress"}, "cancelled", "cancel", input.Comment, requestID, ipAddress,
 		`cancelled_at=now()`)
 }
 
@@ -371,8 +366,11 @@ func (s *Service) transition(ctx context.Context, principal auth.Principal, id s
 	if !principal.CanManageSecurityTests() {
 		return Batch{}, ErrForbidden
 	}
-	if !validUUID(id) || len(comment) > 2000 {
-		return Batch{}, ErrInvalid
+	if !validUUID(id) {
+		return Batch{}, &ValidationError{Message: "安全测试批次标识不正确"}
+	}
+	if err := validateTransitionComment(action, comment); err != nil {
+		return Batch{}, err
 	}
 	comment = strings.TrimSpace(comment)
 	tx, err := s.pool.Begin(ctx)
@@ -559,20 +557,7 @@ func normalizeInput(input *Input) {
 	input.AssetIDs = uniqueIDs(input.AssetIDs)
 }
 
-func validInput(input Input) bool {
-	if input.Name == "" || textlength.Count(input.Name) > 255 || input.Provider == "" || textlength.Count(input.Provider) > 255 ||
-		input.AuthorizationNote == "" || textlength.Count(input.AuthorizationNote) > 20000 || textlength.Count(input.Notes) > 20000 ||
-		!validTestType(input.TestType) || input.StartAt.IsZero() || input.EndAt.IsZero() || !input.EndAt.After(input.StartAt) ||
-		len(input.AssetIDs) < 1 || len(input.AssetIDs) > maxScopeAssets {
-		return false
-	}
-	for _, id := range input.AssetIDs {
-		if !validUUID(id) {
-			return false
-		}
-	}
-	return true
-}
+func validInput(input Input) bool { return validateInput(input) == nil }
 
 func validTestType(value string) bool {
 	return contains([]string{"penetration", "manual", "scan", "retest", "other"}, value)

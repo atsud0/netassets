@@ -68,7 +68,7 @@ func (s *Service) SearchScopeCandidates(ctx context.Context, principal auth.Prin
 	keyword := strings.TrimSpace(filter.Keyword)
 	assetType := strings.TrimSpace(filter.Type)
 	if len(keyword) > 128 {
-		return pagination.Result[ScopeCandidate]{}, ErrInvalid
+		return pagination.Result[ScopeCandidate]{}, invalidInput("搜索关键词不能超过 128 字节")
 	}
 	rows, err := s.pool.Query(ctx, `
 	WITH ledger AS (
@@ -288,7 +288,7 @@ func replaceScope(ctx context.Context, tx pgx.Tx, requestID, orgID, userID strin
 		}
 	}
 	if len(publishedIDs)+len(workingIDs) > maxScopeAssets {
-		return ErrInvalid
+		return invalidInput("申请范围不能超过 200 项资产")
 	}
 	var publishedCount, workingCount int
 	if len(publishedIDs) > 0 {

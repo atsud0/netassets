@@ -166,7 +166,7 @@ func (s *Service) RestoreAsset(ctx context.Context, principal auth.Principal, as
 		return fmt.Errorf("validate asset organization on restore: %w", err)
 	}
 	if !validReference {
-		return ErrInvalid
+		return invalidField("资产所属组织已停用，无法恢复")
 	}
 	if err := tx.QueryRow(ctx, `SELECT NOT EXISTS (
 		SELECT 1
@@ -179,21 +179,21 @@ func (s *Service) RestoreAsset(ctx context.Context, principal auth.Principal, as
 		return fmt.Errorf("validate asset network area on restore: %w", err)
 	}
 	if !validReference {
-		return ErrInvalid
+		return invalidField("资产网络区域已失效，无法恢复")
 	}
 	if ownerUserID != "" {
 		if err := tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM users u JOIN user_organizations membership ON membership.user_id=u.id WHERE u.id=$1::uuid AND membership.organization_id=$2::uuid AND u.status='enabled' AND u.deleted_at IS NULL)`, ownerUserID, organizationID).Scan(&validReference); err != nil {
 			return fmt.Errorf("validate asset owner on restore: %w", err)
 		}
 		if !validReference {
-			return ErrInvalid
+			return invalidField("资产负责人已停用或不再属于所属组织，无法恢复")
 		}
 	}
 	if err := tx.QueryRow(ctx, `SELECT NOT EXISTS (SELECT 1 FROM system_assets link JOIN business_systems system ON system.id=link.business_system_id WHERE link.asset_id=$1::uuid AND (system.deleted_at IS NOT NULL OR system.owner_organization_id <> $2::uuid))`, assetID, organizationID).Scan(&validReference); err != nil {
 		return fmt.Errorf("validate asset system on restore: %w", err)
 	}
 	if !validReference {
-		return ErrInvalid
+		return invalidField("资产关联业务系统已删除或不属于所属组织，无法恢复")
 	}
 
 	var hasConflict bool

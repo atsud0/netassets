@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"netassets/internal/access"
@@ -351,14 +352,18 @@ func (s *Service) SummarizeFindings(ctx context.Context, principal auth.Principa
 	organizationID = strings.TrimSpace(organizationID)
 	if organizationID != "" {
 		if !validUUID(organizationID) {
-			return FindingSummaryStats{}, ErrInvalid
+			return FindingSummaryStats{}, invalidField("安全发现汇总的组织标识格式不正确")
 		}
-		allowed, err := access.CanAccessOrganization(ctx, s.pool, principal, organizationID)
-		if err != nil {
-			return FindingSummaryStats{}, err
-		}
-		if !allowed {
-			return FindingSummaryStats{}, ErrForbidden
+		// Match the global finding visibility used by the query below. A security
+		// operator need not hold an organization appointment to narrow that scope.
+		if !principal.CanManageSecurityFindings() {
+			allowed, err := access.CanAccessOrganization(ctx, s.pool, principal, organizationID)
+			if err != nil {
+				return FindingSummaryStats{}, err
+			}
+			if !allowed {
+				return FindingSummaryStats{}, ErrForbidden
+			}
 		}
 	}
 	var result FindingSummaryStats
@@ -427,21 +432,25 @@ func (s *Service) SearchFindings(ctx context.Context, principal auth.Principal, 
 	assetLinkState = strings.TrimSpace(assetLinkState)
 	if organizationID != "" {
 		if !validUUID(organizationID) {
-			return pagination.Result[Finding]{}, ErrInvalid
+			return pagination.Result[Finding]{}, invalidField("安全发现筛选的组织标识格式不正确")
 		}
-		allowed, err := access.CanAccessOrganization(ctx, s.pool, principal, organizationID)
-		if err != nil {
-			return pagination.Result[Finding]{}, err
-		}
-		if !allowed {
-			return pagination.Result[Finding]{}, ErrForbidden
+		// Match the global finding visibility used by the query below. A security
+		// operator need not hold an organization appointment to narrow that scope.
+		if !principal.CanManageSecurityFindings() {
+			allowed, err := access.CanAccessOrganization(ctx, s.pool, principal, organizationID)
+			if err != nil {
+				return pagination.Result[Finding]{}, err
+			}
+			if !allowed {
+				return pagination.Result[Finding]{}, ErrForbidden
+			}
 		}
 	}
 	if status != "" && !validFindingStatus(status) {
-		return pagination.Result[Finding]{}, ErrInvalid
+		return pagination.Result[Finding]{}, invalidField("请选择有效的安全发现状态")
 	}
 	if assetLinkState != "" && !validFindingAssetLinkState(assetLinkState) {
-		return pagination.Result[Finding]{}, ErrInvalid
+		return pagination.Result[Finding]{}, invalidField("请选择有效的资产关联状态")
 	}
 	rows, err := s.pool.Query(ctx, accessibleCTE+`
 		SELECT f.id::text, f.finding_code, f.title, f.severity, f.status, f.asset_link_status, f.remediation_status,
@@ -501,7 +510,8 @@ func (s *Service) SearchFindings(ctx context.Context, principal auth.Principal, 
 		  AND ($3::text = '' OR f.assignee_organization_id::text = $3)
 		  AND ($4::text = '' OR f.status = $4)
 		  `+findingAssetLinkStateFilter("f", "a", "$5")+`
-		ORDER BY f.discovered_at DESC, f.created_at DESC
+		-- File imports share both timestamps; keep offset pages deterministic.
+		ORDER BY f.discovered_at DESC, f.created_at DESC, f.id DESC
 		LIMIT $6 OFFSET $7`, principal.UserID, principal.CanManageSecurityFindings(), organizationID, status, assetLinkState, page.PageSize, page.Offset())
 	if err != nil {
 		return pagination.Result[Finding]{}, fmt.Errorf("search security findings: %w", err)
@@ -565,31 +575,8 @@ func (s *Service) SearchFindings(ctx context.Context, principal auth.Principal, 
 }
 
 func (s *Service) CreateFinding(ctx context.Context, principal auth.Principal, input FindingInput, requestID, ipAddress string) (Finding, error) {
-	if !principal.CanManageSecurityFindings() {
-		return Finding{}, ErrForbidden
-	}
-	normalizeFindingInput(&input)
-	if !validFindingInput(input) {
-		return Finding{}, ErrInvalid
-	}
-	if input.PendingAssetDraftID != "" {
-		// A pending asset link is an import-pipeline transition, not a public
-		// finding-edit escape hatch. Otherwise a caller could point a finding at
-		// another organization's unpublished draft.
-		return Finding{}, ErrInvalid
-	}
-	if input.Source != "import" && (input.ImportStatusRaw != "" || input.ImportStatusNormalized != "" || input.ImportStatusMappingReason != "") {
-		return Finding{}, ErrInvalid
-	}
-	if input.Source == "import" {
-		if !findingstatus.Valid(input.ImportStatusNormalized) || input.Status != input.ImportStatusNormalized || input.ImportStatusMappingReason == "" {
-			return Finding{}, ErrInvalid
-		}
-	} else if input.Status == findingstatus.RiskAccepted {
-		return Finding{}, ErrConflict
-	}
-	if input.Status == findingstatus.Duplicate || input.DuplicateOfFindingID != "" {
-		return Finding{}, ErrConflict
+	if err := prepareFindingCreateInput(principal, &input); err != nil {
+		return Finding{}, err
 	}
 	if err := s.validateReferences(ctx, input.AssigneeOrganizationID, input.AssetID, input.BusinessSystemID); err != nil {
 		return Finding{}, err
@@ -614,10 +601,61 @@ func (s *Service) CreateFinding(ctx context.Context, principal auth.Principal, i
 	return s.getFinding(ctx, id)
 }
 
+// Keep public creation and file import subject to the same role, field and
+// status rules, even when the import writes into an existing transaction.
+func prepareFindingCreateInput(principal auth.Principal, input *FindingInput) error {
+	if !principal.CanManageSecurityFindings() {
+		return ErrForbidden
+	}
+	normalizeFindingInput(input)
+	if err := validateFindingInput(*input); err != nil {
+		return err
+	}
+	if input.PendingAssetDraftID != "" {
+		// A pending asset link is an import-pipeline transition, not a public
+		// finding-edit escape hatch. Otherwise a caller could point a finding at
+		// another organization's unpublished draft.
+		return invalidField("不能在安全发现新增接口指定待关联资产工作版本，请使用导入关联流程")
+	}
+	if input.Source != "import" && (input.ImportStatusRaw != "" || input.ImportStatusNormalized != "" || input.ImportStatusMappingReason != "") {
+		return invalidField("非导入来源不能填写导入状态及映射信息")
+	}
+	if input.Source == "import" {
+		if !findingstatus.Valid(input.ImportStatusNormalized) || input.Status != input.ImportStatusNormalized || input.ImportStatusMappingReason == "" {
+			return invalidField("导入状态映射不完整或与安全发现状态不一致")
+		}
+	} else if input.Status == findingstatus.RiskAccepted {
+		return ErrConflict
+	}
+	if input.Status == findingstatus.Duplicate || input.DuplicateOfFindingID != "" {
+		return ErrConflict
+	}
+	return nil
+}
+
+// A concurrent import may pass the pre-insert duplicate check while another
+// transaction inserts the same finding. Only the finding identity constraint is
+// a duplicate; unrelated unique violations (e.g. finding_code) remain errors.
+func findingInsertError(err error) error {
+	var pgError *pgconn.PgError
+	if errors.As(err, &pgError) && pgError.Code == "23505" && pgError.ConstraintName == "security_findings_batch_asset_title_unique" {
+		return fmt.Errorf("insert security finding: %w: %w", ErrConflict, err)
+	}
+	return fmt.Errorf("insert security finding: %w", err)
+}
+
 func (s *Service) createFindingInTx(ctx context.Context, tx pgx.Tx, principal auth.Principal, input FindingInput, requestID, ipAddress string) (string, string, error) {
+	return s.createFindingInTxWithEventWriter(ctx, tx, principal, input, requestID, ipAddress, func(event notification.EventInput) error {
+		return notification.WriteEvent(ctx, tx, event)
+	})
+}
+
+// Keep every finding/audit/owner rule shared. File imports defer only the durable
+// notification write, and enqueue it only after this row's savepoint succeeds.
+func (s *Service) createFindingInTxWithEventWriter(ctx context.Context, tx pgx.Tx, principal auth.Principal, input FindingInput, requestID, ipAddress string, writeEvent func(notification.EventInput) error) (string, string, error) {
 	if input.PendingAssetDraftID != "" {
 		if input.Source != "import" || input.AssetID != "" || !validUUID(input.PendingAssetDraftID) {
-			return "", "", ErrInvalid
+			return "", "", invalidField("待关联资产工作版本必须为有效标识，且仅限未关联正式资产的导入记录使用")
 		}
 		var draftMatches bool
 		if err := tx.QueryRow(ctx, `SELECT EXISTS(
@@ -648,7 +686,7 @@ func (s *Service) createFindingInTx(ctx context.Context, tx pgx.Tx, principal au
 		input.AssetID, input.BusinessSystemID, input.TestBatchID, input.VulnerabilityType, input.Description, input.Evidence,
 		input.RemediationAdvice, input.Source, input.DiscoveredAt, principal.UserID, input.PendingAssetDraftID,
 		input.ImportStatusRaw, input.ImportStatusNormalized, input.ImportStatusMappingReason, input.DuplicateOfFindingID).Scan(&id); err != nil {
-		return "", "", fmt.Errorf("insert security finding: %w", err)
+		return "", "", findingInsertError(err)
 	}
 	if err := writeAudit(ctx, tx, principal, input.AssigneeOrganizationID, "security_finding.create", "security_finding", id,
 		"登记安全发现 "+code, map[string]any{"severity": input.Severity, "asset_id": input.AssetID, "business_system_id": input.BusinessSystemID, "test_batch_id": input.TestBatchID,
@@ -700,7 +738,7 @@ func (s *Service) createFindingInTx(ctx context.Context, tx pgx.Tx, principal au
 	} else if input.Severity == "high" || input.Severity == "critical" {
 		level = "danger"
 	}
-	if err := notification.WriteEvent(ctx, tx, notification.EventInput{
+	if err := writeEvent(notification.EventInput{
 		EventType: eventType, Category: notification.CategoryFindingReceived,
 		TargetOrganizationID: input.AssigneeOrganizationID, TargetUserID: targetUserID, ActorUserID: principal.UserID, RequiredPermission: requiredPermission,
 		ResourceType: "security_finding", ResourceID: id, ResourceLabel: code + "《" + input.Title + "》", BatchKey: requestID, Level: level,
@@ -712,14 +750,14 @@ func (s *Service) createFindingInTx(ctx context.Context, tx pgx.Tx, principal au
 }
 
 func (s *Service) UpdateFinding(ctx context.Context, principal auth.Principal, id string, input FindingInput, requestID, ipAddress string) (Finding, error) {
-	if err := s.guardPersonalFinding(ctx, id); err != nil {
-		return Finding{}, err
-	}
 	if !principal.CanManageSecurityFindings() {
 		return Finding{}, ErrForbidden
 	}
+	if err := s.guardPersonalFinding(ctx, id); err != nil {
+		return Finding{}, err
+	}
 	if !validUUID(id) {
-		return Finding{}, ErrInvalid
+		return Finding{}, invalidField("安全发现标识格式不正确")
 	}
 	// UpdateFinding is the only read-modify-write entry for a finding row, so a
 	// missing optimistic-lock token is a client bug, not a convenience.
@@ -728,10 +766,10 @@ func (s *Service) UpdateFinding(ctx context.Context, principal auth.Principal, i
 	}
 	normalizeFindingInput(&input)
 	if input.PendingAssetDraftID != "" {
-		return Finding{}, ErrInvalid
+		return Finding{}, invalidField("不能通过编辑安全发现指定待关联资产工作版本，请使用导入关联流程")
 	}
-	if !validFindingInput(input) {
-		return Finding{}, ErrInvalid
+	if err := validateFindingInput(input); err != nil {
+		return Finding{}, err
 	}
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
@@ -844,7 +882,7 @@ func (s *Service) UpdateFinding(ctx context.Context, principal auth.Principal, i
 // of the referenced asset/system; issued work orders retain their existing visibility.
 func (s *Service) GetFinding(ctx context.Context, principal auth.Principal, id string) (Finding, error) {
 	if !validUUID(id) {
-		return Finding{}, ErrInvalid
+		return Finding{}, invalidField("安全发现标识格式不正确")
 	}
 	if err := s.expireDueRiskAcceptances(ctx); err != nil {
 		return Finding{}, err
@@ -898,8 +936,20 @@ func (s *Service) LinkDuplicateFinding(ctx context.Context, principal auth.Princ
 	}
 	input.MasterFindingID = strings.TrimSpace(input.MasterFindingID)
 	input.Reason = strings.TrimSpace(input.Reason)
-	if !validUUID(id) || !validUUID(input.MasterFindingID) || id == input.MasterFindingID || input.Reason == "" || textlength.Count(input.Reason) > 5000 {
-		return Finding{}, ErrInvalid
+	if !validUUID(id) {
+		return Finding{}, invalidField("待关联安全发现标识格式不正确")
+	}
+	if !validUUID(input.MasterFindingID) {
+		return Finding{}, invalidField("请选择有效的主漏洞")
+	}
+	if strings.EqualFold(id, input.MasterFindingID) {
+		return Finding{}, invalidField("不能将安全发现关联为自身的重复漏洞")
+	}
+	if input.Reason == "" {
+		return Finding{}, invalidField("重复关联原因不能为空")
+	}
+	if textlength.Count(input.Reason) > 5000 {
+		return Finding{}, invalidField("重复关联原因最多 5000 字")
 	}
 	if err := s.guardPersonalFinding(ctx, id); err != nil {
 		return Finding{}, err
@@ -977,15 +1027,15 @@ func (s *Service) LinkDuplicateFinding(ctx context.Context, principal auth.Princ
 }
 
 func (s *Service) AcceptRisk(ctx context.Context, principal auth.Principal, id string, input RiskAcceptanceInput, requestID, ipAddress string) (Finding, error) {
-	if err := s.guardPersonalFinding(ctx, id); err != nil {
-		return Finding{}, err
-	}
 	if !principal.CanManageSecurityFindings() {
 		return Finding{}, ErrForbidden
 	}
+	if err := s.guardPersonalFinding(ctx, id); err != nil {
+		return Finding{}, err
+	}
 	input.Reason = strings.TrimSpace(input.Reason)
-	if !validUUID(id) || !validRiskAcceptanceInput(input) {
-		return Finding{}, ErrInvalid
+	if err := validateRiskAcceptanceInput(input); err != nil {
+		return Finding{}, err
 	}
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
@@ -1055,14 +1105,14 @@ func (s *Service) AcceptRisk(ctx context.Context, principal auth.Principal, id s
 }
 
 func (s *Service) RevokeRisk(ctx context.Context, principal auth.Principal, id string, input RiskRevokeInput, requestID, ipAddress string) (Finding, error) {
-	if err := s.guardPersonalFinding(ctx, id); err != nil {
-		return Finding{}, err
-	}
 	if !principal.CanManageSecurityFindings() {
 		return Finding{}, ErrForbidden
 	}
+	if err := s.guardPersonalFinding(ctx, id); err != nil {
+		return Finding{}, err
+	}
 	if !validUUID(id) {
-		return Finding{}, ErrInvalid
+		return Finding{}, invalidField("安全发现标识格式不正确")
 	}
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
@@ -1117,15 +1167,18 @@ func (s *Service) RevokeRisk(ctx context.Context, principal auth.Principal, id s
 }
 
 func (s *Service) ReviewRisk(ctx context.Context, principal auth.Principal, id string, input RiskReviewInput, requestID, ipAddress string) (Finding, error) {
-	if err := s.guardPersonalFinding(ctx, id); err != nil {
-		return Finding{}, err
-	}
 	if !principal.CanManageSecurityFindings() {
 		return Finding{}, ErrForbidden
 	}
+	if err := s.guardPersonalFinding(ctx, id); err != nil {
+		return Finding{}, err
+	}
 	input.Comment = strings.TrimSpace(input.Comment)
-	if !validUUID(id) || input.Comment == "" || textlength.Count(input.Comment) > 5000 {
-		return Finding{}, ErrInvalid
+	if input.Comment == "" {
+		return Finding{}, invalidField("复核意见不能为空")
+	}
+	if textlength.Count(input.Comment) > 5000 {
+		return Finding{}, invalidField("复核意见最多 5000 字")
 	}
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
@@ -1162,12 +1215,12 @@ func (s *Service) ReviewRisk(ctx context.Context, principal auth.Principal, id s
 	effectiveUntil := currentUntil
 	if input.AcceptedUntil != nil {
 		if !input.AcceptedUntil.After(time.Now()) {
-			return Finding{}, ErrInvalid
+			return Finding{}, invalidField("风险有效期必须晚于当前时间")
 		}
 		effectiveUntil = input.AcceptedUntil
 	}
 	if effectiveUntil == nil || !effectiveUntil.After(time.Now()) {
-		return Finding{}, ErrInvalid
+		return Finding{}, invalidField("风险有效期必须晚于当前时间")
 	}
 	if _, err := tx.Exec(ctx, `
 		UPDATE security_findings SET risk_accepted_until = $2, risk_reviewed_at = now(),
@@ -1205,12 +1258,13 @@ func (s *Service) SearchWorkOrders(ctx context.Context, principal auth.Principal
 }
 
 // SearchWorkOrdersWithFilter applies all filters and pagination in the database before related findings are hydrated.
+// Drafts are not actionable, so they must not be overdue (same definition as the dashboard).
 func (s *Service) SearchWorkOrdersWithFilter(ctx context.Context, principal auth.Principal, filter WorkOrderSearchFilter) (pagination.Result[WorkOrder], error) {
 	filter.OrganizationID = strings.TrimSpace(filter.OrganizationID)
 	filter.Status = strings.TrimSpace(filter.Status)
 	if filter.OrganizationID != "" {
 		if !validUUID(filter.OrganizationID) {
-			return pagination.Result[WorkOrder]{}, ErrInvalid
+			return pagination.Result[WorkOrder]{}, invalidField("安全工单筛选的责任组织标识格式不正确")
 		}
 		allowed, err := s.canViewWorkOrder(ctx, principal, filter.OrganizationID)
 		if err != nil {
@@ -1221,7 +1275,7 @@ func (s *Service) SearchWorkOrdersWithFilter(ctx context.Context, principal auth
 		}
 	}
 	if filter.Status != "" && !validWorkOrderStatus(filter.Status) {
-		return pagination.Result[WorkOrder]{}, ErrInvalid
+		return pagination.Result[WorkOrder]{}, invalidField("请选择有效的安全工单状态")
 	}
 	selectWithTotal := strings.Replace(workOrderSelect, "SELECT ", "SELECT count(*) OVER (), ", 1)
 	rows, err := s.pool.Query(ctx, accessibleCTE+selectWithTotal+`
@@ -1231,7 +1285,7 @@ func (s *Service) SearchWorkOrdersWithFilter(ctx context.Context, principal auth
 		      )
 		  AND ($3::text = '' OR wo.assignee_organization_id::text = $3)
 		  AND ($4::text = '' OR wo.status = $4)
-		  AND (NOT $5::boolean OR (wo.due_at < now() AND wo.status NOT IN ('closed', 'cancelled')))
+		  AND (NOT $5::boolean OR (wo.due_at < now() AND wo.status NOT IN ('draft', 'closed', 'cancelled')))
 		ORDER BY CASE WHEN wo.status IN ('closed', 'cancelled') THEN 1 ELSE 0 END,
 		         wo.due_at, wo.created_at DESC
 		LIMIT $6 OFFSET $7`, principal.UserID, principal.CanManageSecurityWorkOrders(), filter.OrganizationID, filter.Status, filter.OverdueOnly, filter.Page.PageSize, filter.Page.Offset())
@@ -1260,7 +1314,7 @@ func (s *Service) SearchWorkOrdersWithFilter(ctx context.Context, principal auth
                   )
               AND ($3::text = '' OR wo.assignee_organization_id::text = $3)
               AND ($4::text = '' OR wo.status = $4)
-              AND (NOT $5::boolean OR (wo.due_at < now() AND wo.status NOT IN ('closed', 'cancelled')))
+              AND (NOT $5::boolean OR (wo.due_at < now() AND wo.status NOT IN ('draft', 'closed', 'cancelled')))
         `, principal.UserID, principal.CanManageSecurityWorkOrders(), filter.OrganizationID, filter.Status, filter.OverdueOnly).Scan(&total); err != nil {
 			return pagination.Result[WorkOrder]{}, fmt.Errorf("count security work orders: %w", err)
 		}
@@ -1270,7 +1324,7 @@ func (s *Service) SearchWorkOrdersWithFilter(ctx context.Context, principal auth
 
 func (s *Service) GetWorkOrder(ctx context.Context, principal auth.Principal, id string) (WorkOrder, error) {
 	if !validUUID(id) {
-		return WorkOrder{}, ErrInvalid
+		return WorkOrder{}, invalidField("安全工单标识格式不正确")
 	}
 	item, err := loadWorkOrder(ctx, s.pool, id)
 	if err != nil {
@@ -1377,10 +1431,10 @@ func (s *Service) CreateWorkOrder(ctx context.Context, principal auth.Principal,
 		input.ExecutionMode = "organization"
 	}
 	if input.ExecutionMode != "organization" && input.ExecutionMode != "individual" {
-		return WorkOrder{}, ErrInvalid
+		return WorkOrder{}, invalidField("请选择有效的工单执行方式")
 	}
-	if !validWorkOrderInput(input) {
-		return WorkOrder{}, ErrInvalid
+	if err := validateWorkOrderInput(input); err != nil {
+		return WorkOrder{}, err
 	}
 	var organizationStatus, organizationType string
 	if err := s.pool.QueryRow(ctx, `SELECT status, organization_type FROM organizations WHERE id::text = $1 AND deleted_at IS NULL`, input.AssigneeOrganizationID).Scan(&organizationStatus, &organizationType); errors.Is(err, pgx.ErrNoRows) {
@@ -1388,8 +1442,11 @@ func (s *Service) CreateWorkOrder(ctx context.Context, principal auth.Principal,
 	} else if err != nil {
 		return WorkOrder{}, fmt.Errorf("load work order organization: %w", err)
 	}
-	if organizationStatus != "enabled" || organizationType == "group" {
-		return WorkOrder{}, ErrInvalid
+	if organizationStatus != "enabled" {
+		return WorkOrder{}, invalidField("责任组织已停用，不能创建安全工单")
+	}
+	if organizationType == "group" {
+		return WorkOrder{}, invalidField("安全工单责任组织不能选择集团组织")
 	}
 
 	tx, err := s.pool.Begin(ctx)
@@ -1437,10 +1494,9 @@ func (s *Service) Issue(ctx context.Context, principal auth.Principal, id string
 		return WorkOrder{}, ErrForbidden
 	}
 	input.Comment = strings.TrimSpace(input.Comment)
-	if !validUUID(id) || textlength.Count(input.Comment) > 2000 {
-		return WorkOrder{}, ErrInvalid
-	}
-	return s.transition(ctx, principal, id, []string{"draft"}, "issued", "issue", input.Comment, requestID, ipAddress, func(ctx context.Context, tx pgx.Tx) error {
+	return s.transition(ctx, principal, id, []string{"draft"}, "issued", "issue", input.Comment, requestID, ipAddress, func() error {
+		return validateWorkOrderComment(input.Comment, false)
+	}, func(ctx context.Context, tx pgx.Tx) error {
 		if _, err := tx.Exec(ctx, `UPDATE security_work_orders SET issued_at = now() WHERE id::text = $1`, id); err != nil {
 			return fmt.Errorf("set work order issued time: %w", err)
 		}
@@ -1461,35 +1517,41 @@ func (s *Service) Issue(ctx context.Context, principal auth.Principal, id string
 }
 
 func (s *Service) Accept(ctx context.Context, principal auth.Principal, id string, input CommentInput, requestID, ipAddress string) (WorkOrder, error) {
-	input.Comment = strings.TrimSpace(input.Comment)
-	if !validUUID(id) || textlength.Count(input.Comment) > 2000 {
-		return WorkOrder{}, ErrInvalid
+	if !principal.CanExecuteSecurityWorkOrders() && !principal.HasPermission("remediation.assign") {
+		return WorkOrder{}, ErrForbidden
 	}
-	return s.transition(ctx, principal, id, []string{"issued"}, "in_progress", "accept", input.Comment, requestID, ipAddress, func(ctx context.Context, tx pgx.Tx) error {
+	input.Comment = strings.TrimSpace(input.Comment)
+	return s.transition(ctx, principal, id, []string{"issued"}, "in_progress", "accept", input.Comment, requestID, ipAddress, func() error {
+		return validateWorkOrderComment(input.Comment, false)
+	}, func(ctx context.Context, tx pgx.Tx) error {
 		_, err := tx.Exec(ctx, `UPDATE security_work_orders SET accepted_at = COALESCE(accepted_at, now()) WHERE id::text = $1`, id)
 		return err
 	})
 }
 
 func (s *Service) Progress(ctx context.Context, principal auth.Principal, id string, input ProgressInput, requestID, ipAddress string) (WorkOrder, error) {
+	if !principal.CanExecuteSecurityWorkOrders() && !principal.HasPermission("remediation.assign") {
+		return WorkOrder{}, ErrForbidden
+	}
 	input.Progress = strings.TrimSpace(input.Progress)
 	input.Comment = strings.TrimSpace(input.Comment)
-	if !validUUID(id) || input.Progress == "" || textlength.Count(input.Progress) > 5000 || textlength.Count(input.Comment) > 2000 {
-		return WorkOrder{}, ErrInvalid
-	}
-	return s.transition(ctx, principal, id, []string{"in_progress", "returned"}, "in_progress", "progress", input.Comment, requestID, ipAddress, func(ctx context.Context, tx pgx.Tx) error {
+	return s.transition(ctx, principal, id, []string{"in_progress", "returned"}, "in_progress", "progress", input.Comment, requestID, ipAddress, func() error {
+		return validateWorkOrderProgress(input)
+	}, func(ctx context.Context, tx pgx.Tx) error {
 		_, err := tx.Exec(ctx, `UPDATE security_work_orders SET remediation_progress = $2, return_reason = CASE WHEN status = 'returned' THEN NULL ELSE return_reason END WHERE id::text = $1`, id, input.Progress)
 		return err
 	})
 }
 
 func (s *Service) Submit(ctx context.Context, principal auth.Principal, id string, input SubmitInput, requestID, ipAddress string) (WorkOrder, error) {
+	if !principal.CanExecuteSecurityWorkOrders() && !principal.HasPermission("remediation.assign") {
+		return WorkOrder{}, ErrForbidden
+	}
 	input.RemediationResult = strings.TrimSpace(input.RemediationResult)
 	input.Comment = strings.TrimSpace(input.Comment)
-	if !validUUID(id) || input.RemediationResult == "" || textlength.Count(input.RemediationResult) > 10000 || textlength.Count(input.Comment) > 2000 {
-		return WorkOrder{}, ErrInvalid
-	}
-	return s.transition(ctx, principal, id, []string{"in_progress", "returned"}, "pending_verification", "submit", input.Comment, requestID, ipAddress, func(ctx context.Context, tx pgx.Tx) error {
+	return s.transition(ctx, principal, id, []string{"in_progress", "returned"}, "pending_verification", "submit", input.Comment, requestID, ipAddress, func() error {
+		return validateWorkOrderSubmission(input)
+	}, func(ctx context.Context, tx pgx.Tx) error {
 		_, err := tx.Exec(ctx, `UPDATE security_work_orders SET remediation_result = $2, submitted_at = now(), return_reason = NULL WHERE id::text = $1`, id, input.RemediationResult)
 		return err
 	})
@@ -1502,17 +1564,15 @@ func (s *Service) Review(ctx context.Context, principal auth.Principal, id strin
 	input.Decision = strings.TrimSpace(input.Decision)
 	input.VerificationResult = strings.TrimSpace(input.VerificationResult)
 	input.ReturnReason = strings.TrimSpace(input.ReturnReason)
-	if !validUUID(id) || (input.Decision != "returned" && input.Decision != "closed") || textlength.Count(input.VerificationResult) > 10000 || textlength.Count(input.ReturnReason) > 2000 ||
-		(input.Decision == "returned" && input.ReturnReason == "") || (input.Decision == "closed" && input.VerificationResult == "") {
-		return WorkOrder{}, ErrInvalid
-	}
 	action := "return"
 	comment := input.ReturnReason
 	if input.Decision == "closed" {
 		action = "close"
 		comment = input.VerificationResult
 	}
-	return s.transition(ctx, principal, id, []string{"pending_verification"}, input.Decision, action, comment, requestID, ipAddress, func(ctx context.Context, tx pgx.Tx) error {
+	return s.transition(ctx, principal, id, []string{"pending_verification"}, input.Decision, action, comment, requestID, ipAddress, func() error {
+		return validateWorkOrderReview(input)
+	}, func(ctx context.Context, tx pgx.Tx) error {
 		if input.Decision == "returned" {
 			_, err := tx.Exec(ctx, `UPDATE security_work_orders SET verification_result = NULLIF($2, ''), return_reason = $3, verified_at = now() WHERE id::text = $1`, id, input.VerificationResult, input.ReturnReason)
 			return err
@@ -1533,10 +1593,9 @@ func (s *Service) Cancel(ctx context.Context, principal auth.Principal, id strin
 		return WorkOrder{}, ErrForbidden
 	}
 	input.Comment = strings.TrimSpace(input.Comment)
-	if !validUUID(id) || input.Comment == "" || textlength.Count(input.Comment) > 2000 {
-		return WorkOrder{}, ErrInvalid
-	}
-	return s.transition(ctx, principal, id, []string{"draft", "issued", "in_progress", "pending_verification", "returned"}, "cancelled", "cancel", input.Comment, requestID, ipAddress, func(ctx context.Context, tx pgx.Tx) error {
+	return s.transition(ctx, principal, id, []string{"draft", "issued", "in_progress", "pending_verification", "returned"}, "cancelled", "cancel", input.Comment, requestID, ipAddress, func() error {
+		return validateWorkOrderComment(input.Comment, true)
+	}, func(ctx context.Context, tx pgx.Tx) error {
 		if _, err := tx.Exec(ctx, `UPDATE security_work_orders SET cancelled_at = now() WHERE id::text = $1`, id); err != nil {
 			return err
 		}
@@ -1611,9 +1670,9 @@ func individualWorkOrderActionForbidden(action string) bool {
 	}
 }
 
-func (s *Service) transition(ctx context.Context, principal auth.Principal, id string, fromStatuses []string, toStatus, action, comment, requestID, ipAddress string, extra transitionExtra) (WorkOrder, error) {
+func (s *Service) transition(ctx context.Context, principal auth.Principal, id string, fromStatuses []string, toStatus, action, comment, requestID, ipAddress string, validate func() error, extra transitionExtra) (WorkOrder, error) {
 	if !validUUID(id) {
-		return WorkOrder{}, ErrInvalid
+		return WorkOrder{}, invalidField("安全工单标识不正确")
 	}
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
@@ -1634,6 +1693,11 @@ func (s *Service) transition(ctx context.Context, principal auth.Principal, id s
 	// an unauthorized caller must never reach those updates.
 	if err := s.authorizeWorkOrderAction(ctx, principal, organizationID, executionMode, action); err != nil {
 		return WorkOrder{}, err
+	}
+	if validate != nil {
+		if err := validate(); err != nil {
+			return WorkOrder{}, err
+		}
 	}
 	if executionMode == "individual" {
 		// Individual work orders are orchestration containers. Concrete
@@ -1703,7 +1767,7 @@ func (s *Service) getFinding(ctx context.Context, id string) (Finding, error) {
 		LEFT JOIN users u ON u.id = f.created_by
 		LEFT JOIN users risk_acceptor ON risk_acceptor.id = f.risk_accepted_by
 		LEFT JOIN users risk_reviewer ON risk_reviewer.id = f.risk_reviewed_by
-		WHERE f.id::text = $1`, id), &item)
+		WHERE f.id = $1::uuid`, id), &item)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return Finding{}, ErrNotFound
 	}
@@ -1721,7 +1785,7 @@ func (s *Service) validateReferences(ctx context.Context, organizationID, assetI
 // pool connection here could exhaust the pool while other edits wait on locks.
 func validateFindingReferences(ctx context.Context, db queryer, organizationID, assetID, systemID string) error {
 	var valid bool
-	if err := db.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM organizations WHERE id::text = $1 AND status = 'enabled' AND deleted_at IS NULL AND organization_type <> 'group')`, organizationID).Scan(&valid); err != nil {
+	if err := db.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM organizations WHERE id = $1::uuid AND status = 'enabled' AND deleted_at IS NULL AND organization_type <> 'group')`, organizationID).Scan(&valid); err != nil {
 		return fmt.Errorf("validate finding organization: %w", err)
 	}
 	if !valid {
@@ -1731,7 +1795,7 @@ func validateFindingReferences(ctx context.Context, db queryer, organizationID, 
 		if err := db.QueryRow(ctx, `
 			SELECT EXISTS (
 				SELECT 1 FROM assets a JOIN asset_organizations ao ON ao.asset_id = a.id
-				WHERE a.id::text = $1 AND ao.organization_id::text = $2 AND a.deleted_at IS NULL
+				WHERE a.id = $1::uuid AND ao.organization_id = $2::uuid AND a.deleted_at IS NULL
 			)`, assetID, organizationID).Scan(&valid); err != nil {
 			return fmt.Errorf("validate finding asset: %w", err)
 		}
@@ -1741,7 +1805,7 @@ func validateFindingReferences(ctx context.Context, db queryer, organizationID, 
 	}
 	if systemID != "" {
 		if err := db.QueryRow(ctx, `
-			SELECT EXISTS (SELECT 1 FROM business_systems WHERE id::text = $1 AND owner_organization_id::text = $2 AND deleted_at IS NULL)`, systemID, organizationID).Scan(&valid); err != nil {
+			SELECT EXISTS (SELECT 1 FROM business_systems WHERE id = $1::uuid AND owner_organization_id = $2::uuid AND deleted_at IS NULL)`, systemID, organizationID).Scan(&valid); err != nil {
 			return fmt.Errorf("validate finding business system: %w", err)
 		}
 		if !valid {
@@ -1757,15 +1821,15 @@ func (s *Service) validateFindingBatchScope(ctx context.Context, batchID, organi
 
 func validateFindingBatchScope(ctx context.Context, db queryer, batchID, organizationID, assetID string) error {
 	if assetID == "" {
-		return ErrInvalid
+		return invalidField("关联测试批次时必须选择批次范围内的网络资产")
 	}
 	var valid bool
 	if err := db.QueryRow(ctx, `
 		SELECT EXISTS (
 			SELECT 1 FROM security_test_batches b
 			JOIN security_test_scope_assets scope ON scope.batch_id = b.id
-			WHERE b.id::text = $1 AND b.status IN ('authorized', 'in_progress', 'completed')
-			  AND scope.organization_id::text = $2 AND scope.asset_id::text = $3
+			WHERE b.id = $1::uuid AND b.status IN ('authorized', 'in_progress', 'completed')
+			  AND scope.organization_id = $2::uuid AND scope.asset_id = $3::uuid
 		)`, batchID, organizationID, assetID).Scan(&valid); err != nil {
 		return fmt.Errorf("validate finding test batch scope: %w", err)
 	}
@@ -1905,7 +1969,7 @@ const workOrderSelect = `
 	SELECT wo.id::text, wo.work_order_no, wo.title,
 	       o.id::text, o.organization_code, o.organization_name,
 	       wo.severity, wo.status, COALESCE(wo.description, ''), wo.remediation_requirement,
-	       wo.due_at, (wo.due_at < now() AND wo.status NOT IN ('closed', 'cancelled')) AS overdue,
+	       wo.due_at, (wo.due_at < now() AND wo.status NOT IN ('draft', 'closed', 'cancelled')) AS overdue,
 	       wo.issued_at, wo.accepted_at, wo.submitted_at, wo.verified_at, wo.closed_at, wo.cancelled_at,
 	       COALESCE(wo.remediation_progress, ''), COALESCE(wo.remediation_result, ''),
 	       COALESCE(wo.verification_result, ''), COALESCE(wo.return_reason, ''),
@@ -2161,17 +2225,11 @@ func checkFindingVersion(id string, expected *time.Time, current time.Time) erro
 }
 
 func validRiskAcceptanceInput(input RiskAcceptanceInput) bool {
-	return input.Reason != "" && textlength.Count(input.Reason) <= 5000 && input.AcceptedUntil.After(time.Now())
+	return validateRiskAcceptanceInput(input) == nil
 }
 
 func validFindingInput(input FindingInput) bool {
-	return input.Title != "" && textlength.Count(input.Title) <= 255 && validSeverity(input.Severity) && validFindingStatus(input.Status) &&
-		validUUID(input.AssigneeOrganizationID) && (input.AssetID != "" || input.BusinessSystemID != "") &&
-		(input.AssetID == "" || validUUID(input.AssetID)) && (input.BusinessSystemID == "" || validUUID(input.BusinessSystemID)) &&
-		(input.TestBatchID == "" || validUUID(input.TestBatchID)) &&
-		textlength.Count(input.VulnerabilityType) <= 128 && input.Description != "" && textlength.Count(input.Description) <= 20000 &&
-		textlength.Count(input.Evidence) <= 30000 && textlength.Count(input.RemediationAdvice) <= 20000 &&
-		(input.Source == "manual" || input.Source == "import" || input.Source == "api" || input.Source == "plugin")
+	return validateFindingInput(input) == nil
 }
 
 func normalizeWorkOrderInput(input *WorkOrderInput) {
@@ -2183,17 +2241,7 @@ func normalizeWorkOrderInput(input *WorkOrderInput) {
 }
 
 func validWorkOrderInput(input WorkOrderInput) bool {
-	if input.Title == "" || textlength.Count(input.Title) > 255 || !validUUID(input.AssigneeOrganizationID) ||
-		textlength.Count(input.Description) > 10000 || input.RemediationRequirement == "" || textlength.Count(input.RemediationRequirement) > 20000 ||
-		input.DueAt.IsZero() || !input.DueAt.After(time.Now().Add(-time.Minute)) || len(input.FindingIDs) == 0 || len(input.FindingIDs) > 100 {
-		return false
-	}
-	for _, id := range input.FindingIDs {
-		if !validUUID(id) {
-			return false
-		}
-	}
-	return true
+	return validateWorkOrderInput(input) == nil
 }
 
 func validSeverity(value string) bool {
@@ -2268,7 +2316,7 @@ func workOrderActionSummary(action string) string {
 
 func (s *Service) guardPersonalFinding(ctx context.Context, id string) error {
 	if !validUUID(id) {
-		return ErrInvalid
+		return invalidField("安全发现标识不正确")
 	}
 	var linked bool
 	if err := s.pool.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM remediation_tasks t JOIN security_work_orders w ON w.id=t.work_order_id WHERE t.finding_id=$1::uuid AND t.status<>'cancelled' AND w.status NOT IN ('closed','cancelled'))`, id).Scan(&linked); err != nil {

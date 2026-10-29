@@ -12,6 +12,7 @@ import (
 	"github.com/gin-gonic/gin"
 
 	"netassets/internal/asset"
+	"netassets/internal/businesssystem"
 	"netassets/internal/exportfile"
 	"netassets/internal/inventorytask"
 )
@@ -21,7 +22,7 @@ func registerInventoryTaskRoutes(api *gin.RouterGroup, requireAuth gin.HandlerFu
 	group.GET("", func(c *gin.Context) {
 		page, err := parsePageQuery(c)
 		if err != nil {
-			writeAPIError(c, http.StatusBadRequest, "invalid_query", "分页参数不正确，page_size 最大为 100")
+			writeAPIError(c, http.StatusBadRequest, "invalid_query", pageQueryErrorMessage(err))
 			return
 		}
 		result, err := service.Search(c.Request.Context(), mustPrincipal(c), strings.TrimSpace(c.Query("task_id")), page)
@@ -42,7 +43,7 @@ func registerInventoryTaskRoutes(api *gin.RouterGroup, requireAuth gin.HandlerFu
 	group.GET("/resource-submissions/:resourceType/:resourceID", func(c *gin.Context) {
 		page, err := parsePageQuery(c)
 		if err != nil {
-			writeAPIError(c, http.StatusBadRequest, "invalid_query", "分页参数不正确，page_size 最大为 100")
+			writeAPIError(c, http.StatusBadRequest, "invalid_query", pageQueryErrorMessage(err))
 			return
 		}
 		result, err := service.ResourceSubmissionHistory(c.Request.Context(), mustPrincipal(c), c.Param("resourceType"), c.Param("resourceID"), page)
@@ -73,7 +74,7 @@ func registerInventoryTaskRoutes(api *gin.RouterGroup, requireAuth gin.HandlerFu
 	group.GET("/:taskID/organizations/:organizationID/business-system-drafts", func(c *gin.Context) {
 		page, err := parsePageQuery(c)
 		if err != nil {
-			writeAPIError(c, http.StatusBadRequest, "invalid_query", "分页参数不正确，page_size 最大为 100")
+			writeAPIError(c, http.StatusBadRequest, "invalid_query", pageQueryErrorMessage(err))
 			return
 		}
 		result, err := service.SearchBusinessSystemDrafts(c.Request.Context(), mustPrincipal(c), c.Param("taskID"), c.Param("organizationID"), page, c.Query("include_discarded") == "true")
@@ -185,7 +186,7 @@ func registerInventoryTaskRoutes(api *gin.RouterGroup, requireAuth gin.HandlerFu
 	group.GET("/:taskID/organizations/:organizationID/asset-drafts", func(c *gin.Context) {
 		page, err := parsePageQuery(c)
 		if err != nil {
-			writeAPIError(c, http.StatusBadRequest, "invalid_query", "分页参数不正确，page_size 最大为 100")
+			writeAPIError(c, http.StatusBadRequest, "invalid_query", pageQueryErrorMessage(err))
 			return
 		}
 		result, err := service.SearchAssetDrafts(c.Request.Context(), mustPrincipal(c), c.Param("taskID"), c.Param("organizationID"), page, c.Query("include_discarded") == "true")
@@ -297,13 +298,13 @@ func registerInventoryTaskRoutes(api *gin.RouterGroup, requireAuth gin.HandlerFu
 	group.GET("/:taskID/organizations", func(c *gin.Context) {
 		page, err := parsePageQuery(c)
 		if err != nil {
-			writeAPIError(c, http.StatusBadRequest, "invalid_query", "分页参数不正确，page_size 最大为 100")
+			writeAPIError(c, http.StatusBadRequest, "invalid_query", pageQueryErrorMessage(err))
 			return
 		}
 		result, err := service.SearchOrganizations(c.Request.Context(), mustPrincipal(c), c.Param("taskID"), strings.TrimSpace(c.Query("organization_id")), page)
 		switch {
 		case errors.Is(err, inventorytask.ErrInvalid):
-			writeAPIError(c, http.StatusBadRequest, "invalid_inventory_task_id", "填报任务编号不正确")
+			writeAPIError(c, http.StatusBadRequest, "invalid_inventory_task_id", inventoryTaskValidationMessage(err, "填报任务编号不正确"))
 		case errors.Is(err, inventorytask.ErrNotFound):
 			writeAPIError(c, http.StatusNotFound, "inventory_task_not_found", "填报任务不存在或当前账号无权查看")
 		case err != nil:
@@ -346,7 +347,7 @@ func registerInventoryTaskRoutes(api *gin.RouterGroup, requireAuth gin.HandlerFu
 		case errors.Is(err, inventorytask.ErrExportTooLarge):
 			writeAPIError(c, http.StatusUnprocessableEntity, "synchronous_xlsx_limit_exceeded", "同步 XLSX 导出最多支持 5000 条数据，请改用 CSV 格式导出")
 		case errors.Is(err, inventorytask.ErrInvalid):
-			writeAPIError(c, http.StatusBadRequest, "invalid_format", "导出格式仅支持 csv 或 xlsx")
+			writeAPIError(c, http.StatusBadRequest, "invalid_format", inventoryTaskValidationMessage(err, "导出格式仅支持 csv 或 xlsx"))
 		case errors.Is(err, inventorytask.ErrNotFound):
 			writeAPIError(c, http.StatusNotFound, "inventory_task_not_found", "填报任务不存在或当前账号无权导出")
 		case err != nil:
@@ -371,7 +372,7 @@ func registerInventoryTaskRoutes(api *gin.RouterGroup, requireAuth gin.HandlerFu
 		case errors.Is(err, inventorytask.ErrForbidden):
 			writeAPIError(c, http.StatusForbidden, "forbidden", "仅集团管理员可以预览填报任务范围")
 		case errors.Is(err, inventorytask.ErrInvalid):
-			writeAPIError(c, http.StatusBadRequest, "invalid_inventory_task_scope", "请检查填报组织、填报内容和网络资产核查范围")
+			writeAPIError(c, http.StatusBadRequest, "invalid_inventory_task_scope", inventoryTaskValidationMessage(err, "请检查填报组织、填报内容和网络资产核查范围"))
 		case errors.Is(err, inventorytask.ErrNotFound):
 			writeAPIError(c, http.StatusNotFound, "organization_not_found", "部分填报组织不存在、已停用或不是下级组织")
 		case err != nil:
@@ -392,7 +393,7 @@ func registerInventoryTaskRoutes(api *gin.RouterGroup, requireAuth gin.HandlerFu
 		case errors.Is(err, inventorytask.ErrForbidden):
 			writeAPIError(c, http.StatusForbidden, "forbidden", "仅集团管理员可以创建填报任务")
 		case errors.Is(err, inventorytask.ErrInvalid):
-			writeAPIError(c, http.StatusBadRequest, "invalid_inventory_task", "请检查任务名称、时间范围和填报组织")
+			writeAPIError(c, http.StatusBadRequest, "invalid_inventory_task", inventoryTaskValidationMessage(err, "请检查任务名称、时间范围和填报组织"))
 		case errors.Is(err, inventorytask.ErrNotFound):
 			writeAPIError(c, http.StatusNotFound, "organization_not_found", "部分填报组织不存在、已停用或不是下级组织")
 		case err != nil:
@@ -417,7 +418,7 @@ func registerInventoryTaskRoutes(api *gin.RouterGroup, requireAuth gin.HandlerFu
 	group.GET("/:taskID/organizations/:organizationID/submission-diff/items", func(c *gin.Context) {
 		page, err := parsePageQuery(c)
 		if err != nil {
-			writeAPIError(c, http.StatusBadRequest, "invalid_query", "分页参数不正确，page_size 最大为 100")
+			writeAPIError(c, http.StatusBadRequest, "invalid_query", pageQueryErrorMessage(err))
 			return
 		}
 		result, err := service.SearchSubmissionDiffItems(
@@ -426,7 +427,7 @@ func registerInventoryTaskRoutes(api *gin.RouterGroup, requireAuth gin.HandlerFu
 		)
 		switch {
 		case errors.Is(err, inventorytask.ErrInvalid):
-			writeAPIError(c, http.StatusBadRequest, "invalid_query", "resource_type 或 change_type 参数不正确")
+			writeAPIError(c, http.StatusBadRequest, "invalid_query", inventoryTaskValidationMessage(err, "提交差异筛选条件不正确"))
 		case errors.Is(err, inventorytask.ErrNotFound):
 			writeAPIError(c, http.StatusNotFound, "submission_not_found", "尚未生成填报提交快照，或当前账号无权查看")
 		case err != nil:
@@ -451,7 +452,7 @@ func registerInventoryTaskRoutes(api *gin.RouterGroup, requireAuth gin.HandlerFu
 	group.GET("/:taskID/organizations/:organizationID/review-resources", func(c *gin.Context) {
 		page, err := parsePageQuery(c)
 		if err != nil {
-			writeAPIError(c, http.StatusBadRequest, "invalid_query", "分页参数不正确，page_size 最大为 100")
+			writeAPIError(c, http.StatusBadRequest, "invalid_query", pageQueryErrorMessage(err))
 			return
 		}
 		result, err := service.SearchReviewResources(c.Request.Context(), mustPrincipal(c), c.Param("taskID"), c.Param("organizationID"), c.Query("q"), page)
@@ -468,7 +469,7 @@ func registerInventoryTaskRoutes(api *gin.RouterGroup, requireAuth gin.HandlerFu
 	group.GET("/:taskID/organizations/:organizationID/review-comments", func(c *gin.Context) {
 		page, err := parsePageQuery(c)
 		if err != nil {
-			writeAPIError(c, http.StatusBadRequest, "invalid_query", "分页参数不正确，page_size 最大为 100")
+			writeAPIError(c, http.StatusBadRequest, "invalid_query", pageQueryErrorMessage(err))
 			return
 		}
 		result, err := service.SearchReviewComments(c.Request.Context(), mustPrincipal(c), c.Param("taskID"), c.Param("organizationID"), page)
@@ -527,7 +528,7 @@ func registerInventoryTaskRoutes(api *gin.RouterGroup, requireAuth gin.HandlerFu
 		case errors.Is(err, inventorytask.ErrForbidden):
 			writeAPIError(c, http.StatusForbidden, "forbidden", "仅集团管理员可以更新任务状态")
 		case errors.Is(err, inventorytask.ErrInvalid):
-			writeAPIError(c, http.StatusBadRequest, "invalid_status", "不支持该任务状态")
+			writeAPIError(c, http.StatusBadRequest, "invalid_status", inventoryTaskValidationMessage(err, "不支持该任务状态"))
 		case errors.Is(err, inventorytask.ErrState):
 			writeAPIError(c, http.StatusConflict, "invalid_state", "任务当前状态不允许执行该操作")
 		case err != nil:
@@ -546,7 +547,7 @@ func writeResourceSubmissionHistoryError(c *gin.Context, logger *slog.Logger, er
 	case errors.Is(err, inventorytask.ErrForbidden):
 		writeAPIError(c, http.StatusForbidden, "forbidden", "当前账号无权查看该资源的上报历史")
 	case errors.Is(err, inventorytask.ErrInvalid):
-		writeAPIError(c, http.StatusBadRequest, "invalid_resource", "资源类型、资源标识或分页参数不正确")
+		writeAPIError(c, http.StatusBadRequest, "invalid_resource", inventoryTaskValidationMessage(err, "上报历史资源标识不正确"))
 	case errors.Is(err, inventorytask.ErrNotFound):
 		writeAPIError(c, http.StatusNotFound, "resource_not_found", "资源不存在或已不可访问")
 	default:
@@ -563,7 +564,7 @@ func writeResourceSubmissionRestoreError(c *gin.Context, logger *slog.Logger, er
 	case errors.Is(err, inventorytask.ErrForbidden):
 		writeAPIError(c, http.StatusForbidden, "forbidden", "仅组织侧具有填报和资源管理权限的账号可以恢复历史版本")
 	case errors.Is(err, inventorytask.ErrInvalid):
-		writeAPIError(c, http.StatusBadRequest, "invalid_restore", "历史版本字段已不符合当前台账规则，无法自动恢复")
+		writeAPIError(c, http.StatusBadRequest, "invalid_restore", inventoryTaskValidationMessage(err, "历史版本字段已不符合当前台账规则，无法自动恢复"))
 	case errors.Is(err, inventorytask.ErrNotFound):
 		writeAPIError(c, http.StatusNotFound, "submission_not_found", "资源、上报版本或对应正式台账不存在")
 	case errors.Is(err, inventorytask.ErrState):
@@ -586,7 +587,7 @@ func writeWorkingVersionDiffError(c *gin.Context, logger *slog.Logger, err error
 	case errors.Is(err, inventorytask.ErrForbidden):
 		writeAPIError(c, http.StatusForbidden, "forbidden", "当前账号无权查看该工作版本的变更内容")
 	case errors.Is(err, inventorytask.ErrInvalid):
-		writeAPIError(c, http.StatusBadRequest, "invalid_working_version", "工作版本类型或标识不正确")
+		writeAPIError(c, http.StatusBadRequest, "invalid_working_version", inventoryTaskValidationMessage(err, "工作版本类型或标识不正确"))
 	case errors.Is(err, inventorytask.ErrNotFound):
 		writeAPIError(c, http.StatusNotFound, "working_version_not_found", "工作版本或对应集团正式版本不存在")
 	default:
@@ -607,7 +608,7 @@ func writeInventoryProgressResult(c *gin.Context, logger *slog.Logger, operation
 	case errors.Is(err, inventorytask.ErrForbidden):
 		writeAPIError(c, http.StatusForbidden, "forbidden", "您没有权限执行该操作")
 	case errors.Is(err, inventorytask.ErrInvalid):
-		writeAPIError(c, http.StatusBadRequest, "invalid_input", "请检查提交或审核信息")
+		writeAPIError(c, http.StatusBadRequest, "invalid_input", inventoryTaskValidationMessage(err, "请检查提交或审核信息"))
 	case errors.Is(err, inventorytask.ErrNotFound):
 		writeAPIError(c, http.StatusNotFound, "not_found", "填报任务或目标组织不存在")
 	case errors.Is(err, inventorytask.ErrState):
@@ -647,8 +648,10 @@ func writeInventoryBusinessSystemDraftError(c *gin.Context, logger *slog.Logger,
 		return false
 	case errors.Is(err, inventorytask.ErrForbidden):
 		writeAPIError(c, http.StatusForbidden, "forbidden", "当前账号无权维护该组织的填报业务系统草稿")
+	case errors.Is(err, businesssystem.ErrInvalidOwnerContact):
+		writeAPIError(c, http.StatusBadRequest, "invalid_owner_contact", "联系方式格式不正确，请填写手机号码、座机或分机号")
 	case errors.Is(err, inventorytask.ErrInvalid):
-		writeAPIError(c, http.StatusBadRequest, "invalid_business_system_draft", "请检查业务系统字段和集团自定义字段")
+		writeAPIError(c, http.StatusBadRequest, "invalid_business_system_draft", inventoryTaskValidationMessage(err, "请检查业务系统字段和集团自定义字段"))
 	case errors.Is(err, inventorytask.ErrConflict):
 		writeAPIError(c, http.StatusConflict, "business_system_draft_conflict", "相同系统编码已存在于正式台账或当前任务草稿中")
 	case errors.Is(err, inventorytask.ErrNotFound):
@@ -678,7 +681,7 @@ func writeInventoryAssetDraftError(c *gin.Context, logger *slog.Logger, operatio
 	case errors.Is(err, inventorytask.ErrForbidden):
 		writeAPIError(c, http.StatusForbidden, "forbidden", "当前账号无权维护该组织的填报资产草稿")
 	case errors.Is(err, inventorytask.ErrInvalid):
-		writeAPIError(c, http.StatusBadRequest, "invalid_asset_draft", "请检查资产字段、所属资源或任务网络范围")
+		writeAPIError(c, http.StatusBadRequest, "invalid_asset_draft", inventoryTaskValidationMessage(err, "请检查资产字段、所属资源或任务网络范围"))
 	case errors.Is(err, inventorytask.ErrConflict):
 		writeAPIError(c, http.StatusConflict, "asset_draft_conflict", "相同资产已存在于正式台账或当前任务草稿中")
 	case errors.Is(err, inventorytask.ErrNotFound):
@@ -692,4 +695,13 @@ func writeInventoryAssetDraftError(c *gin.Context, logger *slog.Logger, operatio
 		writeAPIError(c, http.StatusInternalServerError, "internal_error", "处理填报资产草稿失败")
 	}
 	return true
+}
+
+// Only typed public validation messages may replace the legacy fallback.
+func inventoryTaskValidationMessage(err error, fallback string) string {
+	var validation *inventorytask.InputValidationError
+	if errors.As(err, &validation) {
+		return validation.Message
+	}
+	return fallback
 }

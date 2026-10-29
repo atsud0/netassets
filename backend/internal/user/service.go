@@ -149,8 +149,11 @@ func (s *Service) Search(ctx context.Context, principal auth.Principal, query Li
 	query.Status = strings.ToLower(strings.TrimSpace(query.Status))
 	query.OrganizationID = strings.TrimSpace(query.OrganizationID)
 	query.RoleID = strings.TrimSpace(query.RoleID)
-	if len(query.Keyword) > 128 || (query.Status != "" && query.Status != "enabled" && query.Status != "disabled" && query.Status != "locked") {
-		return ListResult{}, ErrInvalid
+	if textlength.Count(query.Keyword) > 128 {
+		return ListResult{}, invalidInput("用户搜索关键词最多 128 字")
+	}
+	if query.Status != "" && query.Status != "enabled" && query.Status != "disabled" && query.Status != "locked" {
+		return ListResult{}, invalidInput("请选择有效的用户筛选状态")
 	}
 	if query.Page <= 0 {
 		query.Page = 1
@@ -213,9 +216,9 @@ func (s *Service) Get(ctx context.Context, principal auth.Principal, userID stri
 	if !canManage(principal) {
 		return User{}, ErrForbidden
 	}
-	userID = strings.TrimSpace(userID)
-	if userID == "" {
-		return User{}, ErrInvalid
+	userID = normalizeIdentifier(userID)
+	if !validIdentifier(userID) {
+		return User{}, invalidInput("用户标识格式不正确")
 	}
 	if !principal.HasRole("group_admin") {
 		if err := s.ensureTargetManageable(ctx, principal, userID); err != nil {
@@ -305,13 +308,25 @@ func (s *Service) Create(ctx context.Context, principal auth.Principal, input Cr
 	if !canManage(principal) {
 		return User{}, ErrForbidden
 	}
+	if !principal.HasRole("group_admin") && len(input.GlobalRoleIDs) > 0 {
+		return User{}, ErrForbidden
+	}
 	input.Username = strings.TrimSpace(input.Username)
 	input.DisplayName = strings.TrimSpace(input.DisplayName)
 	input.Email = strings.TrimSpace(input.Email)
 	input.MobilePhone = strings.TrimSpace(input.MobilePhone)
 	input.OfficePhone = strings.TrimSpace(input.OfficePhone)
-	if !usernamePattern.MatchString(input.Username) || textlength.Count(input.Password) < 10 || input.DisplayName == "" || textlength.Count(input.DisplayName) > 128 || textlength.Count(input.Email) > 255 || textlength.Count(input.MobilePhone) > 64 || textlength.Count(input.OfficePhone) > 64 {
-		return User{}, ErrInvalid
+	if input.Username == "" {
+		return User{}, invalidInput("用户名不能为空")
+	}
+	if !usernamePattern.MatchString(input.Username) {
+		return User{}, invalidInput("用户名须为 3–64 位字母、数字、点、下划线或短横线，且以字母或数字开头")
+	}
+	if err := validateUserPassword(input.Password, "初始密码"); err != nil {
+		return User{}, err
+	}
+	if err := validateUserFields(input.DisplayName, input.Email, input.MobilePhone, input.OfficePhone); err != nil {
+		return User{}, err
 	}
 	if err := normalizeGlobalRoleIDs(&input.GlobalRoleIDs); err != nil {
 		return User{}, err
@@ -368,22 +383,31 @@ func (s *Service) Update(ctx context.Context, principal auth.Principal, userID s
 	if !canManage(principal) {
 		return User{}, ErrForbidden
 	}
-	userID = strings.TrimSpace(userID)
+	userID = normalizeIdentifier(userID)
+	if !validIdentifier(userID) {
+		return User{}, invalidInput("用户标识格式不正确")
+	}
+	if userID == principal.UserID {
+		return User{}, ErrForbidden
+	}
+	if err := s.ensureTargetManageable(ctx, principal, userID); err != nil {
+		return User{}, err
+	}
+	if !principal.HasRole("group_admin") && len(input.GlobalRoleIDs) > 0 {
+		return User{}, ErrForbidden
+	}
 	input.DisplayName = strings.TrimSpace(input.DisplayName)
 	input.Email = strings.TrimSpace(input.Email)
 	input.MobilePhone = strings.TrimSpace(input.MobilePhone)
 	input.OfficePhone = strings.TrimSpace(input.OfficePhone)
-	if userID == "" || input.DisplayName == "" || textlength.Count(input.DisplayName) > 128 || textlength.Count(input.Email) > 255 || textlength.Count(input.MobilePhone) > 64 || textlength.Count(input.OfficePhone) > 64 {
-		return User{}, ErrInvalid
+	if err := validateUserFields(input.DisplayName, input.Email, input.MobilePhone, input.OfficePhone); err != nil {
+		return User{}, err
 	}
 	if err := normalizeGlobalRoleIDs(&input.GlobalRoleIDs); err != nil {
 		return User{}, err
 	}
 	if err := normalizeAppointments(&input.Appointments, len(input.GlobalRoleIDs) > 0); err != nil {
 		return User{}, err
-	}
-	if userID == principal.UserID {
-		return User{}, ErrForbidden
 	}
 	if err := s.validateManagementInput(ctx, principal, input.Appointments, input.GlobalRoleIDs); err != nil {
 		return User{}, err
@@ -438,16 +462,19 @@ func (s *Service) UpdateStatus(ctx context.Context, principal auth.Principal, us
 	if !canManage(principal) {
 		return ErrForbidden
 	}
-	userID = strings.TrimSpace(userID)
-	input.Status = strings.ToLower(strings.TrimSpace(input.Status))
-	if userID == "" || (input.Status != "enabled" && input.Status != "disabled") {
-		return ErrInvalid
+	userID = normalizeIdentifier(userID)
+	if !validIdentifier(userID) {
+		return invalidInput("用户标识格式不正确")
 	}
 	if userID == principal.UserID {
 		return ErrForbidden
 	}
 	if err := s.ensureTargetManageable(ctx, principal, userID); err != nil {
 		return err
+	}
+	input.Status = strings.ToLower(strings.TrimSpace(input.Status))
+	if input.Status != "enabled" && input.Status != "disabled" {
+		return invalidInput("请选择有效的用户状态")
 	}
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
@@ -469,7 +496,7 @@ func (s *Service) UpdateStatus(ctx context.Context, principal auth.Principal, us
 			return fmt.Errorf("count group admins: %w", err)
 		}
 		if admins <= 1 {
-			return ErrInvalid
+			return invalidInput("不能停用最后一个启用的集团管理员")
 		}
 	}
 	if _, err := tx.Exec(ctx, `UPDATE users SET status=$2,updated_at=now() WHERE id=$1::uuid`, userID, input.Status); err != nil {
@@ -491,14 +518,17 @@ func (s *Service) ResetPassword(ctx context.Context, principal auth.Principal, u
 	if !canManage(principal) {
 		return ErrForbidden
 	}
-	userID = strings.TrimSpace(userID)
-	if userID == "" || textlength.Count(input.Password) < 10 {
-		return ErrInvalid
+	userID = normalizeIdentifier(userID)
+	if !validIdentifier(userID) {
+		return invalidInput("用户标识格式不正确")
 	}
 	if userID == principal.UserID {
 		return ErrForbidden
 	}
 	if err := s.ensureTargetManageable(ctx, principal, userID); err != nil {
+		return err
+	}
+	if err := validateUserPassword(input.Password, "临时密码"); err != nil {
 		return err
 	}
 	hash, err := bcrypt.GenerateFromPassword([]byte(input.Password), 12)
@@ -623,12 +653,15 @@ func (s *Service) compatibilityAppointments(ctx context.Context, input *CreateIn
 	if input.OrganizationID == "" && input.RoleKey == "" && len(input.GlobalRoleIDs) > 0 {
 		return nil
 	}
-	if input.OrganizationID == "" || input.RoleKey == "" {
-		return ErrInvalid
+	if input.OrganizationID == "" {
+		return invalidInput("请选择任职组织")
+	}
+	if input.RoleKey == "" {
+		return invalidInput("请选择组织角色")
 	}
 	var roleID string
 	if err := s.pool.QueryRow(ctx, `SELECT id::text FROM roles WHERE role_key=$1 AND role_scope='organization' AND status='enabled'`, input.RoleKey).Scan(&roleID); errors.Is(err, pgx.ErrNoRows) {
-		return ErrInvalid
+		return invalidInput("请选择有效且已启用的组织角色")
 	} else if err != nil {
 		return fmt.Errorf("load legacy role: %w", err)
 	}
@@ -642,15 +675,21 @@ func normalizeAppointments(items *[]AppointmentInput, allowEmpty bool) error {
 			*items = []AppointmentInput{}
 			return nil
 		}
-		return ErrInvalid
+		return invalidInput("请至少配置一个组织任职，或选择集团范围角色")
 	}
 	primary := 0
 	seenOrgs := map[string]bool{}
 	for i := range *items {
 		item := &(*items)[i]
-		item.OrganizationID = strings.TrimSpace(item.OrganizationID)
-		if item.OrganizationID == "" || seenOrgs[item.OrganizationID] {
-			return ErrInvalid
+		item.OrganizationID = normalizeIdentifier(item.OrganizationID)
+		if item.OrganizationID == "" {
+			return invalidInput(fmt.Sprintf("第 %d 个任职组织不能为空", i+1))
+		}
+		if !validIdentifier(item.OrganizationID) {
+			return invalidInput(fmt.Sprintf("第 %d 个任职组织标识格式不正确", i+1))
+		}
+		if seenOrgs[item.OrganizationID] {
+			return invalidInput(fmt.Sprintf("第 %d 个任职组织重复，请选择不同组织", i+1))
 		}
 		seenOrgs[item.OrganizationID] = true
 		if item.IsPrimary {
@@ -659,25 +698,34 @@ func normalizeAppointments(items *[]AppointmentInput, allowEmpty bool) error {
 		seenRoles := map[string]bool{}
 		clean := make([]AssignmentInput, 0, len(item.Assignments))
 		for _, assignment := range item.Assignments {
-			assignment.RoleID = strings.TrimSpace(assignment.RoleID)
+			assignment.RoleID = normalizeIdentifier(assignment.RoleID)
 			assignment.DataScope = strings.ToLower(strings.TrimSpace(assignment.DataScope))
 			if assignment.DataScope == "" {
 				assignment.DataScope = "organization"
 			}
-			if assignment.RoleID == "" || seenRoles[assignment.RoleID] || !validDataScope(assignment.DataScope) {
-				return ErrInvalid
+			if assignment.RoleID == "" {
+				return invalidInput(fmt.Sprintf("第 %d 个任职组织请选择组织角色", i+1))
+			}
+			if !validIdentifier(assignment.RoleID) {
+				return invalidInput(fmt.Sprintf("第 %d 个任职组织的组织角色标识格式不正确", i+1))
+			}
+			if seenRoles[assignment.RoleID] {
+				return invalidInput(fmt.Sprintf("第 %d 个任职组织的组织角色重复", i+1))
+			}
+			if !validDataScope(assignment.DataScope) {
+				return invalidInput(fmt.Sprintf("第 %d 个任职组织请选择有效的数据范围", i+1))
 			}
 			seenRoles[assignment.RoleID] = true
 			clean = append(clean, assignment)
 		}
 		if len(clean) == 0 {
-			return ErrInvalid
+			return invalidInput(fmt.Sprintf("第 %d 个任职组织至少需要一个组织角色", i+1))
 		}
 		sort.Slice(clean, func(a, b int) bool { return clean[a].RoleID < clean[b].RoleID })
 		item.Assignments = clean
 	}
 	if primary != 1 {
-		return ErrInvalid
+		return invalidInput("组织任职必须且只能设置一个主组织")
 	}
 	return nil
 }
@@ -695,9 +743,15 @@ func normalizeGlobalRoleIDs(ids *[]string) error {
 	seen := map[string]bool{}
 	clean := make([]string, 0, len(*ids))
 	for _, id := range *ids {
-		id = strings.TrimSpace(id)
-		if id == "" || seen[id] {
-			return ErrInvalid
+		id = normalizeIdentifier(id)
+		if id == "" {
+			return invalidInput("集团范围角色不能为空，请重新选择")
+		}
+		if !validIdentifier(id) {
+			return invalidInput("集团范围角色标识格式不正确")
+		}
+		if seen[id] {
+			return invalidInput("集团范围角色不能重复")
 		}
 		seen[id] = true
 		clean = append(clean, id)
@@ -711,12 +765,12 @@ func (s *Service) validateGlobalRoles(ctx context.Context, tx pgx.Tx, roleIDs []
 	for _, roleID := range roleIDs {
 		var scope, status string
 		if err := tx.QueryRow(ctx, `SELECT role_scope,status FROM roles WHERE id=$1::uuid`, roleID).Scan(&scope, &status); errors.Is(err, pgx.ErrNoRows) {
-			return ErrInvalid
+			return invalidInput("请选择有效的集团范围角色")
 		} else if err != nil {
 			return fmt.Errorf("load global role: %w", err)
 		}
 		if scope != "group" || status != "enabled" {
-			return ErrInvalid
+			return invalidInput("请选择已启用的集团范围角色")
 		}
 	}
 	return nil
@@ -771,7 +825,7 @@ func (s *Service) ensureGroupAdminRetained(ctx context.Context, tx pgx.Tx, userI
 		return fmt.Errorf("count group administrators: %w", err)
 	}
 	if adminCount <= 1 {
-		return ErrInvalid
+		return invalidInput("不能移除最后一个启用的集团管理员的集团管理角色")
 	}
 	return nil
 }
@@ -785,17 +839,17 @@ func (s *Service) validateAppointments(ctx context.Context, tx pgx.Tx, appointme
 			return fmt.Errorf("load appointment organization: %w", err)
 		}
 		if organizationType == "group" || status != "enabled" {
-			return ErrInvalid
+			return invalidInput("任职组织必须为已启用的非集团组织")
 		}
 		for _, assignment := range appointment.Assignments {
 			var roleScope, status string
 			if err := tx.QueryRow(ctx, `SELECT role_scope,status FROM roles WHERE id=$1::uuid`, assignment.RoleID).Scan(&roleScope, &status); errors.Is(err, pgx.ErrNoRows) {
-				return ErrInvalid
+				return invalidInput("请选择有效的组织角色")
 			} else if err != nil {
 				return fmt.Errorf("load appointment role: %w", err)
 			}
 			if roleScope != "organization" || status != "enabled" {
-				return ErrInvalid
+				return invalidInput("请选择已启用的组织范围角色")
 			}
 		}
 	}

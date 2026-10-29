@@ -150,10 +150,13 @@ func (s *Service) writeDirectChangeRecheck(ctx context.Context, tx pgx.Tx, princ
 	switch action {
 	case DirectChangeCreate, DirectChangeUpdate, DirectChangeDelete:
 	default:
-		return ErrInvalid
+		return invalidInput("直接变更操作：仅支持新增、修改或删除")
 	}
-	if reason == "" || len(reason) > DirectChangeReasonMax || !assetUUIDPattern.MatchString(assetID) {
-		return ErrInvalid
+	if err := validateDirectChangeReason(reason); err != nil {
+		return err
+	}
+	if !assetUUIDPattern.MatchString(assetID) {
+		return invalidInput("直接变更资产：标识不正确")
 	}
 	snapshotJSON, err := json.Marshal(snapshot)
 	if err != nil {
@@ -189,8 +192,11 @@ func (s *Service) writeDirectChangeRecheck(ctx context.Context, tx pgx.Tx, princ
 // which is the same as raising none.
 func validateDirectChangeReason(reason string) error {
 	reason = strings.TrimSpace(reason)
-	if reason == "" || len(reason) > DirectChangeReasonMax {
-		return ErrInvalid
+	if reason == "" {
+		return invalidInput("直接变更原因：不能为空")
+	}
+	if textlength.Count(reason) > DirectChangeReasonMax {
+		return invalidInput(fmt.Sprintf("直接变更原因：最多 %d 字", DirectChangeReasonMax))
 	}
 	return nil
 }
@@ -240,10 +246,10 @@ func (s *Service) SearchDirectChangeRecheckTasks(ctx context.Context, principal 
 	filter.OrganizationID = strings.TrimSpace(filter.OrganizationID)
 	filter.AssetID = strings.TrimSpace(filter.AssetID)
 	if filter.Status != "" && !validDirectChangeStatus(filter.Status) {
-		return pagination.Result[DirectChangeRecheckTask]{}, ErrInvalid
+		return pagination.Result[DirectChangeRecheckTask]{}, invalidInput("复核状态：请选择待复核、认可或有异议")
 	}
 	if filter.AssetID != "" && !assetUUIDPattern.MatchString(filter.AssetID) {
-		return pagination.Result[DirectChangeRecheckTask]{}, ErrInvalid
+		return pagination.Result[DirectChangeRecheckTask]{}, invalidInput("复核资产：标识不正确")
 	}
 	args := []any{principal.UserID, principal.HasRole("group_admin"), filter.Status, filter.OrganizationID, filter.AssetID, filter.Page.PageSize, filter.Page.Offset()}
 	rows, err := s.pool.Query(ctx, `
@@ -298,7 +304,7 @@ func (s *Service) GetDirectChangeRecheckTask(ctx context.Context, principal auth
 	}
 	id = strings.TrimSpace(id)
 	if !assetUUIDPattern.MatchString(id) {
-		return DirectChangeRecheckTask{}, ErrInvalid
+		return DirectChangeRecheckTask{}, invalidInput("复核记录：标识不正确")
 	}
 	item, _, err := scanDirectChangeRecheckRow(s.pool.QueryRow(ctx, `
 		WITH `+directChangeAccessibleCTEAt2+`
@@ -327,11 +333,14 @@ func (s *Service) ConfirmDirectChangeRecheckTask(ctx context.Context, principal 
 	id = strings.TrimSpace(id)
 	input.Status = strings.TrimSpace(input.Status)
 	input.Note = strings.TrimSpace(input.Note)
-	if !assetUUIDPattern.MatchString(id) || !validDirectChangeStatus(input.Status) || input.Status == DirectChangeStatusOpen {
-		return DirectChangeRecheckTask{}, ErrInvalid
+	if !assetUUIDPattern.MatchString(id) {
+		return DirectChangeRecheckTask{}, invalidInput("复核记录：标识不正确")
+	}
+	if !validDirectChangeStatus(input.Status) || input.Status == DirectChangeStatusOpen {
+		return DirectChangeRecheckTask{}, invalidInput("复核结论：请选择认可或有异议")
 	}
 	if input.Note == "" || textlength.Count(input.Note) > 2000 {
-		return DirectChangeRecheckTask{}, ErrInvalid
+		return DirectChangeRecheckTask{}, invalidInput("复核说明：请输入 1 至 2000 字")
 	}
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {

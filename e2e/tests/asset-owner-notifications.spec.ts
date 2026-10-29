@@ -14,6 +14,7 @@ type CurrentUser = {
 }
 type AssetItem = {
   id: string
+  version: number
   type: string
   value: string
   name?: string
@@ -39,8 +40,9 @@ async function expectStatus(response: APIResponse, expected: number, label: stri
   }
 }
 
-async function loginContext(browser: Browser, baseURL: string, username: string, password: string) {
+async function loginContext(browser: Browser, baseURL: string, username: string, password: string, contexts: BrowserContext[]) {
   const context = await browser.newContext({ baseURL })
+  contexts.push(context)
   const loginResponse = await context.request.post('/api/v1/auth/login', { data: { username, password } })
   await expectStatus(loginResponse, 200, `${username} 登录`)
   let user = (await loginResponse.json() as { user: CurrentUser }).user
@@ -60,6 +62,7 @@ async function loginContext(browser: Browser, baseURL: string, username: string,
 
 function editableAsset(item: AssetItem, overrides: Partial<Record<string, unknown>> = {}) {
   return {
+    expected_version: item.version,
     type: item.type,
     value: item.value,
     name: item.name ?? '',
@@ -98,8 +101,10 @@ test('网络资产责任人绑定、候选范围和精确通知回归', async ({
     owner: `owner_target_${suffix}`,
     peer: `owner_peer_${suffix}`,
   }
-  const admin = await loginContext(browser, baseURL, adminUsername, adminPassword!)
+  const initialContexts = new Set(browser.contexts())
+  const contexts: BrowserContext[] = []
   try {
+    const admin = await loginContext(browser, baseURL, adminUsername, adminPassword!, contexts)
     const rolesResponse = await admin.context.request.get('/api/v1/roles?page=1&page_size=100')
     await expectStatus(rolesResponse, 200, '读取角色')
     const roles = (await rolesResponse.json() as { items: RoleItem[] }).items
@@ -124,7 +129,7 @@ test('网络资产责任人绑定、候选范围和精确通知回归', async ({
         short_name: '责任人通知测试',
         type: 'subsidiary',
         manager: 'E2E',
-        contact: 'owner-e2e@example.invalid',
+        contact: '13800000018',
         notes: '网络资产责任人精确通知自动化回归数据',
       },
     })
@@ -155,9 +160,9 @@ test('网络资产责任人绑定、候选范围和精确通知回归', async ({
     await createUser(usernames.owner, '网络资产责任人', organizationEditorRole!.id)
     await createUser(usernames.peer, '同组织其他填报员', organizationEditorRole!.id)
 
-    const actor = await loginContext(browser, baseURL, usernames.actor, temporaryPassword)
-    const owner = await loginContext(browser, baseURL, usernames.owner, temporaryPassword)
-    const peer = await loginContext(browser, baseURL, usernames.peer, temporaryPassword)
+    const actor = await loginContext(browser, baseURL, usernames.actor, temporaryPassword, contexts)
+    const owner = await loginContext(browser, baseURL, usernames.owner, temporaryPassword, contexts)
+    const peer = await loginContext(browser, baseURL, usernames.peer, temporaryPassword, contexts)
 
     const ownerOptionsResponse = await actor.context.request.get(`/api/v1/assets/owner-options?organization_id=${organization.id}&page=1&page_size=100`)
     await expectStatus(ownerOptionsResponse, 200, '读取责任人候选')
@@ -234,7 +239,14 @@ test('网络资产责任人绑定、候选范围和精确通知回归', async ({
     expect(ownerAfterReactivate.some((item) => item.message.includes('验证责任人解绑通知'))).toBeTruthy()
     expect(await assetMessages(admin.context, asset.id)).toHaveLength(5)
   } finally {
-    // Playwright owns these contexts; explicit close races with trace finalization
-    // when a background notification request is still in flight.
+    // browser.newContext() is worker-owned, not the test context fixture.
+    // Close serially while Playwright's trace recorder is still installed, so
+    // pages/timers and their next-test trace chunks cannot leak into later specs.
+    const closeErrors: unknown[] = []
+    for (const context of contexts.reverse()) {
+      try { await context.close() } catch (error) { closeErrors.push(error) }
+    }
+    try { expect(new Set(browser.contexts())).toEqual(initialContexts) } catch (error) { closeErrors.push(error) }
+    if (closeErrors.length) throw new AggregateError(closeErrors, '责任人专项浏览器上下文收尾失败')
   }
 })
