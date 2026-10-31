@@ -92,7 +92,7 @@ onMounted(() => { void loadHistory() })
         </div>
       </div>
       <div class="inspection-history-table-scroll">
-        <el-table :data="items" stripe empty-text="尚未执行持久化质量巡检">
+        <el-table :data="items" stripe max-height="var(--inspection-history-table-max-height)" empty-text="尚未执行持久化质量巡检">
           <el-table-column label="执行时间" width="155"><template #default="scope">{{ formatTime(scope.row.created_at) }}</template></el-table-column>
           <el-table-column label="触发方式" width="100"><template #default="scope"><el-tag :type="scope.row.trigger_type === 'scheduled' ? 'success' : 'info'">{{ scope.row.trigger_type === 'scheduled' ? '系统自动' : '人工执行' }}</el-tag></template></el-table-column>
           <el-table-column label="巡检范围" min-width="165"><template #default="scope"><strong>{{ scope.row.organization_name || '全集团' }}</strong><div class="muted-text">{{ resourceTypeLabel(scope.row.resource_type) }} · {{ severityLabel(scope.row.severity) }}</div></template></el-table-column>
@@ -114,10 +114,11 @@ onMounted(() => { void loadHistory() })
 
 <style scoped>
 .inspection-history-panel { min-width:0; padding-top:14px; }
-.inspection-history-table-scroll { width:100%; min-width:0; overflow-x:auto; overscroll-behavior-x:contain; }
+.inspection-history-table-scroll { width:100%; min-width:0; overflow-x:auto; overscroll-behavior-x:contain; --inspection-history-table-max-height:min(58dvh, 620px); }
 .inspection-history-table-scroll :deep(.el-table) { min-width:1080px; }
 .table-pagination { display:flex; justify-content:flex-end; margin-top:18px; }
 @media (max-width:760px) {
+  .inspection-history-table-scroll { --inspection-history-table-max-height:min(46dvh, 420px); }
   .table-pagination { justify-content:flex-start; overflow-x:auto; padding-bottom:2px; }
 }
 </style>
