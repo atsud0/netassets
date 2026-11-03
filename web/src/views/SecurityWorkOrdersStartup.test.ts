@@ -6,16 +6,18 @@ import { apiClient } from '../api/client'
 import { loadOptions } from '../api/remediation'
 import SecurityWorkOrdersView from './SecurityWorkOrdersView.vue'
 
+const push = vi.hoisted(() => vi.fn())
 const route = vi.hoisted(() => ({ query: {} as Record<string, string> }))
-vi.mock('vue-router', () => ({ useRoute: () => route }))
+vi.mock('vue-router', () => ({ useRoute: () => route, useRouter: () => ({ push }) }))
 vi.mock('../stores/auth', () => ({ useAuthStore: () => ({ hasGroupSecurityRole: true, canManageSecurityFindings: true, canManageSecurityWorkOrders: true, canManageSecurityTests: false }) }))
 vi.mock('../api/client', () => ({ apiClient: { get: vi.fn(), post: vi.fn() }, getAPIErrorMessage: () => '读取失败' }))
 vi.mock('../api/remediation', () => ({ loadOptions: vi.fn() }))
 vi.mock('element-plus', async importOriginal => ({ ...await importOriginal<typeof import('element-plus')>(), ElMessage: { error: vi.fn(), warning: vi.fn(), success: vi.fn() } }))
 const Empty = defineComponent({ setup: () => () => h('div') })
-const SavedViews = defineComponent({ setup: (_, { expose }) => { expose({ loadViews: vi.fn(), initialize: vi.fn() }); return () => h('div') } })
+const loadSavedViews = vi.fn()
+const SavedViews = defineComponent({ setup: (_, { expose }) => { expose({ loadViews: loadSavedViews, initialize: vi.fn() }); return () => h('div') } })
 const wrappers: ReturnType<typeof mount>[] = []
-afterEach(() => { wrappers.splice(0).forEach(wrapper => wrapper.unmount()); vi.clearAllMocks() })
+afterEach(() => { wrappers.splice(0).forEach(wrapper => wrapper.unmount()); vi.clearAllMocks(); loadSavedViews.mockReset() })
 
 describe('安全工单首屏不依赖编辑下拉选项加载', () => {
   it.each(['finding', 'order'] as const)('%s 责任组织保留全部选项但仅渲染可见窗口', async mode => {
@@ -122,5 +124,34 @@ describe('漏洞导入完成后的弹窗意图', () => {
     expect(state.importDialogVisible).toBe(false)
     expect(state.importSubmitting).toBe(false)
     expect(state.importResult.success_count).toBe(2)
+  })
+})
+
+
+describe('安全发现独立编辑入口', () => {
+  it.each(['findings', 'orders', 'candidates'])('%s 恢复列表页码并携带筛选与详情返回位置，不打开编辑弹窗', async tab => {
+    if (tab === 'candidates') loadSavedViews.mockImplementation(() => new Promise(resolve => setTimeout(resolve, 350)))
+    route.query = { tab, finding_id: 'finding-1', organization_id: 'org', severity: 'high', page: '3', page_size: '50', candidate_status: '', candidate_keyword: '测试词' }
+    vi.mocked(loadOptions).mockResolvedValue([])
+    vi.mocked(apiClient.get).mockResolvedValue({ data: { items: [], total: 120, summary: {}, item: { id: 'finding-1' } } })
+    const wrapper = mount(SecurityWorkOrdersView, { global: { stubs: {
+      ElTable: Empty, ElTabs: Empty, ElDialog: Empty, ElDrawer: Empty, ElSelect: Empty, ElPagination: Empty,
+      ElAlert: Empty, ElDropdown: Empty, ElTooltip: Empty, ElCollapse: Empty, ElForm: Empty, SavedFilterViews: SavedViews,
+    }, directives: { loading: () => {} } } })
+    wrappers.push(wrapper)
+    await flushPromises()
+    if (tab === 'candidates') { await new Promise(resolve => setTimeout(resolve, 400)); await flushPromises() }
+    const endpoint = tab === 'orders' ? '/security-work-orders' : tab === 'candidates' ? '/security-findings/import-candidates' : '/security-findings'
+    expect(apiClient.get).toHaveBeenCalledWith(endpoint, expect.objectContaining({ params: expect.objectContaining({ page: 3, page_size: 50 }) }))
+    const state = (wrapper.vm.$ as unknown as { setupState: Record<string, any> }).setupState
+    state.findingDetailVisible = true
+    state.openEditFinding({ id: 'finding-1' })
+    const destination = push.mock.calls[0]![0]
+    expect(destination.path).toBe('/security-findings/finding-1/edit')
+    const target = new URL(destination.query.returnTo, 'https://example.test')
+    expect(Object.fromEntries(target.searchParams)).toMatchObject({ tab, page: '3', page_size: '50', severity: 'high', organization_id: 'org', finding_id: 'finding-1' })
+    expect(state.activeTab).toBe(tab)
+    if (tab === 'candidates') expect(Object.fromEntries(target.searchParams)).toMatchObject({ candidate_status: '', candidate_keyword: '测试词' })
+    expect(state.findingDialogVisible).toBe(false)
   })
 })

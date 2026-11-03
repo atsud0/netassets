@@ -5,7 +5,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { apiClient } from '../api/client'
 import SecurityWorkOrdersView from './SecurityWorkOrdersView.vue'
 
-vi.mock('vue-router', () => ({ useRoute: () => ({ query: { tab: 'findings' } }) }))
+vi.mock('vue-router', () => ({ useRoute: () => ({ query: { tab: 'findings' } }), useRouter: () => ({ push: vi.fn() }) }))
 vi.mock('../stores/auth', () => ({ useAuthStore: () => ({ hasGroupSecurityRole: true, canManageSecurityFindings: true, canManageSecurityWorkOrders: true, canManageSecurityTests: false }) }))
 vi.mock('../api/client', () => ({ apiClient: { get: vi.fn(), post: vi.fn(), patch: vi.fn() }, getAPIErrorMessage: () => '读取失败' }))
 vi.mock('../api/remediation', () => ({ loadOptions: async () => [] }))

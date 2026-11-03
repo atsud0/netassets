@@ -2,12 +2,13 @@
 import { useLiveList } from '../composables/useLiveList'
 import ListToolbar from '../components/ListToolbar.vue'
 import ContextHelp from '../components/ContextHelp.vue'
+import MarkdownPreview from '../components/MarkdownPreview.vue'
 import ListPagination from '../components/ListPagination.vue'
 import RowActions from '../components/RowActions.vue'
 import { computed, nextTick, onMounted, reactive, ref, watch } from 'vue'
 import type { FormInstance, FormItemRule, FormRules } from 'element-plus'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { useRoute } from 'vue-router'
+import { useRoute, useRouter } from 'vue-router'
 import { apiClient, getAPIErrorMessage } from '../api/client'
 import { loadOptions } from '../api/remediation'
 import { useAuthStore } from '../stores/auth'
@@ -107,6 +108,7 @@ const itemOrderID = ref('')
 
 const auth = useAuthStore()
 const route = useRoute()
+const router = useRouter()
 const activeTab = ref<'orders' | 'findings' | 'candidates'>('orders')
 let applyingRouteFilters = true
 const loading = ref(false)
@@ -142,10 +144,6 @@ const savedFilterViews = ref<InstanceType<typeof SavedFilterViews>>()
 
 const findingDialogVisible = ref(false)
 const findingFormRef = ref<FormInstance>()
-const editingFindingID = ref('')
-// The row version this form was opened with. Sending it back lets the API reject
-// a save that would overwrite a newer edit by another security operator.
-const editingFindingUpdatedAt = ref('')
 const findingForm = reactive({
   title: '', severity: 'high', status: FINDING_STATUS_PENDING, assignee_organization_id: '', asset_id: '', business_system_id: '', test_batch_id: '',
   vulnerability_type: '', description: '', evidence: '', remediation_advice: '', source: 'manual', discovered_at: new Date() as Date | string,
@@ -450,13 +448,28 @@ function applyRouteFilters() {
   dispatchedDateFilter.value = typeof route.query.dispatched_date === 'string' ? route.query.dispatched_date : ''
   closedDateFilter.value = typeof route.query.closed_date === 'string' ? route.query.closed_date : ''
   overdueOnly.value = route.query.overdue === '1'
+  if (activeTab.value === 'candidates') {
+    candidateStatusFilter.value = typeof route.query.candidate_status === 'string' ? route.query.candidate_status : 'pending'
+    candidateBatchFilter.value = typeof route.query.candidate_batch === 'string' ? route.query.candidate_batch : ''
+    candidateAssetTypeFilter.value = typeof route.query.candidate_asset_type === 'string' ? route.query.candidate_asset_type : ''
+    candidateKeyword.value = typeof route.query.candidate_keyword === 'string' ? route.query.candidate_keyword : ''
+  }
+  const requestedSize = Number(route.query.page_size)
+  if ([20, 50, 100].includes(requestedSize)) pageSize.value = requestedSize
+  const requestedPage = Number(route.query.page)
+  if (Number.isSafeInteger(requestedPage) && requestedPage > 0) {
+    if (activeTab.value === 'orders') orderPage.value = requestedPage
+    else if (activeTab.value === 'findings') findingPage.value = requestedPage
+    else candidatePage.value = requestedPage
+  }
 }
 
 onMounted(async () => {
   applyRouteFilters()
   await nextTick()
+  liveList.begin()
   applyingRouteFilters = false
-  const hasRouteContext = ['organization_id', 'status', 'overdue', 'work_order_id', 'finding_id', 'asset_link_state', 'severity', 'dashboard_scope', 'test_batch_only', 'dispatch_state', 'discovered_date', 'dispatched_date', 'closed_date'].some(key => route.query[key] !== undefined)
+  const hasRouteContext = ['page', 'page_size', 'organization_id', 'status', 'overdue', 'work_order_id', 'finding_id', 'asset_link_state', 'severity', 'dashboard_scope', 'test_batch_only', 'dispatch_state', 'discovered_date', 'dispatched_date', 'closed_date'].some(key => route.query[key] !== undefined)
   if (activeTab.value === 'orders' && !hasRouteContext) {
     const defaultFilters = await savedFilterViews.value?.initialize()
     if (defaultFilters) setWorkOrderFilters(defaultFilters)
@@ -470,9 +483,11 @@ onMounted(async () => {
   const workOrderID = typeof route.query.work_order_id === 'string' ? route.query.work_order_id : ''
   const findingID = typeof route.query.finding_id === 'string' ? route.query.finding_id : ''
   if (workOrderID) await openDetail({ id: workOrderID } as WorkOrder)
-  else if (findingID) {
-    activeTab.value = 'findings'
-    await loadActiveList()
+  if (findingID) {
+    if (!['orders', 'findings', 'candidates'].includes(String(route.query.tab))) {
+      activeTab.value = 'findings'
+      await loadActiveList()
+    }
     await openFindingDetail({ id: findingID } as Finding)
   }
   await supportingData
@@ -598,6 +613,7 @@ async function refreshAfterMutation() {
 }
 
 function applyFilter() {
+  if (applyingRouteFilters) return
   if (activeTab.value === 'orders') orderPage.value = 1
   else if (activeTab.value === 'findings') findingPage.value = 1
   else candidatePage.value = 1
@@ -660,7 +676,6 @@ function defaultRiskUntil() {
 }
 
 function resetFindingForm() {
-  editingFindingUpdatedAt.value = ''
   Object.assign(findingForm, {
     title: '', severity: 'high', status: FINDING_STATUS_PENDING, assignee_organization_id: defaultOrganizationID(), asset_id: '', business_system_id: '', test_batch_id: '',
     vulnerability_type: '', description: '', evidence: '', remediation_advice: '', source: 'manual', discovered_at: new Date(),
@@ -668,21 +683,33 @@ function resetFindingForm() {
 }
 
 function openCreateFinding() {
-  editingFindingID.value = ''
   resetFindingForm()
   findingDialogVisible.value = true
 }
 
 function openEditFinding(item: Finding) {
-  editingFindingID.value = item.id
-  editingFindingUpdatedAt.value = item.updated_at
-  Object.assign(findingForm, {
-    title: item.title, severity: item.severity, status: item.status, assignee_organization_id: item.assignee_organization_id,
-    asset_id: item.asset_id ?? '', business_system_id: item.business_system_id ?? '', test_batch_id: item.test_batch_id ?? '', vulnerability_type: item.vulnerability_type ?? '',
-    description: item.description, evidence: item.evidence ?? '', remediation_advice: item.remediation_advice ?? '', source: item.source,
-    discovered_at: new Date(item.discovered_at),
+  const params = new URLSearchParams({
+    tab: activeTab.value,
+    page: String(activeTab.value === 'orders' ? orderPage.value : activeTab.value === 'candidates' ? candidatePage.value : findingPage.value),
+    page_size: String(pageSize.value),
   })
-  findingDialogVisible.value = true
+  const filters: Record<string, string> = {
+    organization_id: organizationFilter.value, status: statusFilter.value,
+    asset_link_state: assetLinkStateFilter.value, severity: severityFilter.value,
+    dispatch_state: dispatchStateFilter.value, discovered_date: discoveredDateFilter.value,
+    dispatched_date: dispatchedDateFilter.value, closed_date: closedDateFilter.value,
+    test_batch_only: testBatchOnlyFilter.value ? '1' : '',
+    dashboard_scope: dashboardScopeFilter.value ? '1' : '', overdue: overdueOnly.value ? '1' : '',
+    ...(activeTab.value === 'candidates' ? {
+      candidate_status: candidateStatusFilter.value, candidate_batch: candidateBatchFilter.value,
+      candidate_asset_type: candidateAssetTypeFilter.value, candidate_keyword: candidateKeyword.value,
+    } : {}),
+  }
+  for (const [key, value] of Object.entries(filters)) if (value) params.set(key, value)
+  if (activeTab.value === 'candidates') params.set('candidate_status', candidateStatusFilter.value)
+  if (findingDetailVisible.value) params.set('finding_id', item.id)
+  if (detailVisible.value && selectedOrder.value) params.set('work_order_id', selectedOrder.value.id)
+  void router.push({ path: `/security-findings/${encodeURIComponent(item.id)}/edit`, query: { returnTo: `/security-work-orders?${params}` } })
 }
 
 async function saveFinding() {
@@ -694,16 +721,12 @@ async function saveFinding() {
   submitting.value = true
   try {
     const payload: Record<string, unknown> = { ...findingForm, discovered_at: new Date(findingForm.discovered_at).toISOString() }
-    if (editingFindingID.value) {
-      payload.expected_updated_at = editingFindingUpdatedAt.value
-      await apiClient.patch(`/security-findings/${editingFindingID.value}`, payload)
-    }
-    else await apiClient.post('/security-findings', payload)
-    ElMessage.success(editingFindingID.value ? '安全发现已更新' : '安全发现已登记')
+    await apiClient.post('/security-findings', payload)
+    ElMessage.success('安全发现已登记')
     findingDialogVisible.value = false
     await refreshAfterMutation()
   } catch (error) {
-    ElMessage.error(getAPIErrorMessage(error, editingFindingID.value ? '更新安全发现失败' : '登记安全发现失败'))
+    ElMessage.error(getAPIErrorMessage(error, '登记安全发现失败'))
   } finally {
     submitting.value = false
   }
@@ -1562,7 +1585,7 @@ async function onTabChange() {
       </div>
     </el-drawer>
 
-    <el-drawer v-model="findingDetailVisible" title="安全发现详情" size="680px">
+    <el-drawer v-model="findingDetailVisible" title="安全发现详情" size="min(680px, 100vw)">
       <div v-loading="findingDetailLoading" v-if="selectedFinding" class="finding-detail">
         <div class="detail-title">
           <div><span class="mono-text">{{ selectedFinding.code }}</span><h2>{{ selectedFinding.title }}</h2></div>
@@ -1577,9 +1600,9 @@ async function onTabChange() {
           <el-descriptions-item label="测试批次">{{ selectedFinding.test_batch_name || '—' }}<span v-if="selectedFinding.test_batch_code" class="table-secondary mono-text">{{ selectedFinding.test_batch_code }}</span></el-descriptions-item>
           <el-descriptions-item label="发现时间">{{ formatDate(selectedFinding.discovered_at) }}</el-descriptions-item>
         </el-descriptions>
-        <div class="detail-block"><h3>漏洞描述</h3><p>{{ selectedFinding.description }}</p></div>
-        <div v-if="selectedFinding.evidence" class="detail-block"><h3>验证证据</h3><p>{{ selectedFinding.evidence }}</p></div>
-        <div v-if="selectedFinding.remediation_advice" class="detail-block"><h3>整改建议</h3><p>{{ selectedFinding.remediation_advice }}</p></div>
+        <div class="detail-block"><h3>漏洞描述</h3><MarkdownPreview :content="selectedFinding.description" /></div>
+        <div v-if="selectedFinding.evidence" class="detail-block"><h3>验证证据</h3><MarkdownPreview :content="selectedFinding.evidence" /></div>
+        <div v-if="selectedFinding.remediation_advice" class="detail-block"><h3>整改建议</h3><MarkdownPreview :content="selectedFinding.remediation_advice" /></div>
         <div v-if="selectedFinding.risk_accepted_at" class="detail-block risk-acceptance-card" :class="{ expired: selectedFinding.risk_acceptance_expired }">
           <div class="detail-block-heading"><h3>风险接受记录</h3><el-tag v-if="selectedFinding.status === FINDING_STATUS_RISK_ACCEPTED" :type="selectedFinding.risk_acceptance_expired ? 'danger' : 'warning'">{{ riskAcceptanceLabel(selectedFinding) }}</el-tag><el-tag v-else type="info">已撤销</el-tag></div>
           <el-descriptions :column="1" border size="small">
@@ -1590,6 +1613,7 @@ async function onTabChange() {
           </el-descriptions>
         </div>
         <div v-if="auth.canManageSecurityFindings || auth.canManageSecurityWorkOrders" class="finding-detail-actions">
+          <el-button v-if="auth.canManageSecurityFindings" type="primary" @click="openEditFinding(selectedFinding)">编辑安全发现</el-button>
           <el-button v-if="auth.canManageSecurityFindings && ['pending', 'in_progress', FINDING_STATUS_CONFIRMED, 'resolved', 'fixed'].includes(selectedFinding.status)" type="warning" @click="openRiskDialog(selectedFinding, 'accept')">接受风险</el-button>
           <el-button v-if="auth.canManageSecurityFindings && selectedFinding.status === FINDING_STATUS_RISK_ACCEPTED" type="warning" @click="openRiskDialog(selectedFinding, 'review')">复核并延长有效期</el-button>
           <el-button v-if="auth.canManageSecurityFindings && selectedFinding.status === FINDING_STATUS_RISK_ACCEPTED" type="danger" plain @click="revokeFindingRisk(selectedFinding)">撤销风险接受</el-button>
@@ -1609,7 +1633,7 @@ async function onTabChange() {
       <template #footer><el-button @click="riskDialogVisible = false">取消</el-button><el-button type="warning" :loading="riskSubmitting" @click="submitRiskAction">确认{{ riskActionLabels[riskMode] }}</el-button></template>
     </el-dialog>
 
-    <el-dialog v-model="findingDialogVisible" :title="editingFindingID ? '编辑安全发现' : '登记安全发现'" width="760px" destroy-on-close>
+    <el-dialog v-model="findingDialogVisible" title="登记安全发现" width="760px" destroy-on-close>
       <el-form ref="findingFormRef" :model="findingForm" :rules="findingRules" label-position="top">
         <div class="form-grid two-columns">
           <el-form-item label="漏洞标题" prop="title"><el-input v-model="findingForm.title" /></el-form-item>
@@ -1620,7 +1644,6 @@ async function onTabChange() {
           <el-form-item label="关联网络资产"><el-select v-model="findingForm.asset_id" clearable filterable style="width:100%" placeholder="URL、IP、域名等"><el-option v-for="item in scopedAssets" :key="item.id" :label="`${item.name || item.value}（${item.value}）`" :value="item.id" /></el-select></el-form-item>
           <el-form-item label="关联业务系统"><el-select v-model="findingForm.business_system_id" clearable filterable style="width:100%" placeholder="可与网络资产同时选择"><el-option v-for="item in scopedSystems" :key="item.id" :label="`${item.name}（${item.code}）`" :value="item.id" /></el-select></el-form-item>
           <el-form-item label="发现时间" prop="discovered_at"><el-date-picker v-model="findingForm.discovered_at" type="datetime" style="width:100%" /></el-form-item>
-          <el-form-item v-if="editingFindingID" label="发现状态"><el-select v-model="findingForm.status" style="width:100%" :disabled="findingForm.status === FINDING_STATUS_RISK_ACCEPTED"><el-option v-for="(label, value) in findingStatusLabels" :key="value" :label="label" :value="value" :disabled="value === FINDING_STATUS_RISK_ACCEPTED" /></el-select><small v-if="findingForm.status === FINDING_STATUS_RISK_ACCEPTED" class="form-help">风险接受状态请通过详情中的风险操作维护</small></el-form-item>
         </div>
         <el-form-item label="漏洞描述" prop="description"><el-input v-model="findingForm.description" type="textarea" :rows="4" placeholder="描述漏洞位置、触发条件和影响" /></el-form-item>
         <el-form-item label="验证证据" prop="evidence"><el-input v-model="findingForm.evidence" type="textarea" :rows="3" placeholder="请脱敏填写请求路径、响应现象或证据位置，不要录入明文口令" /></el-form-item>

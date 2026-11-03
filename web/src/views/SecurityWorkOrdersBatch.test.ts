@@ -6,7 +6,7 @@ import { apiClient } from '../api/client'
 import SecurityWorkOrdersView from './SecurityWorkOrdersView.vue'
 
 const permissions = vi.hoisted(() => ({ hasGroupSecurityRole: true, canManageSecurityFindings: true, canManageSecurityWorkOrders: true, canManageSecurityTests: false, hasPermission: (_permission: string) => true }))
-vi.mock('vue-router', () => ({ useRoute: () => ({ query: {} }) }))
+vi.mock('vue-router', () => ({ useRoute: () => ({ query: {} }), useRouter: () => ({ push: vi.fn() }) }))
 vi.mock('../stores/auth', () => ({ useAuthStore: () => permissions }))
 vi.mock('../api/client', () => ({ apiClient: { get: vi.fn(), post: vi.fn(), patch: vi.fn() }, getAPIErrorMessage: () => '加载失败' }))
 vi.mock('../api/remediation', () => ({ loadOptions: vi.fn().mockResolvedValue([]) }))

@@ -53,6 +53,7 @@ const router = createRouter({
         { path: 'security-test-batches', name: 'security-test-batches', component: SecurityTestBatchesView, meta: { permission: 'security_test.manage', groupSecurityOnly: true } },
         { path: 'security-test-requests', name: 'security-test-requests', component: SecurityTestRequestsView, meta: { anyPermission: ['security_test.request', 'security_test.manage'] } },
         { path: 'security-work-orders', name: 'security-work-orders', component: SecurityWorkOrdersView },
+        { path: 'security-findings/:id/edit', name: 'security-finding-edit', component: () => import('../views/SecurityFindingEditView.vue'), meta: { title: '编辑安全发现' } },
         { path: 'audit-logs', name: 'audit-logs', component: AuditLogsView, meta: { groupAdminOnly: true } },
         { path: 'recycle-bin', name: 'recycle-bin', component: RecycleBinView, meta: { groupAdminOnly: true } },
         { path: 'backups', name: 'backups', component: BackupsView, meta: { groupAdminOnly: true } },
