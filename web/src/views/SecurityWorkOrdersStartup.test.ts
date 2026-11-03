@@ -54,7 +54,7 @@ describe('安全工单首屏不依赖编辑下拉选项加载', () => {
     let finishOptions!: (value: never[]) => void
     const pendingOptions = new Promise<never[]>(resolve => { finishOptions = resolve })
     vi.mocked(loadOptions).mockReturnValue(pendingOptions)
-    route.query = { tab: mode, organization_id: 'org', [mode === 'orders' ? 'work_order_id' : 'finding_id']: 'target' }
+    route.query = { tab: mode, organization_id: 'org', severity: 'high', dashboard_scope: '1', test_batch_only: '1', dispatch_state: 'remediating', discovered_date: '2026-11-03', [mode === 'orders' ? 'work_order_id' : 'finding_id']: 'target' }
     const endpoint = mode === 'orders' ? '/security-work-orders' : '/security-findings'
     vi.mocked(apiClient.get).mockImplementation(async (path, config) => {
       // The unfiltered 100-item finding request supplies an editing selector,
@@ -77,6 +77,7 @@ describe('安全工单首屏不依赖编辑下拉选项加载', () => {
       await flushPromises()
       const state = (wrapper.vm.$ as unknown as { setupState: Record<string, any> }).setupState
       expect(apiClient.get).toHaveBeenCalledWith(endpoint, expect.objectContaining({ params: expect.objectContaining({ organization_id: 'org' }) }))
+      if (mode === 'findings') expect(apiClient.get).toHaveBeenCalledWith(endpoint, expect.objectContaining({ params: expect.objectContaining({ severity: 'high', dashboard_scope: 1, test_batch_only: 1, dispatch_state: 'remediating', discovered_date: '2026-11-03' }) }))
       expect(state[mode === 'orders' ? 'orderTotal' : 'findingTotal']).toBe(3)
       expect(state.loading).toBe(false)
       expect(apiClient.get).toHaveBeenCalledWith(`${endpoint}/target`)

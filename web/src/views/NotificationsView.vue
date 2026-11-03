@@ -1,4 +1,6 @@
 <script setup lang="ts">
+import { useLiveList } from '../composables/useLiveList'
+import ListPagination from '../components/ListPagination.vue'
 import { computed, onMounted, ref } from 'vue'
 import { ElMessage } from 'element-plus'
 import { useRouter } from 'vue-router'
@@ -66,17 +68,22 @@ function formatDue(value?: string) {
   return `截止：${formatTime(value)}`
 }
 
+const liveList = useLiveList(() => [unreadOnly.value, category.value], changeFilter)
+
 async function load() {
+  const isCurrent = liveList.begin()
   loading.value = true
   try {
     const data = await listNotifications({ unread_only: unreadOnly.value, category: category.value || undefined, page: page.value, page_size: pageSize.value })
+    if (!isCurrent()) return
     items.value = data.items
     total.value = data.total
     summary.value = data.summary
   } catch (error) {
+    if (!isCurrent()) return
     ElMessage.error(getAPIErrorMessage(error, '读取消息失败'))
   } finally {
-    loading.value = false
+    if (isCurrent()) loading.value = false
   }
 }
 
@@ -141,8 +148,8 @@ onMounted(load)
     <div class="panel notification-summary-panel">
       <div class="notification-stat"><span>当前消息</span><strong>{{ summary.total }}</strong></div>
       <div class="notification-stat unread"><span>未读消息</span><strong>{{ summary.unread_count }}</strong></div>
-      <el-switch v-model="unreadOnly" active-text="只看未读" @change="changeFilter" />
-      <el-select v-model="category" clearable placeholder="全部分类" @change="changeFilter">
+      <el-switch v-model="unreadOnly" active-text="只看未读" />
+      <el-select v-model="category" clearable placeholder="全部分类">
         <el-option v-for="item in categoryOptions" :key="item.value" :label="item.label" :value="item.value" />
       </el-select>
     </div>
@@ -187,7 +194,7 @@ onMounted(load)
         </div>
       </div>
       <div v-if="total > 0" class="table-pagination notification-pagination">
-        <el-pagination
+        <ListPagination :reset-key="displayedItems"
           background
           layout="total, sizes, prev, pager, next"
           :total="total"

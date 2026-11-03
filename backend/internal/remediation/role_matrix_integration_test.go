@@ -369,8 +369,19 @@ func TestRoleMatrixOrganizationWorkOrderActions(t *testing.T) {
 
 	_, err = f.orders.Submit(f.ctx, f.orgEditor, f.orderID, securityworkorder.SubmitInput{RemediationResult: "填报员提交"}, "", "")
 	assertRoleDenied(t, "filler Submit", err)
-	if _, err := f.orders.Submit(f.ctx, f.orgAdmin, f.orderID, securityworkorder.SubmitInput{RemediationResult: "组织提交"}, "", ""); err != nil {
-		t.Fatalf("org admin Submit error = %v", err)
+	if _, err := f.orders.Submit(f.ctx, f.orgAdmin, f.orderID, securityworkorder.SubmitInput{RemediationResult: "组织提交"}, "", ""); !errors.Is(err, securityworkorder.ErrInvalid) {
+		t.Fatalf("legacy organization Submit error = %v, want ErrInvalid", err)
+	}
+	proof, err := f.orders.AddAttachment(f.ctx, f.orgAdmin, f.orderID, securityworkorder.AttachmentInput{Category: "remediation", FileName: "proof.txt", SizeBytes: 5, Reader: strings.NewReader("proof")}, "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	itemInput := securityworkorder.WorkOrderItemInput{Items: organizationItemVersions(t, f.orders, f.ctx, f.orgAdmin, f.orderID), Action: "submit", Note: "组织逐项提交", EvidenceIDs: []string{proof.ID}}
+	_, err = f.orders.ProcessWorkOrderItems(f.ctx, f.orgEditor, f.orderID, itemInput, "", "")
+	assertRoleDenied(t, "filler item submit", err)
+	processed, err := f.orders.ProcessWorkOrderItems(f.ctx, f.orgAdmin, f.orderID, itemInput, "", "")
+	if err != nil || processed.Succeeded != len(itemInput.Items) || processed.Failed != 0 {
+		t.Fatalf("org admin item submit: %+v %v", processed, err)
 	}
 
 	// review/close are group-level. Even the organization administrator must not
@@ -384,8 +395,14 @@ func TestRoleMatrixOrganizationWorkOrderActions(t *testing.T) {
 	if _, err := f.orders.Review(f.ctx, f.orgEditor, f.orderID, securityworkorder.ReviewInput{Decision: "closed", VerificationResult: "已复测通过"}, "", ""); !errors.Is(err, securityworkorder.ErrForbidden) {
 		t.Fatalf("filler Review error = %v, want securityworkorder.ErrForbidden", err)
 	}
-	if _, err := f.orders.Review(f.ctx, f.securityAdmin, f.orderID, securityworkorder.ReviewInput{Decision: "returned", ReturnReason: "补充复测记录"}, "", ""); err != nil {
-		t.Fatalf("security admin Review error = %v", err)
+	itemInput = securityworkorder.WorkOrderItemInput{Items: organizationItemVersions(t, f.orders, f.ctx, f.securityAdmin, f.orderID), Action: "return", Note: "补充复测记录"}
+	processed, err = f.orders.ProcessWorkOrderItems(f.ctx, f.orgAdmin, f.orderID, itemInput, "", "")
+	if err != nil || processed.Succeeded != 0 || processed.Failed != len(itemInput.Items) || processed.Items[0].Code != "forbidden" {
+		t.Fatalf("org admin item review bypass: %+v %v", processed, err)
+	}
+	processed, err = f.orders.ProcessWorkOrderItems(f.ctx, f.securityAdmin, f.orderID, itemInput, "", "")
+	if err != nil || processed.Succeeded != len(itemInput.Items) || processed.Failed != 0 {
+		t.Fatalf("security admin item review: %+v %v", processed, err)
 	}
 
 	// cancel: group-only, regardless of who currently sits in the organization.

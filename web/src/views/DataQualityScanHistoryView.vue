@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import ListPagination from '../components/ListPagination.vue'
 import { onMounted, ref } from 'vue'
 import { ElMessage } from 'element-plus'
 import { useRouter } from 'vue-router'
@@ -106,7 +107,7 @@ onMounted(() => { void loadHistory() })
         </el-table>
       </div>
       <div class="table-pagination">
-        <el-pagination background layout="total, sizes, prev, pager, next" :total="total" :current-page="page" :page-size="pageSize" :page-sizes="[20, 50, 100]" @current-change="handlePageChange" @size-change="handlePageSizeChange" />
+        <ListPagination :reset-key="items" background layout="total, sizes, prev, pager, next" :total="total" :current-page="page" :page-size="pageSize" :page-sizes="[20, 50, 100]" @current-change="handlePageChange" @size-change="handlePageSizeChange" />
       </div>
     </div>
   </section>

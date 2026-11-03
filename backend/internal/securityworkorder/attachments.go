@@ -223,6 +223,16 @@ func (s *Service) DeleteAttachment(ctx context.Context, principal auth.Principal
 		return fmt.Errorf("begin delete attachment: %w", err)
 	}
 	defer tx.Rollback(ctx)
+	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtext('netassets-remediation'))`); err != nil {
+		return err
+	}
+	var referenced bool
+	if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM security_work_order_item_history WHERE work_order_id=$1::uuid AND $2::uuid=ANY(evidence_ids))`, workOrderID, attachmentID).Scan(&referenced); err != nil {
+		return err
+	}
+	if referenced {
+		return invalidField("该附件已作为逐项处置证据留档，不能删除")
+	}
 	if command, err := tx.Exec(ctx, `DELETE FROM security_work_order_attachments WHERE id::text = $1 AND work_order_id::text = $2`, attachmentID, workOrderID); err != nil {
 		return fmt.Errorf("delete attachment: %w", err)
 	} else if command.RowsAffected() == 0 {

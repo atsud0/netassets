@@ -1,4 +1,8 @@
 <script setup lang="ts">
+import { useLiveList } from '../composables/useLiveList'
+import ListToolbar from '../components/ListToolbar.vue'
+import ContextHelp from '../components/ContextHelp.vue'
+import ListPagination from '../components/ListPagination.vue'
 import RowActions from '../components/RowActions.vue'
 import { computed, onMounted, reactive, ref } from 'vue'
 import { ElMessage, ElMessageBox, type FormInstance, type FormItemRule, type FormRules } from 'element-plus'
@@ -245,19 +249,24 @@ onMounted(() => {
   void load()
 })
 
+const liveList = useLiveList(() => [statusFilter.value, keywordFilter.value], searchKeyword, () => keywordFilter.value)
+
 async function load() {
+  const isCurrent = liveList.begin()
   loading.value = true
   try {
     const params: Record<string, string | number> = { page: page.value, page_size: pageSize.value }
     if (statusFilter.value) params.status = statusFilter.value
     if (keywordFilter.value.trim()) params.keyword = keywordFilter.value.trim()
     const response = await apiClient.get<ListResponse<SecurityTestRequest>>('/security-test-requests', { params })
+    if (!isCurrent()) return
     requests.value = response.data.items
     total.value = response.data.total
   } catch (error) {
+    if (!isCurrent()) return
     ElMessage.error(getAPIErrorMessage(error, '读取上线安全测试申请失败'))
   } finally {
-    loading.value = false
+    if (isCurrent()) loading.value = false
   }
 }
 
@@ -370,7 +379,10 @@ async function openSystemPicker() {
   await loadSystemPicker()
 }
 
+const systemList = useLiveList(() => [systemPickerVisible.value, systemPickerKeyword.value], () => { if (systemPickerVisible.value) searchSystemPicker() }, () => systemPickerKeyword.value)
+
 async function loadSystemPicker() {
+  const isCurrent = systemList.begin()
   systemPickerLoading.value = true
   try {
     const params: Record<string, string | number> = {
@@ -380,12 +392,14 @@ async function loadSystemPicker() {
     }
     if (systemPickerKeyword.value.trim()) params.q = systemPickerKeyword.value.trim()
     const response = await apiClient.get<ListResponse<SystemPickerRow>>('/business-systems', { params })
+    if (!isCurrent()) return
     systemPickerRows.value = response.data.items
     systemPickerTotal.value = response.data.total
   } catch (error) {
+    if (!isCurrent()) return
     ElMessage.error(getAPIErrorMessage(error, '读取业务系统失败'))
   } finally {
-    systemPickerLoading.value = false
+    if (isCurrent()) systemPickerLoading.value = false
   }
 }
 
@@ -428,7 +442,10 @@ async function openScopePicker() {
   await loadScopePicker()
 }
 
+const scopeList = useLiveList(() => [scopePickerVisible.value, scopePickerType.value, scopePickerKeyword.value], () => { if (scopePickerVisible.value) searchScopePicker() }, () => scopePickerKeyword.value)
+
 async function loadScopePicker() {
+  const isCurrent = scopeList.begin()
   scopePickerLoading.value = true
   try {
     const params: Record<string, string | number> = {
@@ -438,12 +455,14 @@ async function loadScopePicker() {
     if (scopePickerKeyword.value.trim()) params.keyword = scopePickerKeyword.value.trim()
     if (scopePickerType.value) params.asset_type = scopePickerType.value
     const response = await apiClient.get<ListResponse<ScopeItem>>('/security-test-requests/scope-candidates', { params })
+    if (!isCurrent()) return
     scopePickerRows.value = response.data.items
     scopePickerTotal.value = response.data.total
   } catch (error) {
+    if (!isCurrent()) return
     ElMessage.error(getAPIErrorMessage(error, '读取可选公网资产失败'))
   } finally {
-    scopePickerLoading.value = false
+    if (isCurrent()) scopePickerLoading.value = false
   }
 }
 
@@ -788,15 +807,15 @@ function formatDate(value?: string) {
       </div>
     </div>
 
-    <div class="panel request-filter-panel">
-      <el-select v-model="statusFilter" clearable placeholder="全部状态" style="width: 170px" @change="applyStatusFilter">
+    <ListToolbar class="panel" label="测试申请筛选">
+      <el-select v-model="statusFilter" clearable placeholder="全部状态" style="width: 170px">
         <el-option v-for="(label, value) in statusLabels" :key="value" :label="label" :value="value" />
       </el-select>
-      <el-input v-model="keywordFilter" clearable placeholder="搜索申请编号、名称、业务系统或组织" style="width: 280px" @keyup.enter="searchKeyword" @clear="searchKeyword" />
-      <el-button @click="searchKeyword">搜索</el-button>
-      <span class="request-filter-hint">范围仅允许本组织未归档公网资产，单次最多 200 项。</span>
-      <span class="request-filter-count">当前页 {{ requests.length }} 条，共 {{ total }} 个申请</span>
-    </div>
+      <el-input v-model="keywordFilter" clearable placeholder="搜索申请编号、名称、业务系统或组织" style="width: 280px" />
+
+      <ContextHelp label="测试范围说明">范围仅允许本组织未归档公网资产，单次最多 200 项。</ContextHelp>
+      <template #actions><span class="list-toolbar-summary">当前页 {{ requests.length }} 条，共 {{ total }} 个申请</span></template>
+    </ListToolbar>
 
     <div class="panel data-table-panel" v-loading="loading">
       <el-table :data="requests" row-key="id" empty-text="暂无上线安全测试申请">
@@ -830,7 +849,7 @@ function formatDate(value?: string) {
         </el-table-column>
       </el-table>
       <div class="table-pagination">
-        <el-pagination
+        <ListPagination :reset-key="requests"
           background
           layout="total, sizes, prev, pager, next"
           :total="total"
@@ -901,8 +920,8 @@ function formatDate(value?: string) {
 
     <el-dialog v-model="systemPickerVisible" title="选择上线业务系统" width="780px" append-to-body destroy-on-close>
       <div class="scope-search-bar">
-        <el-input v-model="systemPickerKeyword" clearable placeholder="搜索系统名称或负责人，也可输入编码" @keyup.enter="searchSystemPicker" @clear="searchSystemPicker" />
-        <el-button type="primary" @click="searchSystemPicker">搜索</el-button>
+        <el-input v-model="systemPickerKeyword" clearable placeholder="搜索系统名称或负责人，也可输入编码" />
+
       </div>
       <el-table v-loading="systemPickerLoading" :data="systemPickerRows" border height="390" data-testid="request-system-picker">
         <el-table-column label="业务系统" min-width="260"><template #default="{ row }"><strong>{{ row.name }}</strong><div class="scope-row-secondary">{{ systemPickerHint(row) }}</div></template></el-table-column>
@@ -918,7 +937,7 @@ function formatDate(value?: string) {
       </el-table>
       <div class="scope-picker-pagination">
         <span>只能选择本组织的业务系统；已进入其他填报流程或审核中的版本不可选。</span>
-        <el-pagination background small layout="total, sizes, prev, pager, next" :total="systemPickerTotal" :current-page="systemPickerPage" :page-size="systemPickerPageSize" :page-sizes="[20, 50, 100]" @current-change="handleSystemPickerPageChange" @size-change="handleSystemPickerPageSizeChange" />
+        <ListPagination :reset-key="systemPickerRows" background small layout="total, sizes, prev, pager, next" :total="systemPickerTotal" :current-page="systemPickerPage" :page-size="systemPickerPageSize" :page-sizes="[20, 50, 100]" @current-change="handleSystemPickerPageChange" @size-change="handleSystemPickerPageSizeChange" />
       </div>
     </el-dialog>
 
@@ -927,11 +946,11 @@ function formatDate(value?: string) {
         <template #title>仅列出本组织可选的公网资产；内网资产待集团-子单位网络打通后开放。</template>
       </el-alert>
       <div class="scope-search-bar">
-        <el-select v-model="scopePickerType" clearable placeholder="全部类型" style="width: 130px" @change="searchScopePicker">
+        <el-select v-model="scopePickerType" clearable placeholder="全部类型" style="width: 130px">
           <el-option v-for="(label, value) in assetTypeLabels" :key="value" :label="label" :value="value" />
         </el-select>
-        <el-input v-model="scopePickerKeyword" clearable placeholder="搜索资产值、名称、业务系统或负责人" @keyup.enter="searchScopePicker" @clear="searchScopePicker" />
-        <el-button type="primary" @click="searchScopePicker">搜索</el-button>
+        <el-input v-model="scopePickerKeyword" clearable placeholder="搜索资产值、名称、业务系统或负责人" />
+
       </div>
       <el-table v-loading="scopePickerLoading" :data="scopePickerRows" border height="390" data-testid="request-scope-picker">
         <el-table-column label="公网资产" min-width="260"><template #default="{ row }"><strong>[{{ assetTypeLabels[row.asset_type] ?? row.asset_type }}] {{ row.asset_value }}</strong><div class="scope-row-secondary">{{ row.asset_name || '-' }}</div></template></el-table-column>
@@ -951,7 +970,7 @@ function formatDate(value?: string) {
       </el-table>
       <div class="scope-picker-pagination">
         <span>已选 {{ selectedScope.length }} / 200 项</span>
-        <el-pagination background small layout="total, sizes, prev, pager, next" :total="scopePickerTotal" :current-page="scopePickerPage" :page-size="scopePickerPageSize" :page-sizes="[20, 50, 100]" @current-change="handleScopePickerPageChange" @size-change="handleScopePickerPageSizeChange" />
+        <ListPagination :reset-key="scopePickerRows" background small layout="total, sizes, prev, pager, next" :total="scopePickerTotal" :current-page="scopePickerPage" :page-size="scopePickerPageSize" :page-sizes="[20, 50, 100]" @current-change="handleScopePickerPageChange" @size-change="handleScopePickerPageSizeChange" />
       </div>
     </el-dialog>
 
@@ -1041,7 +1060,7 @@ function formatDate(value?: string) {
           </el-timeline>
           <el-empty v-else-if="!eventListLoading" description="暂无处理记录" :image-size="60" />
           <div v-if="eventTotal > 0" class="table-pagination detail-pagination">
-            <el-pagination background small layout="total, sizes, prev, pager, next" :total="eventTotal" :current-page="eventPage" :page-size="eventPageSize" :page-sizes="[20, 50, 100]" @current-change="handleEventPageChange" @size-change="handleEventPageSizeChange" />
+            <ListPagination :reset-key="currentRequest.scope_assets ?? []" background small layout="total, sizes, prev, pager, next" :total="eventTotal" :current-page="eventPage" :page-size="eventPageSize" :page-sizes="[20, 50, 100]" @current-change="handleEventPageChange" @size-change="handleEventPageSizeChange" />
           </div>
         </div>
       </template>
@@ -1050,9 +1069,6 @@ function formatDate(value?: string) {
 </template>
 
 <style scoped>
-.request-filter-panel { display:flex; align-items:center; gap:14px; margin-bottom:16px; }
-.request-filter-hint { color:var(--muted); font-size:13px; }
-.request-filter-count { margin-left:auto; color:var(--muted); font-size:13px; white-space:nowrap; }
 .table-pagination { display:flex; justify-content:flex-end; margin-top:18px; }
 .detail-pagination { overflow-x:auto; padding-bottom:2px; }
 .link-button { padding:0; border:0; background:transparent; color:var(--blue); cursor:pointer; text-align:left; font:inherit; }
@@ -1076,5 +1092,5 @@ function formatDate(value?: string) {
 .section-heading { margin:28px 0 14px; }
 .section-heading p { margin:6px 0 0; color:var(--muted); }
 .detail-inline-tag { margin-left:8px; }
-@media (max-width: 900px) { .request-filter-panel { align-items:flex-start; flex-wrap:wrap; } .request-filter-count { width:100%; margin-left:0; } .form-grid-two { grid-template-columns:1fr; } .date-range-inline { flex-direction:column; align-items:stretch; } .scope-picker-pagination { align-items:flex-start; flex-direction:column; } }
+@media (max-width: 900px) { .form-grid-two { grid-template-columns:1fr; } .date-range-inline { flex-direction:column; align-items:stretch; } .scope-picker-pagination { align-items:flex-start; flex-direction:column; } }
 </style>

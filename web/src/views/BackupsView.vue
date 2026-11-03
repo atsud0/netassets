@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import ListPagination from '../components/ListPagination.vue'
 import RowActions from '../components/RowActions.vue'
 import { onMounted, ref } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
@@ -177,7 +178,7 @@ onMounted(() => { void loadBackups() })
         </el-table-column>
       </el-table>
       <div v-if="total > 0" class="table-pagination">
-        <el-pagination background layout="total, sizes, prev, pager, next" :total="total" :current-page="page" :page-size="pageSize" :page-sizes="[20, 50, 100]" @current-change="handlePageChange" @size-change="handlePageSizeChange" />
+        <ListPagination :reset-key="backups" background layout="total, sizes, prev, pager, next" :total="total" :current-page="page" :page-size="pageSize" :page-sizes="[20, 50, 100]" @current-change="handlePageChange" @size-change="handlePageSizeChange" />
       </div>
     </div>
   </section>

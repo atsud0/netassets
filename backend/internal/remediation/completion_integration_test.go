@@ -1,6 +1,7 @@
 package remediation_test
 
 import (
+	"context"
 	"errors"
 	"io"
 	"strings"
@@ -13,6 +14,17 @@ import (
 	"netassets/internal/remediation"
 	"netassets/internal/securityworkorder"
 )
+
+func organizationItemVersions(t *testing.T, service *securityworkorder.Service, ctx context.Context, principal auth.Principal, orderID string) []securityworkorder.WorkOrderItemVersion {
+	t.Helper()
+	result, err := service.SearchWorkOrderFindings(ctx, principal, orderID, pagination.Query{Page: 1, PageSize: 100})
+	must(t, err)
+	items := make([]securityworkorder.WorkOrderItemVersion, 0, len(result.Items))
+	for _, row := range result.Items {
+		items = append(items, securityworkorder.WorkOrderItemVersion{ID: row.ID, Version: row.Version, FindingUpdatedAt: row.FindingUpdatedAt})
+	}
+	return items
+}
 
 func version(t *testing.T, f *fixture, id string) int {
 	t.Helper()
@@ -431,8 +443,22 @@ func TestLegacyOrganizationModeStillCompletesWithAttachments(t *testing.T) {
 	_, err = f.orders.GetAttachment(f.ctx, f.manager, order.ID, attachment.ID)
 	must(t, err)
 	_, err = f.orders.Submit(f.ctx, f.manager, order.ID, securityworkorder.SubmitInput{RemediationResult: "两个漏洞统一修复"}, "", "")
+	if !errors.Is(err, securityworkorder.ErrInvalid) {
+		t.Fatalf("legacy submit bypassed item evidence: %v", err)
+	}
+	items := organizationItemVersions(t, f.orders, f.ctx, f.manager, order.ID)
+	processed, err := f.orders.ProcessWorkOrderItems(f.ctx, f.manager, order.ID, securityworkorder.WorkOrderItemInput{Items: items, Action: "submit", Note: "两个漏洞统一修复", EvidenceIDs: []string{attachment.ID}}, "", "")
 	must(t, err)
-	result, err := f.orders.Review(f.ctx, f.group, order.ID, securityworkorder.ReviewInput{Decision: "closed", VerificationResult: "整体复测通过"}, "", "")
+	if processed.Succeeded != 2 || processed.Failed != 0 {
+		t.Fatalf("item submission: %+v", processed)
+	}
+	items = organizationItemVersions(t, f.orders, f.ctx, f.group, order.ID)
+	processed, err = f.orders.ProcessWorkOrderItems(f.ctx, f.group, order.ID, securityworkorder.WorkOrderItemInput{Items: items, Action: "pass", Note: "逐项复测通过"}, "", "")
+	must(t, err)
+	if processed.Succeeded != 2 || processed.Failed != 0 {
+		t.Fatalf("item verification: %+v", processed)
+	}
+	result, err := f.orders.GetWorkOrder(f.ctx, f.group, order.ID)
 	must(t, err)
 	if result.Status != "closed" {
 		t.Fatal("legacy order not closed")

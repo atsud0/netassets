@@ -1,4 +1,8 @@
 <script setup lang="ts">
+import { useLiveList } from '../composables/useLiveList'
+import ListToolbar from '../components/ListToolbar.vue'
+import ContextHelp from '../components/ContextHelp.vue'
+import ListPagination from '../components/ListPagination.vue'
 import RowActions from '../components/RowActions.vue'
 import { loadOptions } from '../api/remediation'
 import { computed, onMounted, reactive, ref } from 'vue'
@@ -140,7 +144,10 @@ async function runScan() {
   } finally { scanning.value = false }
 }
 
+const liveList = useLiveList(() => filters, searchIssues)
+
 async function loadIssues() {
+  const isCurrent = liveList.begin()
   loading.value = true
   try {
     const params: Record<string, string | number> = { page: issuePage.value, page_size: issuePageSize.value }
@@ -150,13 +157,15 @@ async function loadIssues() {
     if (filters.resource_type) params.resource_type = filters.resource_type
     if (filters.assignee) params.assignee = filters.assignee
     const response = await apiClient.get<ListResponse<QualityIssue> & { summary: IssueSummary }>('/data-quality-issues', { params })
+    if (!isCurrent()) return
     items.value = response.data.items
     issueTotal.value = response.data.total
     Object.assign(summary, response.data.summary)
   } catch (error) {
+    if (!isCurrent()) return
     ElMessage.error(getAPIErrorMessage(error, '读取数据质量问题失败'))
   } finally {
-    loading.value = false
+    if (isCurrent()) loading.value = false
   }
 }
 
@@ -412,22 +421,24 @@ onMounted(async () => {
       <div v-for="card in summaryCards" :key="String(card[0])" class="quality-workflow-card" :class="`tone-${card[2]}`"><span>{{ card[0] }}</span><strong>{{ card[1] }}</strong></div>
       </div>
 
-      <div class="panel quality-workflow-filters">
+      <ListToolbar class="panel" label="质量整改筛选">
       <el-select v-model="filters.organization_id" clearable filterable placeholder="全部组织"><el-option v-for="item in organizations" :key="item.id" :label="item.name" :value="item.id" /></el-select>
       <el-select v-model="filters.status" clearable placeholder="全部状态"><el-option v-for="(label, value) in statusLabels" :key="value" :label="label" :value="value" /></el-select>
       <el-select v-model="filters.severity" clearable placeholder="全部级别"><el-option label="错误" value="error" /><el-option label="警告" value="warning" /></el-select>
       <el-select v-model="filters.resource_type" clearable placeholder="全部对象"><el-option label="网络资产" value="asset" /><el-option label="业务系统" value="business_system" /></el-select>
       <el-select v-model="filters.assignee" clearable placeholder="全部负责人"><el-option label="只看我负责的" value="me" /><el-option v-for="user in availableFilterUsers" :key="user.id" :label="user.display_name" :value="user.id" /></el-select>
-      <div class="quality-workflow-filter-actions"><el-button type="primary" @click="searchIssues">查询</el-button><el-button @click="resetFilters">重置</el-button></div>
-      <SavedFilterViews ref="savedFilterViews" page-key="data_quality_issues" :current-filters="currentIssueFilters" class="quality-saved-views" @apply="applySavedIssueFilters" @changed="reloadIssuesAfterViewChange" />
-    </div>
+      <div class="list-action-group"><el-button @click="resetFilters">重置</el-button></div>
+      <template #actions>
+      <SavedFilterViews ref="savedFilterViews" page-key="data_quality_issues" :current-filters="currentIssueFilters" @apply="applySavedIssueFilters" @changed="reloadIssuesAfterViewChange" />
+      </template>
+    </ListToolbar>
 
       <div class="panel quality-workflow-table-panel quality-issue-panel">
       <div class="table-panel-heading"><div><strong>质量问题清单</strong><span>当前筛选命中 {{ summary.total }} 条</span></div><el-tag type="danger">错误 {{ summary.error }}</el-tag><el-tag type="warning">警告 {{ summary.warning }}</el-tag></div>
-      <div class="batch-toolbar quality-batch-toolbar">
-        <div><strong>批量整改</strong><span>已选择 {{ selectedIssues.length }} 个问题，单次最多 200 个；指派负责人和开始整改要求属于同一责任组织</span></div>
-        <div class="button-row"><el-button :disabled="selectedIssues.length === 0" :loading="bulkLoading" @click="openBulkAction('assign')">批量指派</el-button><el-button type="primary" plain :disabled="selectedIssues.length === 0" :loading="bulkLoading" @click="openBulkAction('start')">批量开始整改</el-button><el-button type="success" plain :disabled="selectedIssues.length === 0" :loading="bulkLoading" @click="openBulkAction('submit')">批量提交复核</el-button></div>
-      </div>
+      <ListToolbar :selection="selectedIssues.length" label="批量整改">
+        <ContextHelp label="批量整改限制">单次最多 200 个；指派负责人和开始整改要求属于同一责任组织。</ContextHelp>
+        <template #actions><div class="list-action-group"><el-button :disabled="selectedIssues.length === 0" :loading="bulkLoading" @click="openBulkAction('assign')">批量指派</el-button><el-button type="primary" plain :disabled="selectedIssues.length === 0" :loading="bulkLoading" @click="openBulkAction('start')">批量开始整改</el-button><el-button type="success" plain :disabled="selectedIssues.length === 0" :loading="bulkLoading" @click="openBulkAction('submit')">批量提交复核</el-button></div></template>
+      </ListToolbar>
       <div class="quality-issue-table-scroll">
         <el-table ref="issueTableRef" v-loading="loading" :data="items" row-key="id" stripe max-height="560" empty-text="当前范围暂无数据质量问题" @selection-change="handleSelectionChange">
           <el-table-column type="selection" width="46" :reserve-selection="true" />
@@ -450,7 +461,7 @@ onMounted(async () => {
         </el-table>
       </div>
       <div class="table-pagination">
-        <el-pagination background layout="total, sizes, prev, pager, next" :total="issueTotal" :current-page="issuePage" :page-size="issuePageSize" :page-sizes="[20, 50, 100]" @current-change="handleIssuePageChange" @size-change="handleIssuePageSizeChange" />
+        <ListPagination :reset-key="items" background layout="total, sizes, prev, pager, next" :total="issueTotal" :current-page="issuePage" :page-size="issuePageSize" :page-sizes="[20, 50, 100]" @current-change="handleIssuePageChange" @size-change="handleIssuePageSizeChange" />
       </div>
     </div>
 
@@ -473,7 +484,7 @@ onMounted(async () => {
           <el-timeline v-if="events.length"><el-timeline-item v-for="event in events" :key="event.id" :timestamp="formatTime(event.created_at)" placement="top"><strong>{{ eventLabels[event.event_type] || event.event_type }}</strong><span class="quality-event-actor">{{ event.actor_display_name || '系统' }}</span><p v-if="event.note">{{ event.note }}</p></el-timeline-item></el-timeline>
           <el-empty v-else description="暂无人工处理记录；巡检命中历史可通过最近发现时间和命中次数查看" />
         </div>
-        <el-pagination v-if="eventTotal > 0" class="table-pagination" background layout="total, sizes, prev, pager, next" :total="eventTotal" :current-page="eventPage" :page-size="eventPageSize" :page-sizes="[20, 50, 100]" @current-change="handleEventPageChange" @size-change="handleEventPageSizeChange" />
+        <ListPagination :reset-key="events" v-if="eventTotal > 0" class="table-pagination" background layout="total, sizes, prev, pager, next" :total="eventTotal" :current-page="eventPage" :page-size="eventPageSize" :page-sizes="[20, 50, 100]" @current-change="handleEventPageChange" @size-change="handleEventPageSizeChange" />
       </div>
     </el-drawer>
 
@@ -527,15 +538,11 @@ onMounted(async () => {
 .quality-workflow-card span { display:block; margin-bottom:8px; color:var(--muted); font-size:12px; }
 .quality-workflow-card strong { color:var(--navy); font-size:26px; }
 .quality-workflow-card.tone-danger { border-left-color:#f56c6c; }.quality-workflow-card.tone-warning { border-left-color:#e6a23c; }.quality-workflow-card.tone-success { border-left-color:#67c23a; }.quality-workflow-card.tone-info { border-left-color:#909399; }.quality-workflow-card.tone-total { border-left-color:var(--cyan); }
-.quality-workflow-filters { display:grid; grid-template-columns:repeat(auto-fit,minmax(min(100%,160px),1fr)); min-width:0; gap:12px; align-items:center; }
-.quality-workflow-filters :deep(.el-select) { min-width:0; width:100%; }
-.quality-saved-views { grid-column:1 / -1; min-width:0; padding-top:4px; border-top:1px dashed var(--line); }
-.quality-workflow-filter-actions { display:flex; flex-wrap:wrap; gap:8px; }.table-pagination { display:flex; justify-content:flex-end; margin-top:18px; }.quality-workflow-table-panel { min-width:0; padding-top:14px; }.row-actions { display:flex; flex-wrap:wrap; justify-content:flex-end; gap:2px 8px; }
-.quality-issue-panel .table-panel-heading { flex-wrap:wrap; gap:8px 12px; }.quality-issue-table-scroll { width:100%; min-width:0; overflow-x:auto; overscroll-behavior-x:contain; }.quality-issue-table-scroll :deep(.el-table) { min-width:100%; }
-.quality-batch-toolbar { flex-wrap:wrap; margin:14px 0; }.quality-batch-toolbar .button-row { flex-wrap:wrap; margin-left:auto; justify-content:flex-end; }.quality-batch-form { margin-top:18px; }
+.table-pagination { display:flex; justify-content:flex-end; margin-top:18px; }.quality-workflow-table-panel { min-width:0; padding-top:14px; }.row-actions { display:flex; flex-wrap:wrap; justify-content:flex-end; gap:2px 8px; }
+.quality-issue-panel .table-panel-heading { flex-wrap:wrap; gap:8px 12px; }.quality-issue-table-scroll { width:100%; min-width:0; overflow-x:auto; overscroll-behavior-x:contain; }.quality-issue-table-scroll :deep(.el-table) { min-width:100%; }.quality-batch-form { margin-top:18px; }
 .quality-note { margin:14px 0; padding:14px 16px; background:#f8fafc; border-radius:9px; }.quality-note span { color:var(--muted); font-size:12px; }.quality-note p { margin:7px 0; white-space:pre-wrap; line-height:1.65; }.quality-note small { color:var(--muted); }
 .assignee-field { width:100%; }.assignee-field small { display:block; margin-top:7px; color:#e6a23c; line-height:1.5; }
 .quality-event-list { min-height:120px; max-height:420px; overflow:auto; padding:4px 10px 0 2px; }
 .quality-event-actor { margin-left:10px; color:var(--muted); font-size:12px; }.el-timeline-item p { margin:6px 0 0; color:var(--muted); white-space:pre-wrap; }
-@media (max-width:760px) { .quality-workflow-filter-actions { width:100%; }.quality-workflow-filter-actions .el-button { flex:1; }.quality-batch-toolbar .button-row { width:100%; margin-left:0; justify-content:flex-start; }.table-pagination { justify-content:flex-start; overflow-x:auto; padding-bottom:2px; } }
+@media (max-width:760px) { .table-pagination { justify-content:flex-start; overflow-x:auto; padding-bottom:2px; } }
 </style>

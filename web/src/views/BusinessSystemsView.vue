@@ -1,4 +1,8 @@
 <script setup lang="ts">
+import { useLiveList } from '../composables/useLiveList'
+import ListToolbar from '../components/ListToolbar.vue'
+import ContextHelp from '../components/ContextHelp.vue'
+import ListPagination from '../components/ListPagination.vue'
 import RowActions from '../components/RowActions.vue'
 import { computed, onMounted, reactive, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
@@ -178,7 +182,10 @@ watch(() => form.contains_personal_information, (value) => {
   }
 })
 
+const liveList = useLiveList(() => [search.value, statusFilter.value, organizationFilter.value], resetAndLoadSystems, () => search.value)
+
 async function loadSystems() {
+  const isCurrent = liveList.begin()
   loading.value = true
   try {
     const response = await apiClient.get<ListResponse<BusinessSystem>>('/business-systems', {
@@ -190,11 +197,14 @@ async function loadSystems() {
         organization_id: organizationFilter.value || undefined,
       },
     })
+    if (!isCurrent()) return
     systems.value = response.data.items
     total.value = response.data.total
     selectedSystems.value = []
-  } catch (error) { ElMessage.error(getAPIErrorMessage(error, '读取业务系统失败')) }
-  finally { loading.value = false }
+  } catch (error) {
+    if (isCurrent()) ElMessage.error(getAPIErrorMessage(error, '读取业务系统失败'))
+  }
+  finally { if (isCurrent()) loading.value = false }
 }
 
 async function loadDraftSystems() {
@@ -849,17 +859,17 @@ onMounted(load)
       <h1>业务系统</h1>
     </div>
       <div class="button-row ledger-page-actions business-system-page-actions"><el-dropdown v-if="!inventoryMode"><el-button :loading="exporting">导出台账</el-button><template #dropdown><el-dropdown-menu><el-dropdown-item @click="exportLedger('xlsx')">导出 XLSX</el-dropdown-item><el-dropdown-item @click="exportLedger('csv')">导出 CSV</el-dropdown-item><el-dropdown-item divided @click="queueXLSXExport">后台生成 XLSX</el-dropdown-item></el-dropdown-menu></template></el-dropdown><el-button v-if="!inventoryMode" @click="openImportHistory">导入记录</el-button><el-button v-if="!inventoryMode" @click="openImportDialog">批量导入</el-button><el-button v-if="!inventoryMode || !auth.isGroupAdmin" type="primary" :disabled="eligibleOrganizations.length === 0" @click="openCreateDialog">{{ '新增业务系统' }}</el-button></div>
-    <div class="panel asset-filter-panel">
-      <el-input v-model="search" clearable placeholder="搜索系统名称、组织或负责人，也可输入编码" @keyup.enter="resetAndLoadSystems" @clear="resetAndLoadSystems" />
-      <el-select v-model="statusFilter" clearable placeholder="全部状态" @change="resetAndLoadSystems" @clear="resetAndLoadSystems">
+    <ListToolbar class="panel" label="业务系统筛选">
+      <el-input v-model="search" clearable placeholder="搜索系统名称、组织或负责人，也可输入编码" />
+      <el-select v-model="statusFilter" clearable placeholder="全部状态">
         <el-option v-for="(label, value) in statusLabels" :key="value" :label="label" :value="value" />
       </el-select>
-      <el-select v-if="auth.isGroupAdmin && !inventoryMode" v-model="organizationFilter" clearable filterable placeholder="全部组织" fit-input-width popper-class="organization-select-popper" placement="bottom-start" :fallback-placements="['bottom-start']" @change="resetAndLoadSystems" @clear="resetAndLoadSystems">
+      <el-select v-if="auth.isGroupAdmin && !inventoryMode" v-model="organizationFilter" clearable filterable placeholder="全部组织" fit-input-width popper-class="organization-select-popper" placement="bottom-start" :fallback-placements="['bottom-start']">
         <el-option v-for="item in eligibleOrganizations" :key="item.id" :label="item.name" :title="item.name" :value="item.id" />
       </el-select>
-      <el-button @click="resetAndLoadSystems">查询</el-button>
-      <span class="asset-filter-count">共 {{ total }} 条</span>
-    </div>
+
+      <template #actions><span class="list-toolbar-summary">共 {{ total }} 条</span></template>
+    </ListToolbar>
     <div v-if="inventoryMode" class="panel data-table-panel inventory-draft-panel" v-loading="loading">
       <div class="table-panel-heading"><div><strong>本次上报内容</strong><span>共 {{ draftTotal }} 个；首次上报、变更上报和下线申请均在审核发布后影响集团正式台账</span></div><el-tag type="warning" effect="plain">待提交</el-tag></div>
       <el-table :data="draftSystems" row-key="id" empty-text="尚未选择需要上报的业务系统">
@@ -872,16 +882,16 @@ onMounted(load)
         <el-table-column label="填报归属" min-width="180"><template #default="scope"><span v-if="!draftOwnerLabel(scope.row)" class="list-secondary">尚未分配填报人</span><template v-else><span>{{ draftOwnerLabel(scope.row) }}</span><span v-if="draftTakeoverSummary(scope.row)" class="list-secondary">{{ draftTakeoverSummary(scope.row) }}</span><span v-else-if="draftLastEditedHint(scope.row)" class="list-secondary">{{ draftLastEditedHint(scope.row) }}</span></template></template></el-table-column>
         <el-table-column label="操作" width="88" fixed="right" align="right" header-align="right" class-name="table-action-column"><template #default="scope"><RowActions :label="`操作：${scope.row.name || scope.row.title || scope.row.code || scope.row.display_name || scope.row.id}`"><el-button link type="primary" @click="openWorkingVersionDiff(scope.row)">查看变更</el-button><el-button v-if="scope.row.operation !== 'delete'" link type="primary" :disabled="scope.row.draft_status === 'submitted'" @click="openEditDialog(scope.row)">编辑</el-button><el-button v-if="canTakeOverDraft(scope.row)" link type="warning" @click="takeoverDraft(scope.row)">接管</el-button><el-button link type="danger" :disabled="scope.row.draft_status === 'submitted'" @click="removeDraft(scope.row)">取消上报</el-button></RowActions></template></el-table-column>
       </el-table>
-      <div v-if="draftTotal > 0" class="table-pagination"><el-pagination background layout="total, sizes, prev, pager, next" :total="draftTotal" :current-page="draftPage" :page-size="draftPageSize" :page-sizes="[20, 50, 100]" @current-change="handleDraftPageChange" @size-change="handleDraftPageSizeChange" /></div>
+      <div v-if="draftTotal > 0" class="table-pagination"><ListPagination :reset-key="draftSystems" background layout="total, sizes, prev, pager, next" :total="draftTotal" :current-page="draftPage" :page-size="draftPageSize" :page-sizes="[20, 50, 100]" @current-change="handleDraftPageChange" @size-change="handleDraftPageSizeChange" /></div>
     </div>
     <div class="panel data-table-panel">
-      <div v-if="inventoryMode" class="batch-toolbar">
-        <div><strong>选择上报</strong><span>已选择 {{ selectedSystems.length }} 个未上报业务系统，单次最多 200 个</span></div>
-        <div class="button-row"><el-button type="primary" :loading="batchLoading" :disabled="selectedSystems.length === 0" @click="batchSelectWorkspaceBusinessSystems">批量纳入本次上报</el-button></div>
-      </div>
-      <div v-else class="batch-toolbar">
-        <div><strong>批量操作</strong><span>已选择 {{ selectedSystems.length }} 个业务系统，单次最多 200 个</span></div>
-        <div class="batch-toolbar-actions">
+      <ListToolbar label="选择上报" :selection="selectedSystems.length" v-if="inventoryMode">
+        <ContextHelp label="选择范围">单次最多 200 项，仅作用于选中记录。</ContextHelp>
+        <template #actions><div class="button-row"><el-button type="primary" :loading="batchLoading" :disabled="selectedSystems.length === 0" @click="batchSelectWorkspaceBusinessSystems">批量纳入本次上报</el-button></div>
+      </template></ListToolbar>
+      <ListToolbar label="批量操作" :selection="selectedSystems.length" v-else>
+        <ContextHelp label="选择范围">单次最多 200 项，仅作用于选中记录。</ContextHelp>
+        <template #actions><div class="list-action-group">
           <template v-if="auth.isGroupAdmin"><el-button :disabled="selectedSystems.length === 0" :loading="batchLoading" @click="runBatchArchive(false)">批量恢复</el-button>
           <el-button type="warning" plain :disabled="selectedSystems.length === 0" :loading="batchLoading" @click="runBatchArchive(true)">批量归档</el-button></template>
           <el-dropdown :disabled="selectedSystems.length === 0 || selectedExporting">
@@ -894,7 +904,7 @@ onMounted(load)
             </template>
           </el-dropdown>
         </div>
-      </div>
+      </template></ListToolbar>
       <el-table v-loading="loading" :data="systems" row-key="id" empty-text="暂无业务系统" @selection-change="handleSelectionChange">
         <el-table-column type="selection" width="46" :selectable="canSelectBusinessSystem" />
         <el-table-column label="业务系统" min-width="200">
@@ -911,7 +921,7 @@ onMounted(load)
         <el-table-column label="操作" fixed="right" width="88" align="right" header-align="right" class-name="table-action-column"><template #default="scope"><RowActions :label="`操作：${scope.row.name || scope.row.title || scope.row.code || scope.row.display_name || scope.row.id}`"><template v-if="!inventoryMode"><template v-if="scope.row.is_working_copy"><el-button link type="primary" @click="openWorkingVersionDiff(scope.row)">查看变更</el-button><el-button link type="primary" @click="openEditDialog(scope.row)">编辑</el-button><el-button link type="danger" @click="remove(scope.row)">删除</el-button></template><template v-else><el-button link type="primary" @click="openChangeHistory(scope.row)">历史</el-button><el-button link type="primary" @click="openEditDialog(scope.row)">编辑</el-button><el-button v-if="auth.isGroupAdmin" link :type="scope.row.status === 'archived' ? 'success' : 'warning'" @click="changeArchive(scope.row, scope.row.status !== 'archived')">{{ scope.row.status === 'archived' ? '恢复' : '归档' }}</el-button><el-button link type="danger" @click="remove(scope.row)">删除</el-button></template></template><template v-else><template v-if="scope.row.is_working_copy"><el-button link type="primary" @click="openWorkingVersionDiff(scope.row)">查看变更</el-button><el-button v-if="!scope.row.task_id" link type="primary" @click="selectWorkspaceBusinessSystem(scope.row)">选择上报</el-button></template><template v-else><el-button link type="primary" @click="openEditDialog(scope.row)">修改后上报</el-button><el-button link type="danger" @click="requestSystemDeletion(scope.row)">申请下线</el-button></template></template></RowActions></template></el-table-column>
       </el-table>
       <div class="table-pagination">
-        <el-pagination background layout="total, sizes, prev, pager, next" :total="total" :current-page="page" :page-size="pageSize" :page-sizes="[20, 50, 100]" @current-change="handlePageChange" @size-change="handlePageSizeChange" />
+        <ListPagination :reset-key="systems" background layout="total, sizes, prev, pager, next" :total="total" :current-page="page" :page-size="pageSize" :page-sizes="[20, 50, 100]" @current-change="handlePageChange" @size-change="handlePageSizeChange" />
       </div>
     </div>
 
@@ -1013,7 +1023,7 @@ onMounted(load)
     <el-dialog v-model="historyDialogVisible" title="业务系统导入记录" width="980px">
       <el-table v-loading="historyLoading" :data="importHistory" size="small" empty-text="暂无导入记录" max-height="520"><el-table-column label="时间" width="175"><template #default="scope">{{ formatDateTime(scope.row.created_at) }}</template></el-table-column><el-table-column prop="organization_name" label="所属组织" min-width="130" /><el-table-column prop="file_name" label="文件名" min-width="190" /><el-table-column label="模式" width="130"><template #default="scope">{{ scope.row.import_mode === 'update_working' ? '覆盖为工作版本' : '重复跳过' }}</template></el-table-column><el-table-column label="结果" min-width="280"><template #default="scope">总数 {{ scope.row.total_count }} · 成功 {{ scope.row.success_count }}（新增 {{ scope.row.created_count }} / 更新 {{ scope.row.updated_count }}）· 重复 {{ scope.row.duplicate_count }} · 失败 {{ scope.row.failure_count }}</template></el-table-column><el-table-column prop="created_by_name" label="操作人" width="110" /></el-table>
       <div class="table-pagination dialog-pagination">
-        <el-pagination background layout="total, sizes, prev, pager, next" :total="importTotal" :current-page="importPage" :page-size="importPageSize" :page-sizes="[20, 50, 100]" @current-change="handleImportPageChange" @size-change="handleImportPageSizeChange" />
+        <ListPagination :reset-key="importHistory" background layout="total, sizes, prev, pager, next" :total="importTotal" :current-page="importPage" :page-size="importPageSize" :page-sizes="[20, 50, 100]" @current-change="handleImportPageChange" @size-change="handleImportPageSizeChange" />
       </div>
       <template #footer><el-button @click="historyDialogVisible = false">关闭</el-button></template>
     </el-dialog>
@@ -1030,7 +1040,7 @@ onMounted(load)
           <div class="form-section-title">系统说明</div><p class="detail-description">{{ detail.description || '暂无说明' }}</p>
           <div class="form-section-title">关联网络资产（{{ detailAssetTotal }}）</div>
           <el-table v-loading="detailAssetLoading" :data="detailAssets" size="small" empty-text="暂未关联网络资产" max-height="360"><el-table-column label="资产" min-width="210"><template #default="scope"><div class="organization-name-cell"><strong>{{ scope.row.value }}</strong><span>{{ scope.row.name || assetTypeLabel(scope.row.type) }}</span></div></template></el-table-column><el-table-column label="范围" width="80"><template #default="scope">{{ scope.row.network_scope === 'public' ? '公网' : scope.row.network_scope === 'private' ? '内网' : '待确认' }}</template></el-table-column><el-table-column label="状态" width="90"><template #default="scope">{{ assetStatusLabel(scope.row.status) }}</template></el-table-column><el-table-column prop="owner_name" label="负责人" min-width="90" /></el-table>
-          <div v-if="detailAssetTotal > 0" class="table-pagination dialog-pagination"><el-pagination background small layout="total, sizes, prev, pager, next" :total="detailAssetTotal" :current-page="detailAssetPage" :page-size="detailAssetPageSize" :page-sizes="[20, 50, 100]" @current-change="handleDetailAssetPageChange" @size-change="handleDetailAssetPageSizeChange" /></div>
+          <div v-if="detailAssetTotal > 0" class="table-pagination dialog-pagination"><ListPagination :reset-key="detailAssets" background small layout="total, sizes, prev, pager, next" :total="detailAssetTotal" :current-page="detailAssetPage" :page-size="detailAssetPageSize" :page-sizes="[20, 50, 100]" @current-change="handleDetailAssetPageChange" @size-change="handleDetailAssetPageSizeChange" /></div>
           <div class="detail-actions"><el-button type="primary" plain @click="openResourceSubmissionHistory(detail as BusinessSystem)">上报历史</el-button><template v-if="!inventoryMode"><el-button v-if="!detail.is_working_copy" @click="openChangeHistory(detail as BusinessSystem)">变更历史</el-button><el-button @click="openEditDialog(detail as BusinessSystem)">编辑系统</el-button><el-button v-if="!detail.is_working_copy && auth.isGroupAdmin" :type="detail.status === 'archived' ? 'success' : 'warning'" @click="changeArchive(detail, detail.status !== 'archived')">{{ detail.status === 'archived' ? '恢复系统' : '归档系统' }}</el-button></template></div>
         </template>
       </div>
@@ -1053,7 +1063,7 @@ onMounted(load)
         </el-timeline>
         <el-empty v-else-if="!changeHistoryLoading" description="暂无变更历史" />
         <div v-if="changeHistoryTotal > 0" class="table-pagination">
-          <el-pagination
+          <ListPagination :reset-key="changeHistoryItems"
             background
             layout="total, sizes, prev, pager, next"
             :total="changeHistoryTotal"

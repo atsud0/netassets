@@ -1,4 +1,6 @@
 <script setup lang="ts">
+import ContextHelp from '../components/ContextHelp.vue'
+import ListPagination from '../components/ListPagination.vue'
 import { onMounted, ref } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { getAPIErrorMessage } from '../api/client'
@@ -126,10 +128,7 @@ onMounted(load)
       </div>
     </div>
 
-    <div class="panel recycle-bin-notice">
-      <strong>集团治理提示</strong>
-      <span>恢复前会检查资源冲突和组织上级关系；组织恢复后不会自动启用，避免未经确认重新进入业务范围。</span>
-    </div>
+    <ContextHelp label="恢复规则">恢复前会检查资源冲突和组织上级关系；组织恢复后不会自动启用，避免未经确认重新进入业务范围。</ContextHelp>
 
     <div class="panel data-table-panel" v-loading="loading">
       <el-tabs v-model="activeTab" class="recycle-bin-tabs" @tab-change="handleTabChange">
@@ -171,7 +170,7 @@ onMounted(load)
         </el-table-column>
       </el-table>
       <div class="table-pagination">
-        <el-pagination
+        <ListPagination :reset-key="items"
           background
           layout="total, sizes, prev, pager, next"
           :total="total"
@@ -187,6 +186,5 @@ onMounted(load)
 </template>
 
 <style scoped>
-.recycle-bin-notice { margin-bottom: 16px; }
 .table-pagination { display: flex; justify-content: flex-end; margin-top: 18px; }
 </style>

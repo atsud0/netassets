@@ -160,11 +160,27 @@ func TestRoleWorkflowMainline(t *testing.T) {
 	if _, err := findings.Progress(ctx, orgAdmin, order.ID, ProgressInput{Progress: "正在修复", Comment: "组织管理员执行"}, "role-flow-progress", "192.168.8.6"); err != nil {
 		t.Fatalf("organization admin progresses order: %v", err)
 	}
-	if _, err := findings.Submit(ctx, orgAdmin, order.ID, SubmitInput{RemediationResult: "已修复，提交验证", Comment: "完成整改"}, "role-flow-submit-remediation", "192.168.8.6"); err != nil {
-		t.Fatalf("organization admin submits remediation: %v", err)
+	attachment, err := findings.AddAttachment(ctx, orgAdmin, order.ID, AttachmentInput{Category: "remediation", FileName: "proof.txt", ContentType: "text/plain", SizeBytes: 5, Reader: strings.NewReader("proof")}, "role-flow-proof", "192.168.8.6")
+	if err != nil {
+		t.Fatal(err)
 	}
-	if _, err := findings.Review(ctx, securityAdmin, order.ID, ReviewInput{Decision: "closed", VerificationResult: "验证通过"}, "role-flow-close", "192.168.8.6"); err != nil {
-		t.Fatalf("security admin closes work order: %v", err)
+	linked, err := findings.SearchWorkOrderFindings(ctx, orgAdmin, order.ID, pagination.Query{Page: 1, PageSize: 20})
+	if err != nil || len(linked.Items) != 1 {
+		t.Fatalf("load remediation item: %+v %v", linked, err)
+	}
+	item := linked.Items[0]
+	result, err := findings.ProcessWorkOrderItems(ctx, orgAdmin, order.ID, WorkOrderItemInput{Action: "submit", Note: "已修复，提交验证", EvidenceIDs: []string{attachment.ID}, Items: []WorkOrderItemVersion{{ID: item.ID, Version: item.Version, FindingUpdatedAt: item.FindingUpdatedAt}}}, "role-flow-submit-remediation", "192.168.8.6")
+	if err != nil || result.Succeeded != 1 {
+		t.Fatalf("organization admin submits remediation: %+v %v", result, err)
+	}
+	linked, err = findings.SearchWorkOrderFindings(ctx, securityAdmin, order.ID, pagination.Query{Page: 1, PageSize: 20})
+	if err != nil {
+		t.Fatal(err)
+	}
+	item = linked.Items[0]
+	result, err = findings.ProcessWorkOrderItems(ctx, securityAdmin, order.ID, WorkOrderItemInput{Action: "pass", Note: "验证通过", Items: []WorkOrderItemVersion{{ID: item.ID, Version: item.Version, FindingUpdatedAt: item.FindingUpdatedAt}}}, "role-flow-close", "192.168.8.6")
+	if err != nil || result.Succeeded != 1 {
+		t.Fatalf("security admin verifies item: %+v %v", result, err)
 	}
 	closed, err := findings.GetWorkOrder(ctx, securityAdmin, order.ID)
 	if err != nil {

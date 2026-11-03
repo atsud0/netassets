@@ -1,4 +1,7 @@
 <script setup lang="ts">
+import { useLiveList } from '../composables/useLiveList'
+import ListToolbar from '../components/ListToolbar.vue'
+import ListPagination from '../components/ListPagination.vue'
 import RowActions from '../components/RowActions.vue'
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
@@ -46,16 +49,21 @@ function progress(item: ExportJob) {
   return Math.min(99, Math.round(item.processed_rows * 100 / item.total_rows))
 }
 
+const liveList = useLiveList(() => [status.value, resourceType.value], changeFilter)
+
 async function load(silent = false) {
+  const isCurrent = liveList.begin()
   if (!silent) loading.value = true
   try {
     const data = await listExportJobs({ page: page.value, page_size: pageSize.value, status: status.value || undefined, resource_type: resourceType.value || undefined })
+    if (!isCurrent()) return
     items.value = data.items
     total.value = data.total
   } catch (error) {
+    if (!isCurrent()) return
     if (!silent) ElMessage.error(getAPIErrorMessage(error, '读取导出任务失败'))
   } finally {
-    if (!silent) loading.value = false
+    if (isCurrent()) loading.value = false
   }
 }
 async function changeFilter() { page.value = 1; await load() }
@@ -112,15 +120,15 @@ onBeforeUnmount(() => { if (timer !== undefined) window.clearInterval(timer) })
       </div>
     </div>
 
-    <div class="panel export-filter-panel">
-      <el-select v-model="resourceType" clearable placeholder="全部资源" @change="changeFilter">
+    <ListToolbar class="panel" label="导出任务筛选">
+      <el-select v-model="resourceType" clearable placeholder="全部资源">
         <el-option label="网络资产" value="asset" /><el-option label="业务系统" value="business_system" /><el-option label="填报任务" value="inventory_task" />
       </el-select>
-      <el-select v-model="status" clearable placeholder="全部状态" @change="changeFilter">
+      <el-select v-model="status" clearable placeholder="全部状态">
         <el-option v-for="(label, value) in statusLabels" :key="value" :label="label" :value="value" />
       </el-select>
-      <span>共 {{ total }} 个任务</span>
-    </div>
+      <template #actions><span class="list-toolbar-summary">共 {{ total }} 个任务</span></template>
+    </ListToolbar>
 
     <div class="panel data-table-panel" v-loading="loading">
       <el-table :data="items" row-key="id" empty-text="暂无后台导出任务">
@@ -138,15 +146,12 @@ onBeforeUnmount(() => { if (timer !== undefined) window.clearInterval(timer) })
           <template #default="scope"><RowActions :label="`操作：${scope.row.name || scope.row.title || scope.row.code || scope.row.display_name || scope.row.id}`"><el-button link type="primary" :disabled="scope.row.status !== 'completed'" :loading="downloadingID === scope.row.id" @click="download(scope.row)">下载</el-button><el-button link type="danger" :disabled="scope.row.status === 'running'" :loading="deletingID === scope.row.id" @click="remove(scope.row)">删除</el-button></RowActions></template>
         </el-table-column>
       </el-table>
-      <div v-if="total > 0" class="table-pagination"><el-pagination background layout="total, sizes, prev, pager, next" :total="total" :current-page="page" :page-size="pageSize" :page-sizes="[20, 50, 100]" @current-change="changePage" @size-change="changePageSize" /></div>
+      <div v-if="total > 0" class="table-pagination"><ListPagination :reset-key="items" background layout="total, sizes, prev, pager, next" :total="total" :current-page="page" :page-size="pageSize" :page-sizes="[20, 50, 100]" @current-change="changePage" @size-change="changePageSize" /></div>
     </div>
   </section>
 </template>
 
 <style scoped>
-.export-filter-panel { display:flex; align-items:center; gap:12px; margin-bottom:18px; }
-.export-filter-panel .el-select { width:180px; }
-.export-filter-panel span { color:#64748b; font-size:13px; }
 .job-name { display:flex; flex-direction:column; gap:4px; }
 .job-name span,.progress-copy { color:#64748b; font-size:12px; }
 .error-copy { color:#b42318; font-size:12px; line-height:1.5; }

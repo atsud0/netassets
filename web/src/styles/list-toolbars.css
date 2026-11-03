@@ -1,0 +1,46 @@
+.list-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px 20px;
+  min-width: 0;
+  margin-bottom: 16px;
+}
+.list-toolbar-main, .list-toolbar-end, .list-action-group {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  max-width: 100%;
+}
+.list-toolbar-main { flex: 1 1 320px; }
+.list-toolbar-end { flex: 0 1 auto; margin-inline-start: auto; justify-content: flex-end; }
+.list-toolbar-summary { color: var(--muted); font-size: 13px; overflow-wrap: anywhere; }
+.list-toolbar-selection { padding: 10px 0; border-bottom: 1px solid var(--line); }
+.list-toolbar .el-button, .list-action-group .el-button { margin: 0; min-height: 32px; }
+.list-toolbar .el-input, .list-toolbar .el-select { width: 180px; max-width: 100%; min-width: 0; }
+.list-toolbar-main > .el-input { width: 260px; }
+.list-toolbar .el-checkbox { margin-right: 0; white-space: normal; }
+.list-toolbar .el-button { white-space: normal; height: auto; }
+.page-heading-actions, .page-heading .button-row, .toolbar-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  min-width: 0;
+}
+.page-heading-actions .el-button, .page-heading .button-row .el-button, .toolbar-actions .el-button { margin: 0; }
+.context-help { min-width: 0; font-size: 13px; color: var(--muted); }
+.context-help summary { cursor: pointer; width: fit-content; line-height: 32px; }
+.context-help summary:focus-visible { outline: 2px solid var(--el-color-primary); outline-offset: 2px; }
+.context-help-content { padding: 8px 0; line-height: 1.65; overflow-wrap: anywhere; }
+.context-help-content p { margin: 0 0 8px; }
+@media (max-width: 760px) {
+  .list-toolbar-main { flex-basis: 100%; }
+  .list-toolbar-end { flex-basis: 100%; margin-inline-start: 0; justify-content: flex-start; }
+  .list-toolbar .el-input, .list-toolbar .el-select { max-width: 100%; }
+  .page-heading-actions, .page-heading .button-row, .toolbar-actions { justify-content: flex-start; }
+}

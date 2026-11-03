@@ -1,4 +1,8 @@
 <script setup lang="ts">
+import { useLiveList } from '../composables/useLiveList'
+import ListToolbar from '../components/ListToolbar.vue'
+import ContextHelp from '../components/ContextHelp.vue'
+import ListPagination from '../components/ListPagination.vue'
 import { inventoryTaskStatus } from '../utils/inventory-task-status'
 import RowActions from '../components/RowActions.vue'
 import { computed, onMounted, reactive, ref, watch } from 'vue'
@@ -823,7 +827,10 @@ async function loadReviewComments() {
   }
 }
 
+const returnResourceList = useLiveList(() => returnResourceSearch.value, () => { if (returnDialogVisible.value) applyReturnResourceSearch() }, () => returnResourceSearch.value, () => [returnDialogVisible.value, selectedTask.value?.id, selectedProgress.value?.organization_id])
+
 async function loadReturnResources() {
+  const isCurrent = returnResourceList.begin()
   if (!selectedTask.value || !selectedProgress.value) return
   returnResourceLoading.value = true
   try {
@@ -833,13 +840,15 @@ async function loadReturnResources() {
       `/inventory-tasks/${selectedTask.value.id}/organizations/${selectedProgress.value.organization_id}/review-resources`,
       { params },
     )
+    if (!isCurrent()) return
     returnResources.value = response.data.items
     returnResourceTotal.value = response.data.total
     for (const resource of response.data.items) returnResourceIndex[reviewResourceKey(resource)] = resource
   } catch (error) {
+    if (!isCurrent()) return
     ElMessage.error(getAPIErrorMessage(error, '读取本次提交明细失败'))
   } finally {
-    returnResourceLoading.value = false
+    if (isCurrent()) returnResourceLoading.value = false
   }
 }
 
@@ -1028,9 +1037,7 @@ onMounted(async () => {
     </el-alert>
 
     <el-alert v-if="auth.isGroupAdmin && eligibleOrganizations.length === 0" title="请先在“组织机构”中新增并启用至少一个子公司或部门，之后才能创建填报任务。" type="warning" :closable="false" show-icon class="page-alert" />
-    <el-alert v-if="!auth.isGroupAdmin" title="填报任务以系统中当前的业务系统和网络资产为准。请先维护数据，再回到本页面提交。" type="info" :closable="false" show-icon class="page-alert">
-      <template #default>
-        <div class="inventory-guide-actions">
+    <ContextHelp v-if="!auth.isGroupAdmin" label="填报与上报指引"><div class="list-action-group">
           <span>填报任务以系统中当前的业务系统和网络资产为准。请先维护数据，再回到本页面提交。</span>
           <el-button size="small" @click="router.push('/systems')">维护日常业务系统台账</el-button>
           <el-dropdown :disabled="tasks.length === 0" @command="openTaskDetail">
@@ -1038,8 +1045,7 @@ onMounted(async () => {
             <template #dropdown><el-dropdown-menu><el-dropdown-item v-for="task in tasks" :key="task.id" :command="task">{{ task.name }}</el-dropdown-item></el-dropdown-menu></template>
           </el-dropdown>
         </div>
-      </template>
-    </el-alert>
+    </ContextHelp>
 
     <div class="organization-summary">
       <div><span>任务总数</span><strong>{{ total }}</strong></div>
@@ -1081,7 +1087,7 @@ onMounted(async () => {
         </el-table-column>
       </el-table>
       <div class="table-pagination">
-        <el-pagination
+        <ListPagination :reset-key="tasks"
           background
           layout="total, sizes, prev, pager, next"
           :total="total"
@@ -1154,7 +1160,7 @@ onMounted(async () => {
           </el-table-column>
         </el-table>
         <div v-if="taskOrganizationState(detailTask).total > 0" class="table-pagination task-organization-pagination">
-          <el-pagination
+          <ListPagination :reset-key="taskOrganizationState(detailTask).items"
             background
             small
             layout="total, sizes, prev, pager, next"
@@ -1241,7 +1247,7 @@ onMounted(async () => {
                     <template #default="changeScope">{{ changeScope.row.changes?.length || 0 }} 项</template>
                   </el-table-column>
                 </el-table>
-                <el-pagination
+                <ListPagination :reset-key="diffListState(groupItem.key, tabItem.key).items"
                   v-if="diffListState(groupItem.key, tabItem.key).total > 0"
                   class="table-pagination"
                   background
@@ -1347,10 +1353,9 @@ onMounted(async () => {
       <el-divider content-position="left">逐条审核意见（可选）</el-divider>
       <el-alert title="可以针对本次提交中的具体业务系统或网络资产填写意见；子公司将在任务中查看这些意见。单次最多 100 条。" type="info" :closable="false" show-icon />
       <div v-loading="returnContextLoading" class="review-resource-panel">
-        <div class="review-resource-toolbar">
-          <el-input v-model="returnResourceSearch" clearable placeholder="按名称或资产标识搜索" class="review-resource-search" @keyup.enter="applyReturnResourceSearch" @clear="applyReturnResourceSearch" />
-          <el-button :loading="returnResourceLoading" @click="applyReturnResourceSearch">搜索</el-button>
-        </div>
+        <ListToolbar label="审核明细搜索" >
+          <el-input v-model="returnResourceSearch" clearable placeholder="按名称或资产标识搜索" class="review-resource-search" />
+        </ListToolbar>
         <el-table v-loading="returnResourceLoading" :data="returnResources" max-height="390" empty-text="本次提交没有可填写意见的明细">
           <el-table-column label="类型" width="95"><template #default="scope">{{ reviewResourceTypeLabel(scope.row.resource_type) }}</template></el-table-column>
           <el-table-column label="变更性质" width="112"><template #default="scope"><el-tag :type="inventoryOperationTagType(scope.row.operation)" effect="plain" size="small">{{ inventoryOperationLabel(scope.row.operation) }}</el-tag></template></el-table-column>
@@ -1358,7 +1363,7 @@ onMounted(async () => {
           <el-table-column label="审核意见" min-width="390"><template #default="scope"><el-input v-model="returnCommentDrafts[reviewResourceKey(scope.row)]" placeholder="针对该条数据填写整改要求（可选）" /></template></el-table-column>
         </el-table>
         <div v-if="returnResourceTotal > 0" class="table-pagination dialog-pagination">
-          <el-pagination background small layout="total, sizes, prev, pager, next" :total="returnResourceTotal" :current-page="returnResourcePage" :page-size="returnResourcePageSize" :page-sizes="[20, 50, 100]" @current-change="handleReturnResourcePageChange" @size-change="handleReturnResourcePageSizeChange" />
+          <ListPagination :reset-key="returnResources" background small layout="total, sizes, prev, pager, next" :total="returnResourceTotal" :current-page="returnResourcePage" :page-size="returnResourcePageSize" :page-sizes="[20, 50, 100]" @current-change="handleReturnResourcePageChange" @size-change="handleReturnResourcePageSizeChange" />
         </div>
       </div>
       <template #footer><el-button @click="returnDialogVisible = false">取消</el-button><el-button type="danger" :loading="actionLoading !== ''" :disabled="returnContextLoading || returnResourceLoading" @click="returnProgress">确认退回</el-button></template>
@@ -1381,7 +1386,7 @@ onMounted(async () => {
             <el-table-column label="审核人 / 时间" width="175"><template #default="scope"><div class="organization-name-cell"><strong>{{ scope.row.created_by_name || '集团审核人' }}</strong><span>{{ formatDate(scope.row.created_at) }}</span></div></template></el-table-column>
           </el-table>
           <div v-if="reviewCommentTotal > 0" class="table-pagination dialog-pagination">
-            <el-pagination background small layout="total, sizes, prev, pager, next" :total="reviewCommentTotal" :current-page="reviewCommentPage" :page-size="reviewCommentPageSize" :page-sizes="[20, 50, 100]" @current-change="handleReviewCommentPageChange" @size-change="handleReviewCommentPageSizeChange" />
+            <ListPagination :reset-key="reviewComments" background small layout="total, sizes, prev, pager, next" :total="reviewCommentTotal" :current-page="reviewCommentPage" :page-size="reviewCommentPageSize" :page-sizes="[20, 50, 100]" @current-change="handleReviewCommentPageChange" @size-change="handleReviewCommentPageSizeChange" />
           </div>
         </div>
       </div>
@@ -1414,7 +1419,6 @@ onMounted(async () => {
 .submission-progress span { display:inline-flex; align-items:baseline; gap:4px; }
 .submission-progress strong { color:var(--navy); font-size:15px; }
 .submission-progress i { color:var(--line); font-style:normal; }
-.review-resource-toolbar { display:flex; gap:10px; margin:14px 0; }
 .review-resource-search { flex:1; }
 @media (max-width:900px) {
   .inventory-task-detail-grid { grid-template-columns:1fr; }

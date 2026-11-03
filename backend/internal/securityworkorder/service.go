@@ -140,7 +140,7 @@ type FindingInput struct {
 // silently returning an empty page.
 func validFindingAssetLinkState(state string) bool {
 	switch state {
-	case "live", "pending", "retired", "unlinked":
+	case "live", "pending", "retired", "unlinked", "linked":
 		return true
 	default:
 		return false
@@ -152,6 +152,7 @@ func validFindingAssetLinkState(state string) bool {
 // state. The placeholder carries the requested value; an empty value means no filtering.
 func findingAssetLinkStateFilter(findingAlias, assetAlias, placeholder string) string {
 	return "AND (" + placeholder + "::text = ''\n" +
+		"    OR (" + placeholder + "::text = 'linked' AND " + findingAlias + ".asset_id IS NOT NULL)\n" +
 		"    OR (" + placeholder + "::text = 'live' AND " + findingAlias + ".asset_id IS NOT NULL AND " + assetAlias + ".deleted_at IS NULL)\n" +
 		"    OR (" + placeholder + "::text = 'retired' AND " + findingAlias + ".asset_id IS NOT NULL AND " + assetAlias + ".deleted_at IS NOT NULL)\n" +
 		"    OR (" + placeholder + "::text = 'pending' AND " + findingAlias + ".asset_id IS NULL AND " + findingAlias + ".pending_asset_draft_id IS NOT NULL)\n" +
@@ -196,15 +197,22 @@ type FindingSummaryStats struct {
 }
 
 type FindingSummary struct {
-	ID             string `json:"id"`
-	Code           string `json:"code"`
-	Title          string `json:"title"`
-	Severity       string `json:"severity"`
-	Status         string `json:"status"`
-	AssetID        string `json:"asset_id,omitempty"`
-	AssetValue     string `json:"asset_value,omitempty"`
-	AssetName      string `json:"asset_name,omitempty"`
-	AssetLinkState string `json:"asset_link_state,omitempty"`
+	Stage            string     `json:"stage,omitempty"`
+	Version          int64      `json:"version,omitempty"`
+	FindingUpdatedAt *time.Time `json:"finding_updated_at,omitempty"`
+	ProcessingNote   string     `json:"processing_note,omitempty"`
+	EvidenceIDs      []string   `json:"evidence_ids,omitempty"`
+	ProcessedAt      *time.Time `json:"processed_at,omitempty"`
+	ProcessedByName  string     `json:"processed_by_name,omitempty"`
+	ID               string     `json:"id"`
+	Code             string     `json:"code"`
+	Title            string     `json:"title"`
+	Severity         string     `json:"severity"`
+	Status           string     `json:"status"`
+	AssetID          string     `json:"asset_id,omitempty"`
+	AssetValue       string     `json:"asset_value,omitempty"`
+	AssetName        string     `json:"asset_name,omitempty"`
+	AssetLinkState   string     `json:"asset_link_state,omitempty"`
 	// PendingAssetDraftID and AssetDeleted are the inputs to AssetLinkState; the
 	// work order finding list surfaces them so a row can explain its own state.
 	PendingAssetDraftID string `json:"pending_asset_draft_id,omitempty"`
@@ -262,6 +270,7 @@ type WorkOrder struct {
 }
 
 type WorkOrderSearchFilter struct {
+	DashboardScope bool
 	OrganizationID string
 	Status         string
 	OverdueOnly    bool
@@ -422,8 +431,31 @@ func (s *Service) ListFindings(ctx context.Context, principal auth.Principal, or
 	return result.Items, err
 }
 
+type FindingSearchOptions struct {
+	TestBatchOnly  bool
+	Severity       string
+	DashboardScope bool
+	DispatchState  string
+	DiscoveredDate string
+	DispatchedDate string
+	ClosedDate     string
+}
+
 // SearchFindings applies database pagination before findings are hydrated and serialized.
-func (s *Service) SearchFindings(ctx context.Context, principal auth.Principal, organizationID, status, assetLinkState string, page pagination.Query) (pagination.Result[Finding], error) {
+func (s *Service) SearchFindings(ctx context.Context, principal auth.Principal, organizationID, status, assetLinkState string, page pagination.Query, options ...FindingSearchOptions) (pagination.Result[Finding], error) {
+	filter := FindingSearchOptions{}
+	if len(options) > 0 {
+		filter = options[0]
+	}
+	globalRead := principal.CanManageSecurityFindings() || (filter.DashboardScope && principal.CanViewGroupSecurityDashboard())
+	severity := strings.TrimSpace(filter.Severity)
+	if severity != "" && !validSeverity(severity) {
+		return pagination.Result[Finding]{}, invalidField("请选择有效的漏洞级别：严重、高危、中危、低危或提示")
+	}
+	dashboardSQL, err := dashboardFindingFilterSQL(DashboardFindingFilter{Scope: filter.DashboardScope, TestBatchOnly: filter.TestBatchOnly, DispatchState: filter.DispatchState, DiscoveredDate: filter.DiscoveredDate, DispatchedDate: filter.DispatchedDate, ClosedDate: filter.ClosedDate})
+	if err != nil {
+		return pagination.Result[Finding]{}, err
+	}
 	if err := s.expireDueRiskAcceptances(ctx); err != nil {
 		return pagination.Result[Finding]{}, err
 	}
@@ -436,7 +468,7 @@ func (s *Service) SearchFindings(ctx context.Context, principal auth.Principal, 
 		}
 		// Match the global finding visibility used by the query below. A security
 		// operator need not hold an organization appointment to narrow that scope.
-		if !principal.CanManageSecurityFindings() {
+		if !globalRead {
 			allowed, err := access.CanAccessOrganization(ctx, s.pool, principal, organizationID)
 			if err != nil {
 				return pagination.Result[Finding]{}, err
@@ -509,10 +541,11 @@ func (s *Service) SearchFindings(ctx context.Context, principal auth.Principal, 
 		      )
 		  AND ($3::text = '' OR f.assignee_organization_id::text = $3)
 		  AND ($4::text = '' OR f.status = $4)
-		  `+findingAssetLinkStateFilter("f", "a", "$5")+`
+		  AND ($8::text = '' OR f.severity = $8)
+		  `+findingAssetLinkStateFilter("f", "a", "$5")+dashboardSQL+`
 		-- File imports share both timestamps; keep offset pages deterministic.
 		ORDER BY f.discovered_at DESC, f.created_at DESC, f.id DESC
-		LIMIT $6 OFFSET $7`, principal.UserID, principal.CanManageSecurityFindings(), organizationID, status, assetLinkState, page.PageSize, page.Offset())
+		LIMIT $6 OFFSET $7`, principal.UserID, globalRead, organizationID, status, assetLinkState, page.PageSize, page.Offset(), severity)
 	if err != nil {
 		return pagination.Result[Finding]{}, fmt.Errorf("search security findings: %w", err)
 	}
@@ -566,8 +599,9 @@ func (s *Service) SearchFindings(ctx context.Context, principal auth.Principal, 
                   )
               AND ($3::text = '' OR f.assignee_organization_id::text = $3)
               AND ($4::text = '' OR f.status = $4)
-              `+findingAssetLinkStateFilter("f", "a", "$5")+`
-        `, principal.UserID, principal.CanManageSecurityFindings(), organizationID, status, assetLinkState).Scan(&total); err != nil {
+              AND ($6::text = '' OR f.severity = $6)
+              `+findingAssetLinkStateFilter("f", "a", "$5")+dashboardSQL+`
+        `, principal.UserID, globalRead, organizationID, status, assetLinkState, severity).Scan(&total); err != nil {
 			return pagination.Result[Finding]{}, fmt.Errorf("count security findings: %w", err)
 		}
 	}
@@ -1260,13 +1294,21 @@ func (s *Service) SearchWorkOrders(ctx context.Context, principal auth.Principal
 // SearchWorkOrdersWithFilter applies all filters and pagination in the database before related findings are hydrated.
 // Drafts are not actionable, so they must not be overdue (same definition as the dashboard).
 func (s *Service) SearchWorkOrdersWithFilter(ctx context.Context, principal auth.Principal, filter WorkOrderSearchFilter) (pagination.Result[WorkOrder], error) {
+	globalRead := principal.CanManageSecurityWorkOrders() || (filter.DashboardScope && principal.CanViewGroupSecurityDashboard())
+	if err := s.expireDueRiskAcceptances(ctx); err != nil {
+		return pagination.Result[WorkOrder]{}, err
+	}
 	filter.OrganizationID = strings.TrimSpace(filter.OrganizationID)
 	filter.Status = strings.TrimSpace(filter.Status)
 	if filter.OrganizationID != "" {
 		if !validUUID(filter.OrganizationID) {
 			return pagination.Result[WorkOrder]{}, invalidField("安全工单筛选的责任组织标识格式不正确")
 		}
-		allowed, err := s.canViewWorkOrder(ctx, principal, filter.OrganizationID)
+		allowed := globalRead
+		var err error
+		if !allowed {
+			allowed, err = s.canViewWorkOrder(ctx, principal, filter.OrganizationID)
+		}
 		if err != nil {
 			return pagination.Result[WorkOrder]{}, err
 		}
@@ -1274,7 +1316,7 @@ func (s *Service) SearchWorkOrdersWithFilter(ctx context.Context, principal auth
 			return pagination.Result[WorkOrder]{}, ErrForbidden
 		}
 	}
-	if filter.Status != "" && !validWorkOrderStatus(filter.Status) {
+	if filter.Status != "" && !validWorkOrderStatus(filter.Status) && !dashboardWorkOrderStatus(filter.Status) {
 		return pagination.Result[WorkOrder]{}, invalidField("请选择有效的安全工单状态")
 	}
 	selectWithTotal := strings.Replace(workOrderSelect, "SELECT ", "SELECT count(*) OVER (), ", 1)
@@ -1284,11 +1326,11 @@ func (s *Service) SearchWorkOrdersWithFilter(ctx context.Context, principal auth
 		        OR (wo.assignee_organization_id IN (SELECT id FROM work_order_accessible) AND wo.status <> 'draft')
 		      )
 		  AND ($3::text = '' OR wo.assignee_organization_id::text = $3)
-		  AND ($4::text = '' OR wo.status = $4)
+		  AND `+dashboardWorkOrderStatusSQL("$4")+dashboardWorkOrderScopeSQL(filter.DashboardScope)+`
 		  AND (NOT $5::boolean OR (wo.due_at < now() AND wo.status NOT IN ('draft', 'closed', 'cancelled')))
 		ORDER BY CASE WHEN wo.status IN ('closed', 'cancelled') THEN 1 ELSE 0 END,
 		         wo.due_at, wo.created_at DESC
-		LIMIT $6 OFFSET $7`, principal.UserID, principal.CanManageSecurityWorkOrders(), filter.OrganizationID, filter.Status, filter.OverdueOnly, filter.Page.PageSize, filter.Page.Offset())
+		LIMIT $6 OFFSET $7`, principal.UserID, globalRead, filter.OrganizationID, filter.Status, filter.OverdueOnly, filter.Page.PageSize, filter.Page.Offset())
 	if err != nil {
 		return pagination.Result[WorkOrder]{}, fmt.Errorf("search security work orders: %w", err)
 	}
@@ -1313,9 +1355,9 @@ func (s *Service) SearchWorkOrdersWithFilter(ctx context.Context, principal auth
                     OR (wo.assignee_organization_id IN (SELECT id FROM work_order_accessible) AND wo.status <> 'draft')
                   )
               AND ($3::text = '' OR wo.assignee_organization_id::text = $3)
-              AND ($4::text = '' OR wo.status = $4)
+              AND `+dashboardWorkOrderStatusSQL("$4")+dashboardWorkOrderScopeSQL(filter.DashboardScope)+`
               AND (NOT $5::boolean OR (wo.due_at < now() AND wo.status NOT IN ('draft', 'closed', 'cancelled')))
-        `, principal.UserID, principal.CanManageSecurityWorkOrders(), filter.OrganizationID, filter.Status, filter.OverdueOnly).Scan(&total); err != nil {
+        `, principal.UserID, globalRead, filter.OrganizationID, filter.Status, filter.OverdueOnly).Scan(&total); err != nil {
 			return pagination.Result[WorkOrder]{}, fmt.Errorf("count security work orders: %w", err)
 		}
 	}
@@ -1325,6 +1367,9 @@ func (s *Service) SearchWorkOrdersWithFilter(ctx context.Context, principal auth
 func (s *Service) GetWorkOrder(ctx context.Context, principal auth.Principal, id string) (WorkOrder, error) {
 	if !validUUID(id) {
 		return WorkOrder{}, invalidField("安全工单标识格式不正确")
+	}
+	if err := s.expireDueRiskAcceptances(ctx); err != nil {
+		return WorkOrder{}, err
 	}
 	item, err := loadWorkOrder(ctx, s.pool, id)
 	if err != nil {
@@ -1354,11 +1399,13 @@ func (s *Service) SearchWorkOrderFindings(ctx context.Context, principal auth.Pr
 		SELECT f.id::text, f.finding_code, f.title, f.severity, f.status,
 		       COALESCE(a.id::text, ''), COALESCE(a.asset_value, ''), COALESCE(a.asset_name, ''),
 		       COALESCE(f.pending_asset_draft_id::text, ''), (a.id IS NOT NULL AND a.deleted_at IS NOT NULL),
-		       COALESCE(bs.id::text, ''), COALESCE(bs.system_name, '')
+		       COALESCE(bs.id::text, ''), COALESCE(bs.system_name, ''),
+		       link.stage,link.version,f.updated_at,link.processing_note,link.evidence_ids::text[],link.processed_at,COALESCE(processor.display_name,'')
 		FROM security_work_order_findings link
 		JOIN security_findings f ON f.id = link.finding_id
 		LEFT JOIN assets a ON a.id = f.asset_id
 		LEFT JOIN business_systems bs ON bs.id = f.business_system_id
+		LEFT JOIN users processor ON processor.id=link.processed_by
 		WHERE link.work_order_id::text = $1
 		ORDER BY CASE f.severity WHEN 'critical' THEN 1 WHEN 'high' THEN 2 WHEN 'medium' THEN 3 WHEN 'low' THEN 4 ELSE 5 END,
 		         f.finding_code
@@ -1371,7 +1418,8 @@ func (s *Service) SearchWorkOrderFindings(ctx context.Context, principal auth.Pr
 	for rows.Next() {
 		var item FindingSummary
 		if err := rows.Scan(&item.ID, &item.Code, &item.Title, &item.Severity, &item.Status,
-			&item.AssetID, &item.AssetValue, &item.AssetName, &item.PendingAssetDraftID, &item.AssetDeleted, &item.BusinessSystemID, &item.BusinessSystemName); err != nil {
+			&item.AssetID, &item.AssetValue, &item.AssetName, &item.PendingAssetDraftID, &item.AssetDeleted, &item.BusinessSystemID, &item.BusinessSystemName,
+			&item.Stage, &item.Version, &item.FindingUpdatedAt, &item.ProcessingNote, &item.EvidenceIDs, &item.ProcessedAt, &item.ProcessedByName); err != nil {
 			return pagination.Result[FindingSummary]{}, fmt.Errorf("scan work order finding: %w", err)
 		}
 		item.AssetLinkState = findingAssetLinkState(item.AssetID, item.PendingAssetDraftID, item.AssetDeleted)
@@ -1538,7 +1586,7 @@ func (s *Service) Progress(ctx context.Context, principal auth.Principal, id str
 	return s.transition(ctx, principal, id, []string{"in_progress", "returned"}, "in_progress", "progress", input.Comment, requestID, ipAddress, func() error {
 		return validateWorkOrderProgress(input)
 	}, func(ctx context.Context, tx pgx.Tx) error {
-		_, err := tx.Exec(ctx, `UPDATE security_work_orders SET remediation_progress = $2, return_reason = CASE WHEN status = 'returned' THEN NULL ELSE return_reason END WHERE id::text = $1`, id, input.Progress)
+		_, err := tx.Exec(ctx, `UPDATE security_work_orders SET remediation_progress = $2 WHERE id::text = $1`, id, input.Progress)
 		return err
 	})
 }
@@ -1603,9 +1651,10 @@ func (s *Service) Cancel(ctx context.Context, principal auth.Principal, id strin
 			-- Legacy links have no recoverable pre-issue state. 'confirmed' is the
 			-- conservative fallback: this finding is known to be real and remains
 			-- actionable, unlike resetting it to an untriaged 'pending' state.
-			UPDATE security_findings f SET status=COALESCE(l.finding_status_before_issue,'confirmed'), updated_at=now(), updated_by=$2::uuid
+			UPDATE security_findings f SET status=COALESCE(l.finding_status_before_issue,'confirmed'), remediation_status='not_started', updated_at=now(), updated_by=$2::uuid
 			FROM security_work_order_findings l
-			WHERE l.work_order_id=$1::uuid AND l.finding_id=f.id AND f.status='in_progress'
+			WHERE l.work_order_id=$1::uuid AND l.finding_id=f.id
+			  AND (f.status='in_progress' OR (f.status='resolved' AND l.stage='pending_verification'))
 			  -- Cancelling an unissued draft must not change finding state.
 			  AND EXISTS (SELECT 1 FROM security_work_orders w WHERE w.id=l.work_order_id AND w.issued_at IS NOT NULL)
 			  AND NOT EXISTS (SELECT 1 FROM security_work_order_findings other_link JOIN security_work_orders other ON other.id=other_link.work_order_id WHERE other_link.finding_id=f.id AND other.id<>$1::uuid AND other.status NOT IN ('closed','cancelled'))`, id, principal.UserID)
@@ -1719,6 +1768,12 @@ func (s *Service) transition(ctx context.Context, principal auth.Principal, id s
 	}
 	if !contains(fromStatuses, fromStatus) {
 		return WorkOrder{}, ErrState
+	}
+	if executionMode == "organization" && contains([]string{"submit", "return", "close"}, action) {
+		return WorkOrder{}, invalidField("请在工单关联发现中逐项或批量提交、复测；整单状态按项目自动汇总")
+	}
+	if executionMode == "organization" && action == "progress" {
+		toStatus = fromStatus
 	}
 	if extra != nil {
 		if err := extra(ctx, tx); err != nil {
@@ -1975,7 +2030,7 @@ const workOrderSelect = `
 	       COALESCE(wo.verification_result, ''), COALESCE(wo.return_reason, ''),
 	       COALESCE(u.display_name, ''),
 	       (SELECT count(*) FROM security_work_order_findings link WHERE link.work_order_id = wo.id),
-	       wo.created_at, wo.updated_at, wo.execution_mode,CASE WHEN wo.execution_mode='individual' THEN remediation_order_counts(wo.id) ELSE '{}'::jsonb END
+	       wo.created_at, wo.updated_at, wo.execution_mode,CASE WHEN wo.execution_mode='individual' THEN remediation_order_counts(wo.id) ELSE organization_order_counts(wo.id) END
 	FROM security_work_orders wo
 	JOIN organizations o ON o.id = wo.assignee_organization_id
 	LEFT JOIN users u ON u.id = wo.created_by

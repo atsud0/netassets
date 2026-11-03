@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import ListPagination from '../components/ListPagination.vue'
 import { computed, reactive, ref, watch } from 'vue'
 import { ElMessage, ElMessageBox, type FormInstance, type FormRules } from 'element-plus'
 import { useRouter } from 'vue-router'
@@ -239,7 +240,7 @@ async function changePassword() {
         </div>
       </div>
       <div v-if="sessionTotal > 0" class="table-pagination">
-        <el-pagination
+        <ListPagination :reset-key="sessions"
           background
           layout="total, sizes, prev, pager, next"
           :total="sessionTotal"

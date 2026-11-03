@@ -1,4 +1,8 @@
 <script setup lang="ts">
+import { useLiveList } from '../composables/useLiveList'
+import ListToolbar from '../components/ListToolbar.vue'
+import ContextHelp from '../components/ContextHelp.vue'
+import ListPagination from '../components/ListPagination.vue'
 import RowActions from '../components/RowActions.vue'
 import { computed, onMounted, reactive, ref } from 'vue'
 import { ElMessage, ElMessageBox, type FormInstance, type FormRules, type FormItemRule } from 'element-plus'
@@ -211,18 +215,23 @@ const rules: FormRules = {
 
 onMounted(load)
 
+const liveList = useLiveList(() => [statusFilter.value], applyStatusFilter)
+
 async function load() {
+  const isCurrent = liveList.begin()
   loading.value = true
   try {
     const params: Record<string, string | number> = { page: page.value, page_size: pageSize.value }
     if (statusFilter.value) params.status = statusFilter.value
     const response = await apiClient.get<ListResponse<SecurityTestBatch>>('/security-test-batches', { params })
+    if (!isCurrent()) return
     batches.value = response.data.items
     total.value = response.data.total
   } catch (error) {
+    if (!isCurrent()) return
     ElMessage.error(getAPIErrorMessage(error, '读取安全测试批次失败'))
   } finally {
-    loading.value = false
+    if (isCurrent()) loading.value = false
   }
 }
 
@@ -362,7 +371,10 @@ async function openScopePicker(mode: ScopePickerMode) {
   await loadScopePicker()
 }
 
+const scopeList = useLiveList(() => [scopePickerVisible.value, scopePickerMode.value, scopePickerKeyword.value], () => { if (scopePickerVisible.value) searchScopePicker() }, () => scopePickerKeyword.value)
+
 async function loadScopePicker() {
+  const isCurrent = scopeList.begin()
   scopePickerLoading.value = true
   try {
     const params: Record<string, string | number | boolean> = {
@@ -378,6 +390,7 @@ async function loadScopePicker() {
       network_area: '/security-reference/network-areas',
     }[scopePickerMode.value]
     const response = await apiClient.get<ListResponse<Asset | ScopeReference>>(endpoint, { params })
+    if (!isCurrent()) return
     scopePickerTotal.value = response.data.total
     if (scopePickerMode.value === 'asset') {
       scopePickerAssets.value = response.data.items as Asset[]
@@ -387,9 +400,10 @@ async function loadScopePicker() {
       scopePickerAssets.value = []
     }
   } catch (error) {
+    if (!isCurrent()) return
     ElMessage.error(getAPIErrorMessage(error, '读取测试范围候选失败'))
   } finally {
-    scopePickerLoading.value = false
+    if (isCurrent()) scopePickerLoading.value = false
   }
 }
 
@@ -680,13 +694,13 @@ function formatTime(value?: string) {
       </div>
     </div>
 
-    <div class="panel security-test-filter-panel">
-      <el-select v-model="statusFilter" clearable placeholder="全部状态" style="width: 180px" @change="applyStatusFilter">
+    <ListToolbar class="panel" label="安全测试筛选">
+      <el-select v-model="statusFilter" clearable placeholder="全部状态" style="width: 180px">
         <el-option v-for="(label, value) in statusLabels" :key="value" :label="label" :value="value" />
       </el-select>
-      <span class="security-test-filter-hint">测试范围仅允许选择未归档的公网资产，单批次最多 200 项。</span>
-      <span class="security-test-filter-count">当前页 {{ batches.length }} 条，共 {{ total }} 个批次</span>
-    </div>
+      <ContextHelp label="测试范围说明">测试范围仅允许选择未归档的公网资产，单批次最多 200 项。</ContextHelp>
+      <template #actions><span class="list-toolbar-summary">当前页 {{ batches.length }} 条，共 {{ total }} 个批次</span></template>
+    </ListToolbar>
 
     <div class="panel data-table-panel" v-loading="loading">
       <el-table :data="batches" row-key="id" empty-text="暂无安全测试批次">
@@ -711,7 +725,7 @@ function formatTime(value?: string) {
         </el-table-column>
       </el-table>
       <div class="table-pagination">
-        <el-pagination
+        <ListPagination :reset-key="batches"
           background
           layout="total, sizes, prev, pager, next"
           :total="total"
@@ -763,8 +777,8 @@ function formatTime(value?: string) {
         <template #title>只纳入匹配的未归档公网资产；最终仍执行 1～200 项范围校验，授权后冻结范围快照。</template>
       </el-alert>
       <div class="scope-search-bar">
-        <el-input v-model="scopePickerKeyword" clearable :placeholder="scopePickerMode === 'asset' ? '搜索资产值、名称、组织、业务系统或网络区域' : `搜索${scopePickerDimensionLabel}`" @keyup.enter="searchScopePicker" @clear="searchScopePicker" />
-        <el-button type="primary" @click="searchScopePicker">搜索</el-button>
+        <el-input v-model="scopePickerKeyword" clearable :placeholder="scopePickerMode === 'asset' ? '搜索资产值、名称、组织、业务系统或网络区域' : `搜索${scopePickerDimensionLabel}`" />
+
       </div>
       <el-table v-if="scopePickerMode === 'asset'" v-loading="scopePickerLoading" :data="scopePickerAssets" border height="390" data-testid="security-test-asset-picker">
         <el-table-column label="公网资产" min-width="280"><template #default="{ row }"><strong>[{{ assetTypeLabels[row.type] ?? row.type }}] {{ row.value }}</strong><div class="scope-row-secondary">{{ row.name || '-' }}</div></template></el-table-column>
@@ -778,7 +792,7 @@ function formatTime(value?: string) {
       </el-table>
       <div class="scope-picker-pagination">
         <span v-if="scopePickerMode !== 'asset'">已选择 {{ scopePickerSelectedIDs.length }} 个{{ scopePickerDimensionLabel }}</span>
-        <el-pagination background small layout="total, sizes, prev, pager, next" :total="scopePickerTotal" :current-page="scopePickerPage" :page-size="scopePickerPageSize" :page-sizes="[20, 50, 100]" @current-change="handleScopePickerPageChange" @size-change="handleScopePickerPageSizeChange" />
+        <ListPagination :reset-key="scopePickerReferences" background small layout="total, sizes, prev, pager, next" :total="scopePickerTotal" :current-page="scopePickerPage" :page-size="scopePickerPageSize" :page-sizes="[20, 50, 100]" @current-change="handleScopePickerPageChange" @size-change="handleScopePickerPageSizeChange" />
       </div>
       <template #footer><el-button @click="scopePickerVisible = false">关闭</el-button><el-button v-if="scopePickerMode !== 'asset'" type="primary" :loading="scopePickerApplying" data-testid="apply-bulk-security-test-scope" @click="applyBulkScope">纳入所选{{ scopePickerDimensionLabel }}</el-button></template>
     </el-dialog>
@@ -839,7 +853,7 @@ function formatTime(value?: string) {
             <el-table-column label="操作" width="80" align="right" header-align="right" class-name="table-action-column"><template #default="{ row }"><el-button link type="danger" :loading="attachmentLoading" @click="deleteAttachment(row)">删除</el-button></template></el-table-column>
           </el-table>
           <div v-if="attachmentTotal > 0" class="table-pagination detail-pagination">
-            <el-pagination background small layout="total, sizes, prev, pager, next" :total="attachmentTotal" :current-page="attachmentPage" :page-size="attachmentPageSize" :page-sizes="[20, 50, 100]" @current-change="handleAttachmentPageChange" @size-change="handleAttachmentPageSizeChange" />
+            <ListPagination :reset-key="batchAttachments" background small layout="total, sizes, prev, pager, next" :total="attachmentTotal" :current-page="attachmentPage" :page-size="attachmentPageSize" :page-sizes="[20, 50, 100]" @current-change="handleAttachmentPageChange" @size-change="handleAttachmentPageSizeChange" />
           </div>
         </div>
 
@@ -853,7 +867,7 @@ function formatTime(value?: string) {
           </el-timeline>
           <el-empty v-else-if="!eventListLoading" description="暂无批次处理记录" :image-size="60" />
           <div v-if="eventTotal > 0" class="table-pagination detail-pagination">
-            <el-pagination background small layout="total, sizes, prev, pager, next" :total="eventTotal" :current-page="eventPage" :page-size="eventPageSize" :page-sizes="[20, 50, 100]" @current-change="handleEventPageChange" @size-change="handleEventPageSizeChange" />
+            <ListPagination :reset-key="batchEvents" background small layout="total, sizes, prev, pager, next" :total="eventTotal" :current-page="eventPage" :page-size="eventPageSize" :page-sizes="[20, 50, 100]" @current-change="handleEventPageChange" @size-change="handleEventPageSizeChange" />
           </div>
         </div>
       </template>
@@ -862,9 +876,6 @@ function formatTime(value?: string) {
 </template>
 
 <style scoped>
-.security-test-filter-panel { display:flex; align-items:center; gap:14px; margin-bottom:16px; }
-.security-test-filter-hint { color:var(--muted); font-size:13px; }
-.security-test-filter-count { margin-left:auto; color:var(--muted); font-size:13px; white-space:nowrap; }
 .table-pagination { display:flex; justify-content:flex-end; margin-top:18px; }
 .detail-pagination { overflow-x:auto; padding-bottom:2px; }
 .link-button { padding:0; border:0; background:transparent; color:var(--blue); cursor:pointer; text-align:left; font:inherit; }
@@ -892,5 +903,5 @@ function formatTime(value?: string) {
 .selected-file-name { flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; color:var(--muted); font-size:13px; }
 .attachment-heading { margin-bottom:14px; }
 .scope-chips { display:flex; flex-wrap:wrap; justify-content:flex-end; gap:8px; }
-@media (max-width: 900px) { .security-test-filter-panel { align-items:flex-start; flex-wrap:wrap; } .security-test-filter-count { width:100%; margin-left:0; } .form-grid-two { grid-template-columns:1fr; } .date-range-inline { flex-direction:column; align-items:stretch; } .attachment-upload-row { flex-wrap:wrap; } .selected-file-name { flex-basis:100%; order:3; } .scope-picker-pagination { align-items:flex-start; flex-direction:column; } }
+@media (max-width: 900px) { .form-grid-two { grid-template-columns:1fr; } .date-range-inline { flex-direction:column; align-items:stretch; } .attachment-upload-row { flex-wrap:wrap; } .selected-file-name { flex-basis:100%; order:3; } .scope-picker-pagination { align-items:flex-start; flex-direction:column; } }
 </style>

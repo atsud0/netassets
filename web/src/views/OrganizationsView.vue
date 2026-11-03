@@ -1,4 +1,7 @@
 <script setup lang="ts">
+import ContextHelp from '../components/ContextHelp.vue'
+import ListToolbar from '../components/ListToolbar.vue'
+import ListPagination from '../components/ListPagination.vue'
 import { contactPhoneRule } from '../utils/contact-phone'
 import RowActions from '../components/RowActions.vue'
 import { computed, h, onMounted, reactive, ref, watch } from 'vue'
@@ -252,12 +255,12 @@ onMounted(loadOrganizations)
     </div>
 
     <div class="panel data-table-panel organization-tree-panel" v-loading="loading">
-      <div class="panel-title-row"><div><h2>集团组织树</h2><p>组织按层级分页展示，可搜索名称、编码或简称定位完整路径；迁移组织时，其全部下级节点会随组织一起移动。</p></div></div>
-      <div class="organization-tree-toolbar">
+      <div class="panel-title-row"><div><h2>集团组织树</h2><ContextHelp label="组织搜索与迁移说明">组织按层级分页展示，可搜索名称、编码或简称定位完整路径；迁移组织时，其全部下级节点会随组织一起移动。</ContextHelp></div></div>
+      <ListToolbar label="组织搜索" >
         <el-input v-model="organizationQuery" aria-label="搜索组织" placeholder="搜索组织名称、编码或简称" clearable />
-        <el-button :disabled="!!organizationQuery.trim()" @click="collapsedIDs = new Set()">展开全部</el-button>
+        <template #actions><el-button :disabled="!!organizationQuery.trim()" @click="collapsedIDs = new Set()">展开全部</el-button>
         <el-button :disabled="!!organizationQuery.trim()" @click="collapseAllOrganizations">收起全部</el-button>
-      </div>
+      </template></ListToolbar>
       <el-table :data="pageRows" row-key="id" empty-text="暂无匹配的组织机构">
         <el-table-column label="组织" min-width="250"><template #default="scope"><div class="organization-tree-node" :style="{ paddingLeft: `${Math.min(scope.row.treeDepth, 6) * 16}px` }">
           <button v-if="scope.row.treeHasChildren" class="organization-tree-toggle" :aria-label="`${scope.row.treeExpanded ? '收起' : '展开'}：${scope.row.name}`" :aria-expanded="scope.row.treeExpanded" :disabled="!!organizationQuery.trim()" @click="toggleOrganization(scope.row.id)">{{ scope.row.treeExpanded ? '▾' : '▸' }}</button>
@@ -284,7 +287,7 @@ onMounted(loadOrganizations)
           </div>
         </RowActions></template></el-table-column>
       </el-table>
-      <el-pagination v-model:current-page="currentPage" v-model:page-size="pageSize" :total="visibleRows.length" :page-sizes="[25, 50, 100]" layout="total, sizes, prev, pager, next, jumper" />
+      <ListPagination :reset-key="pageRows" v-model:current-page="currentPage" v-model:page-size="pageSize" :total="visibleRows.length" :page-sizes="[25, 50, 100]" layout="total, sizes, prev, pager, next, jumper" />
     </div>
 
     <el-dialog v-model="groupDialogVisible" title="编辑集团基本信息" width="620px" destroy-on-close @closed="editingOrganization = null">
@@ -327,8 +330,6 @@ onMounted(loadOrganizations)
 </template>
 
 <style scoped>
-.organization-tree-toolbar { display:flex; gap:12px; flex-wrap:wrap; margin-bottom:16px; }
-.organization-tree-toolbar :deep(.el-input) { width:320px; max-width:100%; }
 .organization-tree-node { display:flex; align-items:flex-start; min-width:0; }
 .organization-tree-toggle,.organization-tree-spacer { flex:0 0 24px; width:24px; height:24px; }
 .organization-tree-toggle { border:0; background:transparent; color:var(--el-text-color-primary); cursor:pointer; font-size:16px; }

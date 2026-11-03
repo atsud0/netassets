@@ -1,4 +1,6 @@
 <script setup lang="ts">
+import { useLiveList } from '../composables/useLiveList'
+import ListPagination from '../components/ListPagination.vue'
 import { computed, onMounted, reactive, ref } from 'vue'
 import { ElMessage } from 'element-plus'
 import { apiClient, getAPIErrorMessage } from '../api/client'
@@ -90,7 +92,10 @@ async function loadReferenceData() {
   }
 }
 
+const liveList = useLiveList(() => [filters.action, filters.resource_type, filters.result, filters.user_id, filters.organization_id, filters.q, filters.date_range], search, () => filters.q)
+
 async function loadLogs() {
+  const isCurrent = liveList.begin()
   loading.value = true
   try {
     const params: Record<string, string | number> = { page: filters.page, page_size: filters.page_size }
@@ -106,12 +111,14 @@ async function loadLogs() {
       params.end_at = dateRange[1]
     }
     const response = await apiClient.get<AuditListResponse>('/audit-logs', { params })
+    if (!isCurrent()) return
     items.value = response.data.items
     total.value = response.data.total
   } catch (error) {
+    if (!isCurrent()) return
     ElMessage.error(getAPIErrorMessage(error, '读取审计日志失败'))
   } finally {
-    loading.value = false
+    if (isCurrent()) loading.value = false
   }
 }
 
@@ -155,7 +162,7 @@ onMounted(async () => {
     </div>
 
     <div class="panel audit-filter-panel">
-      <el-input v-model="filters.q" clearable placeholder="搜索摘要、资源 ID、请求 ID、人员或组织" @keyup.enter="search" />
+      <el-input v-model="filters.q" clearable placeholder="搜索摘要、资源 ID、请求 ID、人员或组织" />
       <el-select v-model="filters.action" clearable filterable placeholder="全部操作">
         <el-option v-for="item in options.actions" :key="item.value" :label="item.label" :value="item.value" />
       </el-select>
@@ -183,7 +190,7 @@ onMounted(async () => {
       />
       <div class="audit-filter-actions">
         <el-button @click="reset">重置</el-button>
-        <el-button type="primary" @click="search">查询</el-button>
+
       </div>
     </div>
 
@@ -203,7 +210,7 @@ onMounted(async () => {
         <el-table-column label="详情" width="82" fixed="right" align="right" header-align="right" class-name="table-action-column"><template #default="scope"><el-button link type="primary" @click="showDetail(scope.row)">查看</el-button></template></el-table-column>
       </el-table>
       <div class="audit-pagination">
-        <el-pagination
+        <ListPagination :reset-key="items"
           background
           layout="total, sizes, prev, pager, next"
           :total="total"

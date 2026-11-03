@@ -1,4 +1,8 @@
 <script setup lang="ts">
+import { useLiveList } from '../composables/useLiveList'
+import ContextHelp from '../components/ContextHelp.vue'
+import ListToolbar from '../components/ListToolbar.vue'
+import ListPagination from '../components/ListPagination.vue'
 import RowActions from '../components/RowActions.vue'
 import { computed, onMounted, reactive, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
@@ -361,7 +365,10 @@ async function loadAssetDrafts() {
   draftTotal.value = response.data.total
 }
 
+const liveList = useLiveList(() => [search.value, typeFilter.value, statusFilter.value, organizationFilter.value], resetAndLoadAssets, () => search.value)
+
 async function loadAssets() {
+  const isCurrent = liveList.begin()
   loading.value = true
   try {
     if (inventoryMode.value) organizationFilter.value = inventoryOrganizationID.value
@@ -378,13 +385,15 @@ async function loadAssets() {
       }),
       loadAssetDrafts(),
     ])
+    if (!isCurrent()) return
     assets.value = response.data.items
     total.value = response.data.total
     selectedAssets.value = []
   } catch (error) {
+    if (!isCurrent()) return
     ElMessage.error(getAPIErrorMessage(error, '读取网络资产失败'))
   } finally {
-    loading.value = false
+    if (isCurrent()) loading.value = false
   }
 }
 
@@ -1182,26 +1191,28 @@ onMounted(() => {
       </div>
     </div>
 
-    <div class="panel asset-filter-panel network-asset-filter-panel">
-      <div class="network-asset-filter-controls" :class="{ 'with-organization-filter': auth.isGroupAdmin }">
+    <ListToolbar class="panel" label="网络资产筛选" :actions-visible="!inventoryMode">
+      <div class="list-action-group">
         <!-- maxlength mirrors savedfilter's q bound of 200 characters. Without it a long keyword
              is accepted by the box, finds nothing, and can then be rejected when the user
              saves the filter as a view - a failure the user cannot connect to their input. -->
-        <el-input v-model="search" maxlength="200" clearable placeholder="搜索资产值、名称、系统或负责人" @keyup.enter="resetAndLoadAssets" @clear="resetAndLoadAssets" />
-        <el-select v-model="typeFilter" clearable placeholder="全部类型" @change="resetAndLoadAssets" @clear="resetAndLoadAssets">
+        <el-input v-model="search" maxlength="200" clearable placeholder="搜索资产值、名称、系统或负责人" />
+        <el-select v-model="typeFilter" clearable placeholder="全部类型">
           <el-option v-for="(label, value) in typeLabels" :key="value" :label="label" :value="value" />
         </el-select>
-        <el-select v-model="statusFilter" clearable placeholder="全部状态" @change="resetAndLoadAssets" @clear="resetAndLoadAssets">
+        <el-select v-model="statusFilter" clearable placeholder="全部状态">
           <el-option v-for="(label, value) in statusLabels" :key="value" :label="label" :value="value" />
         </el-select>
-        <el-select v-if="auth.isGroupAdmin" v-model="organizationFilter" clearable filterable placeholder="全部组织" fit-input-width popper-class="organization-select-popper" placement="bottom-start" :fallback-placements="['bottom-start']" @change="resetAndLoadAssets" @clear="resetAndLoadAssets">
+        <el-select v-if="auth.isGroupAdmin" v-model="organizationFilter" clearable filterable placeholder="全部组织" fit-input-width popper-class="organization-select-popper" placement="bottom-start" :fallback-placements="['bottom-start']">
           <el-option v-for="item in enabledOrganizations" :key="item.id" :label="item.name" :title="item.name" :value="item.id" />
         </el-select>
-        <el-button @click="resetAndLoadAssets">查询</el-button>
+
         <el-button text :aria-pressed="extendedColumns" @click="extendedColumns=!extendedColumns">{{ extendedColumns?'精简字段':'更多字段' }}</el-button><span class="asset-filter-count">共 {{ total }} 条</span>
       </div>
+      <template #actions>
       <SavedFilterViews v-if="!inventoryMode" ref="savedFilterViews" page-key="assets" :current-filters="currentAssetFilters" @apply="applySavedAssetFilters" @changed="reloadAssetsAfterViewChange" />
-    </div>
+      </template>
+    </ListToolbar>
 
     <div v-if="inventoryMode" class="panel data-table-panel inventory-draft-panel" v-loading="loading">
       <div class="table-panel-heading">
@@ -1220,18 +1231,18 @@ onMounted(() => {
         <el-table-column label="操作" width="120" fixed="right" align="right" header-align="right" class-name="table-action-column"><template #default="scope"><RowActions :label="`操作：${scope.row.name || scope.row.title || scope.row.code || scope.row.display_name || scope.row.id}`"><el-button link type="primary" @click="openWorkingVersionDiff(scope.row)">查看变更</el-button><el-button v-if="scope.row.operation !== 'delete'" link type="primary" :disabled="scope.row.draft_status === 'submitted'" @click="openEditDialog(scope.row)">编辑</el-button><el-button v-if="canTakeOverDraft(scope.row)" link type="warning" :disabled="scope.row.draft_status === 'submitted'" @click="takeoverDraft(scope.row)">接管</el-button><el-button link type="danger" :disabled="scope.row.draft_status === 'submitted'" @click="removeDraft(scope.row)">取消上报</el-button></RowActions></template></el-table-column>
       </el-table>
       <div v-if="draftTotal > 0" class="table-pagination">
-        <el-pagination background layout="total, sizes, prev, pager, next" :total="draftTotal" :current-page="draftPage" :page-size="draftPageSize" :page-sizes="[20, 50, 100]" @current-change="handleDraftPageChange" @size-change="handleDraftPageSizeChange" />
+        <ListPagination :reset-key="draftAssets" background layout="total, sizes, prev, pager, next" :total="draftTotal" :current-page="draftPage" :page-size="draftPageSize" :page-sizes="[20, 50, 100]" @current-change="handleDraftPageChange" @size-change="handleDraftPageSizeChange" />
       </div>
     </div>
 
     <div class="panel data-table-panel" v-loading="loading">
-      <div v-if="inventoryMode" class="batch-toolbar">
-        <div><strong>选择上报</strong><span>已选择 {{ selectedAssets.length }} 个未上报网络资产，单次最多 200 个</span></div>
-        <div class="batch-toolbar-actions"><el-button type="primary" :loading="batchLoading" :disabled="selectedAssets.length === 0" @click="batchSelectWorkspaceAssets">批量纳入本次上报</el-button></div>
-      </div>
-      <div v-else-if="selectedAssets.length" class="batch-toolbar">
-        <div><strong>批量操作</strong><span>已选择 {{ selectedAssets.length }} 个资产；设置网络区域时需选择同一组织的资产</span></div>
-        <div class="batch-toolbar-actions">
+      <ListToolbar label="选择上报" :selection="selectedAssets.length" v-if="inventoryMode">
+        <ContextHelp label="选择范围">单次最多 200 项，仅作用于选中记录。</ContextHelp>
+        <template #actions><div class="list-action-group"><el-button type="primary" :loading="batchLoading" :disabled="selectedAssets.length === 0" @click="batchSelectWorkspaceAssets">批量纳入本次上报</el-button></div>
+      </template></ListToolbar>
+      <ListToolbar label="批量操作" :selection="selectedAssets.length" v-else>
+        <ContextHelp label="选择范围">单次最多 200 项，仅作用于选中记录。</ContextHelp>
+        <template #actions><div class="list-action-group">
           <el-select v-model="batchStatusValue" aria-label="批量设置状态" :disabled="selectedAssets.length === 0 || batchLoading" placeholder="批量设置状态" style="width: 150px" @change="applyBatchStatus">
             <el-option v-for="(label, value) in statusLabels" :key="value" :label="label" :value="value" />
           </el-select>
@@ -1249,7 +1260,7 @@ onMounted(() => {
             </template>
           </el-dropdown>
         </div>
-      </div>
+      </template></ListToolbar>
       <el-table :data="assets" row-key="id" empty-text="暂无网络资产" @selection-change="handleSelectionChange">
         <el-table-column type="selection" width="46" :selectable="canSelectAsset" />
         <el-table-column label="资产 / 访问标识" min-width="240">
@@ -1274,7 +1285,7 @@ onMounted(() => {
         </el-table-column>
       </el-table>
       <div class="table-pagination">
-        <el-pagination background layout="total, sizes, prev, pager, next" :total="total" :current-page="page" :page-size="pageSize" :page-sizes="[20, 50, 100]" @current-change="handlePageChange" @size-change="handlePageSizeChange" />
+        <ListPagination :reset-key="assets" background layout="total, sizes, prev, pager, next" :total="total" :current-page="page" :page-size="pageSize" :page-sizes="[20, 50, 100]" @current-change="handlePageChange" @size-change="handlePageSizeChange" />
       </div>
     </div>
 
@@ -1410,7 +1421,7 @@ onMounted(() => {
         <el-table-column label="导入人 / 时间" min-width="160"><template #default="scope"><div class="organization-name-cell"><strong>{{ scope.row.created_by_name || '-' }}</strong><span>{{ formatDate(scope.row.created_at) }}</span></div></template></el-table-column>
       </el-table>
       <div class="table-pagination dialog-pagination">
-        <el-pagination background layout="total, sizes, prev, pager, next" :total="importTotal" :current-page="importPage" :page-size="importPageSize" :page-sizes="[20, 50, 100]" @current-change="handleImportPageChange" @size-change="handleImportPageSizeChange" />
+        <ListPagination :reset-key="importHistory" background layout="total, sizes, prev, pager, next" :total="importTotal" :current-page="importPage" :page-size="importPageSize" :page-sizes="[20, 50, 100]" @current-change="handleImportPageChange" @size-change="handleImportPageSizeChange" />
       </div>
       <template #footer><el-button @click="historyDialogVisible = false">关闭</el-button></template>
     </el-dialog>
@@ -1432,7 +1443,7 @@ onMounted(() => {
         </el-timeline>
         <el-empty v-else-if="!changeHistoryLoading" description="暂无变更历史" />
         <div v-if="changeHistoryTotal > 0" class="table-pagination">
-          <el-pagination
+          <ListPagination :reset-key="changeHistoryItems"
             background
             layout="total, sizes, prev, pager, next"
             :total="changeHistoryTotal"
@@ -1448,12 +1459,12 @@ onMounted(() => {
 
     <el-drawer v-model="recheckVisible" title="集团直改复核" size="880px">
       <el-alert title="集团管理员绕过填报复核流程直接写入正式台账的资产会列在这里，由资产所属组织认可或提出异议。集团管理员不能确认自己写的变更。" type="info" :closable="false" show-icon />
-      <div class="recheck-toolbar">
+      <ListToolbar label="直改复核筛选">
         <el-select v-model="recheckStatusFilter" clearable placeholder="全部状态" style="width: 150px" @change="recheckPage = 1; loadRechecks()">
           <el-option v-for="(label, value) in recheckStatusLabels" :key="value" :label="label" :value="value" />
         </el-select>
-        <span class="asset-filter-count">共 {{ recheckTotal }} 条</span>
-      </div>
+        <template #actions><span class="list-toolbar-summary">共 {{ recheckTotal }} 条</span></template>
+      </ListToolbar>
       <el-table :data="recheckItems" v-loading="recheckLoading" max-height="520">
         <el-table-column label="资产" min-width="200"><template #default="scope"><div class="organization-name-cell"><strong>{{ scope.row.asset_name || scope.row.asset_value }}</strong><span>{{ scope.row.asset_type }} · {{ scope.row.asset_value }}</span></div></template></el-table-column>
         <el-table-column label="所属组织" min-width="140" prop="organization_name" />
@@ -1463,7 +1474,7 @@ onMounted(() => {
         <el-table-column label="状态" width="96"><template #default="scope"><el-tag :type="scope.row.status === 'confirmed' ? 'success' : scope.row.status === 'disputed' ? 'danger' : 'warning'" effect="plain">{{ recheckStatusLabels[scope.row.status] || scope.row.status }}</el-tag></template></el-table-column>
         <el-table-column label="操作" width="140" fixed="right"><template #default="scope"><el-button link type="primary" @click="openRecheckDetail(scope.row)">查看</el-button><template v-if="scope.row.status === 'open' && !auth.isGroupAdmin"><el-button link type="primary" @click="decideRecheck(scope.row, 'confirmed')">认可</el-button><el-button link type="danger" @click="decideRecheck(scope.row, 'disputed')">有异议</el-button></template></template></el-table-column>
       </el-table>
-      <el-pagination
+      <ListPagination :reset-key="recheckItems"
         v-model:current-page="recheckPage"
         v-model:page-size="recheckPageSize"
         layout="total, sizes, prev, pager, next"
@@ -1509,5 +1520,6 @@ onMounted(() => {
 </template>
 
 <style scoped>
-.network-asset-filter-controls,.network-asset-filter-controls.with-organization-filter { display:flex;flex-wrap:wrap;gap:10px; }.network-asset-filter-controls>.el-input { flex:1;min-width:220px; }.network-asset-filter-controls>.el-select { width:140px; }.network-asset-filter-controls>.el-select:last-of-type { width:170px; }.network-asset-filter-controls .el-button { margin-left:0; }.mono-text { overflow-wrap:anywhere; }.recheck-toolbar { display:flex;align-items:center;gap:12px;margin:12px 0; }.recheck-section-title { margin:16px 0 8px; }@media(max-width:760px) { .network-asset-filter-controls>.el-input { flex-basis:100%; }.asset-page-actions { flex-wrap:wrap; }.batch-toolbar { align-items:flex-start; } }
+.mono-text { overflow-wrap:anywhere; }
+.recheck-section-title { margin:16px 0 8px; }
 </style>

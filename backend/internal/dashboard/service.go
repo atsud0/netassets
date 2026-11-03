@@ -80,20 +80,27 @@ type SecurityBreakdown struct {
 }
 
 type SecurityTrendPoint struct {
-	Date               string `json:"date"`
-	NewFindingCount    int64  `json:"new_finding_count"`
-	ClosedFindingCount int64  `json:"closed_finding_count"`
+	Date                   string `json:"date"`
+	NewFindingCount        int64  `json:"new_finding_count"`
+	ClosedFindingCount     int64  `json:"closed_finding_count"`
+	DispatchedFindingCount int64  `json:"dispatched_finding_count"`
 }
 
 type OrganizationSecurityPerformance struct {
-	OrganizationID        string `json:"organization_id"`
-	OrganizationCode      string `json:"organization_code"`
-	OrganizationName      string `json:"organization_name"`
-	ActiveWorkOrderCount  int64  `json:"active_work_order_count"`
-	OverdueWorkOrderCount int64  `json:"overdue_work_order_count"`
-	ClosedWorkOrderCount  int64  `json:"closed_work_order_count"`
-	ClosedOnTimeCount     int64  `json:"closed_on_time_count"`
-	TimelyRate            int64  `json:"timely_rate"`
+	OrganizationID                    string `json:"organization_id"`
+	OrganizationCode                  string `json:"organization_code"`
+	OrganizationName                  string `json:"organization_name"`
+	ActiveWorkOrderCount              int64  `json:"active_work_order_count"`
+	OverdueWorkOrderCount             int64  `json:"overdue_work_order_count"`
+	ClosedWorkOrderCount              int64  `json:"closed_work_order_count"`
+	ClosedOnTimeCount                 int64  `json:"closed_on_time_count"`
+	TimelyRate                        int64  `json:"timely_rate"`
+	UndispatchedFindingCount          int64  `json:"undispatched_finding_count"`
+	ActiveFindingCount                int64  `json:"active_finding_count"`
+	PendingVerificationWorkOrderCount int64  `json:"pending_verification_work_order_count"`
+	PendingVerificationFindingCount   int64  `json:"pending_verification_finding_count"`
+	OverdueFindingCount               int64  `json:"overdue_finding_count"`
+	ClosedFindingCount                int64  `json:"closed_finding_count"`
 }
 
 type TestCoverage struct {
@@ -121,6 +128,10 @@ type SecurityOverview struct {
 	FindingTrend             []SecurityTrendPoint              `json:"finding_trend"`
 	OrganizationPerformance  []OrganizationSecurityPerformance `json:"organization_performance"`
 	TestCoverage             TestCoverage                      `json:"test_coverage"`
+	ClosureFunnel            SecurityClosureFunnel             `json:"closure_funnel"`
+	UndispatchedFindings     UndispatchedFindingSummary        `json:"undispatched_findings"`
+	WorkOrderFindings        WorkOrderFindingSummary           `json:"work_order_findings"`
+	CanViewUndispatched      bool                              `json:"can_view_undispatched"`
 }
 
 type Service struct{ pool *pgxpool.Pool }
@@ -244,6 +255,7 @@ func (s *Service) GetSecurityOverview(ctx context.Context, principal auth.Princi
 		FindingTrend:            make([]SecurityTrendPoint, 0, 30),
 		OrganizationPerformance: make([]OrganizationSecurityPerformance, 0),
 	}
+	result.CanViewUndispatched = principal.CanViewGroupSecurityDashboard()
 	findingVisible := func(alias string) string {
 		return `
 		($2::boolean OR (
@@ -252,6 +264,7 @@ func (s *Service) GetSecurityOverview(ctx context.Context, principal auth.Princi
 				SELECT 1 FROM security_work_order_findings link
 				JOIN security_work_orders wo ON wo.id = link.work_order_id
 				WHERE link.finding_id = ` + alias + `.id AND wo.issued_at IS NOT NULL
+				AND wo.assignee_organization_id IN (SELECT id FROM scoped_organizations)
 			)
 		))`
 	}
@@ -321,24 +334,12 @@ func (s *Service) GetSecurityOverview(ctx context.Context, principal auth.Princi
 		return SecurityOverview{}, fmt.Errorf("load security retired asset findings: %w", err)
 	}
 
-	trendRows, err := s.pool.Query(ctx, scopeCTE+`
+	trendRows, err := s.pool.Query(ctx, closureScopeCTE+`
 		SELECT to_char(days.day, 'YYYY-MM-DD'),
-			count(DISTINCT new_finding.id),
-			count(DISTINCT closed_link.finding_id)
+			(SELECT count(*) FROM visible_findings f WHERE f.discovered_at >= days.day AND f.discovered_at < days.day + interval '1 day'),
+			(SELECT count(*) FROM effective_findings f WHERE f.order_status = 'closed' AND f.status IN ('fixed','false_positive','ignored','duplicate','risk_accepted') AND f.closed_at >= days.day AND f.closed_at < days.day + interval '1 day'),
+			(SELECT count(DISTINCT link.finding_id) FROM security_work_order_findings link JOIN visible_orders wo ON wo.id=link.work_order_id JOIN visible_findings f ON f.id=link.finding_id WHERE wo.issued_at >= days.day AND wo.issued_at < days.day + interval '1 day')
 		FROM generate_series(current_date - interval '29 days', current_date, interval '1 day') AS days(day)
-		LEFT JOIN security_findings new_finding
-			ON new_finding.discovered_at >= days.day
-			AND new_finding.discovered_at < days.day + interval '1 day'
-			AND `+findingVisible("new_finding")+`
-		LEFT JOIN security_work_order_events close_event
-			ON close_event.action = 'close'
-			AND close_event.created_at >= days.day
-			AND close_event.created_at < days.day + interval '1 day'
-		LEFT JOIN security_work_orders closed_order
-			ON closed_order.id = close_event.work_order_id
-			AND ($2::boolean OR (closed_order.assignee_organization_id IN (SELECT id FROM scoped_organizations) AND closed_order.issued_at IS NOT NULL))
-		LEFT JOIN security_work_order_findings closed_link ON closed_link.work_order_id = closed_order.id
-		GROUP BY days.day
 		ORDER BY days.day`, principal.UserID, principal.CanViewGroupSecurityDashboard())
 	if err != nil {
 		return SecurityOverview{}, fmt.Errorf("load security finding trend: %w", err)
@@ -346,7 +347,7 @@ func (s *Service) GetSecurityOverview(ctx context.Context, principal auth.Princi
 	defer trendRows.Close()
 	for trendRows.Next() {
 		var item SecurityTrendPoint
-		if err := trendRows.Scan(&item.Date, &item.NewFindingCount, &item.ClosedFindingCount); err != nil {
+		if err := trendRows.Scan(&item.Date, &item.NewFindingCount, &item.ClosedFindingCount, &item.DispatchedFindingCount); err != nil {
 			return SecurityOverview{}, fmt.Errorf("scan security finding trend: %w", err)
 		}
 		result.FindingTrend = append(result.FindingTrend, item)
@@ -355,15 +356,20 @@ func (s *Service) GetSecurityOverview(ctx context.Context, principal auth.Princi
 		return SecurityOverview{}, fmt.Errorf("iterate security finding trend: %w", err)
 	}
 
-	performanceRows, err := s.pool.Query(ctx, scopeCTE+`
+	performanceRows, err := s.pool.Query(ctx, closureScopeCTE+`
 		SELECT o.id::text, o.organization_code, o.organization_name,
-			count(wo.id) FILTER (WHERE wo.status NOT IN ('draft', 'closed', 'cancelled')),
-			count(wo.id) FILTER (WHERE wo.status NOT IN ('draft', 'closed', 'cancelled') AND wo.due_at < now()),
-			count(wo.id) FILTER (WHERE wo.status = 'closed'),
-			count(wo.id) FILTER (WHERE wo.status = 'closed' AND wo.closed_at <= wo.due_at)
+			count(DISTINCT wo.id) FILTER (WHERE wo.status <> 'closed'),
+			count(DISTINCT wo.id) FILTER (WHERE wo.status <> 'closed' AND wo.due_at < now()),
+			count(DISTINCT wo.id) FILTER (WHERE wo.status = 'closed'),
+			count(DISTINCT wo.id) FILTER (WHERE wo.status = 'closed' AND wo.closed_at <= wo.due_at),
+			(SELECT count(*) FROM effective_findings f WHERE $2::boolean AND f.assignee_organization_id=o.id AND f.work_order_id IS NULL),
+			(SELECT count(*) FROM effective_findings f WHERE f.order_organization_id=o.id AND f.order_status <> 'closed'),
+			count(DISTINCT wo.id) FILTER (WHERE wo.status = 'pending_verification'),
+			(SELECT count(*) FROM effective_findings f WHERE f.order_organization_id=o.id AND f.order_status = 'pending_verification'),
+			(SELECT count(*) FROM effective_findings f WHERE f.order_organization_id=o.id AND f.order_status <> 'closed' AND f.due_at < now()),
+			(SELECT count(*) FROM effective_findings f WHERE f.order_organization_id=o.id AND f.order_status='closed' AND f.status IN ('fixed','false_positive','ignored','duplicate','risk_accepted'))
 		FROM organizations o
-		LEFT JOIN security_work_orders wo ON wo.assignee_organization_id = o.id
-			AND ($2::boolean OR wo.issued_at IS NOT NULL)
+		LEFT JOIN visible_orders wo ON wo.assignee_organization_id = o.id
 		WHERE o.id IN (SELECT id FROM scoped_organizations) AND o.organization_type <> 'group'
 		GROUP BY o.id, o.organization_code, o.organization_name
 		ORDER BY count(wo.id) FILTER (WHERE wo.status NOT IN ('draft', 'closed', 'cancelled') AND wo.due_at < now()) DESC,
@@ -376,7 +382,9 @@ func (s *Service) GetSecurityOverview(ctx context.Context, principal auth.Princi
 	for performanceRows.Next() {
 		var item OrganizationSecurityPerformance
 		if err := performanceRows.Scan(&item.OrganizationID, &item.OrganizationCode, &item.OrganizationName,
-			&item.ActiveWorkOrderCount, &item.OverdueWorkOrderCount, &item.ClosedWorkOrderCount, &item.ClosedOnTimeCount); err != nil {
+			&item.ActiveWorkOrderCount, &item.OverdueWorkOrderCount, &item.ClosedWorkOrderCount, &item.ClosedOnTimeCount,
+			&item.UndispatchedFindingCount, &item.ActiveFindingCount, &item.PendingVerificationWorkOrderCount,
+			&item.PendingVerificationFindingCount, &item.OverdueFindingCount, &item.ClosedFindingCount); err != nil {
 			return SecurityOverview{}, fmt.Errorf("scan organization security performance: %w", err)
 		}
 		item.TimelyRate = percentage(item.ClosedOnTimeCount, item.ClosedWorkOrderCount)
@@ -419,6 +427,9 @@ func (s *Service) GetSecurityOverview(ctx context.Context, principal auth.Princi
 
 	result.TestCoverage.PublicAssetCoverageRate = percentage(result.TestCoverage.TestedPublicAssetCount, result.TestCoverage.PublicAssetCount)
 	result.TestCoverage.TestFindingClosureRate = percentage(result.TestCoverage.ClosedTestFindingCount, result.TestCoverage.TestFindingCount)
+	if err := s.loadClosure(ctx, principal, &result); err != nil {
+		return SecurityOverview{}, err
+	}
 	return result, nil
 }
 

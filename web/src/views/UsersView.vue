@@ -1,4 +1,8 @@
 <script setup lang="ts">
+import { useLiveList } from '../composables/useLiveList'
+import ContextHelp from '../components/ContextHelp.vue'
+import ListToolbar from '../components/ListToolbar.vue'
+import ListPagination from '../components/ListPagination.vue'
 import RowActions from '../components/RowActions.vue'
 import { computed, onMounted, reactive, ref } from 'vue'
 import { ElMessage, ElMessageBox, type FormInstance, type FormRules } from 'element-plus'
@@ -95,7 +99,10 @@ const canOmitAppointments = computed(() => isGroupAdmin.value && userForm.global
 const userDialogTitle = computed(() => editingUser.value ? `编辑用户：${editingUser.value.display_name}` : '新增用户')
 const roleDialogTitle = computed(() => editingRole.value ? `编辑角色：${editingRole.value.name}` : '新增自定义角色')
 
+const liveList = useLiveList(() => filters, searchUsers, () => filters.keyword)
+
 async function loadUsers(showLoading = true) {
+  const isCurrent = liveList.begin()
   if (showLoading) listLoading.value = true
   try {
     const response = await apiClient.get<ListResponse<UserItem>>('/users', {
@@ -108,12 +115,14 @@ async function loadUsers(showLoading = true) {
         page_size: pageSize.value,
       },
     })
+    if (!isCurrent()) return
     users.value = response.data.items
     total.value = response.data.total
   } catch (error) {
+    if (!isCurrent()) return
     ElMessage.error(getAPIErrorMessage(error, '读取用户列表失败'))
   } finally {
-    if (showLoading) listLoading.value = false
+    if (isCurrent()) listLoading.value = false
   }
 }
 
@@ -335,8 +344,8 @@ onMounted(load)
 
     <el-tabs v-model="activeTab" v-loading="loading" class="access-tabs">
       <el-tab-pane label="用户与任职" name="users">
-        <div class="panel filter-panel">
-          <el-input v-model="filters.keyword" clearable placeholder="姓名、用户名、联系方式或组织" @keyup.enter="searchUsers" />
+        <ListToolbar label="用户筛选" class="panel">
+          <el-input v-model="filters.keyword" clearable placeholder="姓名、用户名、联系方式或组织" />
           <el-select v-model="filters.status" clearable placeholder="全部状态">
             <el-option label="启用" value="enabled" /><el-option label="停用" value="disabled" /><el-option label="锁定" value="locked" />
           </el-select>
@@ -346,8 +355,8 @@ onMounted(load)
           <el-select v-model="filters.role_id" clearable filterable placeholder="全部角色">
             <el-option v-for="role in roleOptions" :key="role.id" :label="role.name" :value="role.id" />
           </el-select>
-          <div class="filter-actions"><el-button type="primary" @click="searchUsers">查询</el-button><el-button @click="resetFilters">重置</el-button></div>
-        </div>
+          <template #actions><div class="list-action-group"><el-button @click="resetFilters">重置</el-button></div>
+        </template></ListToolbar>
 
         <div class="panel data-table-panel" v-loading="listLoading">
           <!-- 用户列表可切换至每页 100 条，使用表格内部滚动避免拉长内容页面。 -->
@@ -370,15 +379,15 @@ onMounted(load)
               </RowActions></template>
             </el-table-column>
           </el-table>
-          <div class="pagination-row"><span>共 {{ total }} 个用户</span><el-pagination background layout="sizes, prev, pager, next" :total="total" :current-page="page" :page-size="pageSize" :page-sizes="[10, 20, 50, 100]" @current-change="changePage" @size-change="changePageSize" /></div>
+          <div class="pagination-row"><span>共 {{ total }} 个用户</span><ListPagination :reset-key="users" background layout="sizes, prev, pager, next" :total="total" :current-page="page" :page-size="pageSize" :page-sizes="[10, 20, 50, 100]" @current-change="changePage" @size-change="changePageSize" /></div>
         </div>
       </el-tab-pane>
 
       <el-tab-pane v-if="isGroupAdmin" label="角色与权限" name="roles">
-        <div class="tab-toolbar"><p>系统角色不可编辑或删除；可创建、维护组织范围的自定义角色。</p><el-button type="primary" @click="openCreateRole">新增自定义角色</el-button></div>
+        <ListToolbar label="角色管理" ><ContextHelp label="角色维护说明">系统角色不可编辑或删除；可创建、维护组织范围的自定义角色。</ContextHelp><template #actions><el-button type="primary" @click="openCreateRole">新增自定义角色</el-button></template></ListToolbar>
         <div class="panel data-table-panel">
           <el-table :data="roles" row-key="id"><el-table-column prop="name" label="角色名称" min-width="170"><template #default="scope"><strong>{{ scope.row.name }}</strong><div class="form-hint">{{ scope.row.key }}</div></template></el-table-column><el-table-column label="范围" width="110"><template #default="scope">{{ scope.row.scope === 'group' ? '集团' : '组织' }}</template></el-table-column><el-table-column label="状态" width="105"><template #default="scope"><el-tag :type="scope.row.status === 'enabled' ? 'success' : 'info'">{{ scope.row.status === 'enabled' ? '启用' : '停用' }}</el-tag></template></el-table-column><el-table-column label="权限" min-width="300"><template #default="scope"><el-tag v-for="permission in scope.row.permissions" :key="permission.key" class="permission-tag" size="small">{{ permission.name }}</el-tag></template></el-table-column><el-table-column label="使用人数" width="100"><template #default="scope">{{ scope.row.user_count }}</template></el-table-column><el-table-column label="操作" width="88" fixed="right" align="right" header-align="right" class-name="table-action-column"><template #default="scope"><RowActions :direct="scope.row.is_system === true" :label="`操作：${scope.row.name || scope.row.title || scope.row.code || scope.row.display_name || scope.row.id}`"><span v-if="scope.row.is_system" class="self-hint">系统角色</span><template v-else><el-button link type="primary" @click="openEditRole(scope.row)">编辑</el-button><el-button link type="danger" @click="deleteRole(scope.row)">删除</el-button></template></RowActions></template></el-table-column></el-table>
-          <div class="pagination-row"><span>共 {{ roleTotal }} 个角色</span><el-pagination background layout="sizes, prev, pager, next" :total="roleTotal" :current-page="rolePage" :page-size="rolePageSize" :page-sizes="[20, 50, 100]" @current-change="changeRolePage" @size-change="changeRolePageSize" /></div>
+          <div class="pagination-row"><span>共 {{ roleTotal }} 个角色</span><ListPagination :reset-key="roles" background layout="sizes, prev, pager, next" :total="roleTotal" :current-page="rolePage" :page-size="rolePageSize" :page-sizes="[20, 50, 100]" @current-change="changeRolePage" @size-change="changeRolePageSize" /></div>
         </div>
       </el-tab-pane>
     </el-tabs>
@@ -423,13 +432,8 @@ onMounted(load)
 </template>
 
 <style scoped>
-.access-tabs { margin-top: 18px; }
-.filter-panel { display: grid; grid-template-columns: minmax(220px, 1.5fr) repeat(3, minmax(160px, 1fr)) auto; gap: 12px; align-items: center; margin-bottom: 14px; padding: 16px; }
-.filter-actions, .tab-toolbar, .appointment-header, .appointment-topline, .assignment-row, .pagination-row, .detail-appointment-title { display: flex; align-items: center; gap: 12px; }
-.filter-actions { justify-content: flex-end; }
+.access-tabs { margin-top: 18px; } .appointment-header, .appointment-topline, .assignment-row, .pagination-row, .detail-appointment-title { display: flex; align-items: center; gap: 12px; }
 .pagination-row { justify-content: space-between; padding: 16px 4px 2px; color: var(--el-text-color-secondary); }
-.tab-toolbar { justify-content: space-between; margin: 0 0 14px; }
-.tab-toolbar p { color: var(--el-text-color-regular); margin: 0; }
 .appointment-header { justify-content: space-between; margin: 12px 0; }
 .form-hint, .self-hint { color: var(--el-text-color-secondary); font-size: 12px; }
 .self-hint { line-height: 1.4; margin-left: 6px; }
@@ -443,5 +447,4 @@ onMounted(load)
 .detail-section-title { margin: 24px 0 12px; font-size: 16px; }
 .detail-appointment-title { margin-bottom: 10px; }
 .detail-appointment-title span:last-child { color: var(--el-text-color-secondary); font-size: 12px; }
-@media (max-width: 1100px) { .filter-panel { grid-template-columns: repeat(2, minmax(0, 1fr)); } .filter-actions { justify-content: flex-start; } }
 </style>

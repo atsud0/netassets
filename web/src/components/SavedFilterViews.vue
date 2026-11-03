@@ -150,6 +150,7 @@ defineExpose({ initialize, loadViews })
       :disabled="disabled"
       clearable
       placeholder="已保存视图"
+      aria-label="已保存视图"
       class="saved-view-select"
       @change="applySelected"
     >
@@ -158,8 +159,15 @@ defineExpose({ initialize, loadViews })
       </el-option>
     </el-select>
     <el-button :disabled="disabled" @click="openSaveDialog">保存当前筛选</el-button>
-    <el-button :disabled="disabled || !selectedView || selectedView.is_default" @click="setDefault">设为默认</el-button>
-    <el-button :disabled="disabled || !selectedView" type="danger" plain @click="deleteSelected">删除</el-button>
+    <el-dropdown trigger="click" :disabled="disabled || !selectedView">
+      <el-button :disabled="disabled || !selectedView" aria-label="管理已选视图">视图管理</el-button>
+      <template #dropdown>
+        <el-dropdown-menu>
+          <el-dropdown-item :disabled="disabled || !selectedView || selectedView.is_default" @click="setDefault">设为默认</el-dropdown-item>
+          <el-dropdown-item :disabled="disabled || !selectedView" divided @click="deleteSelected">删除</el-dropdown-item>
+        </el-dropdown-menu>
+      </template>
+    </el-dropdown>
 
     <el-dialog v-model="dialogVisible" title="保存当前筛选" width="460px" append-to-body>
       <el-form label-position="top" @submit.prevent="saveView">
@@ -180,9 +188,10 @@ defineExpose({ initialize, loadViews })
 </template>
 
 <style scoped>
-.saved-filter-views { display:flex; align-items:center; gap:8px; flex-wrap:wrap; }
+.saved-filter-views { display:flex; align-items:center; justify-content:flex-end; gap:8px; flex-wrap:wrap; min-width:0; max-width:100%; }
 .saved-filter-views > .el-button { margin-left:0; }
-.saved-view-select { width:190px; }
+.saved-view-select { width:190px; max-width:100%; min-width:0; }
 .default-tag { float:right; margin-left:12px; }
 .default-help { margin-top:7px; color:var(--muted); font-size:12px; line-height:1.55; }
+@media (max-width:760px) { .saved-filter-views { justify-content:flex-start; } }
 </style>

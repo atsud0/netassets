@@ -1,4 +1,7 @@
 <script setup lang="ts">
+import ListToolbar from '../components/ListToolbar.vue'
+import ContextHelp from '../components/ContextHelp.vue'
+import ListPagination from '../components/ListPagination.vue'
 import RowActions from '../components/RowActions.vue'
 import { computed, onMounted, reactive, ref, watch } from 'vue'
 import { ElMessage, type FormInstance, type FormItemRule, type FormRules } from 'element-plus'
@@ -517,23 +520,22 @@ onMounted(load)
         <el-table-column label="操作" width="88" fixed="right" align="right" header-align="right" class-name="table-action-column"><template #default="{ row }"><RowActions :label="`操作：${row.name || row.title || row.code || row.display_name || row.id}`"><el-button link type="primary" @click="openEdit(row)">编辑</el-button><el-button link :type="row.is_enabled ? 'warning' : 'success'" :loading="saving" @click="toggle(row)">{{ row.is_enabled ? '停用' : '启用' }}</el-button></RowActions></template></el-table-column>
       </el-table>
       <div class="table-pagination">
-        <el-pagination background layout="total, sizes, prev, pager, next" :total="fieldTotal" :current-page="fieldPage" :page-size="fieldPageSize" :page-sizes="[20, 50, 100]" @current-change="handleFieldPageChange" @size-change="handleFieldPageSizeChange" />
+        <ListPagination :reset-key="items" background layout="total, sizes, prev, pager, next" :total="fieldTotal" :current-page="fieldPage" :page-size="fieldPageSize" :page-sizes="[20, 50, 100]" @current-change="handleFieldPageChange" @size-change="handleFieldPageSizeChange" />
       </div>
     </div>
 
     <template v-else>
       <div class="panel quality-scan-panel" v-loading="scanLoading">
         <div class="quality-section-heading">
-          <div><h2>当前台账质量检测</h2><p>使用当前已启用规则检查存量台账；检测不会修改数据，执行记录会写入审计日志。</p></div>
+          <div><h2>当前台账质量检测</h2><ContextHelp label="质量检测说明">使用当前已启用规则检查存量台账；检测不会修改数据，执行记录会写入审计日志。请选择范围后执行检测；规则或台账变更后请重新检测。</ContextHelp></div>
           <el-button type="primary" :loading="scanLoading" @click="runScan">执行当前台账检测</el-button>
         </div>
-        <div class="quality-scan-filters">
+        <ListToolbar label="质量检测范围" >
           <el-select v-model="scanFilters.organization_id" filterable clearable placeholder="全部组织"><el-option v-for="item in organizations" :key="item.id" :label="item.name" :value="item.id" /></el-select>
           <el-select v-model="scanFilters.resource_type" clearable placeholder="全部检查对象"><el-option label="网络资产" value="asset" /><el-option label="业务系统" value="business_system" /></el-select>
           <el-select v-model="scanFilters.severity" clearable placeholder="全部严重程度"><el-option label="错误" value="error" /><el-option label="警告" value="warning" /></el-select>
-        </div>
-        <el-alert v-if="!scanResult" title="请选择筛选范围后手动执行检测。检测结果反映执行当时的台账状态，规则或台账变更后请重新检测。" type="info" :closable="false" show-icon />
-        <template v-else>
+        </ListToolbar>
+        <template v-if="scanResult">
           <div class="quality-summary-grid"><div v-for="card in scanSummaryCards" :key="card.label" class="quality-summary-card" :class="`tone-${card.tone}`"><span>{{ card.label }}</span><strong>{{ card.value }}</strong></div></div>
           <el-alert
             v-if="scanResult.summary.external_observation_processed || scanResult.summary.external_observation_failures || scanResult.summary.external_observation_unsupported || scanResult.summary.external_observation_deferred"
@@ -557,7 +559,7 @@ onMounted(load)
       </div>
 
       <div class="panel data-table-panel quality-rule-panel">
-        <div class="quality-section-heading compact"><div><h2>规则配置</h2><p>集团可配置字段必填、长期未更新和资产到期规则；错误用于重点整改，警告用于一般提醒。</p></div></div>
+        <div class="quality-section-heading compact"><div><h2>规则配置</h2><ContextHelp label="规则配置说明">集团可配置字段必填、长期未更新和资产到期规则；错误用于重点整改，警告用于一般提醒。</ContextHelp></div></div>
         <el-table v-loading="ruleLoading" :data="ruleItems" stripe max-height="620" empty-text="暂未配置数据质量规则">
           <el-table-column prop="rule_name" label="规则名称" min-width="160"><template #default="{ row }"><strong>{{ row.rule_name }}</strong><div class="table-subtext">{{ row.description || qualityTargetLabel(row) }}</div></template></el-table-column>
           <el-table-column label="对象" width="90"><template #default="{ row }">{{ row.resource_type === 'asset' ? '网络资产' : '业务系统' }}</template></el-table-column>
@@ -570,7 +572,7 @@ onMounted(load)
           <el-table-column label="操作" width="88" fixed="right" align="right" header-align="right" class-name="table-action-column"><template #default="{ row }"><RowActions :label="`操作：${row.name || row.title || row.code || row.display_name || row.id}`"><el-button link type="primary" @click="openRuleEdit(row)">编辑</el-button><el-button link :type="row.is_enabled ? 'warning' : 'success'" :loading="saving" @click="toggleRule(row)">{{ row.is_enabled ? '停用' : '启用' }}</el-button></RowActions></template></el-table-column>
         </el-table>
         <div class="table-pagination">
-          <el-pagination background layout="total, sizes, prev, pager, next" :total="ruleTotal" :current-page="rulePage" :page-size="rulePageSize" :page-sizes="[20, 50, 100]" @current-change="handleRulePageChange" @size-change="handleRulePageSizeChange" />
+          <ListPagination :reset-key="ruleItems" background layout="total, sizes, prev, pager, next" :total="ruleTotal" :current-page="rulePage" :page-size="rulePageSize" :page-sizes="[20, 50, 100]" @current-change="handleRulePageChange" @size-change="handleRulePageSizeChange" />
         </div>
       </div>
     </template>
@@ -634,8 +636,6 @@ onMounted(load)
 .quality-section-heading.compact { margin-bottom: 12px; }
 .quality-section-heading h2 { margin: 0 0 6px; color: var(--navy); font-size: 18px; }
 .quality-section-heading p { margin: 0; color: var(--muted); font-size: 13px; line-height: 1.6; }
-.quality-scan-filters { display: grid; grid-template-columns: minmax(260px, 1.4fr) minmax(180px, 1fr) minmax(180px, 1fr); gap: 12px; margin-bottom: 18px; }
-.quality-scan-filters .el-select { width: 100%; }
 .quality-summary-grid { display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: 12px; margin: 18px 0; }
 .quality-summary-card { min-width: 0; padding: 14px 16px; border: 1px solid var(--line); border-left: 4px solid #5b8def; border-radius: 10px; background: #f8fafc; }
 .quality-summary-card span { display: block; margin-bottom: 8px; color: var(--muted); font-size: 12px; white-space: nowrap; }

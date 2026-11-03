@@ -1,4 +1,4 @@
-import { expect, test, type APIResponse, type Browser, type BrowserContext } from '@playwright/test'
+import { expect, test, type APIResponse, type Browser, type BrowserContext, type Page } from '@playwright/test'
 
 const adminUsername = process.env.E2E_USERNAME ?? 'admin'
 const adminPassword = process.env.E2E_PASSWORD
@@ -183,6 +183,14 @@ test('集团安全管理角色化全链路：下发填报、资产入库、漏�
       source: 'manual', discovered_at: new Date().toISOString(),
     }, 201, '集团安全管理员录入并关联漏洞')
     const finding = findingResult.item
+    const findingIDs = [String(finding.id)]
+    for (const number of [2, 3]) {
+      const created = await jsonRequest<{ item: { id: string } }>(security.context, 'POST', '/api/v1/security-findings', {
+        title: `${findingTitle}_${number}`, severity: 'high', status: 'confirmed', assignee_organization_id: organization.id,
+        asset_id: formalAsset.id, business_system_id: formalSystem.id, description: '逐项整改与复测验证', source: 'manual', discovered_at: new Date().toISOString(),
+      }, 201, '录入另外两项关联发现')
+      findingIDs.push(created.item.id)
+    }
     expect(finding.asset_id).toBe(formalAsset.id)
     expect(finding.business_system_id).toBe(formalSystem.id)
     expect(finding.assignee_organization_id).toBe(organization.id)
@@ -195,7 +203,7 @@ test('集团安全管理角色化全链路：下发填报、资产入库、漏�
     const dueAt = new Date(Date.now() + 14 * 24 * 60 * 60_000).toISOString()
     const orderResult = await jsonRequest<{ item: Record<string, unknown> }>(security.context, 'POST', '/api/v1/security-work-orders', {
       title: orderTitle, assignee_organization_id: organization.id, description: '新资产高危漏洞整改工单。',
-      remediation_requirement: '完成鉴权修复、自测并提交整改证明。', due_at: dueAt, finding_ids: [finding.id],
+      remediation_requirement: '完成鉴权修复、自测并提交整改证明。', due_at: dueAt, finding_ids: findingIDs,
     }, 201, '集团安全管理员创建安全工单')
     const order = orderResult.item
     await jsonRequest(security.context, 'POST', `/api/v1/security-work-orders/${order.id}/issue`, { comment: '集团安全管理员下发整改工单' }, 200, '集团安全管理员下发安全工单')
@@ -205,11 +213,64 @@ test('集团安全管理角色化全链路：下发填报、资产入库、漏�
     await jsonRequest(organizationAdmin.context, 'POST', `/api/v1/security-work-orders/${order.id}/accept`, { comment: '组织管理员已接收' }, 200, '组织管理员接收工单')
     await expectStatus(await editor.context.request.post(`/api/v1/security-work-orders/${order.id}/progress`, { data: { progress: '越权进度', comment: '组织填报员无工单执行权限' } }), 403, '组织填报员不得替代组织管理员处理工单')
     await jsonRequest(organizationAdmin.context, 'POST', `/api/v1/security-work-orders/${order.id}/progress`, { progress: '已完成代码修复和自测', comment: '组织管理员提交整改进度' }, 200, '组织管理员更新整改进度')
-    await jsonRequest(organizationAdmin.context, 'POST', `/api/v1/security-work-orders/${order.id}/submit`, { remediation_result: '已完成鉴权修复，附自测结论。', comment: '组织管理员提交整改结果' }, 200, '组织管理员提交整改结果')
-    const reviewed = await jsonRequest<{ item: Record<string, unknown> }>(security.context, 'POST', `/api/v1/security-work-orders/${order.id}/review`, {
-      decision: 'closed', verification_result: '集团安全管理员复测通过', return_reason: '',
-    }, 200, '集团安全管理员复测通过')
-    expect(reviewed.item.status).toBe('closed')
+    const proof = await organizationAdmin.context.request.post(`/api/v1/security-work-orders/${order.id}/attachments`, { multipart: {
+      category: 'remediation', file: { name: 'item-proof.txt', mimeType: 'text/plain', buffer: Buffer.from('E2E remediation proof') },
+    } })
+    await expectStatus(proof, 201, '组织上传整改材料')
+    const organizationPage = await organizationAdmin.context.newPage()
+    const securityPage = await security.context.newPage()
+    const detailURL = `/security-work-orders?work_order_id=${order.id}`
+    const itemTable = (page: Page) => page.locator('.el-drawer .el-table').filter({ has: page.getByRole('button', { name: findingTitle, exact: true }) })
+    const perform = async (page: Page, action: string, count: number, evidence = false) => {
+      await page.getByRole('group', { name: '工单逐项操作', exact: true }).getByRole('button', { name: action, exact: true }).click()
+      const dialog = page.getByRole('dialog', { name: action, exact: true })
+      await dialog.locator('textarea').fill(`${action}：E2E 逐项结论`)
+      if (evidence) {
+        await dialog.locator('.el-select').click()
+        await page.locator('.el-select-dropdown__item:visible').filter({ hasText: 'item-proof.txt' }).click()
+        await dialog.locator('textarea').click()
+      }
+      await dialog.getByRole('button', { name: '确认处理', exact: true }).click()
+      const result = page.getByRole('dialog', { name: '批量处理结果', exact: true })
+      await expect(result.getByText(`成功 ${count} 项，失败 0 项`)).toBeVisible()
+      await result.getByRole('button', { name: /关闭此对话框|Close this dialog/ }).click()
+    }
+    const status = async (expected: string) => {
+      const response = await security.context.request.get(`/api/v1/security-work-orders/${order.id}`)
+      await expectStatus(response, 200, '读取自动汇总结果')
+      expect((await response.json()).item.status).toBe(expected)
+    }
+    await organizationPage.goto(detailURL)
+    await expect(itemTable(organizationPage)).toBeVisible()
+    await itemTable(organizationPage).locator('.el-table__body-wrapper .el-checkbox').first().click()
+    await perform(organizationPage, '提交复测', 1, true)
+    await status('in_progress')
+    await expect(itemTable(organizationPage).getByRole('link', { name: '材料 1', exact: true })).toHaveCount(1)
+    await itemTable(organizationPage).locator('.el-table__header-wrapper .el-checkbox').click()
+    await perform(organizationPage, '提交复测', 2, true)
+    await status('pending_verification')
+    await securityPage.goto(detailURL)
+    await expect(itemTable(securityPage)).toBeVisible()
+    await itemTable(securityPage).locator('.el-table__body-wrapper .el-checkbox').nth(0).click()
+    await itemTable(securityPage).locator('.el-table__body-wrapper .el-checkbox').nth(1).click()
+    await perform(securityPage, '复测通过', 2)
+    await itemTable(securityPage).locator('.el-table__header-wrapper .el-checkbox').click()
+    await perform(securityPage, '复测退回', 1)
+    await status('returned')
+    await organizationPage.reload()
+    await expect(itemTable(organizationPage)).toBeVisible()
+    await expect(itemTable(organizationPage).getByText('复测通过', { exact: true })).toHaveCount(2)
+    await itemTable(organizationPage).locator('.el-table__header-wrapper .el-checkbox').click()
+    await perform(organizationPage, '提交复测', 1, true)
+    await status('pending_verification')
+    await securityPage.reload()
+    await expect(itemTable(securityPage)).toBeVisible()
+    await itemTable(securityPage).locator('.el-table__header-wrapper .el-checkbox').click()
+    await perform(securityPage, '复测通过', 1)
+    await status('closed')
+    await expect(securityPage.locator('.el-drawer').getByRole('link', { name: '历史材料 1', exact: true })).toHaveCount(4)
+    await organizationPage.close()
+    await securityPage.close()
 
     // 7. 四个角色都能看到与自身职责对应的最终结果，且通知链路存在。
     const securityFindings = await security.context.request.get(`/api/v1/security-findings?page=1&page_size=100&q=${encodeURIComponent(findingTitle)}`)

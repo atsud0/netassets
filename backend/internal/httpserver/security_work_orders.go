@@ -13,6 +13,16 @@ import (
 
 func registerSecurityWorkOrderRoutes(api *gin.RouterGroup, requireAuth gin.HandlerFunc, service *securityworkorder.Service, logger *slog.Logger) {
 	findings := api.Group("/security-findings", requireAuth)
+	registerSecurityBatchRoute(findings, "PATCH", "/batch", service.BatchUpdateFindingStatus, logger)
+	registerSecurityBatchRoute(findings, "POST", "/import-candidates/batch/ignore", service.BatchIgnoreCandidates, logger)
+	findings.GET("/import-candidates/:id", func(c *gin.Context) {
+		item, err := service.GetFindingImportCandidate(c.Request.Context(), mustPrincipal(c), c.Param("id"))
+		if err != nil {
+			writeFindingImportCandidateError(c, logger, "get finding import candidate", err)
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"item": item})
+	})
 	findings.GET("/import-template", func(c *gin.Context) {
 		data, contentType, fileName, err := securityworkorder.FindingImportTemplate(c.DefaultQuery("format", "xlsx"))
 		if errors.Is(err, securityworkorder.ErrInvalid) {
@@ -135,7 +145,20 @@ func registerSecurityWorkOrderRoutes(api *gin.RouterGroup, requireAuth gin.Handl
 			writeAPIError(c, http.StatusBadRequest, "invalid_query", pageQueryErrorMessage(err))
 			return
 		}
-		result, err := service.SearchFindings(c.Request.Context(), mustPrincipal(c), c.Query("organization_id"), c.Query("status"), c.Query("asset_link_state"), page)
+		dashboardScope, valid := parseOptionalBoolQuery(c.Query("dashboard_scope"))
+		if !valid {
+			writeAPIError(c, http.StatusBadRequest, "invalid_filter", "工作台统计范围筛选条件不正确")
+			return
+		}
+		testBatchOnly, valid := parseOptionalBoolQuery(c.Query("test_batch_only"))
+		if !valid {
+			writeAPIError(c, http.StatusBadRequest, "invalid_filter", "测试发现筛选条件不正确")
+			return
+		}
+		result, err := service.SearchFindings(c.Request.Context(), mustPrincipal(c), c.Query("organization_id"), c.Query("status"), c.Query("asset_link_state"), page, securityworkorder.FindingSearchOptions{
+			TestBatchOnly: testBatchOnly, Severity: c.Query("severity"), DashboardScope: dashboardScope, DispatchState: c.Query("dispatch_state"),
+			DiscoveredDate: c.Query("discovered_date"), DispatchedDate: c.Query("dispatched_date"), ClosedDate: c.Query("closed_date"),
+		})
 		switch {
 		case errors.Is(err, securityworkorder.ErrForbidden):
 			writeAPIError(c, http.StatusForbidden, "forbidden", "当前账号无权查看该组织的安全发现")
@@ -213,6 +236,21 @@ func registerSecurityWorkOrderRoutes(api *gin.RouterGroup, requireAuth gin.Handl
 	})
 
 	orders := api.Group("/security-work-orders", requireAuth)
+	orders.POST("/:id/findings/process", func(c *gin.Context) {
+		c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, 128<<10)
+		var input securityworkorder.WorkOrderItemInput
+		if err := c.ShouldBindJSON(&input); err != nil {
+			writeAPIError(c, http.StatusBadRequest, "invalid_request", "请选择项目、操作并填写说明")
+			return
+		}
+		result, err := service.ProcessWorkOrderItems(c.Request.Context(), mustPrincipal(c), c.Param("id"), input, c.GetString("request_id"), c.ClientIP())
+		if err != nil {
+			writeWorkOrderResult(c, logger, "process work order findings", http.StatusOK, securityworkorder.WorkOrder{}, err)
+			return
+		}
+		c.JSON(http.StatusOK, result)
+	})
+	registerSecurityBatchRoute(orders, "POST", "/batch/cancel", service.BatchCancel, logger)
 	orders.GET("", func(c *gin.Context) {
 		page, err := parsePageQuery(c)
 		if err != nil {
@@ -224,7 +262,13 @@ func registerSecurityWorkOrderRoutes(api *gin.RouterGroup, requireAuth gin.Handl
 			writeAPIError(c, http.StatusBadRequest, "invalid_filter", "仅逾期筛选条件不正确")
 			return
 		}
+		dashboardScope, valid := parseOptionalBoolQuery(c.Query("dashboard_scope"))
+		if !valid {
+			writeAPIError(c, http.StatusBadRequest, "invalid_filter", "工作台统计范围筛选条件不正确")
+			return
+		}
 		result, err := service.SearchWorkOrdersWithFilter(c.Request.Context(), mustPrincipal(c), securityworkorder.WorkOrderSearchFilter{
+			DashboardScope: dashboardScope,
 			OrganizationID: c.Query("organization_id"),
 			Status:         c.Query("status"),
 			OverdueOnly:    overdue,
