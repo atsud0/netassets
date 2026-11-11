@@ -84,10 +84,11 @@ test('真实安全统计、五等级筛选与看板下钻保持同一数据口�
   await page.setViewportSize({ width: 1440, height: 1000 })
 
   const severityInput = page.getByRole('combobox', { name: '漏洞级别', exact: true })
+  const severitySelect = page.locator('.el-select').filter({ has: severityInput })
   const labels = { high: '高危', critical: '严重', medium: '中危', low: '低危', info: '提示' }
   for (const [severity, label] of Object.entries(labels)) {
     const filtered = waitForFindings(page, { ...baseFilters, severity, page: '1' })
-    await severityInput.click()
+    await severitySelect.locator('.el-select__wrapper').click()
     await page.getByRole('option', { name: label, exact: true }).click()
     const response = await filtered
     expect(response.status()).toBe(200)
@@ -110,7 +111,6 @@ test('真实安全统计、五等级筛选与看板下钻保持同一数据口�
   }
 
   const cleared = waitForFindings(page, { ...baseFilters, severity: '', page: '1' })
-  const severitySelect = page.locator('.el-select').filter({ has: severityInput })
   await severitySelect.hover()
   await severitySelect.locator('.el-select__clear').click()
   const clearedResult = await (await cleared).json() as FindingList
