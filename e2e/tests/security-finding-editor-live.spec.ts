@@ -209,12 +209,11 @@ test('真实权限拒绝、版本冲突恢复及浏览器未保存拦截', async
   await expect(page).toHaveURL(new RegExp(`/security-findings/${finding.id}/edit`))
   await expect(field(page, '漏洞描述').locator('textarea')).toHaveValue(unsaved)
   const unloadDialog = page.waitForEvent('dialog')
-  const reload = page.reload().catch((error: Error) => error)
+  const reload = page.evaluate(() => window.location.reload())
   const dialog = await unloadDialog
   expect(dialog.type()).toBe('beforeunload')
   await dialog.dismiss()
-  const reloadResult = await reload
-  if (reloadResult instanceof Error) expect(reloadResult.message).toContain('ERR_ABORTED')
+  await reload
   await expect(field(page, '漏洞描述').locator('textarea')).toHaveValue(unsaved)
 
   const newerDescription = '另一个真实请求已保存的版本'
