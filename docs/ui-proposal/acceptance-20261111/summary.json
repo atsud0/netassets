@@ -1,0 +1,87 @@
+{
+  "acceptance_date": "2026-11-11",
+  "issues": [
+    2,
+    6,
+    7,
+    8,
+    10,
+    11,
+    12
+  ],
+  "execution": "macOS 15.7.9 x86_64, Podman containers",
+  "evidence_directory": "/Users/x/Code/netassets-acceptance-20261111/evidence",
+  "unit_test_source_commit": "d00896efad53c24423f9be2352e214471f614d3c",
+  "application_build_commit": "13af603f4d24b82e2e6a23a8e0c8f5525aeac2b6",
+  "final_browser_test_source_commit": "3a79c348168e44d4436d7cf135cd781c53b19ca6",
+  "image_id": "2e38e3f1ff82ef4a9cf6673a5c01c4b3d8a1299a2cf20b580702b91a9483ab6c",
+  "backend": {
+    "unit_tests": "passed",
+    "postgres_integration_tests": "passed"
+  },
+  "frontend": {
+    "files_passed": 52,
+    "tests_passed": 398,
+    "typescript": "passed",
+    "production_build": "passed"
+  },
+  "production_image_build": "passed",
+  "final_source_checksum_check": "passed",
+  "browser_suites": {
+    "core": {
+      "startTime": "2026-11-11T15:41:59.889Z",
+      "duration": 320900.163,
+      "expected": 21,
+      "skipped": 0,
+      "unexpected": 0,
+      "flaky": 0
+    },
+    "toolbar": {
+      "startTime": "2026-11-11T15:47:28.327Z",
+      "duration": 272433.919,
+      "expected": 22,
+      "skipped": 0,
+      "unexpected": 0,
+      "flaky": 0
+    },
+    "remediation": {
+      "startTime": "2026-11-11T15:52:07.121Z",
+      "duration": 156586.87999999998,
+      "expected": 3,
+      "skipped": 0,
+      "unexpected": 0,
+      "flaky": 0
+    }
+  },
+  "raw_evidence_sha256": {
+    "environment.txt": "e66060ecb87cce9bcec6c59884e48222b17714af0f6c4bc4d7f3a91a52841558",
+    "backend.log": "fc231a26b566350ad29cac638fffd0cc7ca20894c88d73c26114f569aaedc7ae",
+    "frontend.log": "eadf20f869b96252eef8c90882e41f073009e06ed7e8e9ca29ab118b69d92dd1",
+    "image.log": "fe1aac1f89afdcfae243241aef9402e973c5a505edef598f30cfda46919ac8f6",
+    "image-id.txt": "673533cd30a4d830584a15caa7827249908454075abe6007c15b03f09b24f941",
+    "running-image-id.txt": "673533cd30a4d830584a15caa7827249908454075abe6007c15b03f09b24f941",
+    "system-info.json": "5bc64728e8effec3fb1ec844d2940c0973dacc0106afa2dd71233a40376daa21",
+    "source.sha256": "cadaa7fb22107711f4938736c1f800a358913f717705ac18a71071489ef92b50",
+    "source-check-final.log": "aab43d34aa6d80ccf7ca5989666de46185938fc2204d5e03f10914afa2ed9347",
+    "build-test.exit": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa",
+    "e2e.exit": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa",
+    "core.json": "bcc80b6de99288758805b78dda41b7e2c57cf9465a401ade18c0b348ab732c61",
+    "toolbar.json": "a3647b40984e9b2370cf22495fe1222dd0c14d8ca3c33ad3ebd455f7d1e8221c",
+    "remediation.json": "13d321ac05020f1ded605535f82363cebcae1c6c9416d1c91bfb18d6f7fe07b9",
+    "core-attempt1.json": "51af502cf78fe60aa3929ad5b73caff07f8242c3cfc006272de423bab26f47c7"
+  },
+  "screenshots_sha256": {
+    "1440-assets.png": "4bea6785c68e79ab253113bc60f9c72e664dffb1980401106dd6695915f6752e",
+    "390-安全整改工单.png": "435b1af626fb9910e7d53bb5bc8e1783ca25f2ab510db32ec4e5a44526f0508f",
+    "live-finding-editor-1440.png": "41f6ac3ecb2b12bffa20c9c60872528d6ac482cc4ba848ca64da810010340f52",
+    "live-finding-editor-390.png": "597e74b7f59970770c7cda149031dc3f226525565ccdf557c9a661559a80df7f",
+    "security-summary-1440.png": "33faff6514b557382791f7585d549760f160abea2b2831813d4286b4e7dc726d",
+    "security-summary-390.png": "7e771babb7c69bf21d4269e47d40925ba07ce1e0ac2edccf59b4add21b750ab8"
+  },
+  "limitations": [
+    "Selected issue-focused suites, not all repository E2E",
+    "Toolbar suite uses mocked APIs; separate suites cover live role and business flows",
+    "No Firefox, WebKit, physical mobile device or full accessibility audit",
+    "No production rollout or completion of issue 9 and historical defect ledger"
+  ]
+}
