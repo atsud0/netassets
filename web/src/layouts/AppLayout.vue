@@ -29,7 +29,7 @@ const loggingOut = ref(false)
 const unreadNotificationCount = ref(0)
 let notificationTimer: number | undefined
 
-const activePath = computed(() => route.path)
+const activePath = computed(() => route.name === 'security-finding-edit' ? '/security-work-orders' : route.path)
 const organizationName = computed(() => auth.user?.organization?.name ?? (auth.executionOnly ? '修复工作台' : '集团资产管理'))
 const activeOrganizationID = computed({ get: () => auth.user?.organization?.id ?? '', set: (value: string) => { if (value) void switchOrganization(value) } })
 const availableOrganizations = computed(() => auth.user?.organizations ?? [])
